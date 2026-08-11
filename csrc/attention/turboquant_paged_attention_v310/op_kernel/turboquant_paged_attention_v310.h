@@ -55,6 +55,14 @@ constexpr float kNegInf = -3.0e38f;
  * scalar statements. 8 keeps the tile buffers ~36KB of the 256KB UB.
  */
 constexpr uint32_t kTile = 8;
+/*
+ * Query heads sharing one KV head that are decoded together. Process() used to
+ * call RunOneHead per query head and each call re-gathered and re-unpacked the
+ * WHOLE KV cache, so at group=4 both the MTE2 traffic and the dominant
+ * unpack/dequant vector work were 4x redundant (25.2 MB of GM traffic for a
+ * 6.29 MB cache). Larger groups are handled in chunks of this size.
+ */
+constexpr uint32_t kMaxGroup = 4;
 
 struct TQReadParams {
     GM_ADDR query;
@@ -100,13 +108,15 @@ public:
          * simply passes len = kTile*d. Scratch is `lanes` = kTile*d/kPlanes,
          * maximal when kPlanes is smallest (2, at BITS==4) -> kTile*d/2.
          */
-        pipe->InitBuffer(qBuf_, d * sizeof(float));
-        pipe->InitBuffer(accBuf_, d * sizeof(float));
-        pipe->InitBuffer(kvBuf_, kTile * d * sizeof(float));
+        pipe->InitBuffer(qBuf_, kMaxGroup * d * sizeof(float));
+        pipe->InitBuffer(accBuf_, kMaxGroup * d * sizeof(float));
+        pipe->InitBuffer(kvBuf_, kTile * d * sizeof(float));   // ONE shared K/V tile
+        pipe->InitBuffer(prodBuf_, kTile * d * sizeof(float));  // q*kv per query head
         pipe->InitBuffer(tmpBuf_, d * sizeof(float));
         pipe->InitBuffer(byteBuf_, kTile * TQTraits<BITS>::PackedBytes(d));
         pipe->InitBuffer(codeBuf_, kTile * d * sizeof(int32_t));
-        pipe->InitBuffer(qbBuf_, kTile * d * sizeof(float));   // q permuted to plane-major
+        // q permuted to plane-major, one copy per query head in the group
+        pipe->InitBuffer(qbBuf_, kMaxGroup * kTile * d * sizeof(float));
         pipe->InitBuffer(signBuf_, d * sizeof(float));
         pipe->InitBuffer(cbBuf_, (2 * (1 << BITS)) * sizeof(float));
         pipe->InitBuffer(outBuf_, d * sizeof(half));
@@ -128,8 +138,8 @@ public:
          * blockSize is not a multiple of kTile. Dormant at blockSize=128.
          */
         const uint32_t scoSlots = ((t_->blockSize + kTile - 1) / kTile) * kTile;
-        pipe->InitBuffer(scoBuf_, scoSlots * sizeof(float));
-        pipe->InitBuffer(wgtBuf_, scoSlots * sizeof(float));
+        pipe->InitBuffer(scoBuf_, kMaxGroup * scoSlots * sizeof(float));
+        pipe->InitBuffer(wgtBuf_, kMaxGroup * scoSlots * sizeof(float));
         // ReduceMax/ReduceSum workLocal over padEnd (<= scoSlots); must not alias src/dst
         pipe->InitBuffer(rdxBuf_, scoSlots * sizeof(float));
 
@@ -162,6 +172,24 @@ public:
         for (uint32_t task = begin; task < end; ++task) {
             const uint32_t b = task / t_->numKvHeads;
             const uint32_t kvh = task % t_->numKvHeads;
+            /*
+             * Production path: decode the whole GQA group together so each K/V
+             * tile is gathered and unpacked ONCE instead of `group` times.
+             * Groups larger than kMaxGroup are split into chunks, each of which
+             * still amortises the shared work across its members.
+             */
+            if constexpr (TQPlanar<BITS>::kSupported) {
+                if (t_->variant == 0u) {
+                    for (uint32_t g0 = 0; g0 < group; g0 += kMaxGroup) {
+                        uint32_t nq = group - g0;
+                        if (nq > kMaxGroup) {
+                            nq = kMaxGroup;
+                        }
+                        RunKvGroup(b, kvh, kvh * group + g0, nq);
+                    }
+                    continue;
+                }
+            }
             for (uint32_t g = 0; g < group; ++g) {
                 RunOneHead(b, kvh, kvh * group + g);
             }
@@ -173,6 +201,218 @@ private:
      * One (batch, query-head) attention: rotate q, stream the packed blocks with
      * an online softmax, rotate the accumulator back on exit.
      */
+    /*
+     * GQA-SHARED DECODE. Every query head sharing KV head `kvh` is decoded in one
+     * pass, so each K/V tile is gathered, unpacked and dequantised ONCE and then
+     * dotted against all `nq` queries.
+     *
+     * RunOneHead (below) is still correct but re-reads the whole cache per query
+     * head: at group=4 that made the MTE2 traffic and the dominant unpack/dequant
+     * vector work 4x redundant -- 25.17 MB of GM traffic against a 6.29 MB cache,
+     * 3.17 GB/s achieved on a ~205 GB/s part. Only the SHARED work is amortised
+     * here; the dots and the Axpy still scale with the group, as they must.
+     *
+     * Used for the production path only (variant==0) and only where the planar
+     * codec applies; every debug variant and BITS==3 keep the per-head path, so
+     * the b=3 control and all probes are untouched.
+     */
+    __aicore__ inline void RunKvGroup(uint32_t b, uint32_t kvh, uint32_t qh0, uint32_t nq)
+    {
+        using P = TQPlanar<BITS>;
+        const uint32_t d = t_->headDim;
+        const uint32_t lanes = kTile * d / P::kPlanes;
+        const uint32_t lpt = d / P::kPlanes;
+        const uint32_t scoSlots = ((t_->blockSize + kTile - 1) / kTile) * kTile;
+
+        LocalTensor<float> q = qBuf_.Get<float>();
+        LocalTensor<float> acc = accBuf_.Get<float>();
+        LocalTensor<float> kv = kvBuf_.Get<float>();
+        LocalTensor<float> prod = prodBuf_.Get<float>();
+        LocalTensor<float> tmp = tmpBuf_.Get<float>();
+        LocalTensor<uint8_t> bytes = byteBuf_.Get<uint8_t>();
+        LocalTensor<int32_t> codes = codeBuf_.Get<int32_t>();
+        LocalTensor<half> unpH = unpHBuf_.Get<half>();
+        LocalTensor<float> unpF0 = unpF0Buf_.Get<float>();
+        LocalTensor<float> unpF1 = unpF1Buf_.Get<float>();
+        LocalTensor<half> kNrm = kNrmBuf_.Get<half>();
+        LocalTensor<half> vNrm = vNrmBuf_.Get<half>();
+        LocalTensor<float> sco = scoBuf_.Get<float>();
+        LocalTensor<float> wgt = wgtBuf_.Get<float>();
+        LocalTensor<float> rdx = rdxBuf_.Get<float>();
+        LocalTensor<float> qb = qbBuf_.Get<float>();
+        LocalTensor<half> qh16 = outBuf_.Get<half>();
+
+        float runMax[kMaxGroup];
+        float runSum[kMaxGroup];
+
+        // ---- per-query setup: rotate q, permute into the tiled code layout ----
+        for (uint32_t g = 0; g < nq; ++g) {
+            DataCopy(qh16, qGm_[(b * t_->numHeads + qh0 + g) * d], d);
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID3);   // MTE2 -> V is NOT implicit on 310P
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID3);
+            Cast(q[g * d], qh16, RoundMode::CAST_NONE, d);
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE2>(EVENT_ID7);   // next g overwrites qh16
+            WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+            RotatePi(q[g * d], signs_, tmp, d, t_->invSqrtHeadDim);
+            for (uint32_t pl = 0; pl < P::kPlanes; ++pl) {
+                for (uint32_t t = 0; t < kTile; ++t) {
+                    Adds(qb[g * kTile * d + pl * lanes + t * lpt], q[g * d + pl * lpt], 0.0f, lpt);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+            runMax[g] = kNegInf;
+            runSum[g] = 0.0f;
+        }
+        Duplicate(acc, 0.0f, nq * d);
+        PipeBarrier<PIPE_V>();
+
+        const int32_t seqLen = seqGm_.GetValue(b);
+        const uint32_t nBlocks = (seqLen + t_->blockSize - 1) / t_->blockSize;
+
+        for (uint32_t blk = 0; blk < nBlocks; ++blk) {
+            const int32_t phys = btGm_.GetValue(b * t_->maxBlocksPerSeq + blk);
+            if (phys < 0) {
+                continue;
+            }
+            const uint32_t nrmCount = t_->blockSize * t_->numKvHeads;
+            const uint64_t nrmBase = static_cast<uint64_t>(phys) * nrmCount;
+            DataCopy(kNrm, kNormGm_[nrmBase], nrmCount);
+            DataCopy(vNrm, vNormGm_[nrmBase], nrmCount);
+            SetFlag<HardEvent::MTE2_S>(EVENT_ID6);
+            WaitFlag<HardEvent::MTE2_S>(EVENT_ID6);
+
+            const uint32_t tokBase = blk * t_->blockSize;
+            uint32_t tokEnd = t_->blockSize;
+            if (tokBase + tokEnd > static_cast<uint32_t>(seqLen)) {
+                tokEnd = static_cast<uint32_t>(seqLen) - tokBase;
+            }
+
+            // ---- pass 1: gather K ONCE per tile, dot against every query ----
+            for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
+                GatherNzTile(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
+                UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
+                SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
+                                    t_->codebookMode);
+                for (uint32_t g = 0; g < nq; ++g) {
+                    // kv must SURVIVE for the next query, so the product goes to prod
+                    Mul(prod, kv, qb[g * kTile * d], kTile * d);
+                    PipeBarrier<PIPE_V>();
+                    for (uint32_t pl = 1; pl < P::kPlanes; ++pl) {
+                        Add(prod, prod, prod[pl * lanes], lanes);
+                        PipeBarrier<PIPE_V>();
+                    }
+                    LocalTensor<float> rsrc = prod;
+                    if (lpt > 64) {
+                        const uint8_t sRep = static_cast<uint8_t>(lpt / 8);
+                        Add(prod[kTile * lpt], prod, prod[64], 64, kTile,
+                            BinaryRepeatParams{1, 1, 1, 8, sRep, sRep});
+                        PipeBarrier<PIPE_V>();
+                        rsrc = prod[kTile * lpt];
+                    }
+                    WholeReduceSum(sco[g * scoSlots + t0], rsrc, 64, kTile, 1, 1, 8);
+                    PipeBarrier<PIPE_V>();
+                }
+                SetFlag<HardEvent::V_S>(EVENT_ID2);
+                WaitFlag<HardEvent::V_S>(EVENT_ID2);
+                for (uint32_t t = 0; t < kTile; ++t) {
+                    const uint32_t tk = t0 + t;
+                    if (tk >= tokEnd) {
+                        break;
+                    }
+                    const float s =
+                        static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh)) * t_->scale;
+                    for (uint32_t g = 0; g < nq; ++g) {
+                        sco.SetValue(g * scoSlots + tk, sco.GetValue(g * scoSlots + tk) * s);
+                    }
+                }
+                SetFlag<HardEvent::S_V>(EVENT_ID1);
+                WaitFlag<HardEvent::S_V>(EVENT_ID1);
+            }
+
+            const uint32_t padEnd = ((tokEnd + 7u) / 8u) * 8u;
+            if (padEnd > tokEnd) {
+                for (uint32_t g = 0; g < nq; ++g) {
+                    for (uint32_t tk = tokEnd; tk < padEnd; ++tk) {
+                        sco.SetValue(g * scoSlots + tk, kNegInf);
+                    }
+                }
+                SetFlag<HardEvent::S_V>(EVENT_ID1);
+                WaitFlag<HardEvent::S_V>(EVENT_ID1);
+            }
+
+            // ---- pass 2: independent online softmax per query ----
+            for (uint32_t g = 0; g < nq; ++g) {
+                ReduceMax(rdx, sco[g * scoSlots], rdx, padEnd);
+                PipeBarrier<PIPE_V>();
+                SetFlag<HardEvent::V_S>(EVENT_ID2);
+                WaitFlag<HardEvent::V_S>(EVENT_ID2);
+                const float blkMax = rdx.GetValue(0);
+                const float newMax = (blkMax > runMax[g]) ? blkMax : runMax[g];
+                const float corr = (runMax[g] == kNegInf) ? 0.0f : ExpScalar(runMax[g] - newMax);
+                Adds(sco[g * scoSlots], sco[g * scoSlots], -newMax, padEnd);
+                PipeBarrier<PIPE_V>();
+                Exp(wgt[g * scoSlots], sco[g * scoSlots], padEnd);
+                PipeBarrier<PIPE_V>();
+                ReduceSum(rdx, wgt[g * scoSlots], rdx, padEnd);
+                PipeBarrier<PIPE_V>();
+                SetFlag<HardEvent::V_S>(EVENT_ID2);
+                WaitFlag<HardEvent::V_S>(EVENT_ID2);
+                const float blkSum = rdx.GetValue(0);
+                if (corr != 1.0f) {
+                    Muls(acc[g * d], acc[g * d], corr, d);
+                    PipeBarrier<PIPE_V>();
+                }
+                runSum[g] = runSum[g] * corr + blkSum;
+                runMax[g] = newMax;
+            }
+
+            // ---- pass 3: gather V ONCE per tile, scatter into every acc ----
+            for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
+                GatherNzTile(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
+                UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
+                SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
+                                    t_->codebookMode);
+                for (uint32_t t = 0; t < kTile; ++t) {
+                    const uint32_t tk = t0 + t;
+                    if (tk >= tokEnd) {
+                        break;
+                    }
+                    const float vNorm =
+                        static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
+                    for (uint32_t g = 0; g < nq; ++g) {
+                        const float wv = wgt.GetValue(g * scoSlots + tk) * vNorm;
+                        for (uint32_t pl = 0; pl < P::kPlanes; ++pl) {
+                            Axpy(acc[g * d + pl * lpt], kv[pl * lanes + t * lpt], wv, lpt);
+                            PipeBarrier<PIPE_V>();
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- finalise: normalise, rotate back, store, one query at a time ----
+        LocalTensor<half> out = outBuf_.Get<half>();
+        for (uint32_t g = 0; g < nq; ++g) {
+            if (runSum[g] > 0.0f) {
+                Muls(acc[g * d], acc[g * d], 1.0f / runSum[g], d);
+                PipeBarrier<PIPE_V>();
+            }
+            // Pi is self-inverse: one rotation returns the output to the original basis
+            RotatePi(acc[g * d], signs_, tmp, d, t_->invSqrtHeadDim);
+            Cast(out, acc[g * d], RoundMode::CAST_NONE, d);
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
+            DataCopy(outGm_[(b * t_->numHeads + qh0 + g) * d], out, d);
+            SetFlag<HardEvent::MTE3_V>(EVENT_ID5);   // next g overwrites `out`
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID5);
+        }
+    }
+
     __aicore__ inline void RunOneHead(uint32_t b, uint32_t kvh, uint32_t qh)
     {
         const uint32_t d = t_->headDim;
@@ -653,7 +893,7 @@ private:
     GlobalTensor<float> signGm_, cbGm_;
     TBuf<TPosition::VECCALC> qBuf_, accBuf_, kvBuf_, tmpBuf_, byteBuf_, codeBuf_, signBuf_, cbBuf_,
         outBuf_, redBuf_, wrkBuf_, dbgBuf_, unpHBuf_, unpF0Buf_, unpF1Buf_, kNrmBuf_, vNrmBuf_,
-        scoBuf_, wgtBuf_, rdxBuf_, qbBuf_;
+        scoBuf_, wgtBuf_, rdxBuf_, qbBuf_, prodBuf_;
     LocalTensor<float> signs_, cb_;
 };
 
