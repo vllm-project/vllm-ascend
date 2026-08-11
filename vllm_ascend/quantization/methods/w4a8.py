@@ -205,18 +205,35 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     ) -> torch.Tensor:
         topk_weights = topk_weights.to(x.dtype)
 
-        if self.use_expert_weight_list:
-            w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
-            w1_scale = layer.w13_weight_scale_list
-            w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
-            w2_scale = layer.w2_weight_scale_list
-            w1_scale_bias = layer.w13_scale_bias_list
-            w2_scale_bias = layer.w2_scale_bias_list
-        elif (
+        use_mega_moe = (
             _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
             and get_ascend_config().enable_fused_mc2 == 1
             and _MEGA_MOE_SUPPORTED
-        ):
+        )
+
+        if self.use_expert_weight_list:
+            if use_mega_moe:
+                # EPLB rearranges these lists in place. MegaMoE must consume
+                # their original INT8/NZ tensors instead of the INT32 views
+                # used by the legacy dynamic-EPLB kernels.
+                w1 = layer.w13_weight_list
+                w1_scale = [t.reshape(-1) for t in layer.w13_weight_scale_list]
+                w2 = layer.w2_weight_list
+                w2_scale = [t.reshape(-1) for t in layer.w2_weight_scale_list]
+                w1_scale_bias = [
+                    t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias_list
+                ]
+                w2_scale_bias = [
+                    t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias_list
+                ]
+            else:
+                w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
+                w1_scale = layer.w13_weight_scale_list
+                w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
+                w2_scale = layer.w2_weight_scale_list
+                w1_scale_bias = layer.w13_scale_bias_list
+                w2_scale_bias = layer.w2_scale_bias_list
+        elif use_mega_moe:
             w1 = layer.cann_mega_moe_w13_weight_list
             w1_scale = layer.cann_mega_moe_w13_weight_scale_list
             w2 = layer.cann_mega_moe_w2_weight_list
