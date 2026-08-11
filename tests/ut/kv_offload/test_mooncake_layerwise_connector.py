@@ -45,6 +45,9 @@ for k in list(sys.modules):
 for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
+from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa: E402
+    AscendMultiConnector,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
@@ -627,6 +630,50 @@ class MockRequest:
         self._all_token_ids = list(self.prompt_token_ids)
 
 
+class TestAscendMultiConnector(unittest.TestCase):
+    def test_losing_mooncake_keeps_blocks_without_external_tokens(self):
+        request = SimpleNamespace(request_id="req_store_hit")
+        blocks = MagicMock()
+        empty_blocks = blocks.new_empty.return_value
+        store_connector = MagicMock()
+        mooncake_connector = MagicMock(spec=MooncakeLayerwiseConnector)
+        other_connector = MagicMock()
+        connector = SimpleNamespace(
+            _requests_to_connector={request.request_id: 0},
+            _connectors=[store_connector, mooncake_connector, other_connector],
+            _ktc_kv_transfer_config=[
+                SimpleNamespace(kv_connector="AscendStoreConnector"),
+                SimpleNamespace(kv_connector="MooncakeLayerwiseConnector"),
+                SimpleNamespace(kv_connector="OtherConnector"),
+            ],
+        )
+
+        AscendMultiConnector.update_state_after_alloc(connector, request, blocks, num_external_tokens=16)
+
+        store_connector.update_state_after_alloc.assert_called_once_with(request, blocks, 16)
+        mooncake_connector.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
+        other_connector.update_state_after_alloc.assert_called_once_with(request, empty_blocks, 0)
+
+    def test_selected_mooncake_receives_external_tokens(self):
+        request = SimpleNamespace(request_id="req_p2p_hit")
+        blocks = MagicMock()
+        store_connector = MagicMock()
+        mooncake_connector = MagicMock(spec=MooncakeLayerwiseConnector)
+        connector = SimpleNamespace(
+            _requests_to_connector={request.request_id: 1},
+            _connectors=[store_connector, mooncake_connector],
+            _ktc_kv_transfer_config=[
+                SimpleNamespace(kv_connector="AscendStoreConnector"),
+                SimpleNamespace(kv_connector="MooncakeLayerwiseConnector"),
+            ],
+        )
+
+        AscendMultiConnector.update_state_after_alloc(connector, request, blocks, num_external_tokens=16)
+
+        store_connector.update_state_after_alloc.assert_called_once_with(request, blocks.new_empty.return_value, 0)
+        mooncake_connector.update_state_after_alloc.assert_called_once_with(request, blocks, 16)
+
+
 class TestMooncakeLayerwiseConnectorMetadata(unittest.TestCase):
     def test_add_new_req(self):
         meta = MooncakeLayerwiseConnectorMetadata()
@@ -788,6 +835,22 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         self.assertEqual(record[1], [])
         self.assertEqual(record[2], ([[4, 5, 6]],))
         self.assertFalse(req.kv_transfer_params.get("do_remote_prefill", True))
+
+    def test_update_state_after_alloc_prefill_skips_zero_external_tokens(self):
+        req = MockRequest(
+            "req_not_selected",
+            prompt_token_ids=list(range(24)),
+            kv_transfer_params={"do_remote_prefill": True, "metaserver": "http://meta"},
+        )
+        blocks = MagicMock()
+        self.scheduler.executor.submit = MagicMock()
+
+        self.scheduler.update_state_after_alloc(req, blocks, num_external_tokens=0)
+
+        self.assertNotIn(req.request_id, self.scheduler._reqs_need_recv)
+        self.assertFalse(req.kv_transfer_params["do_remote_prefill"])
+        blocks.get_block_ids.assert_not_called()
+        self.scheduler.executor.submit.assert_not_called()
 
     def test_update_state_after_alloc_decode_records_send_layerwise(self):
         req = MockRequest(
