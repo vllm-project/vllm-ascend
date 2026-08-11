@@ -38,7 +38,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 def _npu_mla_prolog_v3_no_rope(**kwargs):
     """Call the AscendC MLA prolog that supports no-RoPE inputs."""
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
     return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
 
