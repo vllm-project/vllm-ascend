@@ -11,7 +11,9 @@ from vllm_ascend.lora.quant_moe import (
     quant_apply_mlp_with_moe_lora,
     validate_quant_moe_lora_activation_input,
 )
-from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEMlpComputeInput, MoEQuantParams, MoEWeights
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 QUANT_MOE = "vllm_ascend.lora.quant_moe"
