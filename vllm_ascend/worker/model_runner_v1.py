@@ -143,10 +143,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.compilation.breakable_aclgraph import (
-    BreakableACLGraphWrapper,
-    is_breakable_aclgraph_enabled,
-)
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -672,8 +669,10 @@ class NPUModelRunner(GPUModelRunner):
     def _use_aclgraph(self) -> bool:
         return (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and (self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            or is_breakable_aclgraph_enabled())
+            and (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+            )
             and not self.model_config.enforce_eager
         )
 
@@ -3633,7 +3632,7 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             if (
-                is_breakable_aclgraph_enabled()
+                breakable_cudagraph.is_breakable_cudagraph_enabled()
                 and cudagraph_mode != CUDAGraphMode.NONE
             ):
                 self.model = BreakableACLGraphWrapper(
