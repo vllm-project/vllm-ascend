@@ -810,21 +810,17 @@ class AscendModelSlimConfig(QuantizationConfig):
                         from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
                         return AscendUnquantizedLinearMethod()
-                    if isinstance(layer, FusedMoE):
-                        from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+                    if _is_fused_moe_layer(layer):
+                        from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
-                        return AscendFusedMoEMethod(
-                            AscendUnquantizedFusedMoEMethod(layer.moe_config),
-                            layer.moe_config,
-                            tid2eid,
-                        )
+                        return AscendUnquantizedFusedMoEMethod(layer.moe_config)
                     return None
 
             if isinstance(layer, LinearBase):
                 from .methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
                 return AscendLinearMethod(AscendW8A8MXFP8DynamicLinearMethod())
-            if isinstance(layer, FusedMoE):
+            if _is_fused_moe_layer(layer):
                 from .methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod
 
                 return AscendFusedMoEMethod(
