@@ -205,7 +205,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "hc_post"
         "hc_pre"
         "swiglu_group_quant"
-        "swiglu_mx_quant"
         "load_index_kv_cache"
         "indexer_compress_epilog_v2"
         "causal_conv1d"

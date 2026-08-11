@@ -1266,72 +1266,6 @@ int64_t get_type_code(at::ScalarType dst_type)
     return 0;
 }
 
-std::tuple<at::Tensor, at::Tensor> construct_swiglu_mx_quant_output_tensor(
-    const at::Tensor& x,
-    at::ScalarType dst_type)
-{
-    constexpr int64_t SWIGLU_FACTOR = 2;
-    constexpr int64_t MX_BLOCK_SIZE = 32;
-    constexpr int64_t MX_SCALE_ALIGN_FACTOR = 2;
-
-    TORCH_CHECK(x.dim() >= 2, "x rank should be greater than 1.");
-    TORCH_CHECK(x.dtype() == at::kHalf || x.dtype() == at::kBFloat16,
-                "x should be FLOAT16 or BFLOAT16.");
-    TORCH_CHECK(x.size(x.dim() - 1) % SWIGLU_FACTOR == 0,
-                "x last dim should be even, but got ", x.size(x.dim() - 1), ".");
-
-    at::SmallVector<int64_t, 8> y_size(x.sizes().begin(), x.sizes().end());
-    y_size.back() = y_size.back() / SWIGLU_FACTOR;
-    if (dst_type == at::ScalarType::Float4_e2m1fn_x2) {
-        TORCH_CHECK(y_size.back() % 2 == 0, "FP4 output last dim should be even, but got ", y_size.back(), ".");
-    } else {
-        TORCH_CHECK(dst_type == at::ScalarType::Float8_e5m2 || dst_type == at::ScalarType::Float8_e4m3fn,
-                    "dst_type only supports float8_e5m2, float8_e4m3fn, or float4_e2m1fn_x2.");
-    }
-
-    at::Tensor y = at::empty(y_size, x.options().dtype(dst_type));
-
-    at::SmallVector<int64_t, 8> mxscale_size(y_size.begin(), y_size.end());
-    int64_t scale_last_dim = (mxscale_size.back() + MX_BLOCK_SIZE - 1) / MX_BLOCK_SIZE;
-    scale_last_dim = (scale_last_dim + MX_SCALE_ALIGN_FACTOR - 1) / MX_SCALE_ALIGN_FACTOR;
-    mxscale_size.back() = scale_last_dim;
-    mxscale_size.push_back(MX_SCALE_ALIGN_FACTOR);
-    at::Tensor mxscale = at::empty(mxscale_size, x.options().dtype(at::kFloat8_e8m0fnu));
-
-    return {y, mxscale};
-}
-
-std::tuple<at::Tensor, at::Tensor> swiglu_mx_quant_meta(
-    const at::Tensor& x,
-    const c10::optional<at::Tensor>& group_index,
-    at::ScalarType dst_type = at::ScalarType::Float8_e4m3fn,
-    int64_t activate_dim = -1,
-    bool activate_left = false,
-    int64_t swiglu_mode = 1,
-    double clamp_limit = 7.0,
-    double glu_alpha = 1.702,
-    double glu_bias = 1.0,
-    int64_t group_mode = 0,
-    int64_t axis = -1,
-    c10::string_view round_mode = "rint",
-    int64_t scale_alg = 0,
-    double max_dtype_value = 0.0)
-{
-    (void)group_index;
-    (void)activate_left;
-    (void)clamp_limit;
-    (void)glu_alpha;
-    (void)glu_bias;
-    (void)round_mode;
-    (void)max_dtype_value;
-    TORCH_CHECK(activate_dim == -1, "swiglu_mx_quant currently only supports activate_dim=-1.");
-    TORCH_CHECK(axis == -1, "swiglu_mx_quant currently only supports axis=-1.");
-    TORCH_CHECK(swiglu_mode == 0 || swiglu_mode == 1, "swiglu_mode only supports 0 or 1.");
-    TORCH_CHECK(group_mode == 0 || group_mode == 1, "group_mode only supports 0 or 1.");
-    TORCH_CHECK(scale_alg == 0 || scale_alg == 1 || scale_alg == 2, "scale_alg only supports 0, 1, or 2.");
-    return construct_swiglu_mx_quant_output_tensor(x, dst_type);
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_output_tensor(
     const at::Tensor& x,
     int64_t dst_type,
@@ -1748,7 +1682,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_load_index_kv_cache", &vllm_ascend::meta::npu_load_index_kv_cache_meta);
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
-    ops.impl("swiglu_mx_quant", &vllm_ascend::meta::swiglu_mx_quant_meta);
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);

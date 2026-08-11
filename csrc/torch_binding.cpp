@@ -1757,86 +1757,6 @@ int64_t get_type_code(at::ScalarType dst_type)
     return 0;
 }
 
-std::tuple<at::Tensor, at::Tensor> construct_swiglu_mx_quant_output_tensor(
-    const at::Tensor& x,
-    at::ScalarType dst_type)
-{
-    constexpr int64_t SWIGLU_FACTOR = 2;
-    constexpr int64_t MX_BLOCK_SIZE = 32;
-    constexpr int64_t MX_SCALE_ALIGN_FACTOR = 2;
-
-    TORCH_CHECK(x.dim() >= 2, "x rank should be greater than 1.");
-    TORCH_CHECK(x.dtype() == at::kHalf || x.dtype() == at::kBFloat16,
-                "x should be FLOAT16 or BFLOAT16.");
-    TORCH_CHECK(x.size(x.dim() - 1) % SWIGLU_FACTOR == 0,
-                "x last dim should be even, but got ", x.size(x.dim() - 1), ".");
-
-    at::SmallVector<int64_t, 8> y_size(x.sizes().begin(), x.sizes().end());
-    y_size.back() = y_size.back() / SWIGLU_FACTOR;
-    if (dst_type == at::ScalarType::Float4_e2m1fn_x2) {
-        TORCH_CHECK(y_size.back() % 2 == 0, "FP4 output last dim should be even, but got ", y_size.back(), ".");
-    } else {
-        TORCH_CHECK(dst_type == at::ScalarType::Float8_e5m2 || dst_type == at::ScalarType::Float8_e4m3fn,
-                    "dst_type only supports float8_e5m2, float8_e4m3fn, or float4_e2m1fn_x2.");
-    }
-
-    at::Tensor y = at::empty(y_size, x.options().dtype(dst_type));
-
-    at::SmallVector<int64_t, 8> mxscale_size(y_size.begin(), y_size.end());
-    int64_t scale_last_dim = (mxscale_size.back() + MX_BLOCK_SIZE - 1) / MX_BLOCK_SIZE;
-    scale_last_dim = (scale_last_dim + MX_SCALE_ALIGN_FACTOR - 1) / MX_SCALE_ALIGN_FACTOR;
-    mxscale_size.back() = scale_last_dim;
-    mxscale_size.push_back(MX_SCALE_ALIGN_FACTOR);
-    at::Tensor mxscale = at::empty(mxscale_size, x.options().dtype(at::kFloat8_e8m0fnu));
-
-    return {y, mxscale};
-}
-
-std::tuple<at::Tensor, at::Tensor> swiglu_mx_quant_npu(
-    const at::Tensor& x,
-    const c10::optional<at::Tensor>& group_index,
-    at::ScalarType dst_type = at::ScalarType::Float8_e4m3fn,
-    int64_t activate_dim = -1,
-    bool activate_left = false,
-    int64_t swiglu_mode = 1,
-    double clamp_limit = 7.0,
-    double glu_alpha = 1.702,
-    double glu_bias = 1.0,
-    int64_t group_mode = 0,
-    int64_t axis = -1,
-    c10::string_view round_mode = "rint",
-    int64_t scale_alg = 0,
-    double max_dtype_value = 0.0)
-{
-    TORCH_CHECK(activate_dim == -1, "swiglu_mx_quant currently only supports activate_dim=-1.");
-    TORCH_CHECK(axis == -1, "swiglu_mx_quant currently only supports axis=-1.");
-    TORCH_CHECK(swiglu_mode == 0 || swiglu_mode == 1, "swiglu_mode only supports 0 or 1.");
-    TORCH_CHECK(group_mode == 0 || group_mode == 1, "group_mode only supports 0 or 1.");
-    TORCH_CHECK(std::isfinite(clamp_limit) && clamp_limit > 0.0, "clamp_limit should be positive finite.");
-    TORCH_CHECK(std::isfinite(glu_alpha), "glu_alpha should be finite.");
-    TORCH_CHECK(std::isfinite(glu_bias), "glu_bias should be finite.");
-    TORCH_CHECK(scale_alg == 0 || scale_alg == 1 || scale_alg == 2, "scale_alg only supports 0, 1, or 2.");
-    TORCH_CHECK(std::isfinite(max_dtype_value) && max_dtype_value >= 0.0,
-                "max_dtype_value should be non-negative finite.");
-
-    auto output_tensors = construct_swiglu_mx_quant_output_tensor(x, dst_type);
-    at::Tensor y = std::get<0>(output_tensors);
-    at::Tensor mxscale = std::get<1>(output_tensors);
-
-    const at::Tensor& group_index_value = c10::value_or_else(group_index, [] {
-        return at::Tensor();
-    });
-    int64_t dst_type_code = get_type_code(dst_type);
-    std::string round_mode_str = std::string(round_mode);
-    char* round_mode_ptr = const_cast<char*>(round_mode_str.c_str());
-
-    EXEC_NPU_CMD(aclnnSwigluMxQuant, x, group_index_value, activate_dim, activate_left, swiglu_mode, clamp_limit,
-                 glu_alpha, glu_bias, group_mode, axis, dst_type_code, round_mode_ptr, scale_alg, max_dtype_value, y,
-                 mxscale);
-
-    return {y, mxscale};
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_output_tensor(
     const at::Tensor& x,
     int64_t dst_type,
@@ -2800,26 +2720,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y, Tensor scale)"
     );
     ops.impl("npu_dequant_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::npu_dequant_swiglu_quant);
-
-    ops.def(
-        "swiglu_mx_quant("
-            "Tensor x, "
-            "Tensor? group_index=None, "
-            "ScalarType dst_type=39, "
-            "int activate_dim=-1, "
-            "bool activate_left=False, "
-            "int swiglu_mode=1, "
-            "float clamp_limit=7.0, "
-            "float glu_alpha=1.702, "
-            "float glu_bias=1.0, "
-            "int group_mode=0, "
-            "int axis=-1, "
-            "str round_mode='rint', "
-            "int scale_alg=0, "
-            "float max_dtype_value=0.0"
-        ") -> (Tensor y, Tensor mxscale)"
-    );
-    ops.impl("swiglu_mx_quant", torch::kPrivateUse1, &vllm_ascend::swiglu_mx_quant_npu);
 
     ops.def(
         "npu_scatter_nd_update_v2("

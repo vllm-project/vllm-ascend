@@ -42,13 +42,21 @@ from vllm_ascend.attention.msa_m3_npu_new import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
-    minimax_m3_index_decode,
-    minimax_m3_index_score,
-    minimax_m3_index_topk,
-)
+from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import minimax_m3_index_decode
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+if get_ascend_device_type() == AscendDeviceType.A5:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
 
 
 def _active_decode_num_reqs(

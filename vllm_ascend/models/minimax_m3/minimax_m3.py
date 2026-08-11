@@ -28,6 +28,7 @@ from itertools import islice
 from typing import Any
 
 import torch
+import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -459,15 +460,11 @@ class MiniMaxM3SwiGLUOAI(nn.Module):
         self.beta = float(beta)
         self.limit = float(limit)
         self.use_mx_quant = use_mx_quant
-        if self.use_mx_quant and not hasattr(torch.ops._C_ascend, "swiglu_mx_quant"):
-            raise RuntimeError(
-                "swiglu_mx_quant is unavailable in the current Ascend custom op runtime."
-            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.use_mx_quant:
-            quantized_x, scale = torch.ops._C_ascend.swiglu_mx_quant(
-                x=x,
+            quantized_x, scale = torch_npu.npu_swiglu_mx_quant(
+                x,
                 group_index=None,
                 dst_type=torch.float8_e4m3fn,
                 activate_dim=-1,
