@@ -59,6 +59,7 @@ from vllm_ascend.distributed.parallel_state import (
     get_otp_group,
 )
 from vllm_ascend.utils import (
+    COMPRESSED_TENSORS_METHOD,
     enable_dsa_cp,
     enable_sp,
     is_310p,
@@ -297,8 +298,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
         need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix)
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
-        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+        output_parallel = _apply_tensor_all_gather_matmul_if_supported(self.layer, input_, bias, need_all_gather)
+        if output_parallel is None:
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
+            output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -329,8 +332,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         if self.tp_size == 1 or not self.reduce_results:
             output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
         elif self.use_tensor_mm_reduce_scatter_fusion:
-            output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
-            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+            output = _apply_tensor_mm_reduce_scatter(self.layer, input_parallel, bias_)
         else:
             output = torch.ops.vllm.matmul_and_reduce(input_parallel, self.unique_prefix)
 
@@ -471,6 +473,80 @@ def _supports_tensor_mm_reduce_scatter_quant_method(layer) -> bool:
         and hasattr(layer, "weight_scale")
         and not has_dynamic_weight_chunks
     )
+
+
+def _apply_tensor_mm_reduce_scatter(layer, input_: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+    """Call the tensor matmul-reduce-scatter custom op for supported row layers."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
+
+    quant_method = getattr(layer, "quant_method", None)
+    if isinstance(quant_method, UnquantizedLinearMethod):
+        return torch.ops.vllm.unquantized_matmul_reduce_scatter(input_, layer.weight, bias)
+
+    if isinstance(quant_method, AscendLinearMethod) and isinstance(quant_method.quant_method, AscendW8A8LinearMethod):
+        ascend_quant_method = getattr(layer, "ascend_quant_method", "")
+        quant_bias = bias if ascend_quant_method == COMPRESSED_TENSORS_METHOD else None
+        if quant_bias is None and get_tp_group().rank_in_group == 0:
+            quant_bias = layer.quant_bias
+        return torch.ops.vllm.quant_matmul_reduce_scatter(
+            input_,
+            layer.weight,
+            layer.deq_scale,
+            layer.aclnn_input_scale,
+            layer.aclnn_input_scale_reciprocal,
+            layer.aclnn_input_offset,
+            quant_bias,
+        )
+
+    if (
+        isinstance(quant_method, AscendLinearMethod)
+        and isinstance(quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+        and hasattr(layer, "weight")
+        and hasattr(layer, "weight_scale")
+    ):
+        weight_scale = getattr(layer, "weight_scale_fp32", layer.weight_scale)
+        return torch.ops.vllm.dynamic_quant_matmul_reduce_scatter(input_, layer.weight, weight_scale, bias)
+
+    output_parallel = layer.quant_method.apply(layer, input_, bias=bias)
+    return torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+
+
+def _apply_tensor_all_gather_matmul_if_supported(
+    layer,
+    input_: torch.Tensor,
+    bias: torch.Tensor | None,
+    need_all_gather: bool,
+) -> torch.Tensor | None:
+    """Call the tensor all-gather-matmul custom op for supported column layers."""
+    if not need_all_gather:
+        return None
+
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+    quant_method = getattr(layer, "quant_method", None)
+    if isinstance(quant_method, UnquantizedLinearMethod) and _get_weight_dtype(layer) in _TENSOR_MM_REDUCE_SCATTER_DTYPES:
+        return torch.ops.vllm.all_gather_unquantized_matmul(input_, layer.weight, bias)
+
+    chunk_size = getattr(layer, "_chunk_size", 0)
+    has_dynamic_weight_chunks = isinstance(chunk_size, int) and chunk_size > 0
+    if (
+        bias is None
+        and isinstance(quant_method, AscendLinearMethod)
+        and isinstance(quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+        and hasattr(layer, "weight")
+        and hasattr(layer, "weight_scale")
+        and not has_dynamic_weight_chunks
+    ):
+        weight_scale = getattr(layer, "weight_scale_fp32", layer.weight_scale)
+        return torch.ops.vllm.all_gather_dynamic_quant_matmul(input_, layer.weight, weight_scale)
+
+    return None
 
 
 def _supports_tensor_mm_reduce_scatter_fusion(layer, tp_size: int, reduce_results: bool) -> bool:

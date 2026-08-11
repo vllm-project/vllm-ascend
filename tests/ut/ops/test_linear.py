@@ -340,6 +340,58 @@ class TestRowParallelOpDispatch(unittest.TestCase):
 
         self.assertFalse(op.use_tensor_mm_reduce_scatter_fusion)
 
+    def test_sequence_row_op_calls_tensor_mm_reduce_scatter_in_eager(self):
+        from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+
+        layer = MagicMock()
+        layer.prefix = "model.layers.0.mlp.down_proj"
+        layer.unique_prefix = "model.layers.0.mlp.down_proj"
+        layer.input_is_parallel = True
+        layer.reduce_results = True
+        layer.input_size_per_partition = 8
+        layer.skip_bias_add = False
+        layer.return_bias = True
+        layer.quant_method = AscendUnquantizedLinearMethod()
+        layer.weight = torch.nn.Parameter(torch.empty(16, 8, dtype=torch.float16), requires_grad=False)
+        layer.bias = None
+        output = torch.empty(2, 16, dtype=torch.float16)
+
+        op = SequenceRowParallelOp(layer)
+        op.update_attrs()
+        input_ = torch.empty(4, 8, dtype=torch.float16)
+        with patch.object(torch.ops.vllm, "unquantized_matmul_reduce_scatter", return_value=output) as mock_fused:
+            result, output_bias = op.apply_impl(input_)
+
+        self.assertIs(result, output)
+        self.assertIsNone(output_bias)
+        mock_fused.assert_called_once_with(input_, layer.weight, None)
+
+    def test_sequence_column_op_calls_tensor_all_gather_matmul_in_eager(self):
+        from vllm_ascend.ops.linear_op import SequenceColumnParallelOp
+
+        layer = MagicMock()
+        layer.prefix = "model.layers.1.mlp.gate_up_proj"
+        layer.gather_output = False
+        layer.skip_bias_add = False
+        layer.return_bias = True
+        layer.quant_method = AscendUnquantizedLinearMethod()
+        layer.weight = torch.nn.Parameter(torch.empty(16, 8, dtype=torch.float16), requires_grad=False)
+        layer.bias = None
+        output = torch.empty(4, 16, dtype=torch.float16)
+
+        op = SequenceColumnParallelOp(layer)
+        op.update_attrs()
+        input_ = torch.empty(2, 8, dtype=torch.float16)
+        with (
+            patch("vllm_ascend.ops.linear_op.is_vl_model", return_value=False),
+            patch.object(torch.ops.vllm, "all_gather_unquantized_matmul", return_value=output) as mock_fused,
+        ):
+            result, output_bias = op.apply_impl(input_)
+
+        self.assertIs(result, output)
+        self.assertIsNone(output_bias)
+        mock_fused.assert_called_once_with(input_, layer.weight, None)
+
 
 class TestMatmulReduceScatterFusion(unittest.TestCase):
     def test_dynamic_w8a8_tensor_op_uses_mm_reduce_scatter_fusion(self):
