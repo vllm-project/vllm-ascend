@@ -32,6 +32,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.compilation.breakable_aclgraph import eager_break_during_capture
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 
@@ -174,6 +175,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         return output
 
 
+@eager_break_during_capture
 def mla_forward(
     hidden_states: torch.Tensor,
     need_gather_q_kv: bool,
