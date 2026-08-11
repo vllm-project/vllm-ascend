@@ -6,7 +6,12 @@ from collections import defaultdict
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    BlockHashListWithBlockSize,
+    _approximate_gcd,
+    may_override_num_blocks,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -20,6 +25,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.utils import vllm_version_is
 
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+
+
+def _get_terminal_block_hash(self: BlockHashListWithBlockSize, idx: int) -> BlockHash:
+    return self.block_hashes[(idx + 1) * self.scale_factor - 1]
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -52,7 +61,7 @@ def _ascend_resolve_kv_cache_block_sizes(
         # multiplied by the CP factors for proper alignment.
         group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
-        if not cache_config.enable_prefix_caching:
+        if not (cache_config.enable_prefix_caching or vllm_config.kv_transfer_config is not None):
             return scheduler_block_size, scheduler_block_size
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
@@ -256,6 +265,7 @@ vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_
 # get_kv_cache_config_from_groups now calls _get_kv_cache_config_packed directly, bypassing
 # the alias patch above. Patch the canonical name so Ascend's non-packed layout is used.
 if vllm_version_is("0.23.0"):
+    BlockHashListWithBlockSize._get_value_at = _get_terminal_block_hash
     vllm.v1.core.kv_cache_utils._get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_deepseek_v4
 else:
     vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4

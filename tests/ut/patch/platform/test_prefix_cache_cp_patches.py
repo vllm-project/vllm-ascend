@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize
 from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
@@ -101,12 +102,14 @@ def _make_vllm_config(
     dcp: int,
     pcp: int,
     block_size: int = 16,
+    kv_transfer_config: object | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
         ),
+        kv_transfer_config=kv_transfer_config,
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
             prefill_context_parallel_size=pcp,
@@ -128,14 +131,16 @@ def _make_coordinator_for_effective_block_size(
 
 
 @pytest.mark.parametrize(
-    ("enable_prefix_caching", "expected_hash_block_size"),
+    ("enable_prefix_caching", "kv_transfer_config", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2 * 2, id="cp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="cp-with-prefix-caching"),
+        pytest.param(False, None, math.lcm(16, 32) * 2 * 2, id="cp-without-hashing"),
+        pytest.param(False, object(), math.gcd(16, 32), id="cp-with-connector"),
+        pytest.param(True, None, math.gcd(16, 32), id="cp-with-prefix-caching"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     enable_prefix_caching: bool,
+    kv_transfer_config: object | None,
     expected_hash_block_size: int,
 ) -> None:
     kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
@@ -143,6 +148,7 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
         enable_prefix_caching=enable_prefix_caching,
         dcp=2,
         pcp=2,
+        kv_transfer_config=kv_transfer_config,
     )
 
     scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
@@ -153,6 +159,14 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     expected_scheduler_block_size = math.lcm(16, 32) * 2 * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+def test_block_hash_list_uses_terminal_chained_hash() -> None:
+    block_hashes = [BlockHash(bytes([idx]) * 32) for idx in range(4)]
+
+    grouped_hashes = BlockHashListWithBlockSize(block_hashes, 8, 16)
+
+    assert list(grouped_hashes) == [block_hashes[1], block_hashes[3]]
 
 
 @pytest.mark.parametrize(
