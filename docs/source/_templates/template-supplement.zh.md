@@ -4,7 +4,7 @@
   <a href="template-supplement.md"><b>English</b></a> | <a href="template-supplement.zh.md"><b>中文</b></a>
 </p>
 
-> **说明**：本文档为《模型部署技术文档模板》的补充参考手册，旨在帮助文档编写者理解 **Sphinx + MyST-Parser**和 **MkDocs + Material** 两种框架之间的语法差异,避免实际写作中因框架差异出现渲染异常等问题。
+> **说明**：本文档为《模型部署技术文档模板》的补充参考手册，旨在帮助文档编写者理解 `Sphinx + MyST-Parser` 和 `MkDocs + Material` 两种框架之间的语法差异,避免实际写作中因框架差异出现渲染异常等问题。
 
 ## 1 框架概述
 
@@ -14,15 +14,6 @@
 |------|------------------|----------|------|
 | Sphinx + MyST-Parser | v0.23.0 及更早 | `docs/source/conf.py` | 旧版 |
 | MkDocs + Material | v0.24.0 及之后 | `mkdocs.yml` | 新版（当前使用） |
-
-### 1.2 为什么需要这份参考手册
-
-vLLM-Ascend 在 v0.24.0 版本切换到 MkDocs 框架后，两种框架在 Markdown 解析、锚点生成、扩展语法等方面存在显著差异，本文档整理了这些差异示例以供参考。这些差异会导致：
-
-- 中文文档锚点异常（如 `#5-在线服务部署` 变成 `#5`）
-- Tab 切换、提示框等扩展语法需要重写
-- 自定义锚点语法不兼容
-- 版本占位符等渲染不成功
 
 ## 2 语法差异对照表
 
@@ -63,7 +54,7 @@ vLLM-Ascend 在 v0.24.0 版本切换到 MkDocs 框架后，两种框架在 Markd
 
 ### 3.2 Sphinx + MyST-Parser
 
-使用 `{tab-set}` 和 `{tab-item}` 指令，需要显式声明同步组（`:sync-group:`）和同步键（`:sync:`）。
+使用 `{tab-set}` 和 `{tab-item}` 指令，声明同步组（`:sync-group:`）和同步键（`:sync:`）。
 
 **示例：**
 
@@ -75,7 +66,7 @@ vLLM-Ascend 在 v0.24.0 版本切换到 MkDocs 框架后，两种框架在 Markd
     :sync: A3
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
     docker run ...
     ```
 
