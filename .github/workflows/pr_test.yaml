@@ -350,7 +350,6 @@ jobs:
       - ensure-csrc-cache
     if: >-
       ${{
-        always() &&
         needs.pre-commit.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.select-tests.outputs.has_tests == 'true' &&
@@ -377,7 +376,6 @@ jobs:
       - ensure-csrc-cache
     if: >-
       ${{
-        always() &&
         needs.pre-commit.result == 'success' &&
         needs.select-tests.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready') &&
@@ -472,7 +470,7 @@ jobs:
 
       - name: Export coverage paths output
         id: export-paths
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           FILE="recommended_pytest_paths.txt"
           if [ -f "$FILE" ]; then
@@ -506,7 +504,7 @@ jobs:
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
     needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
-    if: ${{ always() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5')) }}
+    if: ${{ !cancelled() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5')) }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
@@ -576,7 +574,7 @@ jobs:
   analyze-failure-report:
     name: Analyze failure report
     needs: [run-selected-tests, recommend-tests-from-coverage]
-    if: always()
+    if: ${{ !cancelled() }}
     uses: ./.github/workflows/_analyze_failure.yaml
     with:
       log_artifact_pattern: selected-test-logs-*

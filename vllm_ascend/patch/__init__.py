@@ -1084,6 +1084,19 @@
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
 #
+#   2. `DeepseekV32IndexerCache.get_attn_backend`
+#    Why:
+#       SFA indexer cache layers require the Ascend cache-only backend;
+#       the upstream indexer backend is GPU-specific.
+#    How：
+#       Route SFA indexer cache layers to the existing
+#       `AscendSFAIndexerBackend`.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/13069
+#    Future Plan:
+#       Remove this patch once upstream adds a backend hook for KV cache spec
+#       construction or v2 worker no longer depends on the shared v1 helper.
+#
 # ** 26. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`

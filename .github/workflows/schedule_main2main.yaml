@@ -254,7 +254,6 @@ jobs:
           pip install uv pytest
 
       - name: Configure git identity
-        if: always()
         working-directory: ${{ github.workspace }}
         run: |
           set -eu
@@ -263,7 +262,7 @@ jobs:
           gh --version
 
       - name: Check npu and CANN info
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           npu-smi info || true
           if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
@@ -513,7 +512,7 @@ jobs:
           fi
 
       - name: Upload workspace
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -524,7 +523,7 @@ jobs:
       - name: Summarize final status
         id: final-status
         working-directory: ${{ github.workspace }}
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           set -eu
           eval "${MAIN2MAIN_LOG_HELPERS}"
