@@ -220,19 +220,9 @@ setup_vllm_cache_root
 if [ "${npu_type}" = "cpu" ]; then
   run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
 elif [ "${mode}" = "with-device" ]; then
-  aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
-  run_aclgraph_capture_replay=0
   for target in "${targets[@]}"; do
-    if [ "${target}" = "${aclgraph_capture_replay}" ]; then
-      run_aclgraph_capture_replay=1
-      continue
-    fi
     run_pytest_target "${target}"
   done
-  if [ "${run_aclgraph_capture_replay}" = "1" ]; then
-    pip uninstall -y triton-ascend triton
-    run_pytest_target "${aclgraph_capture_replay}"
-  fi
 else
   for target in "${targets[@]}"; do
     run_pytest_target "${target}"

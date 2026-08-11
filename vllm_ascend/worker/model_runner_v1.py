@@ -150,7 +150,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
-from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -220,9 +219,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
-
-# if true, allow tensor initialization and casting with internal format (e.g., NZ)
-torch.npu.config.allow_internal_format = True
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -3567,6 +3563,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
+                    from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
                     patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
