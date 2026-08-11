@@ -31,9 +31,13 @@ from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import AttnDSA, AttnMeta, AttnMHA, AttnMLA, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
+from xlite._C import AttnDSA, AttnHybrid, AttnMeta, AttnMHA, AttnMLA, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState, AscendMetadata
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
 from vllm_ascend.xlite.utils import (
     AttnMetadataRouter,
@@ -660,6 +664,200 @@ class MiniMaxM2XliteModel(StandardXliteModel):
         xlite_config.scoring_func = ScoringFuncSigmoid
 
 
+def _gemma_norm_to_xlite(weight: torch.Tensor) -> torch.Tensor:
+    """Gemma RMSNorm ``x*(1+w)`` -> xlite ``x*w``."""
+    return (weight.float() + 1.0).to(weight.dtype).contiguous()
+
+
+def _pack_mha_qkv_with_gate(
+    qkv_weight: torch.Tensor,
+    head_dim: int,
+    num_heads: int,
+    num_kv_heads: int,
+    qkv_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """vLLM interleaved [Q|Gate]/K|V -> xlite [Q|K|V|Gate]."""
+    q_size = num_heads * head_dim
+    kv_size = num_kv_heads * head_dim
+    expected = q_size * 2 + kv_size * 2
+    if qkv_weight.shape[0] != expected:
+        raise ValueError(f"Unexpected fused QKV rows {qkv_weight.shape[0]}, expected {expected}")
+    qkv_weight = qkv_weight.contiguous()
+    q_gate = qkv_weight[: q_size * 2].view(num_heads, 2, head_dim, -1)
+    q_w = q_gate[:, 0].reshape(q_size, -1).contiguous()
+    g_w = q_gate[:, 1].reshape(q_size, -1).contiguous()
+    k_w = qkv_weight[q_size * 2 : q_size * 2 + kv_size]
+    v_w = qkv_weight[q_size * 2 + kv_size :]
+    packed = torch.cat([q_w, k_w, v_w, g_w], dim=0)
+    packed_bias = None
+    if qkv_bias is not None:
+        q_gate_b = qkv_bias[: q_size * 2].view(num_heads, 2, head_dim)
+        packed_bias = torch.cat(
+            [
+                q_gate_b[:, 0].reshape(-1),
+                qkv_bias[q_size * 2 : q_size * 2 + kv_size],
+                qkv_bias[q_size * 2 + kv_size :],
+                q_gate_b[:, 1].reshape(-1),
+            ],
+            dim=0,
+        )
+    return packed, packed_bias
+
+
+def _split_linear_qkvz(weight: torch.Tensor, key_dim: int, value_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    qkv_rows = key_dim * 2 + value_dim
+    if weight.shape[0] != qkv_rows + value_dim:
+        raise ValueError(f"Unexpected in_proj_qkvz rows {weight.shape[0]}")
+    return weight[:qkv_rows].contiguous(), weight[qkv_rows:].contiguous()
+
+
+def _split_linear_ba(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if weight.shape[0] % 2:
+        raise ValueError(f"Unexpected in_proj_ba rows {weight.shape[0]}")
+    b_w, a_w = weight.chunk(2, dim=0)
+    return b_w.contiguous(), a_w.contiguous()
+
+
+def _resolve_full_attention_interval(hf_config: PretrainedConfig) -> int:
+    interval = getattr(hf_config, "full_attention_interval", None)
+    if isinstance(interval, int) and interval > 0:
+        return interval
+    for idx, layer_type in enumerate(getattr(hf_config, "layer_types", None) or []):
+        if layer_type == "full_attention":
+            return idx + 1
+    return 4
+
+
+class Qwen3_5XliteModel(StandardXliteModel):
+    """xlite adapter for dense Qwen3.5 hybrid (MHA + GDN)."""
+
+    _attn_metadata_type = AscendMetadata
+    _supported_architectures = ["Qwen3_5ForCausalLM", "Qwen3_5ForConditionalGeneration"]
+
+    def _build_model_config(self) -> None:
+        super()._build_model_config()
+        cfg, hf = self.xlite_config, self.hf_text_config
+        cfg.attn_type = AttnHybrid
+        cfg.attn_output_gate = True
+        cfg.full_attention_interval = _resolve_full_attention_interval(hf)
+        cfg.linear_num_k_heads = hf.linear_num_key_heads
+        cfg.linear_num_v_heads = hf.linear_num_value_heads
+        cfg.linear_key_head_dim = hf.linear_key_head_dim
+        cfg.linear_value_head_dim = hf.linear_value_head_dim
+        cfg.linear_conv_kernel_dim = hf.linear_conv_kernel_dim
+        if hasattr(hf, "partial_rotary_factor"):
+            partial = hf.partial_rotary_factor
+        else:
+            partial = (getattr(hf, "rope_parameters", None) or {}).get("partial_rotary_factor", 1.0)
+        cfg.rope_head_dim = int(cfg.head_dim * partial)
+        cfg.qk_norm = True
+        cfg.qkv_bias = bool(getattr(hf, "attention_bias", False) or getattr(hf, "qkv_bias", False))
+        cfg.mrope_section = []
+        cfg.mrope_interleaved = False
+        # Prefill+decode on xlite (no Ascend-GDN state sync). Size graph for chunked prefill.
+        cfg.max_m = self.vllm_config.scheduler_config.max_num_batched_tokens
+        kernel_sizes = AscendAttentionBackend.get_supported_kernel_block_sizes()
+        if kernel_sizes and cfg.block_size != int(kernel_sizes[0]):
+            logger.info("xlite hybrid block_size: manager=%s -> kernel=%s", cfg.block_size, kernel_sizes[0])
+            cfg.block_size = int(kernel_sizes[0])
+
+    def _build_model(self) -> None:
+        xm, cfg, hf = self.xlite_model, self.xlite_config, self.hf_text_config
+        layers, prefix = self._get_layers_and_model_prefix()
+        if len(layers) != cfg.n_layers:
+            raise ValueError(f"Layer count mismatch: {len(layers)} vs {cfg.n_layers}")
+
+        xm.embed = get_dotted_attr(self.npu_runnable, f"{prefix}model.embed_tokens.weight", raises=True)
+        norm_w = _gemma_norm_to_xlite(get_dotted_attr(self.npu_runnable, f"{prefix}model.norm.weight", raises=True))
+        xm.norm = norm_w
+        xm.head = xm.embed if hf.tie_word_embeddings else get_dotted_attr(
+            self.npu_runnable, f"{prefix}lm_head.weight", raises=True
+        )
+
+        empty = torch.empty(0, dtype=xm.embed.dtype, device=xm.embed.device)
+        self._xlite_weight_refs: list[torch.Tensor] = [empty, norm_w]
+        dtype = self.vllm_config.model_config.dtype
+        tp = max(int(cfg.def_tp_size), 1)
+        key_dim = (hf.linear_num_key_heads * hf.linear_key_head_dim) // tp
+        value_dim = (hf.linear_num_value_heads * hf.linear_value_head_dim) // tp
+
+        lists: dict[str, list[torch.Tensor]] = {k: [] for k in (
+            "attn_norm", "mlp_norm", "mlp_up_gate", "mlp_down", "attn_out",
+            "mha_qkv", "mha_qkv_bias", "mha_q_norm", "mha_k_norm",
+            "linear_in_proj_qkv", "linear_in_proj_z", "linear_in_proj_b", "linear_in_proj_a",
+            "linear_conv1d", "linear_a_log", "linear_dt_bias", "linear_norm", "linear_out_proj",
+        )}
+        has_qkv_bias = False
+
+        for layer in layers:
+            an = _gemma_norm_to_xlite(layer.input_layernorm.weight)
+            mn = _gemma_norm_to_xlite(layer.post_attention_layernorm.weight)
+            self._xlite_weight_refs.extend([an, mn])
+            lists["attn_norm"].append(an)
+            lists["mlp_norm"].append(mn)
+            lists["mlp_up_gate"].append(layer.mlp.gate_up_proj.weight)
+            lists["mlp_down"].append(layer.mlp.down_proj.weight)
+
+            layer_type = getattr(layer, "layer_type", None)
+            is_full = (layer_type == "full_attention") if layer_type is not None else hasattr(layer, "self_attn")
+            if is_full:
+                attn = layer.self_attn
+                bias = getattr(attn.qkv_proj, "bias", None)
+                qkv_bias = bias if isinstance(bias, torch.Tensor) and bias.numel() else None
+                packed, packed_bias = _pack_mha_qkv_with_gate(
+                    attn.qkv_proj.weight, attn.head_dim, attn.num_heads, attn.num_kv_heads, qkv_bias
+                )
+                self._xlite_weight_refs.append(packed)
+                lists["mha_qkv"].append(packed)
+                lists["attn_out"].append(attn.o_proj.weight)
+                qn = _gemma_norm_to_xlite(attn.q_norm.weight)
+                kn = _gemma_norm_to_xlite(attn.k_norm.weight)
+                self._xlite_weight_refs.extend([qn, kn])
+                lists["mha_q_norm"].append(qn)
+                lists["mha_k_norm"].append(kn)
+                if packed_bias is not None:
+                    has_qkv_bias = True
+                    self._xlite_weight_refs.append(packed_bias)
+                    lists["mha_qkv_bias"].append(packed_bias)
+                else:
+                    lists["mha_qkv_bias"].append(empty)
+                for k in (
+                    "linear_in_proj_qkv", "linear_in_proj_z", "linear_in_proj_b", "linear_in_proj_a",
+                    "linear_conv1d", "linear_a_log", "linear_dt_bias", "linear_norm", "linear_out_proj",
+                ):
+                    lists[k].append(empty)
+            else:
+                la = layer.linear_attn
+                qkv_w, z_w = _split_linear_qkvz(la.in_proj_qkvz.weight, key_dim, value_dim)
+                b_w, a_w = _split_linear_ba(la.in_proj_ba.weight)
+                conv_w = la.conv1d.weight
+                if conv_w.ndim == 2:
+                    conv_w = conv_w.unsqueeze(1)
+                conv_w = conv_w.contiguous()
+                a_log = la.A_log.detach().to(dtype=dtype).contiguous()
+                dt_bias = la.dt_bias.detach().to(dtype=dtype).contiguous()
+                self._xlite_weight_refs.extend([qkv_w, z_w, b_w, a_w, conv_w, a_log, dt_bias])
+                for k in ("attn_out", "mha_qkv", "mha_qkv_bias", "mha_q_norm", "mha_k_norm"):
+                    lists[k].append(empty)
+                lists["linear_in_proj_qkv"].append(qkv_w)
+                lists["linear_in_proj_z"].append(z_w)
+                lists["linear_in_proj_b"].append(b_w)
+                lists["linear_in_proj_a"].append(a_w)
+                lists["linear_conv1d"].append(conv_w)
+                lists["linear_a_log"].append(a_log)
+                lists["linear_dt_bias"].append(dt_bias)
+                lists["linear_norm"].append(la.norm.weight)
+                lists["linear_out_proj"].append(la.out_proj.weight)
+
+        for k, v in lists.items():
+            if k == "mha_qkv_bias" and not has_qkv_bias:
+                continue
+            setattr(xm, k, v)
+        cfg.qk_norm = True
+        cfg.qkv_bias = has_qkv_bias
+
+
+
 def get_adapter_xlite_model(npu_runner: "XliteModelRunner", vllm_config: VllmConfig) -> XliteModelBase:
     """Look up and initialize the appropriate xlite model adapter based on the architecture specified in vLLM config and
     the runnable model.
@@ -755,7 +953,77 @@ class XliteWrapper:
         Args:
             kv_caches (list[tuple[torch.Tensor, ...]]): Runtime KV cache handles or tensors.
         """
-        self.kv_caches = self.adapter_xlite_model.extract_kv_cache(kv_caches)
+        adapted = self.adapter_xlite_model.extract_kv_cache(kv_caches)
+        if self.adapter_xlite_model.xlite_config.attn_type == AttnHybrid:
+            ordered = list(adapted.values()) if isinstance(adapted, dict) else list(adapted)
+            converted = [list(c) if isinstance(c, (list, tuple)) else [c] for c in ordered]
+            self.kv_caches = self._adapt_hybrid_kv_caches(converted)
+        else:
+            self.kv_caches = adapted
+
+    def _adapt_hybrid_kv_caches(self, caches: list[list[torch.Tensor]]) -> list[list[torch.Tensor]]:
+        """Map hybrid caches to xlite: paged K/V for full layers, batch-major states for GDN."""
+        cfg = self.adapter_xlite_model.xlite_config
+        n_layers, interval = int(cfg.n_layers), int(cfg.full_attention_interval)
+        max_batch, tp = int(cfg.max_batch_size), max(int(cfg.def_tp_size), 1)
+        n_v = int(cfg.linear_num_v_heads) // tp
+        k_dim, v_dim = int(cfg.linear_key_head_dim), int(cfg.linear_value_head_dim)
+        conv_dim = (int(cfg.linear_num_k_heads) // tp) * k_dim * 2 + n_v * v_dim
+        kernel, block_size, head_dim = int(cfg.linear_conv_kernel_dim), int(cfg.block_size), int(cfg.head_dim)
+        kv_heads = max(int(cfg.n_kv_heads) // tp, 1)
+        self._xlite_hybrid_state_refs = []
+        adapted: list[list[torch.Tensor]] = []
+
+        def as_kv(group: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+            ts = [t for t in group if isinstance(t, torch.Tensor)]
+            if len(ts) == 1 and ts[0].ndim == 5 and ts[0].shape[0] == 2:
+                k, v = ts[0][0], ts[0][1]
+            elif len(ts) >= 2:
+                k, v = ts[0], ts[1]
+            else:
+                raise RuntimeError(f"bad full-attn cache shapes {[tuple(t.shape) for t in ts]}")
+            # Already kernel layout, or split manager page into kernel blocks.
+            if k.shape[1] == block_size and k.shape[2:] == (kv_heads, head_dim):
+                return k, v
+            if k.ndim == 4 and k.shape[1] > block_size and k.shape[1] % block_size == 0 and k.shape[2:] == (kv_heads, head_dim):
+                chunk = k.shape[1] // block_size
+                return (
+                    k.view(k.shape[0] * chunk, block_size, kv_heads, head_dim),
+                    v.view(v.shape[0] * chunk, block_size, kv_heads, head_dim),
+                )
+            raise RuntimeError(
+                f"full-attn KV layout mismatch: {tuple(k.shape)}, expect [*,{block_size},{kv_heads},{head_dim}]"
+            )
+
+        for i in range(n_layers):
+            if ((i + 1) % interval) == 0:
+                adapted.append(list(as_kv(caches[i])))
+            else:
+                conv = torch.zeros(max_batch, conv_dim, kernel, dtype=self.hidden_states.dtype, device=self.device)
+                ssm = torch.zeros(max_batch, n_v, k_dim, v_dim, dtype=self.hidden_states.dtype, device=self.device)
+                self._xlite_hybrid_state_refs.extend([conv, ssm])
+                adapted.append([conv, ssm])
+        logger.info("xlite hybrid KV adapted: layers=%s max_batch=%s", n_layers, max_batch)
+        return adapted
+
+    @staticmethod
+    def _pick_attn_metadata(attn_metadata: Any, expected_type: type | tuple[type, ...]) -> Any | None:
+        if isinstance(attn_metadata, list):
+            attn_metadata = attn_metadata[0]
+        if isinstance(attn_metadata, expected_type):
+            return attn_metadata
+        if isinstance(attn_metadata, dict):
+            # Prefer full-attention AscendMetadata (hybrid also has GDN entries).
+            cands = [m for m in attn_metadata.values() if isinstance(m, expected_type)]
+            if not cands:
+                return None
+            if len(cands) == 1 or expected_type is not AscendMetadata:
+                return cands[0]
+            def score(m: Any) -> int:
+                bt = getattr(m, "block_tables", None)
+                return int(bt.shape[-1]) if bt is not None and hasattr(bt, "shape") else -1
+            return max(cands, key=score)
+        return None
 
     def __call__(
         self,
@@ -780,20 +1048,135 @@ class XliteWrapper:
             XliteForwardResult: Forward outputs from xlite graph or the original runnable implementation.
         """
         forward_context = get_forward_context()
-        attn_metadata: Any = forward_context.attn_metadata
-        attn_metadata = attn_metadata[0] if isinstance(attn_metadata, list) else attn_metadata
-        attn_metadata = attn_metadata.get("model.layers.0.self_attn.attn", next(iter(attn_metadata.values()), None))
-        # Since v0.28.0, batches are routed by token count (max across DP ranks) instead of the batch attention
-        # state: batches within the preallocated budget run on xlite, others fall back to the native acl runnable.
-        if (num_tokens := forward_context.max_tokens_across_dp) > self.max_tokens:
-            if self.full_mode:
-                logger.warning_once(
-                    "xlite: token number exceeded expected limit (%d >%d), consider opening an issue at %s",
-                    num_tokens,
-                    self.max_tokens,
-                    "https://atomgit.com/openeuler/GVirt",
-                )
+        is_hybrid = self.adapter_xlite_model.xlite_config.attn_type == AttnHybrid
+        if getattr(forward_context, "in_profile_run", False) or (
+            is_hybrid and getattr(forward_context, "capturing", False)
+        ):
+            if self.full_mode and getattr(forward_context, "in_profile_run", False):
+                # In full mode, xlite handles both prefill and decode, and aclgraph runnable should not reserve memory.
+                # This is to avoid redundant memory allocation that reduces KV cache capacity and regresses performance.
+                # NOTE: returning a single hidden state tensor may break the vLLM pipeline if the runnable expects a
+                # tuple of outputs, e.g., (hidden_states, aux_hidden_states) under certain speculative scenarios
+                return self.hidden_states
             return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+
+        attn_metadata_raw: Any = forward_context.attn_metadata
+        if attn_metadata_raw is None:
+            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+
+        if is_hybrid:
+            attn_metadata = self._pick_attn_metadata(attn_metadata_raw, self.adapter_xlite_model._attn_metadata_type)
+        else:
+            attn_metadata = attn_metadata_raw[0] if isinstance(attn_metadata_raw, list) else attn_metadata_raw
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata.get(
+                    "model.layers.0.self_attn.attn", next(iter(attn_metadata.values()), None)
+                )
+            if not isinstance(attn_metadata, self.adapter_xlite_model._attn_metadata_type):
+                attn_metadata = None
+        if attn_metadata is None:
+            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+
+        with_prefill = attn_metadata.attn_state not in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
+        )
+
+        # Since upstream v0.28.0, non-hybrid batches are routed by token count
+        # (max across DP ranks) instead of the batch attention state: batches
+        # beyond the preallocated budget fall back to the native runnable.
+        if not is_hybrid:
+            num_tokens = getattr(forward_context, "max_tokens_across_dp", None)
+            if num_tokens is not None and num_tokens > self.max_tokens:
+                if self.full_mode:
+                    logger.warning_once(
+                        "xlite: token number exceeded expected limit (%d >%d), consider opening an issue at %s",
+                        num_tokens,
+                        self.max_tokens,
+                        "https://atomgit.com/openeuler/GVirt",
+                    )
+                return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+
+        # Full: graph for prefill and decode
+        # Decode-Only: runnable for prefill, graph for decode
+        # Hybrid: always graph (Ascend-GDN state is not sync-compatible with xlite).
+        if is_hybrid:
+            use_xlite_graph = True
+        elif not self.full_mode and self.data_parallel_size > 1:
+            num_tokens = forward_context.batch_descriptor.num_tokens
+            num_reqs = forward_context.batch_descriptor.num_reqs
+            use_xlite_graph = num_reqs is not None and num_tokens <= num_reqs
+        else:
+            use_xlite_graph = not with_prefill or self.full_mode
+
+        if not use_xlite_graph:
+            # fall back to runnable for prefill in decode-only mode
+            # or when the number of tokens exceeds the graph capacity in non-full mode
+            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+
+        if is_hybrid:
+            num_reqs = int(getattr(attn_metadata, "num_decodes", 0) or 0) + int(
+                getattr(attn_metadata, "num_prefills", 0) or 0
+            )
+            if num_reqs <= 0:
+                num_reqs = int(getattr(getattr(forward_context, "batch_descriptor", None), "num_reqs", 0) or 0)
+            seq_lens_list = list(getattr(attn_metadata, "seq_lens_list", None) or [])[:num_reqs]
+            actual_q = list(getattr(attn_metadata, "actual_seq_lengths_q", None) or [])
+            if len(actual_q) >= num_reqs > 0:
+                cum = [0] + [int(x) for x in actual_q[:num_reqs]]
+                query_lens_list = [cum[i + 1] - cum[i] for i in range(num_reqs)]
+            else:
+                router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
+                seq = router.seq_lens[:num_reqs]
+                cum = router.cu_query_lens[-seq.size(0) :][: num_reqs + 1]
+                if cum.device.type != "cpu":
+                    cum = cum.to("cpu")
+                query_lens_list = torch.diff(cum, prepend=cum.new_zeros(1)).tolist()
+                if not seq_lens_list:
+                    seq_lens_list = seq.tolist()
+            query_lens_list = [int(x) for x in query_lens_list[:num_reqs]]
+            seq_lens_list = [int(x) for x in seq_lens_list[:num_reqs]]
+            if len(seq_lens_list) < num_reqs or len(query_lens_list) < num_reqs:
+                return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+            cached_lens_list = [max(seq_lens_list[i] - query_lens_list[i], 0) for i in range(num_reqs)]
+            bt = getattr(attn_metadata, "block_tables", None)
+            if bt is None:
+                return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+            block_tables_list = (
+                bt[:num_reqs].detach().to("cpu").tolist()
+                if hasattr(bt, "device") and bt.device.type != "cpu"
+                else bt[:num_reqs].tolist()
+            )
+            num_actual_tokens = int(attn_metadata.num_actual_tokens)
+            if sum(query_lens_list) != num_actual_tokens:
+                return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+            # Refuse capture/dummy all-zero tables on decode.
+            for i, cached in enumerate(cached_lens_list):
+                if cached > 0 and int(block_tables_list[i][0]) == 0:
+                    return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+            xlite_attn_metadata = AttnMeta()
+            xlite_attn_metadata.lens = query_lens_list
+            xlite_attn_metadata.cached_lens = cached_lens_list
+            xlite_attn_metadata.block_tables_cpu = block_tables_list
+            pos = positions[0] if positions.ndim == 2 else positions
+            xlite_attn_metadata.positions = pos[:num_actual_tokens].contiguous()
+            num_tokens = getattr(forward_context, "max_tokens_across_dp", None) or forward_context.batch_descriptor.num_tokens
+            h = self.hidden_states[:num_tokens]
+            stream = torch.npu.current_stream().npu_stream
+            if inputs_embeds is None:
+                self.xlite_model.forward(
+                    self.xlite_rt, input_ids[:num_actual_tokens], xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream
+                )
+            else:
+                emb = inputs_embeds[:num_actual_tokens]
+                deepstack = getattr(self.npu_runnable, "deepstack_input_embeds", [])
+                xlite_deepstack = [d[: emb.size(0)] for d in deepstack]
+                self.xlite_model.forward_with_inputs_embeds(
+                    self.xlite_rt, emb, xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream, xlite_deepstack
+                )
+                if xlite_deepstack and hasattr(self.npu_runnable, "_clear_deepstack_input_embeds"):
+                    self.npu_runnable._clear_deepstack_input_embeds(emb.size(0))
+            return h[:num_actual_tokens]
 
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         num_actual_tokens = attn_metadata_router.num_actual_tokens
