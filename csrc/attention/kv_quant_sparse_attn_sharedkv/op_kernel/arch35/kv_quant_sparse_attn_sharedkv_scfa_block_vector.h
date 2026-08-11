@@ -247,8 +247,10 @@ __aicore__ inline uint32_t SCFABlockVec<TEMPLATE_ARGS>::CopyInKvSparse(LocalTens
     int64_t keySrcStride = (keyOffset0 > keyOffset1 ? (keyOffset0 - keyOffset1) :
         (keyOffset1 - keyOffset0)) - combineBytes;
     if (unlikely(keySrcStride >= INT32_MAX || keySrcStride < 0) ||
-        constInfo.sparseBlockSize > 1) {
-        // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令
+        constInfo.sparseBlockSize > 1 ||
+        (keyOffset0 >= 0 && keyOffset1 >= 0 && keyOffset1 < keyOffset0)) {
+        // stride溢出、stride为负数、s2超长、或物理顺序与逻辑顺序不一致等异常场景，
+        // 还原成2条搬运指令以保持逻辑 token 顺序
         CopyInSingleKv(kvInUb, startRow, keyOffset0);
         CopyInSingleKv(kvInUb, startRow + 1, keyOffset1);
     } else {
