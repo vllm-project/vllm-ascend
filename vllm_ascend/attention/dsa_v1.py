@@ -736,7 +736,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         if self.prefill_ratio_to_sas_metadata.get("prefill_input_positions", None) is None:
             input_positions = common_attn_metadata.positions[: self.num_actual_tokens].long()
-            max_query_len = self.query_lens[reqs_start:].max().item()
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[reqs_start:]
+            max_query_len = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
             # Prefer _seq_lens_cpu (always available, updated during draft
             # iterations) over seq_lens_cpu (None in async spec decode mode).
             if common_attn_metadata._seq_lens_cpu is not None:
@@ -901,8 +902,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_quant_mode=0,
                 key_quant_mode=0,
                 batch_size=len(self.seq_lens[reqs_start:]),
-                max_seqlen_q=seq_lens_q.max().item(),
-                max_seqlen_k=self.seq_lens[reqs_start:].max().item(),
+                max_seqlen_q=max_query_len,
+                max_seqlen_k=max_seq_lens,
                 layout_query="TND",
                 layout_key="PA_BSND",
                 sparse_count=self.model_config.hf_config.index_topk,  # 512
