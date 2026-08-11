@@ -467,7 +467,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        query_start_loc = common_attn_metadata.query_start_loc
         num_reqs_actual = kwargs.get("num_reqs_actual")
         self.block_size = kwargs.get("block_size", 128)
 
@@ -676,7 +675,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_reqs,
                 self._zero_i32,
                 self.cu_seqlens_ori_kv,
-             )
+            )
             cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         elif has_prefill:
             cu_seqlens_ori_kv = query_start_loc
@@ -746,7 +745,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=False,
             )
-         )
+        )
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -762,7 +761,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         assert self.spec_slot_mapping is not None
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
             slot_mapping, self.block_size
-         )
+        )
         req_metadata = self.build_req_metadata_for_drafting(
             draft_index=draft_index,
             common_attn_metadata=common_attn_metadata,

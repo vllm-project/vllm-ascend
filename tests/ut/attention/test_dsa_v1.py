@@ -21,11 +21,10 @@ import pytest
 import torch
 
 from vllm_ascend.attention.dsa_v1 import (
-    AscendDSAReqMetadata,
     AscendDSAImpl,
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
-    _require_req_metadata,
+    AscendDSAReqMetadata,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 
@@ -330,12 +329,8 @@ def test_build_req_metadata_preserves_zero_max_sequence_lengths():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
     )
-    builder._build_sas_metadata = MagicMock(
-        return_value=torch.zeros(1024, dtype=torch.int32)
-    )
-    builder._build_qli_metadata = MagicMock(
-        return_value=torch.zeros(1024, dtype=torch.int32)
-    )
+    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
 
     with patch(
         "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
@@ -374,12 +369,8 @@ def test_build_req_metadata_clears_graph_padding_rows():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
     )
-    builder._build_sas_metadata = MagicMock(
-        return_value=torch.zeros(1024, dtype=torch.int32)
-    )
-    builder._build_qli_metadata = MagicMock(
-        return_value=torch.zeros(1024, dtype=torch.int32)
-    )
+    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
 
     with patch(
         "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
@@ -503,9 +494,7 @@ def _make_impl() -> AscendDSAImpl:
         patch(
             "vllm_ascend.attention.dsa_v1.get_current_vllm_config",
             return_value=SimpleNamespace(
-                model_config=SimpleNamespace(
-                    hf_config=SimpleNamespace(use_index_cache=False)
-                )
+                model_config=SimpleNamespace(hf_config=SimpleNamespace(use_index_cache=False))
             ),
         ),
     ):
@@ -565,12 +554,8 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
             "vllm_ascend.attention.dsa_v1.get_forward_context",
             return_value=SimpleNamespace(num_tokens=5),
         ),
-        patch(
-            "vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"
-        ),
-        patch(
-            "vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"
-        ),
+        patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
         patch.object(
             torch.ops.vllm,
             "maybe_all_gather_and_maybe_unpad",
