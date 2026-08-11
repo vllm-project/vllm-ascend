@@ -500,11 +500,29 @@ class DfxRuntimeConfig:
 
         can_write = persist and _is_json_writer()
         if overwrite_default:
+            disk_preview = self._read_json_object() if self.config_path.exists() else {}
+            disk_ascend = disk_preview.get("ascend_log") if isinstance(disk_preview, dict) else None
             logger.info(
-                "[DFX runtime_config] overwrite default json path=%s reason=no_dfx_config_path will_persist=%s",
+                "[DFX runtime_config] overwrite default json path=%s reason=no_dfx_config_path "
+                "will_persist=%s (hand-edits on the default path are ignored at startup; "
+                "set additional_config.dfx_config_path for durable config, or "
+                "dfx_config_reload_interval>0 to pick up post-start edits)",
                 self.config_path,
                 can_write,
             )
+            if isinstance(disk_ascend, dict) and (
+                str(disk_ascend.get("level", "INFO")).upper() != "INFO"
+                or bool(disk_ascend.get("debug"))
+            ):
+                logger.warning(
+                    "[DFX runtime_config] default-path file has ascend_log=%s but startup "
+                    "resets to defaults (level=INFO, debug=[]). Edits will not stick across "
+                    "restart without dfx_config_path. For live apply set "
+                    "dfx_config_reload_interval>0 and confirm log line "
+                    "'[ascend_log] applied'. path=%s",
+                    disk_ascend,
+                    self.config_path,
+                )
 
         if can_write:
             try:

@@ -16,13 +16,13 @@ vllm serve <model> --additional-config '{
 | 项 | 说明 |
 |----|------|
 | `dfx_config_reload_interval > 0` | **必须**，否则改 JSON / `manual_trigger` 不生效 |
-| `dump_config_path` | msprobe 配置；无则无法落 dump。启用 `dump_config_isolate_by_dp`（默认）且有 `VLLM_DP_RANK` 时，运行时使用 `<source_dir>/dp<rank>/...` 副本；热更请改副本。 |
-| 每 EngineCore 可读 JSON | 多 DP 不互相广播 config；共享盘一份或每节点一份。启用 `dfx_config_isolate_by_dp`（默认）且有 `VLLM_DP_RANK` 时，运行时使用 `dp<rank>` 副本；热更请改副本。 |
+| `dump_config_path` | msprobe 配置；无则无法落 dump。默认各 DP **共享**同一路径；仅当显式 `dump_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，运行时使用 `<source_dir>/dp<rank>/...` 副本（热更请改副本）。多 DP 同写一份 `dump_path` 可能互相干扰，建议隔离或分 `dump_path`。 |
+| 每 EngineCore 可读 JSON | 多 DP 不互相广播 config；共享盘一份或每节点一份。默认共享同一 `dfx_config`；仅当显式 `dfx_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，使用 `dp<rank>` 副本（热更请改副本）。 |
 | **同 EngineCore 内配置一致** | 各 TP/PP 须读**同一份** `dfx_config`（同路径）。尤其 `dump.enabled`：热更关时 pending-OR 有 fast-path，TP 间不一致会挂死（见 §3） |
 
-默认路径（未设 `dfx_config_path`）：`<cwd>/dfx/config/dfx_config.json`，报告在同级 `dfx/report/`。
+默认路径（未设 `dfx_config_path`）：`<cwd>/dfx/config/dfx_config.json`，报告在同级 `dfx/report/`。启动时会用默认内容覆盖该路径上的既有文件（手改不跨重启保留）；持久配置请设显式 `dfx_config_path`。
 
-- 当存在 `VLLM_DP_RANK` 且 `dfx_config_isolate_by_dp=true`（默认）时，默认路径会自动拆分为：`<cwd>/dfx/config/dp<rank>/dfx_config.json`。
+- 当存在 `VLLM_DP_RANK` 且显式 `dfx_config_isolate_by_dp=true` 时，默认路径会拆分为：`<cwd>/dfx/config/dp<rank>/dfx_config.json`。
 
 **默认全关开销**：`dfx_config_reload_interval=0` 且各 detector / `dump.enabled` 均为关时，无 config 集体通信；检测门控直接跳过。async / TP>1 下 pending-OR 在「热更关 + `dump.enabled=false`」时走 fast-path 跳过 `all_reduce`（同 EngineCore 内 `dump.enabled` 须一致，见 §3）。
 
@@ -125,7 +125,7 @@ vllm serve <model> --additional-config '{
 | ACLGraph：无 DFX 常开有数、DFX dump 无数 | dump 窗口外才 `start`，replay 采空 | 构图前装 hook 且保持采集；DFX 只闸 `step()` 落盘。见 [dumper_design.md](./dumper_design.md) §8 |
 | async 下只 TP0 有检测 | 设计如此（`get_output` 仅 output_rank） | dump 靠下一步 `pending-OR` 齐步；见 [async_scheduling_design.md](./async_scheduling_design.md) |
 | 某类请求从不检测 | `input_filter.filters` 不匹配；prompt 取不到 | 查 `[DFX filter] skip detect`；临时清空 `filters` |
-| 日志级别改了看不到 | 改的是 `VLLM_LOGGING_LEVEL` 而非 `ascend_log` | 用 JSON `ascend_log.level` / `debug: ["dfx"]` |
+| 日志级别改了看不到 | ① `dfx_config_reload_interval=0`（在线改 JSON 不加载）；② 用的是**默认路径**且未设 `dfx_config_path`（启动会忽略/覆盖磁盘手改，`ascend_log` 回到 INFO）；③ 改了 `VLLM_LOGGING_LEVEL` 而非 `ascend_log`；④ 改错文件（多 DP 的 `dpN/` 副本） | 启动项 `dfx_config_reload_interval>0`；持久改级用显式 `dfx_config_path`；JSON 例：`"ascend_log": {"level": "INFO", "debug": ["dfx"]}` 或 `"level": "DEBUG"`；worker 日志里应出现 `[ascend_log] applied level=...` |
 
 ## 4. 日志关键字
 

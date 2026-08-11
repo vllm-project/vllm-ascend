@@ -598,7 +598,7 @@ class AscendConfig:
 
     @classmethod
     def _resolve_dump_config_path(cls, additional_config: dict[str, Any]) -> str | None:
-        isolate_by_dp = bool(additional_config.get("dump_config_isolate_by_dp", True))
+        isolate_by_dp = bool(additional_config.get("dump_config_isolate_by_dp", False))
         dp_rank_tag = cls._dp_rank_tag_or_none() if isolate_by_dp else None
 
         dump_config_path = additional_config.get("dump_config_path")
@@ -623,7 +623,7 @@ class AscendConfig:
 
     @classmethod
     def _resolve_dfx_config_path(cls, additional_config: dict[str, Any], dfx_config_path: str | None) -> str | None:
-        isolate_by_dp = bool(additional_config.get("dfx_config_isolate_by_dp", True))
+        isolate_by_dp = bool(additional_config.get("dfx_config_isolate_by_dp", False))
         dp_rank_tag = cls._dp_rank_tag_or_none() if isolate_by_dp else None
         if dp_rank_tag is None:
             return dfx_config_path
