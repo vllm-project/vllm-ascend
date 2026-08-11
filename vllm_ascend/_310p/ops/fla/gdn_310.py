@@ -214,6 +214,12 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, dict)
+        if self.prefix not in attn_metadata:
+            print(
+                f"[310P GDN DEBUG] prefix={self.prefix!r}, "
+                f"available_keys={tuple(attn_metadata)!r}",
+                flush=True,
+            )
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state

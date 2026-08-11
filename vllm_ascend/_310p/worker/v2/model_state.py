@@ -116,29 +116,23 @@ class _Ascend310PModelStateMixin:
             kv_cache_config,
             for_capture=for_capture,
         )
-        self._add_hybrid_metadata_prefix_aliases(attn_metadata)
-        return attn_metadata
-
-    def _add_hybrid_metadata_prefix_aliases(
-        self, attn_metadata: dict[str, Any]
-    ) -> None:
-        """Alias wrapped-model linear-attention prefixes to KV cache names."""
-        source_names = tuple(attn_metadata)
-        for module in self.model.modules():
-            prefix = getattr(module, "prefix", None)
-            if (
-                not isinstance(prefix, str)
-                or not prefix.endswith(".linear_attn")
-                or prefix in attn_metadata
-            ):
-                continue
-            candidates = [
-                name
-                for name in source_names
-                if prefix.endswith(f".{name}") or name.endswith(f".{prefix}")
+        if not any("linear_attn" in name for name in attn_metadata):
+            kv_layer_names = [
+                tuple(group.layer_names)
+                for group in kv_cache_config.kv_cache_groups
             ]
-            if len(candidates) == 1:
-                attn_metadata[prefix] = attn_metadata[candidates[0]]
+            attn_group_layer_names = [
+                [tuple(group.layer_names) for group in groups]
+                for groups in attn_groups
+            ]
+            print(
+                "[310P GDN DEBUG] "
+                f"kv_cache_groups={kv_layer_names!r}, "
+                f"attn_groups={attn_group_layer_names!r}, "
+                f"metadata_keys={tuple(attn_metadata)!r}",
+                flush=True,
+            )
+        return attn_metadata
 
     def prepare_inputs(self, input_batch: AscendInputBatch, req_states):
         if self.rope_state is None:

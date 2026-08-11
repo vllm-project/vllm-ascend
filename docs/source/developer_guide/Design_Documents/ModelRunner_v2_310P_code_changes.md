@@ -915,3 +915,36 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check`和`git diff --check`已通过。
 - 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
 - 真实310P需重新验证 Qwen3.5-4B eager prefill/decode，再验证 ACLGraph。
+
+临时调试补充：
+
+- 上述后缀别名未命中时，在310P GDN执行原始字典索引前，仅当 `self.prefix`缺失才通过
+  `print(..., flush=True)`输出当前 prefix和 `attn_metadata`全部 keys，随后保留原始
+  `KeyError`行为。该打印用于确认真实命名差异，定位完成后应删除。
+
+## 25. GDN metadata缺失的现场证据与别名方案回退
+
+现场打印结果：
+
+- GDN `self.prefix`为 `language_model.model.layers.0.linear_attn`。
+- `attn_metadata`包含的8个 key全部为
+  `language_model.model.layers.{3,7,11,15,19,23,27,31}.self_attn.attn`。
+- metadata key保留了完整 `language_model`包装前缀，因此第24节关于“包装前缀不一致”
+  的推断被现场证据否定。
+- 真正现象是 GDN/linear-attention metadata整个 group没有被构建，而不是已经构建后
+  无法通过别名命中。
+
+本轮调整：
+
+- 回退第24节实现的 GDN metadata后缀别名逻辑及其两项测试。
+- 保留310P GDN报错点的条件打印。
+- 当最终 metadata中没有任何 `linear_attn` key时，在310P ModelState中额外打印：
+  - `kv_cache_config.kv_cache_groups`的 layer names；
+  - `init_attn_backend()`生成的 `attn_groups` layer names；
+  - 最终 metadata keys。
+- 该诊断用于判断 GDN group是在 KV Cache配置阶段缺失、attention backend初始化阶段
+  缺失，还是 metadata builder阶段遗漏。定位完成后应删除临时打印。
+
+影响范围：
+
+- 仅310P MRV2临时诊断路径；不修改MRV1和其他设备功能。

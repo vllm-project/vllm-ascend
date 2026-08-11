@@ -155,35 +155,6 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     assert state._capture_seq_lens_by_ptr == {}
 
 
-def test_310p_hybrid_model_state_aliases_wrapped_gdn_metadata_prefix() -> None:
-    state = object.__new__(Ascend310PMambaHybridModelState)
-    wrapped_prefix = "language_model.model.layers.0.linear_attn"
-    cache_prefix = "model.layers.0.linear_attn"
-    module = SimpleNamespace(prefix=wrapped_prefix)
-    state.model = SimpleNamespace(modules=lambda: [module])
-    metadata = object()
-    attn_metadata = {cache_prefix: metadata}
-
-    state._add_hybrid_metadata_prefix_aliases(attn_metadata)
-
-    assert attn_metadata[wrapped_prefix] is metadata
-
-
-def test_310p_hybrid_metadata_alias_requires_unique_suffix_match() -> None:
-    state = object.__new__(Ascend310PMambaHybridModelState)
-    wrapped_prefix = "language_model.model.layers.0.linear_attn"
-    module = SimpleNamespace(prefix=wrapped_prefix)
-    state.model = SimpleNamespace(modules=lambda: [module])
-    attn_metadata = {
-        "model.layers.0.linear_attn": object(),
-        "layers.0.linear_attn": object(),
-    }
-
-    state._add_hybrid_metadata_prefix_aliases(attn_metadata)
-
-    assert wrapped_prefix not in attn_metadata
-
-
 def test_310p_mrope_state_prepares_cos_sin_before_model_forward() -> None:
     model_state = object.__new__(Ascend310PMambaHybridModelState)
     model_state.model_config = SimpleNamespace(uses_mrope=True)
