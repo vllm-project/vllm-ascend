@@ -26,7 +26,6 @@ from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
-
 MM_REDUCE_SCATTER_PATTERN_TOKENS = 8
 
 

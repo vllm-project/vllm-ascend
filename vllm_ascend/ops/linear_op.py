@@ -530,7 +530,10 @@ def _apply_tensor_all_gather_matmul_if_supported(
     from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 
     quant_method = getattr(layer, "quant_method", None)
-    if isinstance(quant_method, UnquantizedLinearMethod) and _get_weight_dtype(layer) in _TENSOR_MM_REDUCE_SCATTER_DTYPES:
+    if (
+        isinstance(quant_method, UnquantizedLinearMethod)
+        and _get_weight_dtype(layer) in _TENSOR_MM_REDUCE_SCATTER_DTYPES
+    ):
         return torch.ops.vllm.all_gather_unquantized_matmul(input_, layer.weight, bias)
 
     chunk_size = getattr(layer, "_chunk_size", 0)
