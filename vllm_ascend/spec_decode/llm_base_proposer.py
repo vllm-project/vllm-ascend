@@ -1154,6 +1154,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
+                    # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
                     logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                 else:
                     logits = self.model.model.logits_processor._gather_logits(logits)
@@ -1350,6 +1351,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
+                        # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
                         logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                     else:
                         logits = self.model.model.logits_processor._gather_logits(logits)

@@ -194,6 +194,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 return draft_token_ids, None
             logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
             if lmhead_tp_enable():
+                # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
                 logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
             else:
                 logits = self.model.model.logits_processor._gather_logits(logits)
