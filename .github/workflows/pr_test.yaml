@@ -434,6 +434,10 @@ jobs:
   recommend-tests-from-coverage:
     name: Recommend tests from coverage
     needs: pre-commit
+    # Skip the coverage-based recommendation path when the PR opts into the
+    # full diff-selected suite via the ready-all label; select-tests will
+    # produce the test groups in that case.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
     runs-on: linux-amd64-cpu-8-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
@@ -628,6 +632,9 @@ jobs:
   route-recommended-tests:
     name: Route recommended tests to runners
     needs: recommend-tests-from-coverage
+    # Skip when ready-all forces the full diff-selected suite; select-tests
+    # produces the test groups and this job's outputs are not consumed.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
