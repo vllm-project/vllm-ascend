@@ -30,6 +30,7 @@ class AscendSFAIndexerBackend(AttentionBackend):
     """
 
     accept_output_buffer: bool = True
+    is_cache_only_backend = True
 
     @staticmethod
     def get_name() -> str:

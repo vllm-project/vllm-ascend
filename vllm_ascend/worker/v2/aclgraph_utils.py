@@ -22,7 +22,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -99,19 +99,38 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        with set_forward_context(
-            self.model_runner.model_state.attn_metadata,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=desc.cg_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
-            batch_descriptor=None,  # Full graph model don't need batch_descriptor
-            slot_mapping=None,
+        with (
+            set_current_vllm_config(self.vllm_config),
+            set_forward_context(
+                self.model_runner.model_state.attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=desc.cg_mode,
+                num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=None,  # Full graph model don't need batch_descriptor
+                slot_mapping=None,
+            ),
         ):
             forward_context = get_forward_context()
+            attn_backend = self.model_runner.attn_groups[0][0].backend
+            if getattr(attn_backend, "is_cache_only_backend", False):
+                try:
+                    attn_backend = next(
+                        group.backend
+                        for groups in self.model_runner.attn_groups
+                        for group in groups
+                        if not getattr(
+                            group.backend, "is_cache_only_backend", False
+                        )
+                    )
+                except StopIteration as exc:
+                    raise RuntimeError(
+                        "No executable attention backend is available for "
+                        "full-graph parameter updates."
+                    ) from exc
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
-                self.model_runner.attn_groups[0][0].backend,
+                attn_backend,
                 self.update_stream,
                 forward_context,
                 num_tokens,
