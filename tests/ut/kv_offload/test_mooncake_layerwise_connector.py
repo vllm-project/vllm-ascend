@@ -816,6 +816,9 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         info = self.scheduler._reqs_need_send_layerwise["req_u3"]
         self.assertEqual(info.local_transferred_tokens, 0)
         self.assertIs(info.request, req)
+        # The default must be written back so build_connector_meta doesn't
+        # read None out of kv_transfer_params later.
+        self.assertEqual(req.kv_transfer_params["remote_cached_tokens"], 0)
 
     def test_build_connector_meta_consumes_reqs_need_recv_and_clears(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True

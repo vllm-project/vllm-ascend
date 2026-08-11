@@ -990,9 +990,11 @@ class MooncakeLayerwiseConnectorScheduler:
                 "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need send queue", request.request_id
             )
             # The proxy only fills in remote_cached_tokens in the D-first flow
-            # (via the metaserver). Fall back to 0 so a P-first proxy that
+            # (via the metaserver). Default it to 0 so a P-first proxy that
             # omits the key gets a full transfer instead of a KeyError.
-            remote_cache_tokens = params.get("remote_cached_tokens", 0)
+            # setdefault also covers the .get() in build_connector_meta, which
+            # would otherwise hand None to the worker side.
+            remote_cache_tokens = params.setdefault("remote_cached_tokens", 0)
             local_transferred_tokens = remote_cache_tokens
             local_computed_tokens = 0
             self._reqs_need_send_layerwise[request.request_id] = SendReqInfo(
