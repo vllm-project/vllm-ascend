@@ -841,7 +841,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
-        metadata_cache, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
+        decode_ratio_to_sas_metadata, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
     ):
         """Non-A5: return fallback directly (self.cu_seqlens_ori_kv)."""
         return fallback_cu_seqlens
@@ -1626,19 +1626,19 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
-        metadata_cache, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
+        decode_ratio_to_sas_metadata, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
     ):
         """A5: compute from cumsum of seq_lens, with caching."""
-        if metadata_cache is not None and cache_key in metadata_cache:
-            return metadata_cache[cache_key]
+        if decode_ratio_to_sas_metadata is not None and cache_key in decode_ratio_to_sas_metadata:
+            return decode_ratio_to_sas_metadata[cache_key]
         cu_seqlens = torch.cat(
             [
                 zero_i32,
                 torch.cumsum(seq_lens[:num_decodes], dim=0).to(torch.int32),
             ]
         )
-        if metadata_cache is not None:
-            metadata_cache[cache_key] = cu_seqlens
+        if decode_ratio_to_sas_metadata is not None:
+            decode_ratio_to_sas_metadata[cache_key] = cu_seqlens
         return cu_seqlens
 
     @staticmethod
