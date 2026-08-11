@@ -370,12 +370,29 @@ private:
         const uint32_t ph = t_->packedHalves;
         const uint32_t groups = ph / kNzC0;
         LocalTensor<half> asHalf = bytes.ReinterpretCast<half>();
-        for (uint32_t g = 0; g < groups; ++g) {
-            const uint32_t c1 = (h * ph) / kNzC0 + g;
-            const uint64_t src =
-                ((static_cast<uint64_t>(blk) * t_->c1 + c1) * t_->blockSize + off) * kNzC0;
-            DataCopy(asHalf[g * kNzC0], cache[src], kNzC0);
-        }
+        /*
+         * The per-group loop below used to issue `groups` separate DataCopys,
+         * each recomputing a 64-bit address (two 64-bit multiplies). GatherNz
+         * runs TWICE per token (K in pass 1, V in pass 3), so at d=256/b=4
+         * (groups==4) that was ~16 64-bit multiplies per token on the SCALAR
+         * pipe -- the third scalar consumer, hidden first behind the scalar
+         * unpack and then behind ExpScalar.
+         *
+         * The group index only ever shifts the address by a CONSTANT stride:
+         *     src_g = base + g * blockSize * kNzC0
+         * so all `groups` bursts collapse into one strided DataCopy.
+         *   burst      = kNzC0 halves = 32B = 1 block   -> blockLen 1
+         *   consecutive g are blockSize blocks apart    -> gap blockSize-1
+         *   dst is contiguous in UB                     -> dstStride 0
+         * srcStride is the GAP in 32B units, exclusive of the burst
+         * (kernel_operator_data_copy_impl: srcStride310 = srcStride*32 + burstLength).
+         */
+        const uint32_t c1Base = (h * ph) / kNzC0;
+        const uint64_t src =
+            ((static_cast<uint64_t>(blk) * t_->c1 + c1Base) * t_->blockSize + off) * kNzC0;
+        const DataCopyParams nzParams{static_cast<uint16_t>(groups), 1,
+                                      static_cast<uint16_t>(t_->blockSize - 1), 0};
+        DataCopy(asHalf, cache[src], nzParams);
         /*
          * The consumer of `bytes` depends on the code path:
          *   scalar UnpackCodes  -> GetValue on the SCALAR pipe  => MTE2 -> S
