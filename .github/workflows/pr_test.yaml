@@ -530,25 +530,32 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
-    if: ${{ !cancelled() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5')) }}
+    needs: [pre-commit, select-tests, route-recommended-tests, run-selected-tests, run-selected-tests-a5]
+    if: ${{ !cancelled() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5') || contains(github.event.pull_request.labels.*.name, 'ready-all')) }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
         env:
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+          HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           set -euo pipefail
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
-          HAS_TESTS="${{ needs.select-tests.outputs.has_tests }}"
+          ROUTE_RECOMMENDED_RESULT="${{ needs.route-recommended-tests.result }}"
+          # Tests can be produced by either the diff-based select-tests job or
+          # the coverage-recommended route-recommended-tests job. Treat either
+          # source as "has_tests" so the gate validates run-selected-tests in
+          # both paths.
+          HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' || needs.route-recommended-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "select-tests: ${SELECT_TESTS_RESULT}"
+          echo "route-recommended-tests: ${ROUTE_RECOMMENDED_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
 
@@ -562,10 +569,17 @@ jobs:
             exit 1
           fi
 
+          if [ "${ROUTE_RECOMMENDED_RESULT}" != "success" ] && [ "${ROUTE_RECOMMENDED_RESULT}" != "skipped" ]; then
+            echo "::error::route-recommended-tests did not succeed (result: ${ROUTE_RECOMMENDED_RESULT})"
+            exit 1
+          fi
+
           if [ "${HAS_TESTS}" = "true" ]; then
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${HAS_READY_LABEL}" = "true" ]; then
+            # ready and ready-all both opt into the full gate: the test job must
+            # succeed. Without either label a skipped test job is acceptable.
+            if [ "${HAS_READY_LABEL}" = "true" ] || [ "${HAS_READY_ALL_LABEL}" = "true" ]; then
               if [ "${TESTS_RESULT}" != "success" ]; then
                 echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
                 exit 1
