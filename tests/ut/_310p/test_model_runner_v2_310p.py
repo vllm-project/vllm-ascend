@@ -270,6 +270,32 @@ def test_310p_v2_initializes_kv_zeroer_when_required(needs_zeroing: bool) -> Non
     assert init_zero_meta.call_count == int(needs_zeroing)
 
 
+def test_310p_v2_kv_zeroer_uses_v2_pin_memory_capability() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.attn_groups = []
+    runner.kernel_block_sizes = []
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    zeroer = MagicMock()
+
+    with (
+        patch(
+            "vllm_ascend._310p.worker.v2.model_runner.is_pin_memory_available",
+            return_value=True,
+        ) as pin_memory_available,
+        patch(
+            "vllm_ascend._310p.worker.v2.model_runner.AscendKVBlockZeroer310V2",
+            return_value=zeroer,
+        ) as zeroer_cls,
+    ):
+        runner._init_kv_zero_meta()
+
+    pin_memory_available.assert_called_once_with()
+    zeroer_cls.assert_called_once_with(runner.device, True)
+    zeroer.init_meta.assert_called_once()
+
+
 def test_postprocess_query_lens_ignore_full_graph_request_padding() -> None:
     # Fifteen real decode requests replay a graph captured for a 16-request
     # bucket. query_start_loc has real request boundaries only, while the graph

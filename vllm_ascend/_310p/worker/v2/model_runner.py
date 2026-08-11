@@ -12,6 +12,7 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_ssu_backend
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.kv_cache_interface import (
@@ -486,7 +487,9 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._copy_num_computed_tokens_to_cpu()
 
     def _init_kv_zero_meta(self) -> None:
-        self.kv_block_zeroer = AscendKVBlockZeroer310V2(self.device, self.pin_memory)
+        self.kv_block_zeroer = AscendKVBlockZeroer310V2(
+            self.device, is_pin_memory_available()
+        )
         self.kv_block_zeroer.init_meta(
             attn_groups_iter=(group for groups in self.attn_groups for group in groups),
             kernel_block_sizes=self.kernel_block_sizes,

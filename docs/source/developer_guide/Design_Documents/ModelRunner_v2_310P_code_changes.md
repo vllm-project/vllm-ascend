@@ -1010,3 +1010,31 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check`和`git diff --check`已通过。
 - 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
 - 真实310P需重新验证 Qwen3.5 eager首个请求、请求结束后的 block复用和连续请求。
+
+## 28. MRV2 zeroer的 pin-memory能力检测
+
+问题现象：
+
+- 第27节开始初始化 zeroer后，启动阶段报错：
+  `NPUModelRunner310V2 has no attribute pin_memory`。
+
+根因：
+
+- 310P MRV1 runner保存 `self.pin_memory`实例字段，原 zeroer适配沿用了该字段。
+- 当前上游 MRV2 runner不再提供此属性，而是在初始化 zeroer时动态调用
+  `is_pin_memory_available()`；310P V2适配需要遵守新的 runner契约。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_runner.py`
+  - `_init_kv_zero_meta()`改为使用上游 MRV2相同的
+    `is_pin_memory_available()`返回值构造 `AscendKVBlockZeroer310V2`。
+  - 不向 MRV2 runner人为添加 `pin_memory`字段，也不改变310P MRV1实现。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 验证 V2 zeroer使用动态能力检测结果，并完成 metadata初始化调用。
+
+验证状态：
+
+- `py_compile`、`ruff check`和`git diff --check`已通过。
+- 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
+- 真实310P需重新验证 Qwen3.5 KV Cache初始化及首个 eager请求。
