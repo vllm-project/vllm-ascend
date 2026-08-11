@@ -33,6 +33,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sfa_dcp_replicated_indexer_size = 1
         runner.runner_only_attn_layers = set()
         runner.is_kv_consumer = False
+        runner.sparse_kv_offload_enabled = False
+        runner.sparse_kv_offload_config = MagicMock()
+        runner.tp_rank = 0
         runner.vllm_config = MagicMock()
         runner.vllm_config.kv_transfer_config = None
         runner.model_config = MagicMock()
