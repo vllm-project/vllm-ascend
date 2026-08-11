@@ -42,6 +42,8 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 
+_ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
+
 
 class NPUModelRunner310V2(NPUModelRunner):
     """First-release Model Runner V2 implementation for Ascend 310P."""
@@ -136,6 +138,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.vllm_config,
             self.device,
         )
+        self._adjust_kernel_block_sizes_310p(kv_cache_config)
         self.block_tables = Ascend310PBlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
@@ -185,6 +188,40 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.req_states,
             self.block_tables,
         )
+
+    def _adjust_kernel_block_sizes_310p(
+        self, kv_cache_config: KVCacheConfig
+    ) -> None:
+        """Apply the 310P paged-attention block/head-size constraint."""
+        for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = kv_cache_group.kv_cache_spec
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                specs = tuple(group_spec.kv_cache_specs.values())
+            else:
+                specs = (group_spec,)
+            attention_specs = [spec for spec in specs if isinstance(spec, AttentionSpec)]
+            if not attention_specs:
+                continue
+
+            max_head_size = max(spec.head_size for spec in attention_specs)
+            if max_head_size > 256:
+                raise NotImplementedError(
+                    "310P paged attention requires head_size <= 256, "
+                    f"but group {group_id} has head_size={max_head_size}."
+                )
+            backend = self.attn_groups[group_id][0].backend
+            supported_sizes = [
+                block_size
+                for block_size in backend.get_supported_kernel_block_sizes()
+                if block_size * max_head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+            ]
+            if not supported_sizes:
+                raise NotImplementedError(
+                    "310P paged attention requires block_size * head_size "
+                    f"<= {_ATTENTION_BLOCK_SIZE_LIMIT}, but group {group_id} "
+                    f"has head_size={max_head_size}."
+                )
+            self.kernel_block_sizes[group_id] = supported_sizes[0]
 
     def _init_kv_zero_meta_if_needed(
         self, kv_cache_config: KVCacheConfig

@@ -1077,3 +1077,40 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile` 和 `ruff check` 已通过。
 - 当前 Windows 本地 Python 环境未安装 `pytest`，目标 UT 需在服务器环境补充执行。
 - 真实 310P 需重新验证 Qwen3.5-4B eager，并继续验证 ACLGraph、TP 和并发场景。
+
+## 30. Paged Attention kernel block size 的310P约束
+
+问题现象：
+
+- Qwen3.5-4B 的 Attention KV Cache 格式修正后，Paged Attention setup 报错：
+  `head_size of keyCache should be no greater than 256 and block_size * head_size`
+  `should be no greater than 128 * 128`。
+
+根因：
+
+- 310P Paged Attention 要求 `head_size <= 256`，并要求
+  `kernel_block_size * head_size <= 128 * 128`。
+- 公共 MRV2 `init_attn_backend()` 返回的默认 kernel block size 没有应用该310P专属限制。
+- 对 head size 为256的 Qwen3.5，kernel block size 128会得到 `128 * 256`，超过算子上限；
+  必须使用后端支持的64 block，使乘积降为 `64 * 256 = 128 * 128`。
+- MRV1 的 `may_reinitialize_input_batch()` 已经按该公式过滤后端支持的 block sizes，
+  310P MRV2此前遗漏了相同的设备约束。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_runner.py`
+  - 增加 `_ATTENTION_BLOCK_SIZE_LIMIT` 常量和
+    `_adjust_kernel_block_sizes_310p()`。
+  - 在公共 backend 初始化完成后、BlockTable和KV Cache创建前，对每个Attention组重新选择
+    满足310P限制的最大受支持 kernel block size。
+  - head size为256时从 `[128, 64]` 中选择64；head size超过256或没有合法block时提前抛出
+    明确的 `NotImplementedError`，避免进入ATB后发生不透明的setup失败。
+  - 调整后的同一 `kernel_block_sizes` 同时传递给BlockTable、NZ Cache分配和zeroer，保证三者布局一致。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 增加 head size为256时必须选择64 kernel block的回归测试。
+
+验证状态：
+
+- `py_compile`、`ruff check`和`git diff --check`已通过。
+- 当前 Windows本地 Python环境未安装`pytest`，目标 UT需在服务器执行。
+- 真实310P需重新验证 Qwen3.5-4B eager和ACLGraph，并确认日志中KV Cache采用64 kernel block。

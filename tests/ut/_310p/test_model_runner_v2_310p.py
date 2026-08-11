@@ -406,6 +406,33 @@ def test_v2_allocates_attention_kv_cache_directly_as_nz() -> None:
     )
 
 
+def test_v2_selects_64_kernel_block_for_256_head_size() -> None:
+    spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=2,
+        head_size=256,
+        dtype=torch.float16,
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                backend=SimpleNamespace(
+                    get_supported_kernel_block_sizes=lambda: [128, 64]
+                )
+            )
+        ]
+    ]
+    runner.kernel_block_sizes = [128]
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
+    )
+
+    runner._adjust_kernel_block_sizes_310p(kv_cache_config)
+
+    assert runner.kernel_block_sizes == [64]
+
+
 def test_v2_separates_attention_and_mamba_shared_cache_slot() -> None:
     attention_spec = FullAttentionSpec(
         block_size=128,
