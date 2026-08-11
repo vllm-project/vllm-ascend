@@ -19,6 +19,10 @@
 # ============================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bisect_args.sh
+source "${SCRIPT_DIR}/bisect_args.sh"
+
 FT="${1:-unknown}"
 AGE="${2:-?}"
 RUNNER="${3:-?}"
@@ -111,16 +115,8 @@ BISECT_CMD=(
 [ -n "$SOC" ] && BISECT_CMD+=(--soc "$SOC")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")
 [ -n "$COORD_DIR" ] && BISECT_CMD+=(--coord-dir "$COORD_DIR")
-[ -n "$BISECT_GOOD_COMMIT" ] && BISECT_CMD+=(--good-commit "$BISECT_GOOD_COMMIT")
-[ -n "$BISECT_FAIL_CONFIRM_RETRIES" ] && BISECT_CMD+=(--fail-confirm-retries "$BISECT_FAIL_CONFIRM_RETRIES")
-[ -n "$BISECT_TRIAL_TIMEOUT" ] && BISECT_CMD+=(--trial-timeout-s "$BISECT_TRIAL_TIMEOUT")
-[ -n "$BISECT_BARRIER_TIMEOUT" ] && BISECT_CMD+=(--barrier-timeout-s "$BISECT_BARRIER_TIMEOUT")
-[ "$BISECT_NO_VERIFY_GOOD" = "true" ] && BISECT_CMD+=(--no-verify-good)
-[ "$BISECT_NO_VERIFY_BAD" = "true" ] && BISECT_CMD+=(--no-verify-bad)
-[ "$BISECT_FORCE_INITIAL_BUILD" = "true" ] && BISECT_CMD+=(--force-initial-build)
-# AOP owns the conservative rebuild policy; users cannot override it.
-BISECT_CMD+=(--native-check since-build)
-[ -n "$BISECT_CONFIG_BASE_PATH" ] && BISECT_CMD+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
+build_bisect_extra_args
+BISECT_CMD+=("${BISECT_EXTRA_ARGS[@]}")
 
 echo ""
 echo "=== Running auto bisect ==="

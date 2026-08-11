@@ -28,6 +28,13 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 # cann and atb environment setup
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BISECT_ARGS_HELPER="${SCRIPT_DIR}/bisect_args.sh"
+if [ ! -f "$BISECT_ARGS_HELPER" ]; then
+    BISECT_ARGS_HELPER="${SCRIPT_DIR}/../../scripts/bisect_args.sh"
+fi
+# shellcheck source=../../scripts/bisect_args.sh
+source "$BISECT_ARGS_HELPER"
 
 # The CANN install directory varies between release (cann-9.1.0) and daily
 # (e.g. cann-2026.08.03) images, so discover it dynamically instead of
@@ -283,24 +290,6 @@ run_tests_with_log() {
             echo "Worker: leader finished successfully, exiting"
         fi
     fi
-}
-
-# Build additional bisect args without word splitting or pathname expansion.
-build_bisect_extra_args() {
-    BISECT_EXTRA_ARGS=()
-    [ -n "${BISECT_GOOD_COMMIT:-}" ] && BISECT_EXTRA_ARGS+=(--good-commit "$BISECT_GOOD_COMMIT")
-    [ -n "${BISECT_FAIL_CONFIRM_RETRIES:-}" ] &&
-        BISECT_EXTRA_ARGS+=(--fail-confirm-retries "$BISECT_FAIL_CONFIRM_RETRIES")
-    [ -n "${BISECT_TRIAL_TIMEOUT:-}" ] && BISECT_EXTRA_ARGS+=(--trial-timeout-s "$BISECT_TRIAL_TIMEOUT")
-    [ -n "${BISECT_BARRIER_TIMEOUT:-}" ] &&
-        BISECT_EXTRA_ARGS+=(--barrier-timeout-s "$BISECT_BARRIER_TIMEOUT")
-    [ "${BISECT_NO_VERIFY_GOOD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--no-verify-good)
-    [ "${BISECT_NO_VERIFY_BAD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--no-verify-bad)
-    [ "${BISECT_FORCE_INITIAL_BUILD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--force-initial-build)
-    # Keep native source and built artifacts consistent across bisect jumps.
-    BISECT_EXTRA_ARGS+=(--native-check since-build)
-    [ -n "${BISECT_CONFIG_BASE_PATH:-}" ] &&
-        BISECT_EXTRA_ARGS+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
 }
 
 # Run AOP decision pipeline on failure: classify → check age → bisect-or-exit
