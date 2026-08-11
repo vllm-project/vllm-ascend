@@ -80,9 +80,14 @@ def patch_init_side_effects():
 def make_embedding(patch_init_side_effects):
     """Factory that creates an AscendRotaryEmbedding with controllable use_mtp."""
 
-    def _factory(use_mtp: bool = False, is_neox_style: bool = True):
+    def _factory(
+        use_mtp: bool = False,
+        is_neox_style: bool = True,
+        architecture: str | None = None,
+    ):
         spec_cfg = MagicMock(method="mtp") if use_mtp else None
         patch_init_side_effects.return_value.speculative_config = spec_cfg
+        patch_init_side_effects.return_value.model_config.architectures = [architecture] if architecture else []
 
         with patch("vllm_ascend.ops.rotary_embedding.RotaryEmbedding.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
@@ -134,6 +139,38 @@ def make_yarn_embedding(patch_init_side_effects):
 
 
 class TestAscendEmbeddingForwardOOT:
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ops.rotary_embedding.RotaryEmbedding.forward_static")
+    def test_qwen2_uses_native_rotary_path(
+        self,
+        mock_forward_static,
+        mock_npu_op,
+        make_embedding,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE", "1")
+        expected_output = (MagicMock(), MagicMock())
+        mock_forward_static.return_value = expected_output
+        emb = make_embedding(architecture="Qwen2ForCausalLM")
+        matched_cache = MagicMock()
+        emb._match_cos_sin_cache_dtype = MagicMock(return_value=matched_cache)
+        positions, query, key = _make_tensors()
+
+        result = emb.forward_oot(positions, query, key)
+
+        assert result is expected_output
+        emb._match_cos_sin_cache_dtype.assert_called_once_with(query)
+        mock_forward_static.assert_called_once_with(
+            positions,
+            query,
+            key,
+            HEAD_SIZE,
+            ROTARY_DIM,
+            matched_cache,
+            emb.is_neox_style,
+        )
+        mock_npu_op.assert_not_called()
+
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_basic_call_delegates_to_npu_op(self, mock_get_forward_context, mock_npu_op, make_embedding):
