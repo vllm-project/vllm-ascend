@@ -3386,6 +3386,16 @@ class MooncakeConnectorWorker:
             local_block_ids.append(
                 int(local_full_blocks[local_local_idx]) * local_cp_size + global_block_idx % local_cp_size
             )
+        logger.warning(
+            "SFA replicate-K: num_prompt_blocks=%s num_computed_tokens=%s prefix_cached=%s "
+            "transferred=%s remote_ids[:8]=%s local_ids[:8]=%s",
+            meta.num_prompt_blocks,
+            meta.num_computed_tokens,
+            num_prefix_cached_blocks,
+            len(local_block_ids),
+            remote_block_ids[:8],
+            local_block_ids[:8],
+        )
 
         local_block_ids = local_block_ids[:num_external_blocks]
         remote_block_ids = remote_block_ids[: len(local_block_ids)]
