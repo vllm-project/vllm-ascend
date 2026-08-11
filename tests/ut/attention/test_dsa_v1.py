@@ -550,7 +550,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
 
     with (
         patch(
-            "vllm_ascend.attention.dsa_v1.get_forward_context",
+            "vllm_ascend.ascend_forward_context.get_forward_context",
             return_value=SimpleNamespace(num_tokens=5),
         ),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
