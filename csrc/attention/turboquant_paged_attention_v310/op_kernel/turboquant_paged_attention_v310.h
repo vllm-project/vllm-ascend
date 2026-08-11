@@ -120,10 +120,18 @@ public:
         // token (dependent global loads, pure latency) with one DataCopy.
         pipe->InitBuffer(kNrmBuf_, t_->blockSize * t_->numKvHeads * sizeof(half));
         pipe->InitBuffer(vNrmBuf_, t_->blockSize * t_->numKvHeads * sizeof(half));
-        // block-wise softmax: one score/weight slot per token in a block
-        pipe->InitBuffer(scoBuf_, t_->blockSize * sizeof(float));
-        pipe->InitBuffer(wgtBuf_, t_->blockSize * sizeof(float));
-        pipe->InitBuffer(rdxBuf_, t_->blockSize * sizeof(float));   // variant==10 dot dump; nothing else touches it   // ReduceSum workLocal (must not alias src/dst)
+        /*
+         * Block-wise softmax: one score/weight slot per token in a block, but
+         * rounded UP to a whole tile. Both the tile reduction
+         * (WholeReduceSum writes kTile slots from t0) and the kNegInf pad run to
+         * ceil(tokEnd/8)*8, either of which writes past blockSize the moment
+         * blockSize is not a multiple of kTile. Dormant at blockSize=128.
+         */
+        const uint32_t scoSlots = ((t_->blockSize + kTile - 1) / kTile) * kTile;
+        pipe->InitBuffer(scoBuf_, scoSlots * sizeof(float));
+        pipe->InitBuffer(wgtBuf_, scoSlots * sizeof(float));
+        // ReduceMax/ReduceSum workLocal over padEnd (<= scoSlots); must not alias src/dst
+        pipe->InitBuffer(rdxBuf_, scoSlots * sizeof(float));
 
         signs_ = signBuf_.Get<float>();
         DataCopy(signs_, signGm_, d);
