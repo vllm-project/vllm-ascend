@@ -3,6 +3,8 @@
 # a3 runners and -a3 images. Adding a new test case is just appending a
 # `- name: ...` entry under the matching section. PRs that add entries
 # here can be exercised via `/nightly <name>` without merging to main.
+# Multi-node cases default to internal DP. External DP cases must set
+# `config_base_path` to their external_dp/config directory.
 
 a2:
   single_node:
@@ -81,9 +83,11 @@ a3:
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-1M-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
   double_node:
     test_config:
@@ -122,12 +126,15 @@ a3:
         size: 2
       - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
         config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-prefix
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
   single_node:
     test_config:

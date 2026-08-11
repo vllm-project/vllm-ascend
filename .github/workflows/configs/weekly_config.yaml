@@ -3,6 +3,8 @@
 # exercised by schedule_weekly_test_a2.yaml and schedule_weekly_test_a3.yaml.
 # Adding a new weekly test case is just appending a `- name: ...` entry
 # under the matching section.
+# Multi-node cases default to internal DP. External DP cases must set
+# `config_base_path` to their external_dp/config directory.
 
 a2:
   accuracy:
@@ -20,24 +22,31 @@ a3:
     test_config:
       - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
         config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 2
       - name: GLM-5.1-W8A8C8-128k-1k-90-50-PD
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek-V4-flash-w8a8-PD-prefix
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 2
       - name: DeepSeek-V4-Pro-w4a8-1M-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.1-W8A8C8-64k-1k-90-50-PD
         config_file_path: GLM-5.1-W8A8C8-64k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 2
   double_node:
     test_config:
