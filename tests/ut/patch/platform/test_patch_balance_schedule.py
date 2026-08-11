@@ -275,7 +275,7 @@ def _schedule_body_ast(source: str) -> str:
 
     class _BalanceDeltaStripper(ast.NodeTransformer):
         def visit_BoolOp(self, node: ast.BoolOp):  # noqa: N802
-            node = self.generic_visit(node)
+            self.generic_visit(node)
             node.values = [value for value in node.values if "_use_consumer_partial_group_hits" not in ast.dump(value)]
             return node
 
