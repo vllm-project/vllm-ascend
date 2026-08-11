@@ -209,6 +209,32 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self.assertIsNone(self._get_column_op("model.vision_model_proj.indexer_proj"))
         self.assertIsNone(self._get_column_op("model.vision_tower_encoder.qkv_proj"))
 
+    def test_sequence_column_op_calls_tensor_all_gather_matmul_in_eager(self):
+        from vllm_ascend.ops.linear_op import SequenceColumnParallelOp
+
+        layer = MagicMock()
+        layer.prefix = "model.layers.1.mlp.gate_up_proj"
+        layer.gather_output = False
+        layer.skip_bias_add = False
+        layer.return_bias = True
+        layer.quant_method = AscendUnquantizedLinearMethod()
+        layer.weight = torch.nn.Parameter(torch.empty(16, 8, dtype=torch.float16), requires_grad=False)
+        layer.bias = None
+        output = torch.empty(4, 16, dtype=torch.float16)
+
+        op = SequenceColumnParallelOp(layer)
+        op.update_attrs()
+        input_ = torch.empty(2, 8, dtype=torch.float16)
+        with (
+            patch("vllm_ascend.ops.linear_op.is_vl_model", return_value=False),
+            patch.object(torch.ops.vllm, "all_gather_unquantized_matmul", return_value=output, create=True) as mock_fused,
+        ):
+            result, output_bias = op.apply_impl(input_)
+
+        self.assertIs(result, output)
+        self.assertIsNone(output_bias)
+        mock_fused.assert_called_once_with(input_, layer.weight, None)
+
 
 class TestRowParallelOpDispatch(unittest.TestCase):
     """Tests for _get_row_parallel_op — mtp_block, share_expert."""
