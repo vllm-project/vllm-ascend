@@ -526,7 +526,6 @@ def _make_impl() -> AscendDSAImpl:
         )
 
 
-
 def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     impl = _make_impl()
     hidden_states = torch.arange(20, dtype=torch.float32).reshape(5, 4)
