@@ -10,7 +10,6 @@ from vllm_ascend.quantization.fp8_config import AscendDeepseekV4FP8Config
 
 
 class TestAscendDeepseekV4FP8Config(TestBase):
-
     def setUp(self):
         self.config = AscendDeepseekV4FP8Config()
         self.config.weight_block_size = (128, 128)
@@ -116,9 +115,7 @@ class TestAscendDeepseekV4FP8Config(TestBase):
         ):
             method = self.config.get_quant_method(moe_layer, "prefix", tid2eid=tid2eid)
 
-        mock_ascend_moe_cls.assert_called_once_with(
-            mock_scheme_instance, moe_config, tid2eid=tid2eid
-        )
+        mock_ascend_moe_cls.assert_called_once_with(mock_scheme_instance, moe_config, tid2eid=tid2eid)
         self.assertIs(method, mock_ascend_moe)
 
     def test_get_quant_method_for_moe_non_fp4_raises(self):
