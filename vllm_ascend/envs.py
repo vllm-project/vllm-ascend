@@ -76,9 +76,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # tolerance can detect it and trigger recovery. 0 (default) disables the
     # timeout. Applied via torch_npu.npu.set_op_timeout_ms when fault tolerance
     # is enabled.
-    "FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS": lambda: int(
-        os.getenv("FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS", "0")
-    ),
+    "FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS": lambda: int(os.getenv("FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS", "0")),
 }
 
 # end-env-vars-definition

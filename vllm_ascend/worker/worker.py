@@ -391,8 +391,7 @@ class NPUWorker(WorkerBase):
         if self.parallel_config.enable_fault_tolerance:
             import torch_npu
 
-            torch_npu.npu.set_op_timeout_ms(
-                get_ascend_config().ft_communication_ops_abort_timeout_ms)
+            torch_npu.npu.set_op_timeout_ms(get_ascend_config().ft_communication_ops_abort_timeout_ms)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"

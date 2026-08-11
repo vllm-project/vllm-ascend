@@ -155,7 +155,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
     def _init_device_groups(self, create_cpu_group: bool) -> None:
         from torch.distributed.distributed_c10d import _set_pg_timeout
-
         from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 
         timeout = get_cpu_distributed_timeout_or_none()
