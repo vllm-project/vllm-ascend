@@ -69,7 +69,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer, vllm_version_is
+from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
 
 # isort: off
 if TYPE_CHECKING:
@@ -1508,45 +1508,22 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
-    # main2main compat: upstream KVConnectorBase_V1.__init__() now sets
-    # _kv_transfer_config (required by requires_kv_delivery property in
-    # Scheduler.__init__() post-0.26.0).
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
+    def __init__(  # type: ignore[misc]
+        self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
+    ):
+        assert vllm_config.kv_transfer_config is not None
+        self._kv_transfer_config = vllm_config.kv_transfer_config
+        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        self._connector_metadata = MooncakeConnectorMetadata()
 
-        def __init__(
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self._kv_transfer_config = vllm_config.kv_transfer_config
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(  # type: ignore[no-redef]
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None  # type: ignore[no-redef]
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
+                vllm_config, str(self.engine_id), kv_cache_config
+            )
+            self.connector_worker: MooncakeConnectorWorker | None = None
+        elif role == KVConnectorRole.WORKER:
+            self.connector_scheduler = None
+            self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
     ############################################################
     # Scheduler Side Methods
