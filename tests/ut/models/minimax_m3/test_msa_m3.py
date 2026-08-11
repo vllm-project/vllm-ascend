@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.minimax_m3.minimax_m3 import _scatter_index_cache
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3IndexerCache,
@@ -32,6 +33,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 @dataclass
@@ -376,6 +378,59 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "get_ascend_device_type() == AscendDeviceType.A5" in source
     assert 'main_qkv.device.type != "npu"' in source
     assert "1.0 + self.q_norm.weight" in source
+
+
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.get_ascend_device_type",
+    return_value=AscendDeviceType.A5,
+)
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.torch_npu.npu_scatter_pa_cache",
+    create=True,
+)
+def test_scatter_index_cache_uses_pa_cache_on_a5(
+    mock_scatter_pa_cache: MagicMock,
+    _mock_device_type: MagicMock,
+) -> None:
+    cache = torch.zeros(2, 128, 4, dtype=torch.bfloat16)
+    updates = torch.randn(3, 4, dtype=torch.bfloat16)
+    slots = torch.tensor([0, 129, -1], dtype=torch.int64)
+
+    _scatter_index_cache(cache, updates, slots)
+
+    mock_scatter_pa_cache.assert_called_once()
+    key, actual_slots = mock_scatter_pa_cache.call_args.args
+    key_cache = mock_scatter_pa_cache.call_args.kwargs["key_cache"]
+    assert key.shape == (3, 1, 4)
+    assert key.dtype == torch.bfloat16
+    assert key.is_contiguous()
+    assert torch.equal(actual_slots, slots)
+    assert actual_slots.is_contiguous()
+    assert key_cache.shape == (2, 128, 1, 4)
+    assert key_cache.data_ptr() == cache.data_ptr()
+
+
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.get_ascend_device_type",
+    return_value=AscendDeviceType.A2,
+)
+def test_scatter_index_cache_keeps_legacy_op_off_a5(_mock_device_type: MagicMock) -> None:
+    cache = torch.zeros(2, 128, 4, dtype=torch.bfloat16)
+    updates = torch.randn(3, 4, dtype=torch.bfloat16)
+    slots = torch.tensor([0, 1, 2], dtype=torch.int64)
+
+    with patch.object(
+        torch.ops._C_ascend,
+        "npu_scatter_nd_update_v2",
+        create=True,
+    ) as mock_scatter_nd_update:
+        _scatter_index_cache(cache, updates, slots)
+
+    mock_scatter_nd_update.assert_called_once()
+    flat_cache, actual_slots, actual_updates = mock_scatter_nd_update.call_args.args
+    assert flat_cache.shape == (256, 4)
+    assert actual_slots.shape == (3, 1)
+    assert torch.equal(actual_updates, updates)
 
 
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.logger.warning")
