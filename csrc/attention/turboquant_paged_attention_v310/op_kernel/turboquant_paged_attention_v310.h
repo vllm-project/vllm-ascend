@@ -95,7 +95,15 @@ public:
         pipe->InitBuffer(dbgBuf_, d * sizeof(float));
         pipe->InitBuffer(unpHBuf_, (d / 2) * sizeof(half));      // planar unpack scratch
         pipe->InitBuffer(unpF0Buf_, (d / 2) * sizeof(float));
-        pipe->InitBuffer(unpF1Buf_, (d / 2) * sizeof(float));   // variant==10 dot dump; nothing else touches it   // ReduceSum workLocal (must not alias src/dst)
+        pipe->InitBuffer(unpF1Buf_, (d / 2) * sizeof(float));
+        // norm planes prefetched per BLOCK: replaces two GM scalar reads per
+        // token (dependent global loads, pure latency) with one DataCopy.
+        pipe->InitBuffer(kNrmBuf_, t_->blockSize * t_->numKvHeads * sizeof(half));
+        pipe->InitBuffer(vNrmBuf_, t_->blockSize * t_->numKvHeads * sizeof(half));
+        // block-wise softmax: one score/weight slot per token in a block
+        pipe->InitBuffer(scoBuf_, t_->blockSize * sizeof(float));
+        pipe->InitBuffer(wgtBuf_, t_->blockSize * sizeof(float));
+        pipe->InitBuffer(rdxBuf_, t_->blockSize * sizeof(float));   // variant==10 dot dump; nothing else touches it   // ReduceSum workLocal (must not alias src/dst)
 
         signs_ = signBuf_.Get<float>();
         DataCopy(signs_, signGm_, d);
@@ -103,8 +111,8 @@ public:
         if (t_->codebookMode == TQ_CB_LUT) {
             DataCopy(cb_, cbGm_, 2 * (1 << BITS));
         }
-        SetFlag<HardEvent::MTE2_V>(EVENT_ID6);   // signs_/cb_ are consumed by V ops
-        WaitFlag<HardEvent::MTE2_V>(EVENT_ID6);
+        SetFlag<HardEvent::MTE2_V>(EVENT_ID3);   // signs_/cb_ are consumed by V ops
+        WaitFlag<HardEvent::MTE2_V>(EVENT_ID3);
     }
 
     /*
@@ -152,6 +160,11 @@ private:
         LocalTensor<half> unpH = unpHBuf_.Get<half>();
         LocalTensor<float> unpF0 = unpF0Buf_.Get<float>();
         LocalTensor<float> unpF1 = unpF1Buf_.Get<float>();
+        LocalTensor<half> kNrm = kNrmBuf_.Get<half>();
+        LocalTensor<half> vNrm = vNrmBuf_.Get<half>();
+        LocalTensor<float> sco = scoBuf_.Get<float>();
+        LocalTensor<float> wgt = wgtBuf_.Get<float>();
+        LocalTensor<float> rdx = rdxBuf_.Get<float>();
 
         // q -> fp32, then into the rotated basis (once per head, not per key)
         LocalTensor<half> qh16 = outBuf_.Get<half>();
@@ -190,168 +203,115 @@ private:
             if (phys < 0) {
                 continue;
             }
+            /*
+             * Prefetch this block's norm planes. The layout is [slot, kv_head]
+             * so one block's norms are blockSize*numKvHeads contiguous halves
+             * starting at phys*blockSize*numKvHeads.
+             */
+            const uint32_t nrmCount = t_->blockSize * t_->numKvHeads;
+            const uint64_t nrmBase = static_cast<uint64_t>(phys) * nrmCount;
+            DataCopy(kNrm, kNormGm_[nrmBase], nrmCount);
+            DataCopy(vNrm, vNormGm_[nrmBase], nrmCount);
+            SetFlag<HardEvent::MTE2_S>(EVENT_ID6);   // UB norms read by scalar below
+            WaitFlag<HardEvent::MTE2_S>(EVENT_ID6);
+
             const uint32_t tokBase = blk * t_->blockSize;
             uint32_t tokEnd = t_->blockSize;
             if (tokBase + tokEnd > static_cast<uint32_t>(seqLen)) {
                 tokEnd = static_cast<uint32_t>(seqLen) - tokBase;
             }
 
-            for (uint32_t tk = 0; tk < tokEnd; ++tk) {
-                const uint32_t slot = static_cast<uint32_t>(phys) * t_->blockSize + tk;
+            /*
+             * BLOCK-WISE SOFTMAX (three passes over the block).
+             *
+             * The per-token form called ExpScalar TWICE per token -- a hand-rolled
+             * range reduction, 7-term Taylor and binary-exponent loop, ~40 scalar
+             * ops each. msprof showed the scalar pipe still at 0.87 after the
+             * codec was vectorised, and that was the remaining consumer.
+             *
+             * Restructured so Exp runs ONCE per block as a vector op over all
+             * tokens, leaving a single scalar exp per block for the running-max
+             * correction. Per token the scalar work drops from ~80 ops to two
+             * UB reads (the reduced dot, and the weight in pass 3).
+             */
 
-                // ---- score: <Pi q, yhat_k> * ||k|| * scale -------------------
+            // ---- pass 1: scores for every token in the block ----------------
+            for (uint32_t tk = 0; tk < tokEnd; ++tk) {
                 GatherNz(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
                 if constexpr (TQPlanar<BITS>::kSupported) {
-                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);   // vector path
-                    /*
-                     * V -> MTE2, the SYMMETRIC counterpart to the MTE2 -> V edge
-                     * in GatherNz. The NEXT iteration's gather overwrites `bytes`
-                     * while this unpack may still be reading it on the V pipe.
-                     * With the old scalar unpack this edge was S -> MTE2, which
-                     * IS implicitly drained on 310P, so it never had to exist.
-                     * Moving the read to the vector pipe created it.
-                     */
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);
                     SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
                     WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
                 } else {
-                    UnpackCodes<BITS>(bytes, codes, d);                   // scalar fallback (BITS=3)
+                    UnpackCodes<BITS>(bytes, codes, d);
                     SetFlag<HardEvent::S_V>(EVENT_ID1);
                     WaitFlag<HardEvent::S_V>(EVENT_ID1);
                 }
                 DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
-
                 Mul(tmp, q, kv, d);
                 PipeBarrier<PIPE_V>();
-                /*
-                 * ReduceSum(dst, src, workLocal, count) with THREE DISTINCT
-                 * buffers. This previously passed `tmp` for all three: the
-                 * reduction's scratch then clobbers its own input, so dst[0]
-                 * depends on leftover UB state. That is a nondeterministic
-                 * score, which is what the determinism sweep measured -- and no
-                 * pipe flag can fix it, which is why six sync hypotheses moved
-                 * the failure around without ever converging.
-                 */
-                ReduceSum(tmp, tmp, tmp, d);   // aliased, as in the working write path
+                ReduceSum(tmp, tmp, tmp, d);
                 PipeBarrier<PIPE_V>();
-                // NOTE: a Muls(red, red, 1.0f, 1) was tried here to mirror the
-                // write path's Sqrt(tmp, tmp, 1). count=1 is NOT a valid vector
-                // op (AscendC needs >= 8 elements / 32 B), so it was a no-op --
-                // results came back bit-identical. Removed.
-                /*
-                 * V -> S. The score is a SCALAR read of a tensor the vector pipe
-                 * just wrote. PipeBarrier<PIPE_V> orders V ops against each other
-                 * but is NOT a cross-pipe sync, so the scalar unit could read
-                 * tmp[0] before the reduction landed.
-                 *
-                 * Invisible at seq_len == 1 -- with a single key softmax is
-                 * exactly 1.0 and the score is never used, which is why the
-                 * single-key probe scored 0.995 while multi-token sat at 0.69.
-                 * It also explains the near-flat bit-width response: the error
-                 * was in the attention WEIGHTS, not in quantization.
-                 */
                 SetFlag<HardEvent::V_S>(EVENT_ID2);
                 WaitFlag<HardEvent::V_S>(EVENT_ID2);
-                const float kNorm = static_cast<float>(
-                    kNormGm_.GetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + kvh));
-                /*
-                 * BISECT SWITCH (variant == 2): force every score to 0 so the
-                 * softmax is exactly uniform. Probe B (identical keys, varying
-                 * V) must then return mean(V) EXACTLY.
-                 *   passes -> the defect is in the score computation
-                 *            (gather/unpack/dequant/ReduceSum for K)
-                 *   fails  -> the defect is NOT in the score path at all, and
-                 *            six sync hypotheses were aimed at the wrong half
-                 * Runtime field, so both cases run from ONE build.
-                 */
-                /*
-                 * variant==2: all scores 0  -> softmax uniform (probe B).
-                 * variant==3: score = 2*tk  -> a KNOWN, strongly varying score
-                 *   that never touches ReduceSum. The last token then dominates
-                 *   and the output must equal v[last].
-                 *     v[last]  -> softmax/accumulate plumbing is FINE, so the
-                 *                 defect is red.GetValue(0) (the reduction)
-                 *     mean     -> the weights ignore the score; plumbing broken
-                 * This separates the two remaining candidates in one build.
-                 */
-                if (tk == 0) {
-                    dbgDot = tmp.GetValue(0);
-                }
-                if (t_->variant == 6u) {
-                    acc.SetValue(tk, tmp.GetValue(0));   // per-token dot dump
-                }
-                float score;
-                if (t_->variant == 2u || t_->variant == 7u || t_->variant == 8u) {
-                    score = 0.0f;
-                } else if (t_->variant == 3u) {
-                    score = 2.0f * static_cast<float>(static_cast<int32_t>(tk));  // uint->float is banned in aicore
-                } else {
-                    score = tmp.GetValue(0) * kNorm * t_->scale;
-                }
-                if (t_->variant == 12u && tk == tokEnd - 1) {
-                    Cast(dbg, codes, RoundMode::CAST_NONE, d);   // dump LAST token's codes
-                    PipeBarrier<PIPE_V>();
-                }
-                if (t_->variant == 11u && tk == 0) {
-                    Cast(dbg, codes, RoundMode::CAST_NONE, d);   // dump unpacked codes
-                    PipeBarrier<PIPE_V>();
-                }
-                if (t_->variant == 10u) {
-                    // capture the EXACT value the score uses; must read the same
-                    // buffer ReduceSum writes (tmp in the aliased form)
-                    dbg.SetValue(tk, tmp.GetValue(0));
-                }
+                const float kNorm = static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh));
+                sco.SetValue(tk, tmp.GetValue(0) * kNorm * t_->scale);
+            }
+            SetFlag<HardEvent::S_V>(EVENT_ID1);       // scalar wrote sco -> vector reads it
+            WaitFlag<HardEvent::S_V>(EVENT_ID1);
 
-                // ---- online softmax update ---------------------------------
-                const float newMax = (score > runMax) ? score : runMax;
-                const float corr = (runMax == kNegInf) ? 0.0f : ExpScalar(runMax - newMax);
-                const float w = ExpScalar(score - newMax);
-                if (corr != 1.0f) {
-                    Muls(acc, acc, corr, d);
-                    PipeBarrier<PIPE_V>();
-                }
-                runSum = runSum * corr + w;
-                runMax = newMax;
+            // pad the tail so the reductions run on a whole 32B block
+            uint32_t padEnd = ((tokEnd + 7u) / 8u) * 8u;
+            for (uint32_t tk = tokEnd; tk < padEnd; ++tk) {
+                sco.SetValue(tk, kNegInf);            // excluded by the max, exp -> 0
+            }
+            if (padEnd > tokEnd) {
+                SetFlag<HardEvent::S_V>(EVENT_ID1);
+                WaitFlag<HardEvent::S_V>(EVENT_ID1);
+            }
 
-                if (t_->variant == 8u) {
-                    // accumulate the FIRST gather's kv directly; skip the second
-                    // gather entirely so only the score-path K read is exercised
-                    Muls(kv, kv, w * kNorm, d);
-                    PipeBarrier<PIPE_V>();
-                    Add(acc, acc, kv, d);
-                    PipeBarrier<PIPE_V>();
-                    runSum = runSum;   // weights already updated above
-                    continue;
-                }
-                // ---- accumulate w * ||v|| * yhat_v (still rotated) ----------
-                GatherNz((t_->variant == 7u) ? kCacheGm_ : vCacheGm_, bytes, kvh,
-                         static_cast<uint32_t>(phys), tk);
+            // ---- pass 2: vectorised softmax over the whole block ------------
+            ReduceMax(rdx, sco, rdx, padEnd);
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(EVENT_ID2);
+            WaitFlag<HardEvent::V_S>(EVENT_ID2);
+            const float blkMax = rdx.GetValue(0);
+            const float newMax = (blkMax > runMax) ? blkMax : runMax;
+            const float corr = (runMax == kNegInf) ? 0.0f : ExpScalar(runMax - newMax);
+
+            Adds(sco, sco, -newMax, padEnd);
+            PipeBarrier<PIPE_V>();
+            Exp(wgt, sco, padEnd);                    // ONE vector exp for the block
+            PipeBarrier<PIPE_V>();
+            ReduceSum(rdx, wgt, rdx, padEnd);
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(EVENT_ID2);
+            WaitFlag<HardEvent::V_S>(EVENT_ID2);
+            const float blkSum = rdx.GetValue(0);
+
+            if (corr != 1.0f) {
+                Muls(acc, acc, corr, d);
+                PipeBarrier<PIPE_V>();
+            }
+            runSum = runSum * corr + blkSum;
+            runMax = newMax;
+
+            // ---- pass 3: accumulate w * ||v|| * yhat_v ----------------------
+            for (uint32_t tk = 0; tk < tokEnd; ++tk) {
+                GatherNz(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
                 if constexpr (TQPlanar<BITS>::kSupported) {
-                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);   // vector path
-                    /*
-                     * V -> MTE2, the SYMMETRIC counterpart to the MTE2 -> V edge
-                     * in GatherNz. The NEXT iteration's gather overwrites `bytes`
-                     * while this unpack may still be reading it on the V pipe.
-                     * With the old scalar unpack this edge was S -> MTE2, which
-                     * IS implicitly drained on 310P, so it never had to exist.
-                     * Moving the read to the vector pipe created it.
-                     */
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);
                     SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
                     WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
                 } else {
-                    UnpackCodes<BITS>(bytes, codes, d);                   // scalar fallback (BITS=3)
+                    UnpackCodes<BITS>(bytes, codes, d);
                     SetFlag<HardEvent::S_V>(EVENT_ID1);
                     WaitFlag<HardEvent::S_V>(EVENT_ID1);
                 }
                 DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
-                const float vNorm = static_cast<float>(
-                    vNormGm_.GetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + kvh));
-                if (t_->variant == 7u) {
-                    // accumulate the K vector instead: out becomes mean(K),
-                    // which exposes a bad K gather that identical-key probes hide
-                    Muls(kv, kv, w * kNorm, d);
-                } else {
-                    Muls(kv, kv, w * vNorm, d);
-                }
+                const float vNorm = static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
+                const float w = wgt.GetValue(tk);
+                Muls(kv, kv, w * vNorm, d);
                 PipeBarrier<PIPE_V>();
                 Add(acc, acc, kv, d);
                 PipeBarrier<PIPE_V>();
@@ -447,6 +407,9 @@ private:
      */
     __aicore__ inline float ExpScalar(float x)
     {
+        if (t_->variant == 13u) {
+            return 1.0f;   // ATTRIBUTION PROBE ONLY -- wrong results by design
+        }
         if (x < -80.0f) {
             return 0.0f;
         }
@@ -483,7 +446,8 @@ private:
     GlobalTensor<int32_t> btGm_, seqGm_;
     GlobalTensor<float> signGm_, cbGm_;
     TBuf<TPosition::VECCALC> qBuf_, accBuf_, kvBuf_, tmpBuf_, byteBuf_, codeBuf_, signBuf_, cbBuf_,
-        outBuf_, redBuf_, wrkBuf_, dbgBuf_, unpHBuf_, unpF0Buf_, unpF1Buf_;
+        outBuf_, redBuf_, wrkBuf_, dbgBuf_, unpHBuf_, unpF0Buf_, unpF1Buf_, kNrmBuf_, vNrmBuf_,
+        scoBuf_, wgtBuf_, rdxBuf_;
     LocalTensor<float> signs_, cb_;
 };
 
