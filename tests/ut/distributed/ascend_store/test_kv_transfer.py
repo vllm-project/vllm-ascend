@@ -552,7 +552,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         )
         return thread, store, get_staging, merge_staging
 
-    def test_hybrid_c128_async_load_uses_staging_and_merges_each_range(self):
+    def test_hybrid_c128_async_load_aggregates_pages_and_loads_directly(self):
         thread, store, get_staging, merge_staging = self._make_hybrid_c128_thread()
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=1024, can_load=True, token_len=1024)
         request = ReqMeta(
@@ -567,10 +567,14 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
         thread._handle_request(request)
 
-        self.assertEqual(store.get.call_count, 3)
-        self.assertEqual(get_staging.call_count, 2)
-        self.assertEqual([call.args[1].value_start for call in merge_staging.call_args_list], [0, 4])
-        self.assertEqual([call.args[1].value_end for call in merge_staging.call_args_list], [4, 8])
+        self.assertEqual(store.get.call_count, 2)
+        get_keys, get_addrs, get_sizes = store.get.call_args_list[1].args
+        self.assertEqual(len(get_keys), 1)
+        self.assertIn("@range:4_8", get_keys[0])
+        self.assertEqual(get_addrs, [[2000 + 9 * 1280]])
+        self.assertEqual(get_sizes, [[1280]])
+        get_staging.assert_not_called()
+        merge_staging.assert_not_called()
         self.assertIn("r1", thread.get_and_clear_finished_requests())
 
     def test_hybrid_c128_async_load_does_not_merge_failed_chunk(self):
@@ -589,7 +593,13 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
         thread._handle_request(request)
 
-        get_staging.assert_called_once_with(1)
+        self.assertEqual(store.get.call_count, 1)
+        get_keys, get_addrs, get_sizes = store.get.call_args.args
+        self.assertEqual(len(get_keys), 1)
+        self.assertIn("@range:0_4", get_keys[0])
+        self.assertEqual(get_addrs, [[2000 + 9 * 1280]])
+        self.assertEqual(get_sizes, [[1280]])
+        get_staging.assert_not_called()
         merge_staging.assert_not_called()
         self.assertIn("r1", thread.get_and_clear_finished_requests())
 
