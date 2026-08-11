@@ -28,7 +28,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, overload
 
 import numpy as np
 import torch
@@ -229,6 +229,34 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
+@overload
+def _request_prefill_mask(
+    num_computed_tokens: np.ndarray,
+    num_prompt_tokens: np.ndarray,
+) -> np.ndarray: ...
+
+
+@overload
+def _request_prefill_mask(
+    num_computed_tokens: torch.Tensor,
+    num_prompt_tokens: torch.Tensor,
+) -> torch.Tensor: ...
+
+
+def _request_prefill_mask(
+    num_computed_tokens: np.ndarray | torch.Tensor,
+    num_prompt_tokens: np.ndarray | torch.Tensor,
+) -> np.ndarray | torch.Tensor:
+    """Return the single request-phase truth shared by graph and metadata."""
+    if isinstance(num_computed_tokens, np.ndarray):
+        if not isinstance(num_prompt_tokens, np.ndarray):
+            raise TypeError("NumPy computed-token counts require NumPy prompt-token counts")
+        return np.less(num_computed_tokens, num_prompt_tokens)
+    if not isinstance(num_prompt_tokens, torch.Tensor):
+        raise TypeError("Tensor computed-token counts require Tensor prompt-token counts")
+    return torch.lt(num_computed_tokens, num_prompt_tokens)
 
 
 @dataclass
@@ -2767,10 +2795,14 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        is_prefilling = _request_prefill_mask(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs],
+            self.input_batch.num_prompt_tokens[:num_reqs],
+        )
+        is_all_decode = not np.any(is_prefilling)
         uniform_decode = (
             (
-                (is_all_decode if self.speculative_config else True)
+                is_all_decode
                 and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
@@ -2961,7 +2993,10 @@ class NPUModelRunner(GPUModelRunner):
         num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
             :num_reqs_padded
         ]
-        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+        is_prefilling = _request_prefill_mask(
+            num_computed_tokens_cpu,
+            num_prompt_tokens_cpu,
+        )
         is_prefilling[num_reqs:] = False
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         if self.use_async_spec_decode:
@@ -3060,12 +3095,6 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
-                # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
-                # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
-                if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
-                    and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
-                    if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
-                        attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
             if isinstance(builder, AscendDSAMetadataBuilder):
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 

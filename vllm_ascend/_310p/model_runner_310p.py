@@ -59,7 +59,7 @@ from vllm_ascend.utils import (
     is_rc_device,
     lmhead_tp_enable,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _request_prefill_mask
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -155,7 +155,11 @@ class NPUModelRunner310(NPUModelRunner):
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ):
-        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        is_prefilling = _request_prefill_mask(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs],
+            self.input_batch.num_prompt_tokens[:num_reqs],
+        )
+        is_all_decode = not np.any(is_prefilling)
 
         if self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit):
             force_eager = True

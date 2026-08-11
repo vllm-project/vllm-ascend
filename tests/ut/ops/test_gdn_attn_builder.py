@@ -9,6 +9,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -566,6 +567,14 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
         attn_metadata.spec_decode_metadata.actual_seq_lengths,
         torch.tensor([0, 4, 4, 0, 0], dtype=torch.int32),
     )
+    assert torch.equal(
+        attn_metadata.spec_state_indices_tensor[2:],
+        torch.full((2, 4), NULL_BLOCK_ID, dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.num_accepted_tokens,
+        torch.tensor([2, 4, 1, 1], dtype=torch.int32),
+    )
 
 
 def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
@@ -579,7 +588,7 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
         block_size=16,
         device=torch.device("cpu"),
     )
-    common_attn_metadata.num_actual_tokens = 4
+    common_attn_metadata.num_reqs = 4
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -600,6 +609,11 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
     assert torch.equal(
         attn_metadata.non_spec_decode_metadata.actual_seq_lengths,
         torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
+    )
+    assert attn_metadata.num_actual_tokens == 2
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor([0, 1, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32),
     )
 
 
