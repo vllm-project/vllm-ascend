@@ -446,6 +446,16 @@ class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group
 
+    def _split_decodes_and_prefills(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> tuple[int, int, int, int]:
+        return split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
+        )
+
     def build(
         self,
         common_prefix_len: int,

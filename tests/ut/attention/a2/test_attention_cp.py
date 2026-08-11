@@ -322,3 +322,20 @@ def test_dcp_partial_attention_merge_matches_weighted_reference() -> None:
 
     torch.testing.assert_close(output, torch.tensor([[[4.0, 6.0]]]))
     torch.testing.assert_close(merged_lse, torch.tensor([[[np.log(4.0)]]], dtype=torch.float32))
+
+
+def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
+    builder = AscendAttentionPCPMetadataBuilder.__new__(AscendAttentionPCPMetadataBuilder)
+    builder.decode_threshold = 1
+    common_metadata = SimpleNamespace(
+        context_parallel_metadata=None,
+        max_query_len=4,
+        num_reqs=2,
+        num_actual_tokens=5,
+        query_start_loc_cpu=torch.tensor([0, 1, 5], dtype=torch.int32),
+        is_prefilling=torch.tensor([True, True], dtype=torch.bool),
+    )
+
+    result = builder._split_decodes_and_prefills(common_metadata)
+
+    assert result == (0, 2, 0, 5)
