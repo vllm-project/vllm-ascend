@@ -476,6 +476,9 @@ def test_hang():
     #   - With 3 requests across data_parallel_size=2, at least one request
     #     lands on each DP rank, so both ranks hit input_fits_in_drafter=False
     #     and deadlock on the cross-DP sync. Verified to reproduce 5/5 runs.
+    #
+    # All three prompts below tokenize to exactly 1023 tokens (max_model_len - 1)
+    # for this tokenizer; the assert after apply_chat_template enforces it.
     prompts = [
         {
             "role": "user",
@@ -499,9 +502,7 @@ def test_hang():
         for prompt in prompts
     ]
 
-    prompt_lens = [
-        len(tokenizer.encode(prompt, add_special_tokens=False)) for prompt in prompts
-    ]
+    prompt_lens = [len(tokenizer.encode(prompt, add_special_tokens=False)) for prompt in prompts]
     assert all(plen == max_model_len - 1 for plen in prompt_lens), (
         f"prompt_lens {prompt_lens} != max_model_len - 1 ({max_model_len - 1}); "
         "update the filler if the tokenizer changed"
