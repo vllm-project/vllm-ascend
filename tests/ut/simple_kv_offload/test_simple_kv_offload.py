@@ -12,11 +12,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
-from vllm_ascend.kv_offload.simple import worker as worker_module
-from vllm_ascend.kv_offload.simple.simple_cpu_offload_connector import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import worker as worker_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector import (
     AscendSimpleCPUOffloadConnector,
 )
-from vllm_ascend.kv_offload.simple.worker import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.worker import (
     SimpleCPUOffloadNPUWorker,
     _flatten_kv_value,
 )
@@ -43,7 +43,7 @@ def test_factory_registration_uses_consolidated_package(
     register_connector()
 
     assert registrations["SimpleCPUOffloadConnector"] == (
-        "vllm_ascend.kv_offload.simple.simple_cpu_offload_connector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
         "AscendSimpleCPUOffloadConnector",
     )
 
@@ -76,7 +76,7 @@ def test_connector_only_replaces_enabled_worker(
 
     monkeypatch.setattr(SimpleCPUOffloadConnector, "__init__", fake_upstream_init)
     monkeypatch.setattr(
-        "vllm_ascend.kv_offload.simple.simple_cpu_offload_connector.SimpleCPUOffloadNPUWorker",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector.SimpleCPUOffloadNPUWorker",
         fake_npu_worker,
     )
 

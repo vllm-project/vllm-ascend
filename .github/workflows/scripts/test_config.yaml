@@ -249,8 +249,8 @@
 - name: kv_offload
   optional: false
   source_file_dependencies:
-    - vllm_ascend/kv_offload/__init__.py
-    - vllm_ascend/kv_offload/native
+    - vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload/__init__.py
+    - vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload/native
   tests:
     - tests/ut/kv_offload
     - tests/e2e/pull_request/one_card/test_cpu_offloading.py
@@ -450,7 +450,7 @@
 - name: simple_kv_offload
   optional: false
   source_file_dependencies:
-    - vllm_ascend/kv_offload/simple
+    - vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload/simple
   tests:
     - tests/ut/simple_kv_offload
     - tests/e2e/pull_request/one_card/test_simple_cpu_offload.py

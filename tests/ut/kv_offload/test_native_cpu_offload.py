@@ -19,9 +19,11 @@ from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
-from vllm_ascend.kv_offload.native.cpu_npu import NPUOffloadingWorker
-from vllm_ascend.kv_offload.native.npu import NPUOffloadingSpec
-from vllm_ascend.kv_offload.native.offloading_connector import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
+    NPUOffloadingWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu import NPUOffloadingSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
     _canonicalize_split_attention_cache,
 )
@@ -90,7 +92,7 @@ def test_npu_offloading_spec_loads_through_vllm_factory() -> None:
     spec_cls = OffloadingSpecFactory.get_spec_cls(
         {
             "spec_name": "NPUOffloadingSpec",
-            "spec_module_path": "vllm_ascend.kv_offload.native.npu",
+            "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
         }
     )
 
@@ -296,6 +298,6 @@ def test_offloading_connector_is_registered_with_ascend_adapter(
     register_connector()
 
     assert registrations["OffloadingConnector"] == (
-        "vllm_ascend.kv_offload.native.offloading_connector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
         "AscendOffloadingConnector",
     )

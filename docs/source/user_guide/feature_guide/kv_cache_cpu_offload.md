@@ -27,7 +27,7 @@ kv_transfer_config = KVTransferConfig(
         "cpu_bytes_to_use": 4 * 1024**3,
         "blocks_per_chunk": 8,
         "spec_name": "NPUOffloadingSpec",
-        "spec_module_path": "vllm_ascend.kv_offload.native.npu",
+        "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
     },
 )
 
@@ -56,7 +56,7 @@ vllm serve Qwen/Qwen3-0.6B \
             "cpu_bytes_to_use": 4294967296,
             "blocks_per_chunk": 8,
             "spec_name": "NPUOffloadingSpec",
-            "spec_module_path": "vllm_ascend.kv_offload.native.npu"
+            "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu"
         }
     }'
 ```
@@ -68,7 +68,7 @@ vllm serve Qwen/Qwen3-0.6B \
 - `cpu_bytes_to_use`: Server-wide CPU memory capacity in bytes. It is divided across workers by the upstream vLLM offloading framework.
 - `blocks_per_chunk`: Number of NPU KV-cache blocks stored in one CPU offload block. It must be greater than zero.
 - `spec_name`: Must be `"NPUOffloadingSpec"` for Ascend NPU.
-- `spec_module_path`: Must be `"vllm_ascend.kv_offload.native.npu"`.
+- `spec_module_path`: Must be `"vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu"`.
 
 The legacy Ascend-only `num_cpu_blocks` option remains supported for compatibility, but new configurations should use vLLM's native `cpu_bytes_to_use` option.
 

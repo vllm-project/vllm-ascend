@@ -72,7 +72,7 @@ def register_connector():
         KVConnectorFactory._registry.pop("OffloadingConnector")
     KVConnectorFactory.register_connector(
         "OffloadingConnector",
-        "vllm_ascend.kv_offload.native.offloading_connector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
         "AscendOffloadingConnector",
     )
 
@@ -88,7 +88,7 @@ def register_connector():
             KVConnectorFactory._registry.pop("SimpleCPUOffloadConnector")
         KVConnectorFactory.register_connector(
             "SimpleCPUOffloadConnector",
-            "vllm_ascend.kv_offload.simple.simple_cpu_offload_connector",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
             "AscendSimpleCPUOffloadConnector",
         )
 

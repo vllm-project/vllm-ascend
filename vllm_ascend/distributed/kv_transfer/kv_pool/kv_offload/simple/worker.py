@@ -30,7 +30,9 @@ from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 
-from vllm_ascend.kv_offload.simple.copy_backend import NPUDmaCopyBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.copy_backend import (
+    NPUDmaCopyBackend,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
