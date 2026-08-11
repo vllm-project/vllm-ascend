@@ -30,6 +30,11 @@ class AscendSFAIndexerBackend(AttentionBackend):
     """
 
     accept_output_buffer: bool = True
+    is_cache_only_backend = True
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls():
