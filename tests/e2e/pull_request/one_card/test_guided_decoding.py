@@ -28,6 +28,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import ModelName
+
 os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 MODEL_NAME = ModelName.QWEN3_06B

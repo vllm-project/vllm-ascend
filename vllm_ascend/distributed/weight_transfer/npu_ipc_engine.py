@@ -7,15 +7,21 @@ import socket
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
+    TrainerWeightTransferEngine,
     WeightTransferEngine,
     WeightTransferInitInfo,
+)
+from vllm.distributed.weight_transfer.ipc_engine import (
+    IPCTrainerInitInfo,
+    IPCTrainerWeightTransferEngine,
+    IPCWeightTransferUpdateInfo,
 )
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
@@ -84,17 +90,6 @@ def npu_generate_uuid(logical_device: int | None = None) -> str:
     return f"{get_ip()}-{physical_device}"
 
 
-from typing import ClassVar
-
-from vllm.distributed.weight_transfer.base import (
-    TrainerWeightTransferEngine,
-)
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCTrainerInitInfo,
-    IPCTrainerWeightTransferEngine,
-    IPCWeightTransferUpdateInfo,
-)
-
 @dataclass
 class NPUIPCTrainerInitInfo(IPCTrainerInitInfo):
     """NPU IPC trainer init info — overrides the backend key only.
@@ -106,11 +101,13 @@ class NPUIPCTrainerInitInfo(IPCTrainerInitInfo):
 
     backend: ClassVar[str] = "npu_ipc"
 
+
 @dataclass
 class NPUIPCWeightTransferUpdateInfo(IPCWeightTransferUpdateInfo):  # type: ignore[no-redef]
     """NPU IPC variant — inherits all fields and validation from the CUDA IPC
     base class.  No overrides needed; the field types and ``__post_init__`` are
     identical."""
+
 
 class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
     WeightTransferEngine[NPUIPCWeightTransferInitInfo, NPUIPCWeightTransferUpdateInfo],
@@ -226,6 +223,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
 
     def shutdown(self) -> None:
         pass
+
 
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     """Trainer-side NPU IPC weight transfer engine.
