@@ -37,7 +37,7 @@ import os
 
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import RemoteOpenAIServer
+from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from tools.aisbench import run_aisbench_cases
 
 MODEL = os.getenv("QWEN3_32B_PDMIX_PATH", "/mnt/a800_weight/qwen3-32b-pdmix")
@@ -89,6 +89,9 @@ _SERVER_ARGS = [
 ]
 
 
+# Wait for the NPU driver to reclaim memory after the previous server exits,
+# so the next V1/V2 server does not OOM on a busy device.
+@wait_until_npu_memory_free()
 def _run_aime2024_accuracy(env):
     port = get_open_port()
     with RemoteOpenAIServer(
