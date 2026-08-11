@@ -58,19 +58,34 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
         nn.Module.__init__(self)
         self.forward_type = None
-        if lmhead_tp_enable() and "head" in prefix:
+        self.disable_tp = disable_tp
+
+        if disable_tp :
+            self.comm_group = None
+            self.tp_size = 1
+            self.tp_rank = 0
+
+        elif lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
+            self.tp_size = self.comm_group.world_size
+            self.tp_rank = self.comm_group.rank_in_group
+
         elif embedding_tp_enable() and "embed_tokens" in prefix:
             self.comm_group = get_embed_tp_group()
             self.forward_type = "embed_tp"
+            self.tp_size = self.comm_group.world_size
+            self.tp_rank = self.comm_group.rank_in_group
+
         else:
             self.comm_group = get_tp_group()
+            self.tp_size = self.comm_group.world_size
+            self.tp_rank = self.comm_group.rank_in_group
 
-        self.tp_size = self.comm_group.world_size
-        self.tp_rank = self.comm_group.rank_in_group
 
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
@@ -162,10 +177,9 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
-        if self.forward_type == "embed_tp":
+        if self.forward_type == "embed_tp" and not self.disable_tp:
             return self._forward_embed_tp(input_)
-        else:
-            return self._forward_origin(input_)
+        return self._forward_origin(input_)
 
     def _forward_embed_tp(self, input_):
         num_tokens = input_.shape[0]
@@ -244,16 +258,17 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        # Reduce across all the model parallel GPUs.
-        output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
-        return output
+            # Reduce across all the model parallel GPUs.
+            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+            return output
+        return output_parallel
 
 
 class AscendParallelLMHead(ParallelLMHead):
     """
     Register ParallelLMHead as a custom op for Ascend."""
 
-    def __init__(  # type: ignore[misc]
+    def __init__(
         self,
         num_embeddings: int,
         embedding_dim: int,
@@ -266,8 +281,6 @@ class AscendParallelLMHead(ParallelLMHead):
         *,
         disable_tp: bool = False,
     ):
-        self.disable_tp = disable_tp
-
         AscendVocabParallelEmbedding.__init__(
             self,
             num_embeddings,
@@ -277,8 +290,8 @@ class AscendParallelLMHead(ParallelLMHead):
             padding_size,
             quant_config,
             prefix,
+            disable_tp=disable_tp
         )
-
         self.quant_config = quant_config
         if bias:
             self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
@@ -356,7 +369,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
-        if lmhead_tp_enable():
+        if lmhead_tp_enable() and not lm_head.disable_tp:
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
             return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
@@ -390,7 +403,7 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
+        if not get_ascend_config().enable_reduce_sample and lm_head.tp_size > 1:
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
