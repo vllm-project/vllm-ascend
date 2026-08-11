@@ -18,12 +18,13 @@ from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
-class Ascend310PModelState(AscendModelState):
-    """Model state that avoids upstream Triton-backed multimodal RoPE."""
+class _Ascend310PModelStateMixin:
+    """310P RoPE and full-graph state shared by default and hybrid models."""
 
-    def __init__(
+    def _init_310p_state(
         self,
         vllm_config: VllmConfig,
         model: nn.Module,
@@ -127,3 +128,30 @@ class Ascend310PModelState(AscendModelState):
     def custom_sampler(self, sampler):
         del sampler
         return Ascend310PGreedySampler(), None
+
+
+class Ascend310PModelState(_Ascend310PModelStateMixin, AscendModelState):
+    """310P state for standard attention models."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ) -> None:
+        self._init_310p_state(vllm_config, model, encoder_cache, device)
+
+
+class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHybridModelState):
+    """310P state preserving hybrid/GDN behavior without upstream Triton RoPE."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ) -> None:
+        self._init_310p_state(vllm_config, model, encoder_cache, device)
+        self.num_accepted_tokens_gpu = torch.ones(self.max_num_reqs, dtype=torch.int32, device=self.device)

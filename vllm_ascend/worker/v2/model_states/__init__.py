@@ -32,6 +32,11 @@ def init_asecnd_model_state(
     device: torch.device,
 ):
     if vllm_config.model_config.is_hybrid:
+        if is_310p():
+            from vllm_ascend._310p.worker.v2.model_state import Ascend310PMambaHybridModelState
+
+            return Ascend310PMambaHybridModelState(vllm_config, model, encoder_cache, device)
+
         from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
         return AscendMambaHybridModelState(vllm_config, model, encoder_cache, device)

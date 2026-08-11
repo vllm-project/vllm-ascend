@@ -736,3 +736,75 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check` 和 `git diff --check` 已通过。
 - 当前 Windows Python 环境未安装 `pytest`，目标 UT 尚未在本机执行，需在服务器开发环境补跑。
 - 真实 310P 环境仍需分别验证 TP1/TP2、eager/ACLGraph、单请求/多并发，以及流式输出。
+
+## 21. Qwen3.5 hybrid model state 的无 Triton RoPE 路由
+
+问题现象：
+
+- Qwen3.5-4B 在 `profile_run()` 阶段启动失败，尚未完成 KV Cache 初始化。
+- Python 堆栈进入上游 `vllm/v1/worker/gpu/mm/rope.py`，执行
+  `_prepare_rope_positions_kernel[(num_reqs,)](...)` 时抛出
+  `TypeError: 'function' object is not subscriptable`。
+
+根因：
+
+- Qwen3.5-4B 是 hybrid attention/GDN 模型，同时使用多维 RoPE。
+- model state 工厂优先匹配 `model_config.is_hybrid`，返回公共
+  `AscendMambaHybridModelState`，因此没有进入已有的 310P
+  `Ascend310PModelState/Ascend310PRopeState` 路径。
+- 公共 hybrid state 继承上游 `DefaultModelState`，其 `RopeState.prepare_positions()`
+  调用未注册 pluggable dispatcher 的上游 Triton kernel。310P 替换得到的是普通 Python
+  function，不能继续使用 Triton 的 `kernel[grid](...)` 调用语法。
+- 不能简单让所有 310P 模型都返回默认 `Ascend310PModelState`，否则会丢失 GDN/Mamba
+  metadata、`num_accepted_tokens_gpu` 和 hybrid 后处理语义。
+
+### `vllm_ascend/_310p/worker/v2/model_state.py`
+
+改动内容：
+
+- 抽取 `_Ascend310PModelStateMixin`，集中提供：
+  - 310P model state 公共初始化；
+  - `Ascend310PRopeState` 创建及 CPU position 准备；
+  - FULL graph capture `seq_lens` buffer 登记与 replay 前刷新；
+  - 310P 首版 greedy sampler。
+- `Ascend310PModelState` 改为组合该 mixin 与公共 `AscendModelState`，标准 attention
+  模型行为保持不变。
+- 新增 `Ascend310PMambaHybridModelState`，组合该 mixin 与
+  `AscendMambaHybridModelState`：
+  - RoPE position 准备走 310P 无 Triton 路径；
+  - attention/GDN metadata 和 `postprocess_state()` 继续继承公共 hybrid 实现；
+  - 初始化 hybrid 所需的 `num_accepted_tokens_gpu`。
+
+改动原因：
+
+- 只替换 310P 不可执行的 RoPE position kernel，保留已经适配的 Ascend hybrid/GDN
+  数据流，避免复制整套 hybrid attention 实现。
+- mixin 让默认模型和 hybrid 模型共享同一份 310P RoPE、ACLGraph buffer 与 sampler
+  契约，防止两条路径后续修复不一致。
+
+### `vllm_ascend/worker/v2/model_states/__init__.py`
+
+改动内容：
+
+- hybrid 分支内增加 310P 子分支，返回 `Ascend310PMambaHybridModelState`。
+- 非 310P hybrid 仍返回原有 `AscendMambaHybridModelState`；非 hybrid 路由不变。
+
+影响范围：
+
+- 只改变 310P MRV2 hybrid 模型的 model state 类型。
+- 不修改 vLLM 上游源码，不影响 310P MRV1，也不改变其他 Ascend 机型的 hybrid 路径。
+- 本问题发生在 profile dummy run，与 async scheduling 开关无关。
+
+### `tests/ut/_310p/test_model_runner_v2_310p.py`
+
+改动内容：
+
+- 验证 310P hybrid 配置由工厂路由到专用 hybrid model state。
+- 验证专用 state 仍继承 `AscendMambaHybridModelState`，保留公共 hybrid 行为。
+
+验证状态：
+
+- `py_compile`、`ruff check` 和 `git diff --check` 已通过。
+- 当前 Windows 本地 Python 环境未安装 `pytest`，目标 UT 未在本地执行，需在服务器环境补充执行。
+- 真实 310P Qwen3.5-4B 仍需依次验证 profile、eager 请求、ACLGraph 捕获/重放、
+  TP1/TP2、chunked prefill、多并发和 async scheduling。

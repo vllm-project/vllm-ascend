@@ -15,10 +15,15 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
-from vllm_ascend._310p.worker.v2.model_state import Ascend310PModelState
+from vllm_ascend._310p.worker.v2.model_state import (
+    Ascend310PMambaHybridModelState,
+    Ascend310PModelState,
+)
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
+from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
 def test_310p_slot_mapping_kernel_is_registered() -> None:
@@ -106,6 +111,30 @@ def test_first_release_config_accepts_async_scheduling() -> None:
     config.scheduler_config.async_scheduling = True
 
     NPUModelRunner310V2._validate_first_release_config(config)
+
+
+def test_310p_hybrid_model_uses_dedicated_model_state() -> None:
+    config = SimpleNamespace(model_config=SimpleNamespace(is_hybrid=True))
+    model = MagicMock()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+    expected = object()
+
+    with (
+        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend._310p.worker.v2.model_state.Ascend310PMambaHybridModelState",
+            return_value=expected,
+        ) as model_state_cls,
+    ):
+        result = init_asecnd_model_state(config, model, encoder_cache, device)
+
+    assert result is expected
+    model_state_cls.assert_called_once_with(config, model, encoder_cache, device)
+
+
+def test_310p_hybrid_model_state_keeps_ascend_hybrid_behavior() -> None:
+    assert issubclass(Ascend310PMambaHybridModelState, AscendMambaHybridModelState)
 
 
 @pytest.mark.parametrize(
