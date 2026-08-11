@@ -17,7 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch_npu
@@ -1769,23 +1769,24 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
-        attn_metadata: AscendAttentionPCPMetadata,
+        attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
         if len(kv_cache) <= 1:
             return query, key, value, output
 
+        pcp_metadata = cast(AscendAttentionPCPMetadata, attn_metadata)
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
         if self.kv_sharing_target_layer_name is not None:
             if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
+                pcp_metadata.reshape_cache_event.record()
             return query, key, value, output
 
-        expanded_slot_mapping = attn_metadata.pcp_slot_mapping
+        expanded_slot_mapping = pcp_metadata.pcp_slot_mapping
         if expanded_slot_mapping is None:
             raise RuntimeError("GQA PCP metadata is missing the expanded slot mapping.")
-        local_num_input_tokens = attn_metadata.pcp_local_num_input_tokens
+        local_num_input_tokens = pcp_metadata.pcp_local_num_input_tokens
         if key.shape[0] < local_num_input_tokens:
             raise RuntimeError(
                 f"PCP GQA input is shorter than the rank-local padded batch: {key.shape[0]} < {local_num_input_tokens}."
@@ -1797,7 +1798,7 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
                 value[:local_num_input_tokens],
             ),
             expanded_slot_mapping,
-            attn_metadata.num_decode_tokens,
+            pcp_metadata.num_decode_tokens,
         )
         DeviceOperator.reshape_and_cache(
             key=cache_key,
