@@ -27,6 +27,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
@@ -51,6 +52,20 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     capture descriptors, not the raw config sizes.
     """
     return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
+
+
+def _get_graph_update_backend(
+    attn_groups: list[list[AttentionGroup]],
+) -> type[AttentionBackend]:
+    for groups in attn_groups:
+        for group in groups:
+            backend = group.backend
+            if backend.get_impl_cls() is not None:
+                return backend
+    raise RuntimeError(
+        "No executable attention backend is available for "
+        "full-graph parameter updates."
+    )
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
@@ -112,22 +127,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            attn_backend = self.model_runner.attn_groups[0][0].backend
-            if getattr(attn_backend, "is_cache_only_backend", False):
-                try:
-                    attn_backend = next(
-                        group.backend
-                        for groups in self.model_runner.attn_groups
-                        for group in groups
-                        if not getattr(
-                            group.backend, "is_cache_only_backend", False
-                        )
-                    )
-                except StopIteration as exc:
-                    raise RuntimeError(
-                        "No executable attention backend is available for "
-                        "full-graph parameter updates."
-                    ) from exc
+            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 attn_backend,
