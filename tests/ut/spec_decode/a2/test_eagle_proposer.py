@@ -2,6 +2,7 @@
 import inspect
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,7 +22,9 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
 
@@ -140,9 +143,10 @@ def assert_attr_equal(attr: str | tuple[str, Any, Any], expect: Any, actual: Any
 
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     proposer = AscendEagleProposer.__new__(AscendEagleProposer)
-    proposer.pcp_size = 1
+    proposer.dcp_size = 1
     proposer.arange = torch.arange(16, dtype=torch.int32)
     proposer.runner = MagicMock()
+    proposer.runner.dcp_manager = None
     proposer.runner.actual_seq_lengths_q = [3, 3]
     proposer.runner.attn_state = AscendAttentionState.SpecDecoding
     proposer.runner.decode_token_per_req = 4
@@ -182,6 +186,37 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     assert spec_common_attn_metadata.seq_lens_cpu is None
 
 
+class TestSlidingWindowAdapter:
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        self.device = torch.device("cpu")
+        yield
+
+    def test_apply_window(self):
+        K, W, B = 3, 64, 16
+        max_num_reqs = 16
+        block_table_tensor = torch.randint(1, 1000, (max_num_reqs, 20), dtype=torch.int32)
+
+        adapter = SlidingWindowAdapter(W, B, max_num_reqs, K, self.device)
+        clone_ptr = adapter._block_table_clone.data_ptr()
+
+        cad = SimpleNamespace(
+            block_table_tensor=block_table_tensor,
+            seq_lens=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            seq_lens_cpu_upper_bound=None,
+        )
+        adapter.apply(cad)
+
+        # block_table rebinds to the pre-allocated clone (offset-0 view); full table saved
+        assert cad.block_table_tensor.data_ptr() == clone_ptr
+        assert adapter.full_block_table is block_table_tensor
+        clamped = torch.tensor([10, 60, 72, 64], dtype=torch.int32)
+        assert torch.equal(cad.seq_lens, clamped)
+        assert torch.equal(cad._seq_lens_cpu, clamped)
+
+
 class TestEagleProposerInitialization(TestBase):
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
@@ -197,8 +232,8 @@ class TestEagleProposerInitialization(TestBase):
         self.device = torch.device("cpu")
         self.runner = MagicMock()
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.dcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -341,8 +376,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.device = torch.device("cpu")
         self.runner = MagicMock()
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.dcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -369,10 +404,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -488,9 +521,11 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.speculative_config.num_speculative_tokens = 4
         self.device = torch.device("cpu")
         self.runner = MagicMock()
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.dcp_manager = None
         self.runner.pin_memory = False
+        self.runner.dynamic_eplb = True
+        self.runner.eplb_heat_collection_status = True
         self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), CUDAGraphMode.NONE)
 
         self.vllm_config.cache_config.block_size = 16
@@ -531,10 +566,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -592,6 +625,7 @@ class TestEagleProposerDummyRun(TestBase):
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
             self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(mock_context.call_args.kwargs["eplb_heat_collection_status"])
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -670,8 +704,8 @@ class TestEagleProposerHelperMethods(TestBase):
         self.runner.arange_np = np.arange(10)
         self.runner.input_batch.num_reqs = 3
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.dcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -965,10 +999,8 @@ class TestEagleProposerPropose:
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_get_ascend_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -984,11 +1016,11 @@ class TestEagleProposerPropose:
         self.vllm_config.speculative_config.parallel_drafting = False
         self.device = torch.device("cpu")
         self.runner = MagicMock()
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
         self.runner.pin_memory = False
+        self.runner.dcp_manager = None
 
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
         self.vllm_config.scheduler_config.max_num_seqs = 32
@@ -1018,7 +1050,6 @@ class TestEagleProposerPropose:
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
         self.ascend_config = init_ascend_config(self.vllm_config)
-        self.ascend_config.enable_flashcomm2_parallel_size = 0
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
@@ -1068,7 +1099,7 @@ class TestEagleProposerPropose:
         'dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,' \
         '_num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,' \
         'decode_token_per_req, actual_seq_lengths_q, positions, attn_state,' \
-        'graph_pad_size, num_input_tokens, prefill_context_parallel_metadata',
+        'graph_pad_size, num_input_tokens, context_parallel_metadata',
         [
             (
                 "prefill", torch.tensor([ 0, 13], device=torch.device("cpu"), dtype=torch.int32), torch.tensor([ 0, 13], dtype=torch.int32), 
@@ -1113,7 +1144,7 @@ class TestEagleProposerPropose:
                      dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
                      _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                      decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
-                     graph_pad_size, num_input_tokens, prefill_context_parallel_metadata
+                     graph_pad_size, num_input_tokens, context_parallel_metadata
                     ):
         # adjust for fullgraph mode
         if graphmode == 'full':
@@ -1152,9 +1183,11 @@ class TestEagleProposerPropose:
         mock_attn_metadata = MagicMock()
         mock_builder.build.return_value = mock_attn_metadata
         mock_attn_group.get_metadata_builder.return_value = mock_builder
+        mock_attn_group.layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.draft_attn_groups = [mock_attn_group]
         self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.kernel_block_size = 128
+        self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
         self.proposer._runnable.return_value = [0, 0, 0]
         captured_common_attn_metadata = None
@@ -1220,7 +1253,7 @@ class TestEagleProposerPropose:
                                         dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
                                         _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                                         decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
-                                        graph_pad_size, num_input_tokens, prefill_context_parallel_metadata
+                                        graph_pad_size, num_input_tokens, context_parallel_metadata
                                         )
         
         # create other parameters
@@ -1304,7 +1337,8 @@ class TestEagleProposerPropose:
             patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
             set_current_vllm_config(self.vllm_config),
         ):
-            self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
+            self.proposer._propose(self.proposer.num_speculative_tokens,
+                                target_token_ids, target_positions, target_hidden_states, next_token_ids,
                                 token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
                                 mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
@@ -1319,7 +1353,7 @@ class TestEagleProposerPropose:
                                         dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
                                         _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                                         decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
-                                        graph_pad_size, num_input_tokens, prefill_context_parallel_metadata
+                                        graph_pad_size, num_input_tokens, context_parallel_metadata
                                         ):
         mock_common_attn_metadata.query_start_loc = query_start_loc
         mock_common_attn_metadata.query_start_loc_cpu = query_start_loc_cpu
@@ -1348,7 +1382,7 @@ class TestEagleProposerPropose:
         mock_common_attn_metadata.attn_state = attn_state
         mock_common_attn_metadata.graph_pad_size = graph_pad_size
         mock_common_attn_metadata.num_input_tokens = num_input_tokens
-        mock_common_attn_metadata.prefill_context_parallel_metadata = prefill_context_parallel_metadata
+        mock_common_attn_metadata.context_parallel_metadata = context_parallel_metadata
 
     # assert the value common_attn_metadata
     def assert_value_common_attn_metadata(self, captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode):
@@ -1462,7 +1496,7 @@ class TestEagleProposerPropose:
         else:
             assert captured_common_attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         assert captured_common_attn_metadata.graph_pad_size == -1
-        assert captured_common_attn_metadata.prefill_context_parallel_metadata is None
+        assert captured_common_attn_metadata.context_parallel_metadata is None
         if model_type == 'qwen_dense' and graphmode == 'eager' and flag_prefill_decode == 'decode_and_prefill':
             assert torch.equal(self.proposer.slot_mapping_group[0][:30], torch.tensor([141, 142, 143, 144, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265,
                                                                                        266, 267, 268, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396]))
@@ -1554,7 +1588,7 @@ class TestEagleProposerPropose:
             "tensor_parallel_size",
             "data_parallel_rank",
             "data_parallel_size",
-            "prefill_context_parallel_size",
+            "decode_context_parallel_size",
         }
 
         actual = set(vllm.config.ParallelConfig.__dataclass_fields__)
@@ -1568,7 +1602,6 @@ class TestEagleProposerPropose:
         RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
-            "pcp_size",
             "dcp_size",
             "max_num_tokens",
             "max_num_reqs",
@@ -1607,7 +1640,8 @@ class TestEagleProposerPropose:
         assert 'self.kernel_block_size' in src
         sig = inspect.signature(RunnerCls._propose)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'target_token_ids', 'target_positions', 'target_hidden_states', 'next_token_ids',
+        assert sig_name == ['self', 'num_speculative_tokens', 'target_token_ids', 'target_positions',
+                            'target_hidden_states', 'next_token_ids',
                             'token_indices_to_sample', 'common_attn_metadata', 'target_model_batch_desc',
                             'sampling_metadata', 'mm_embed_inputs', 'req_scheduled_tokens', 'long_seq_metadata',
                             'num_prefill_reqs', 'num_decode_reqs', 'scheduler_output', 'num_scheduled_tokens',
@@ -1671,7 +1705,7 @@ class TestEagleProposerPropose:
         assert hasattr(vllm_ascend.attention.utils, 'AscendCommonAttentionMetadata')
         fields = {
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
-            'prefill_context_parallel_metadata', 'actual_seq_lengths_q', \
+            'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
             'graph_pad_size'
         }
@@ -1784,8 +1818,8 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.device = torch.device("cpu")
         self.runner = MagicMock()
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.dcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -2257,10 +2291,9 @@ class TestRunMergedDraft(TestBase):
         self.device = torch.device("cpu")
         self.runner = MagicMock()
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
-        self.runner.pcp_rank = 0
         self.runner.dcp_rank = 0
+        self.runner.dcp_manager = None
         self.runner.max_num_tokens = 64
         self.runner.max_num_reqs = 8
         self.runner.uniform_decode_query_len = 2
@@ -2377,7 +2410,7 @@ class TestRunMergedDraft(TestBase):
             "tensor_parallel_size",
             "data_parallel_rank",
             "data_parallel_size",
-            "prefill_context_parallel_size",
+            "decode_context_parallel_size",
             "enable_expert_parallel",
         }
         actual = set(vllm.config.ParallelConfig.__dataclass_fields__)
@@ -2513,7 +2546,7 @@ class TestRunMergedDraft(TestBase):
         assert hasattr(RunnerCls, "build_model_inputs_first_pass")
         sig = inspect.signature(RunnerCls.build_model_inputs_first_pass)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "num_input_tokens"]
+        assert sig_name == ["self", "num_input_tokens", "_context_slots"]
 
         import vllm_ascend.worker.model_runner_v1
 
@@ -2521,9 +2554,7 @@ class TestRunMergedDraft(TestBase):
         RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
-            "pcp_size",
             "dcp_size",
-            "pcp_rank",
             "dcp_rank",
             "max_num_tokens",
             "max_num_reqs",
@@ -2636,14 +2667,12 @@ class TestRunMergedDraft(TestBase):
         self.proposer.num_speculative_tokens = 1
         self.proposer.pass_hidden_states_to_model = False
         self.proposer.model = MockDraftModel(returns_tuple=False)
-        self.proposer.build_model_inputs_first_pass = MagicMock(
-            return_value={
-                "input_ids": torch.tensor([151667, 32313], dtype=torch.int32),
-                "positions": torch.tensor([20, 16], dtype=torch.int64),
-                "inputs_embeds": torch.ones(2, 4, dtype=torch.float32),
-            }
+        self.proposer._context_slot_mapping_buffers = MagicMock()
+        self.proposer.build_model_inputs_first_pass = MagicMock()
+        initial_input_ids = torch.tensor(
+            [151667, 32313, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.int32
         )
-
+        self.proposer.input_ids[:12] = initial_input_ids
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_reduce_sample = False
         with (
@@ -2661,13 +2690,15 @@ class TestRunMergedDraft(TestBase):
                 is_prefill=False,
             )
 
-        self.proposer.build_model_inputs_first_pass.assert_called_once_with(12)
+        self.proposer.build_model_inputs_first_pass.assert_called_once_with(
+            12, self.proposer._context_slot_mapping_buffers
+        )
         self.proposer.maybe_all_gather_and_unpad.assert_not_called()
         self.assertNotIn("hidden_states", self.proposer.model.calls[0])
         self.assertTrue(
             torch.equal(
                 self.proposer.model.calls[0]["input_ids"],
-                torch.tensor([151667, 32313], dtype=torch.int32),
+                initial_input_ids,
             )
         )
         self.assertEqual(draft_token_ids.tolist(), [[151667], [32313]])
@@ -2800,8 +2831,8 @@ class TestDraftProposerHelperMethods(TestBase):
         self.runner.arange_np = np.arange(10)
         self.runner.input_batch.num_reqs = 3
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.dcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -2907,13 +2938,13 @@ class TestEagleProposerPrepareInputs:
         self.device = torch.device(current_platform.device_type)
         self.runner = MagicMock()
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
         self.runner.attn_state = AscendAttentionState.ChunkedPrefill
         self.runner.decode_token_per_req = 1
         self.runner.actual_seq_lengths_q = []
+        self.runner.dcp_manager = None
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
@@ -3260,13 +3291,13 @@ class TestEagleProposerPrepareInputsPadded:
         self.device = torch.device(current_platform.device_type)
         self.runner = MagicMock()
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
         self.runner.attn_state = AscendAttentionState.ChunkedPrefill
         self.runner.decode_token_per_req = 1
         self.runner.actual_seq_lengths_q = []
+        self.runner.dcp_manager = None
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
@@ -3608,15 +3639,7 @@ class TestEagleProposerPrepareInputsPadded:
 class TestEagleProposerSetInputsFirstPass:
     """Test set_inputs_first_pass for AscendEagleProposer.
 
-    This test class covers all branches of set_inputs_first_pass:
-
-    Branch coverage:
-    - Branch 1 (needs_extra_input_slots=False): Default EAGLE pathway
-      - Branch 1.1: multiple requests
-      - Branch 1.2: pcp_size > 1 (PCP split logic) - vllm-ascend specific
-    - Branch 2 (needs_extra_input_slots=True): Draft model / Parallel drafting
-      - Branch 2.1: shift_input_ids=False (draft_model)
-      - Branch 2.2: shift_input_ids=True (parallel_drafting)
+    Covers the default EAGLE, DCP, draft-model, and parallel-drafting paths.
 
     """
 
@@ -3625,10 +3648,10 @@ class TestEagleProposerSetInputsFirstPass:
         self.device = torch.device(current_platform.device_type)
         self.runner = MagicMock()
         self.runner.pin_memory = False
-        self.runner.pcp_size = 1
         self.runner.dcp_size = 1
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
+        self.runner.dcp_manager = None
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
@@ -3793,7 +3816,7 @@ class TestEagleProposerSetInputsFirstPass:
         expected_token_indices = torch.tensor([2, 4, 8], dtype=torch.int32, device=self.device)
         assert torch.equal(out_token_indices, expected_token_indices)
         assert out_cad is common_attn_metadata  # returned as-is
-        assert long_seq_args == (None, None)
+        assert long_seq_args is None
 
         # assert proposer internal state
         expected_proposer = MagicMock()
@@ -3811,12 +3834,8 @@ class TestEagleProposerSetInputsFirstPass:
         for attr in attrs_from_proposer:
             assert_attr_equal(attr, expected_proposer, proposer)
 
-    def test_set_inputs_first_pass_pcp_dcp_mixed(self):
-        """
-        Test Default pcp_dcp_mixed scenario
-        Just for coverage no reference value
-        Maybe rewrite considering the refactor of pcp-dcp
-        """
+    def test_set_inputs_first_pass_dcp(self):
+        """DCP preserves first-pass tensors and attaches DCP metadata."""
         num_speculative_tokens = 3
         block_size = BLOCK_SIZE
 
@@ -3829,7 +3848,8 @@ class TestEagleProposerSetInputsFirstPass:
         self.runner.input_batch.req_ids = req_ids
         # maybe not reasonable just to run test
         self.runner.logits_indices = torch.arange(12, dtype=torch.int32, device=self.device)
-        self.runner.pcp_manager.pcp_use_hybrid_attn = False
+        dcp_manager = MagicMock()
+        self.runner.dcp_manager = dcp_manager
 
         proposer, vllm_config = self._create_proposer(
             method="eagle",
@@ -3838,9 +3858,7 @@ class TestEagleProposerSetInputsFirstPass:
             runner=self.runner,
         )
 
-        proposer.pcp_size = 2
         proposer.dcp_size = 2
-        proposer.pcp_rank = 0
         proposer.needs_extra_input_slots = False
 
         num_decode_reqs = 2
@@ -3866,9 +3884,49 @@ class TestEagleProposerSetInputsFirstPass:
 
         next_token_ids = torch.tensor([100, 200, 300, 400], dtype=torch.int32, device=self.device)
 
-        target_hidden_states = torch.randn(18, proposer.hidden_size, dtype=proposer.dtype, device=self.device)
+        target_hidden_states = torch.randn(
+            sum(query_lens),
+            proposer.hidden_size,
+            dtype=proposer.dtype,
+            device=self.device,
+        )
 
         long_seq_metadata = MagicMock()
+        expected_token_indices = torch.tensor([2, 4, 8, 11], dtype=torch.int32, device=self.device)
+        expected_query_lens_d = torch.tensor([3, 2], dtype=torch.int32, device=self.device)
+        expected_ori_token_indices_to_sample = torch.tensor([2, 4, 8, 11], dtype=torch.int32, device=self.device)
+        expected_input_ids = torch.tensor(
+            [11, 12, 100, 21, 200, 31, 32, 33, 300, 41, 42, 400],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        expected_positions = target_positions
+        expected_hidden_states = target_hidden_states
+
+        def prepare_first_pass_inputs(**kwargs):
+            assert torch.equal(
+                kwargs["input_ids"],
+                torch.tensor(
+                    [11, 12, 100, 21, 200, 31, 32, 33, 300, 41, 42, 400],
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+            )
+            assert kwargs["common_attn_metadata"] is common_attn_metadata
+            assert kwargs["long_seq_metadata"] is long_seq_metadata
+            assert kwargs["req_scheduled_tokens"] == req_scheduled_tokens
+            assert kwargs["req_ids"] == req_ids
+            common_attn_metadata.context_parallel_metadata = long_seq_metadata
+            return DCPSpecDecodeFirstPassInputs(
+                num_tokens=12,
+                input_ids=expected_input_ids,
+                target_positions=expected_positions,
+                target_hidden_states=expected_hidden_states,
+                token_indices_to_sample=expected_token_indices,
+                long_seq_args=(expected_query_lens_d, expected_ori_token_indices_to_sample),
+            )
+
+        dcp_manager.prepare_spec_decode_first_pass_inputs.side_effect = prepare_first_pass_inputs
 
         out_num_tokens, out_token_indices, out_cad, (query_lens_d, ori_token_indices_to_sample) = (
             proposer.set_inputs_first_pass(
@@ -3887,24 +3945,19 @@ class TestEagleProposerSetInputsFirstPass:
         )
 
         # assert function computed outputs
-        assert out_num_tokens == 9
-        expected_token_indices = torch.tensor([2, 4, 10, 11], dtype=torch.int32, device=self.device)
+        assert out_num_tokens == 12
         assert torch.equal(out_token_indices, expected_token_indices)
+        dcp_manager.prepare_spec_decode_first_pass_inputs.assert_called_once()
 
         # assert query_lens_d and ori_token_indices_to_sample
-        expected_query_lens_d = torch.tensor([3, 2], dtype=torch.int32, device=self.device)
-        expected_ori_token_indices_to_sample = torch.tensor([2, 4, 8, 11], dtype=torch.int32, device=self.device)
         assert torch.equal(query_lens_d, expected_query_lens_d)
         assert torch.equal(ori_token_indices_to_sample, expected_ori_token_indices_to_sample)
 
         # assert proposer internal state
-        indices = torch.tensor([0, 1, 2, 6, 7, 10, 13, 14, 17], dtype=torch.long, device=self.device)
         expected_proposer = MagicMock()
-        expected_proposer.input_ids = torch.tensor(
-            [11, 12, 100, 21, 200, 31, 300, 41, 0], dtype=torch.int32, device=self.device
-        )
-        expected_proposer.positions = target_positions[:out_num_tokens]
-        expected_proposer.hidden_states = target_hidden_states[indices]
+        expected_proposer.input_ids = expected_input_ids
+        expected_proposer.positions = expected_positions
+        expected_proposer.hidden_states = expected_hidden_states
 
         attrs_from_proposer: list[str | tuple[str, Any, Any]] = [
             ("input_ids", None, slice(None, out_num_tokens)),
@@ -3914,23 +3967,7 @@ class TestEagleProposerSetInputsFirstPass:
         for attr in attrs_from_proposer:
             assert_attr_equal(attr, expected_proposer, proposer)
 
-        # assert metadata attributes modified by PCP logic
-        expected_metadata = MagicMock()
-        expected_metadata.num_actual_tokens = 9
-        expected_metadata.seq_lens = torch.tensor([10, 8, 2, 2], dtype=torch.int32, device=self.device)
-        expected_metadata.query_start_loc = torch.tensor([0, 3, 5, 7, 9], dtype=torch.int32, device=self.device)
-        expected_metadata.max_query_len = 4
-
-        attrs_from_metadata = [
-            "num_actual_tokens",
-            "seq_lens",
-            "query_start_loc",
-            "max_query_len",
-        ]
-        for attr in attrs_from_metadata:
-            assert_attr_equal(attr, expected_metadata, out_cad)
-
-        assert out_cad.prefill_context_parallel_metadata == long_seq_metadata
+        assert out_cad.context_parallel_metadata == long_seq_metadata
 
     def test_set_inputs_first_pass_parallel_drafting(self):
         """
@@ -3955,12 +3992,12 @@ class TestEagleProposerSetInputsFirstPass:
         Expected output layout:
         Request 0 (6 output slots = 4 - 1 + 3):
         - idx 0-2: shifted tokens [11, 12, 100]
-        - idx 3-4: parallel_drafting_tokens, is_masked=True
+        - idx 3-4: masked parallel drafting tokens
         - idx 5: padding_token, is_rejected=True
         Request 1 (6 output slots = 4 - 1 + 3):
         - idx 6-8: shifted tokens [21, 22, 23]
         - idx 9: bonus token 200
-        - idx 10-11: parallel_drafting_tokens, is_masked=True
+        - idx 10-11: masked parallel drafting tokens
         """
         num_speculative_tokens = 3
         block_size = BLOCK_SIZE
@@ -3975,6 +4012,9 @@ class TestEagleProposerSetInputsFirstPass:
 
         proposer.parallel_drafting_token_id = -2
         parallel_drafting_hs = proposer.parallel_drafting_hidden_state_tensor
+        assert parallel_drafting_hs is not None
+        # Production initializes this from the loaded drafter's mask hidden state.
+        parallel_drafting_hs.fill_(1.0)
 
         mock_kv_cache_spec = MagicMock()
         mock_kv_cache_spec.block_size = block_size
@@ -4212,182 +4252,6 @@ class TestEagleProposerSetInputsFirstPass:
             assert_attr_equal(attrition, expected_cad, out_cad)
 
 
-def _build_split_pcp_input_hybrid_inputs(req_scheduled_tokens: dict[str, int], hidden_size: int):
-    """Build input_ids and target_hidden_states where row i is filled with i.
-
-    Using the row index as the value makes it easy to assert which original
-    tokens survive the per-rank slice and which slots are padding.
-    """
-    total_tokens = sum(req_scheduled_tokens.values())
-    input_ids = torch.arange(total_tokens, dtype=torch.int32)
-    target_hidden_states = torch.arange(total_tokens, dtype=torch.float32).unsqueeze(-1).repeat(1, hidden_size)
-    return input_ids, target_hidden_states
-
-
-# yapf: disable
-@pytest.mark.parametrize(
-    "pcp_size, pcp_rank, req_scheduled_tokens, hidden_size,"
-    " expected_num_tokens, expected_input_ids, expected_hidden_first_col,"
-    " expected_seq_lens, expected_cu_num_tokens, expected_max_query_len",
-    [
-        # Case 1: single req, perfectly aligned to 2*pcp_size.
-        # ori=8, pcp=2 -> padded=8, pcp_tokens=4
-        # rank 0: [0,1,2,3], rank 1: [4,5,6,7]
-        (
-            2, 0, {"0": 8}, 4,
-            4, [0, 1, 2, 3], [0.0, 1.0, 2.0, 3.0],
-            [4], [0, 4], 4,
-        ),
-        (
-            2, 1, {"0": 8}, 4,
-            4, [4, 5, 6, 7], [4.0, 5.0, 6.0, 7.0],
-            [4], [0, 4], 4,
-        ),
-        # Case 2: single req, needs padding.
-        # ori=7, pcp=2 -> padded=8, pcp_tokens=4, num_pads=1
-        # rank 0: [0,1,2,3] (all valid)
-        # rank 1: [4,5,6,PAD] -> input_ids=[4,5,6,0], hidden_first_col=[4,5,6,0]
-        (
-            2, 0, {"0": 7}, 4,
-            4, [0, 1, 2, 3], [0.0, 1.0, 2.0, 3.0],
-            [4], [0, 4], 4,
-        ),
-        (
-            2, 1, {"0": 7}, 4,
-            4, [4, 5, 6, 0], [4.0, 5.0, 6.0, 0.0],
-            [4], [0, 4], 4,
-        ),
-        # Case 3: multiple reqs with different padding needs.
-        # req 0: ori=4 -> padded=4, pcp_tokens=2
-        # req 1: ori=6 -> padded=8, pcp_tokens=4, num_pads=2
-        # rank 0: [0,1] + [4,5,6,7]
-        # rank 1: [2,3] + [8,9,PAD,PAD]
-        (
-            2, 0, {"0": 4, "1": 6}, 2,
-            6, [0, 1, 4, 5, 6, 7], [0.0, 1.0, 4.0, 5.0, 6.0, 7.0],
-            [2, 4], [0, 2, 6], 4,
-        ),
-        (
-            2, 1, {"0": 4, "1": 6}, 2,
-            6, [2, 3, 8, 9, 0, 0], [2.0, 3.0, 8.0, 9.0, 0.0, 0.0],
-            [2, 4], [0, 2, 6], 4,
-        ),
-        # Case 4: pcp_size=4
-        # ori=9, pcp=4 -> padded=16, pcp_tokens=4, num_pads=7
-        # rank 0: tokens [0,1,2,3]
-        # rank 1: tokens [4,5,6,7]
-        # rank 2: tokens [8,PAD,PAD,PAD]
-        # rank 3: tokens [PAD,PAD,PAD,PAD]
-        (
-            4, 0, {"0": 9}, 2,
-            4, [0, 1, 2, 3], [0.0, 1.0, 2.0, 3.0],
-            [4], [0, 4], 4,
-        ),
-        (
-            4, 1, {"0": 9}, 2,
-            4, [4, 5, 6, 7], [4.0, 5.0, 6.0, 7.0],
-            [4], [0, 4], 4,
-        ),
-        (
-            4, 2, {"0": 9}, 2,
-            4, [8, 0, 0, 0], [8.0, 0.0, 0.0, 0.0],
-            [4], [0, 4], 4,
-        ),
-        (
-            4, 3, {"0": 9}, 2,
-            4, [0, 0, 0, 0], [0.0, 0.0, 0.0, 0.0],
-            [4], [0, 4], 4,
-        ),
-        # Case 5: minimal request - single token.
-        # ori=1, pcp=2 -> padded=4, pcp_tokens=2, num_pads=3
-        # rank 0: [0, PAD]
-        # rank 1: [PAD, PAD]
-        (
-            2, 0, {"0": 1}, 2,
-            2, [0, 0], [0.0, 0.0],
-            [2], [0, 2], 2,
-        ),
-        (
-            2, 1, {"0": 1}, 2,
-            2, [0, 0], [0.0, 0.0],
-            [2], [0, 2], 2,
-        ),
-    ],
-)
-# yapf: enable
-def test_split_pcp_input_hybrid(
-    pcp_size,
-    pcp_rank,
-    req_scheduled_tokens,
-    hidden_size,
-    expected_num_tokens,
-    expected_input_ids,
-    expected_hidden_first_col,
-    expected_seq_lens,
-    expected_cu_num_tokens,
-    expected_max_query_len,
-):
-    input_ids, target_hidden_states = _build_split_pcp_input_hybrid_inputs(
-        req_scheduled_tokens, hidden_size
-    )
-
-    # _split_pcp_input_hybrid only reads self.pcp_size and self.pcp_rank,
-    # so a MagicMock with just those attributes is enough to drive the
-    # unbound method without instantiating the full proposer.
-    mock_self = MagicMock()
-    mock_self.pcp_size = pcp_size
-    mock_self.pcp_rank = pcp_rank
-
-    (
-        num_tokens,
-        out_input_ids,
-        out_hidden_states,
-        max_query_len,
-        seq_lens,
-        cu_num_tokens,
-    ) = llm_base_proposer.AscendSpecDecodeBaseProposer._split_pcp_input_hybrid(
-        mock_self, req_scheduled_tokens, input_ids, target_hidden_states
-    )
-
-    assert num_tokens == expected_num_tokens
-    assert max_query_len == expected_max_query_len
-    assert torch.equal(
-        out_input_ids, torch.tensor(expected_input_ids, dtype=torch.int32)
-    )
-    assert torch.equal(seq_lens, torch.tensor(expected_seq_lens, dtype=torch.int32))
-    assert torch.equal(
-        cu_num_tokens, torch.tensor(expected_cu_num_tokens, dtype=torch.int64)
-    )
-
-    # hidden_states shape: [num_tokens, hidden_size]
-    assert out_hidden_states.shape == (expected_num_tokens, hidden_size)
-    assert torch.equal(
-        out_hidden_states[:, 0],
-        torch.tensor(expected_hidden_first_col, dtype=torch.float32),
-    )
-
-
-def test_split_pcp_input_hybrid_preserves_hidden_size():
-    """Hidden states must come back with the same hidden dim as the input."""
-    hidden_size = 7
-    req_scheduled_tokens = {"0": 6}
-    input_ids, target_hidden_states = _build_split_pcp_input_hybrid_inputs(
-        req_scheduled_tokens, hidden_size
-    )
-
-    mock_self = MagicMock()
-    mock_self.pcp_size = 2
-    mock_self.pcp_rank = 0
-
-    _, _, out_hidden_states, _, _, _ = (
-        llm_base_proposer.AscendSpecDecodeBaseProposer._split_pcp_input_hybrid(
-            mock_self, req_scheduled_tokens, input_ids, target_hidden_states
-        )
-    )
-
-    assert out_hidden_states.shape[1] == hidden_size
-
-
 class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
     """
     Unit tests for DeepSeek Sparse MLA MTP Layer's Top-K Index reuse feature (PR #10510)
@@ -4401,6 +4265,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock()
         self.device = torch.device("cpu")
         self.runner = MagicMock()
+        self.runner.dcp_manager = None
 
     def test_init_mtp_indices_flag(self):
         """Test whether index_share_for_mtp_iteration is correctly read in __init__."""

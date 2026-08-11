@@ -28,8 +28,6 @@ _server_cmd: &server_cmd
   - "--trust-remote-code"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "--additional-config"
-  - '{"weight_prefetch_config":{"enabled":true}}'
 
 _benchmarks: &benchmarks
   acc:

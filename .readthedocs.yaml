@@ -1,5 +1,16 @@
-# Read the Docs configuration file
-# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
+# Read the Docs configuration file (English + Chinese)
+#
+# Used by both the `vllm-ascend` and `vllm-ascend-cn` projects on
+# Read the Docs. The build entry point `tools/rtd_build.sh` auto-detects
+# Chinese mode from the RTD project slug and sets all DOCS_* env vars
+# required by mkdocs.yml's !ENV tags and docs/hooks/nav_titles.py.
+#
+# For the `vllm-ascend-cn` project, point the "Custom configuration
+# file" RTD setting to this file (or leave blank to use the default
+# `.readthedocs.yaml`). The Chinese build no longer has a separate
+# .readthedocs.zh.yaml.
+#
+# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details.
 
 version: 2
 
@@ -7,14 +18,30 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.12"
+  jobs:
+    post_checkout:
+      - git fetch origin main --unshallow --no-tags --filter=blob:none || true
+    pre_create_environment:
+      - pip install uv
+    create_environment:
+      - uv venv $READTHEDOCS_VIRTUALENV_PATH
+    install:
+      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r docs/requirements-docs.txt
+    pre_build:
+      # Generate model-code artifacts (pre-generated shell scripts for tutorials).
+      # Chinese source generation is handled inside rtd_build.sh.
+      - python tools/docs_codegen/cli.py || true
+    # Custom build command. rtd_build.sh writes mkdocs output to
+    # $READTHEDOCS_OUTPUT/html/ directly because the default mkdocs
+    # integration (which would move site/ there) is disabled by
+    # overriding build.jobs.build.html. See:
+    # https://docs.readthedocs.io/en/stable/build-customization.html#where-to-put-files
+    build:
+      html:
+        - bash tools/rtd_build.sh
 
-sphinx:
-  configuration: docs/source/conf.py
+mkdocs:
+  configuration: mkdocs.yml
   fail_on_warning: true
-# If using Sphinx, optionally build your docs in additional formats such as PDF
-formats: []
 
-# Optionally declare the Python requirements required to build your docs
-python:
-  install:
-    - requirements: docs/requirements-docs.txt
+formats: []

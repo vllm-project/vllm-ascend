@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
@@ -30,13 +30,7 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
     "stream resources are insufficient",
 )
-_STREAM_RESOURCE_GUIDANCE = (
-    "ACL graph capture failed with a known stream-resource exhaustion "
-    "signature. Consider upgrading to a newer HDK/CANN stack, reducing "
-    "cudagraph_capture_sizes, lowering max_cudagraph_capture_size, preferring "
-    "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
-    "temporarily disabling graph mode to confirm the failure is capture-related."
-)
+_OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -47,8 +41,9 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
     return has_stream_resource_marker or (has_error_code and "stream resource" in lowered_message)
 
 
-def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
-    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
 
 
 @dataclasses.dataclass
@@ -206,8 +201,22 @@ class ACLGraphWrapper:
                             # any other acl graph.
                             output = weak_ref_tensors(output)
                 except RuntimeError as exc:
-                    if _is_stream_resource_capture_error(exc):
-                        _raise_stream_resource_capture_error(exc)
+                    if _is_old_hdk_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with an old Ascend HDK/CANN stack "
+                            "signature (`Alloc sq cq fail`). Please upgrade Ascend HDK to "
+                            "25.5.1 or later and use the matching CANN stack.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
+                    elif _is_stream_resource_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with a known stream-resource exhaustion "
+                            "signature. Consider reducing cudagraph_capture_sizes, lowering "
+                            "max_cudagraph_capture_size, preferring FULL or FULL_DECODE_ONLY for "
+                            "mostly uniform decode workloads, or temporarily disabling graph mode "
+                            "to confirm the failure is capture-related.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
                     raise
 
             # here we always use weak ref for the workspaces
@@ -274,35 +283,17 @@ def update_full_graph_params(
     num_tokens,
     vllm_config,
     speculative_config=None,
-    num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
 ):
-    # vLLM 0.23 does not keep the config context active during execute_model.
-    # Backend selection may still consult it (for example, enable_cp()).
-    with set_current_vllm_config(vllm_config):
-        impl_cls = attn_backend.get_impl_cls()
-        impl_cls.update_graph_params(
-            update_stream,
-            forward_context,
-            num_tokens,
-            vllm_config,
-            speculative_config,
-            num_dcp_pcp_tokens,
-            draft_attn_metadatas,
-        )
-
-        from vllm_ascend.ops.gdn import update_conv1d_graph_params
-
-        # For GDN Attention: AscendC operate(conv1d update) update graph params
-        # No patch can be loaded, update method call is temporarily placed here
-        update_conv1d_graph_params(
-            update_stream,
-            forward_context,
-            num_tokens,
-            vllm_config,
-            _EXTRA_CTX.is_draft_model,
-            draft_attn_metadatas,
-        )
+    impl_cls = attn_backend.get_impl_cls()
+    impl_cls.update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config,
+        draft_attn_metadatas=draft_attn_metadatas,
+    )
 
 
 @dataclass
@@ -311,9 +302,6 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
-    conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
-    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
-    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
 
 
 _graph_params: GraphParams | None = None
@@ -326,9 +314,6 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     _graph_params = GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
     )
@@ -356,9 +341,6 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -382,9 +364,6 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     _draft_graph_prefill_params = GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
     )

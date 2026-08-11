@@ -32,23 +32,15 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    if vllm_version_is("0.23.0"):
-        with patch(
-            "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
-            return_value=False,
-        ):
-            yield
-    else:
-        with patch(
-            "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-            False,
-        ):
-            yield
+    with patch(
+        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
+        False,
+    ):
+        yield
 
 
 class MockCachedRequestState:
@@ -137,7 +129,6 @@ def test_proposer_initialization():
     device = torch.device("cpu")
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -162,7 +153,6 @@ def test_dummy_run_basic():
     device = torch.device("cpu")
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -196,7 +186,6 @@ def test_dummy_run_syncs_metadata_across_dp_as_draft_model():
     device = torch.device("cpu")
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -240,7 +229,6 @@ def test_prepare_next_token_ids_padded():
 
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -331,7 +319,6 @@ def _build_proposer_for_padding_test(data_parallel_size: int = 1):
 
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):

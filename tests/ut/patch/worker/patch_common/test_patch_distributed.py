@@ -285,6 +285,13 @@ def test_group_coordinator_is_patched(module_env):
     assert module_env.parallel_state_module.GroupCoordinator is module_env.module.GroupCoordinatorPatch
 
 
+def test_group_coordinator_preserves_backend_for_inherited_helpers(module_env):
+    coordinator = _make_group(module_env, backend="hccl")
+
+    assert coordinator.torch_distributed_backend == "hccl"
+    assert "make_sibling_device_group" not in type(coordinator).__dict__
+
+
 def test_same_hccl_group_reuses_device_pg_once(module_env):
     first = _make_group(
         module_env,

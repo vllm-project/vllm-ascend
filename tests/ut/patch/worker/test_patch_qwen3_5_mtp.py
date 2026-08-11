@@ -23,6 +23,7 @@ def test_qwen3_5_mtp_forward_uses_local_inputs_on_last_pp_rank():
     predictor.fc = MagicMock(side_effect=lambda x: x[:, :4] + x[:, 4:])
     layer0 = MagicMock(return_value=(torch.full((2, 4), 3.0), torch.full((2, 4), 4.0)))
     layer1 = MagicMock(return_value=(torch.full((2, 4), 5.0), torch.full((2, 4), 6.0)))
+    layer1.use_attn_reduce_scatter_for_moe = False
     predictor.layers = [layer0, layer1]
     predictor.norm = MagicMock(return_value=(torch.full((2, 4), 7.0), None))
 

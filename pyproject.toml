@@ -17,7 +17,10 @@ requires = [
     "psutil",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "transformers==5.5.4",
+    "transformers==5.14.1",
+    "torch-npu==2.10.0.post2",
+    "torch==2.10.0",
+    "torchvision",
     "wheel",
     "msgpack",
     "quart",
@@ -25,7 +28,8 @@ requires = [
     "xgrammar>=0.1.30",
     "fastapi<0.124.0",
     "compressed_tensors>=0.11.0",
-    "arctic-inference==0.1.1"
+    "arctic-inference==0.1.1",
+    "triton-ascend==3.2.1"
 ]
 build-backend = "setuptools.build_meta"
 
@@ -85,3 +89,9 @@ logger-objects = ["vllm.logger.logger"]
 
 [tool.ruff.format]
 docstring-code-format = true
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e_model: E2E test model identifier(s)",
+    "e2e_coverage: E2E test coverage dimensions (arch, feature, parallel, deploy, hardware, quantization, graph_mode)",
+]

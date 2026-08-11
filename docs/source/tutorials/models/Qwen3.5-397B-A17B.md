@@ -14,16 +14,16 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-:::{note}
-The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
-:::
+!!! note
+
+    The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Atlas 800 A3 (64G x 16) nodes or 4 Atlas 800 A2 (64G x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
-- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
+- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
+- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
 
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
 
@@ -35,18 +35,17 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas 800 A3.
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas 800 A3.
 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
-```{code-block} bash
-:substitutions:
+```bash
 
 # Update --device according to your device.
 # Atlas A2: /dev/davinci[0-7]
 # Atlas A3: /dev/davinci[0-15]
 # Download the model weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 docker run --rm \
@@ -88,13 +87,13 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving, and W8A8 deployment on 1 Atlas 800 A3 (64G x 16) node. The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving, and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
 
-Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64G x 16).
+Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64GB x 16).
 
 ```shell
 #!/bin/sh
@@ -153,7 +152,7 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 
 ### 5.2 Multi-Node Deployment with MP (Recommended)
 
-Multi-node MP deployment uses vLLM data parallelism across nodes and tensor parallelism within each node. It is recommended for the W8A8 model on 2 Atlas 800 A2 (64G x 8) nodes.
+Multi-node MP deployment uses vLLM data parallelism across nodes and tensor parallelism within each node. It is recommended for the W8A8 model on 2 Atlas 800 A2 (64GB x 8) nodes.
 
 Assume you have 2 Atlas 800 A2 nodes and want to deploy `Qwen3.5-397B-A17B-w8a8-mtp` across them. Replace `nic_name`, `local_ip`, and `node0_ip` with the actual network interface and IP addresses in your environment.
 
@@ -293,10 +292,10 @@ PD disaggregation separates Prefill and Decode into different service groups. Pr
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-Take Atlas 800 A3 (64G x 16) as an example. We recommend deploying 1P1D with 3 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
+Take Atlas 800 A3 (64GB x 16) as an example. We recommend deploying 1P1D with 3 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
 
-- 1 Prefill node: 1 Atlas 800 A3 (64G x 16).
-- 2 Decode nodes: 2 Atlas 800 A3 (64G x 16).
+- 1 Prefill node: 1 Atlas 800 A3 (64GB x 16).
+- 2 Decode nodes: 2 Atlas 800 A3 (64GB x 16).
 
 Deploy `run_p.sh`, `run_d0.sh`, and `run_d1.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
 
@@ -313,8 +312,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 export VLLM_ENGINE_READY_TIMEOUT_S=30000
 export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
@@ -358,7 +357,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
     "kv_role": "kv_producer",
     "kv_port": "23010",
     "kv_connector_extra_config": {
@@ -389,8 +388,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 # The value of node0_ip must be consistent with local_ip on the first decode node.
 node0_ip="xxxx"
@@ -439,7 +438,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --gpu-memory-utilization 0.96 \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
     "kv_buffer_device": "npu",
     "kv_role": "kv_consumer",
     "kv_port": "36010",
@@ -471,8 +470,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 # The value of node0_ip must be consistent with local_ip on the first decode node.
 node0_ip="xxxx"
@@ -521,7 +520,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --gpu-memory-utilization 0.96 \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
     "kv_buffer_device": "npu",
     "kv_role": "kv_consumer",
     "kv_port": "36010",
@@ -548,7 +547,7 @@ Common Issues Tip: If decode node 1 cannot join decode node 0, check that `--hea
 - `--data-parallel-address` and `--data-parallel-rpc-port` define the DP control plane. For decode nodes, the address must point to decode node 0.
 - `--max-num-batched-tokens` is larger on the prefill node and smaller on decode nodes because prefill is prompt-token intensive while decode is latency sensitive.
 - `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it only on decode nodes in PD mode.
-- `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
+- `--kv-transfer-config` sets the Mooncake V1 connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
 - `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` is the timeout in seconds for automatically releasing the prefiller KV cache for a request.
@@ -562,7 +561,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
 unset ftp_proxy
 unset https_proxy
 unset http_proxy
-python3 load_balance_proxy_layerwise_server_example.py \
+python3 load_balance_proxy_server_example.py \
   --prefiller-hosts 141.xx.xx.1 \
   --prefiller-ports 30060 \
   --decoder-hosts 141.xx.xx.2 141.xx.xx.3 \
@@ -693,7 +692,7 @@ Recommended tuning order:
 
 | Optimization | Enablement | Benefit | Notes |
 | ------------ | ---------- | ------- | ----- |
-| Rope optimization | Enabled by default | Reuses position encoding work across layers to reduce decode overhead. | No extra configuration is required. |
+| RoPE optimization | Enabled by default | Reuses position encoding work across layers to reduce decode overhead. | No extra configuration is required. |
 | AddRMSNormQuant fusion | Enabled by default | Fuses normalization and quantization to reduce memory access. | Applies to quantized paths. |
 | Zero-like elimination | Enabled by default | Removes unnecessary zero-like tensor operations in attention. | No extra configuration is required. |
 | Qwen3.5 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Improves decode throughput when acceptance rate is good. | Reduce speculative tokens if latency or stability regresses. |

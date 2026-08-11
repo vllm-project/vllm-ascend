@@ -14,8 +14,7 @@ from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendL
 
 
 class TestAscendLinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.method_adapters.enable_dsa_cp_with_layer_shard")
-    def setUp(self, mock_enable_dsa_cp_with_layer_shard):
+    def setUp(self):
         self.mock_scheme = MagicMock(spec=AscendLinearScheme)
         self.mock_scheme.get_weight.return_value = {
             "weight": torch.empty(128, 256, dtype=torch.int8),
@@ -184,9 +183,25 @@ class TestAscendFusedMoEMethod(TestBase):
     def test_apply_method(self):
         layer = torch.nn.Module()
         x = torch.randn(8, 64)
-        router_logits = torch.randn(8, 64)
-        top_k = 3
-        renormalize = True
+        topk_weights = torch.randn(8, 3)
+        topk_ids = torch.randint(0, 64, (8, 3), dtype=torch.int64)
         self.mock_scheme.apply.return_value = None
-        self.method.apply(layer, x, router_logits, top_k, renormalize)
+        self.method.apply(
+            layer,
+            x,
+            topk_weights,
+            topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
+        )
         self.mock_scheme.apply.assert_called_once()
+
+    def test_get_eplb_weight_views_delegates_to_moe_scheme(self):
+        layer = torch.nn.Module()
+        weight_views = [torch.randn(8, 16)]
+        self.mock_scheme.get_eplb_weight_views.return_value = weight_views
+
+        result = self.method.get_eplb_weight_views(layer)
+
+        self.assertIs(result, weight_views)
+        self.mock_scheme.get_eplb_weight_views.assert_called_once_with(layer)

@@ -164,7 +164,7 @@ def _try_collect_transferable_tensor(
     return True, False
 
 
-def _collect_transferable_tensors(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
+def _collect_processed_layout_tensors(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
     seen_data_ptrs: set[int] = set()
     collected_tensors: list[tuple[str, torch.Tensor]] = []
 
@@ -184,8 +184,7 @@ def _collect_transferable_tensors(model: nn.Module) -> list[tuple[str, torch.Ten
             collected_tensors,
         )
 
-    # Some Ascend post-load paths replace checkpoint parameters with runtime
-    # tensors stored as plain module attributes, e.g. MLA/SFA W_UV and W_UK_T.
+    # Post-load processing can replace checkpoint params with runtime tensors stored as direct attrs or inside `impl`.
     for module_prefix, module in model.named_modules():
         for attr_name, attr_value in vars(module).items():
             if attr_name.startswith("_") or isinstance(attr_value, nn.Module):
@@ -203,8 +202,48 @@ def _collect_transferable_tensors(model: nn.Module) -> list[tuple[str, torch.Ten
     return collected_tensors
 
 
-def _iter_transferable_tensors(model: nn.Module):
-    yield from _collect_transferable_tensors(model)
+def _collect_checkpoint_layout_tensors(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
+    seen_data_ptrs: set[int] = set()
+    collected_tensors: list[tuple[str, torch.Tensor]] = []
+
+    for name, tensor in model.named_parameters():
+        _try_collect_transferable_tensor(
+            name,
+            tensor,
+            seen_data_ptrs,
+            collected_tensors,
+        )
+
+    for name, tensor in model.named_buffers():
+        _try_collect_transferable_tensor(
+            name,
+            tensor,
+            seen_data_ptrs,
+            collected_tensors,
+        )
+
+    # Before post-load processing, only impl-stored runtime tensors supplement params/buffers.
+    for module_prefix, module in model.named_modules():
+        impl = getattr(module, "impl", None)
+        if impl is None or isinstance(impl, nn.Module):
+            continue
+
+        for tensor_name, tensor in _iter_tensors_in_value("impl", impl, set(), scan_objects=True):
+            full_name = f"{module_prefix}.{tensor_name}" if module_prefix else tensor_name
+            _try_collect_transferable_tensor(
+                full_name,
+                tensor,
+                seen_data_ptrs,
+                collected_tensors,
+            )
+    return collected_tensors
+
+
+def _iter_transferable_tensors(model: nn.Module, processed_layout: bool):
+    if processed_layout:
+        yield from _collect_processed_layout_tensors(model)
+    else:
+        yield from _collect_checkpoint_layout_tensors(model)
 
 
 def _block_contains_weight_ptr(address: int, size: int, sorted_weight_ptrs: list[int]) -> bool:
@@ -295,7 +334,7 @@ class RForkTransferBackend:
             raise RuntimeError("TransferEngine is not initialized.")
         return self.rfork_transfer_engine
 
-    def register_memory_region(self, model):
+    def register_memory_region(self, model, processed_layout: bool):
         transfer_engine = self._get_transfer_engine()
         start_reg_mr_time = time.perf_counter()
         self._registered_transferable_tensors = None
@@ -303,7 +342,7 @@ class RForkTransferBackend:
         weight_mr_dict = {}
         weight_shape_dict = {}
         weight_addr_set = set()
-        transferable_tensors = list(_iter_transferable_tensors(model))
+        transferable_tensors = list(_iter_transferable_tensors(model, processed_layout))
         for name, weight in transferable_tensors:
             weight_mr_dict[name] = (
                 weight.data_ptr(),
@@ -396,6 +435,7 @@ class RForkTransferBackend:
         seed_instance_ip,
         seed_instance_service_port,
         local_seed_key,
+        processed_layout: bool,
     ):
         transfer_engine = self._get_transfer_engine()
         seed_url = f"http://{seed_instance_ip}:{seed_instance_service_port}"
@@ -410,7 +450,7 @@ class RForkTransferBackend:
 
         transferable_tensors = getattr(self, "_registered_transferable_tensors", None)
         if transferable_tensors is None:
-            transferable_tensors = list(_iter_transferable_tensors(model))
+            transferable_tensors = list(_iter_transferable_tensors(model, processed_layout))
 
         seed_ptr_list = []
         client_ptr_list = []

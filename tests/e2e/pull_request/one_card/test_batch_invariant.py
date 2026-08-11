@@ -92,6 +92,16 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="piecewise",
+)
 @pytest.mark.timeout(1000)
 @pytest.mark.model(
     model_name=DEFAULT_MODEL,
@@ -200,6 +210,16 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
         )
 
 
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="piecewise",
+)
 @pytest.mark.model(
     model_name=DEFAULT_MODEL,
     max_num_seqs=144,
@@ -390,6 +410,16 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: 
         pytest.fail(msg)
 
 
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="piecewise",
+)
 @pytest.mark.model(
     model_name=DEFAULT_MODEL,
     max_num_seqs=144,
@@ -431,6 +461,16 @@ def test_simple_generation(vllm_runner, monkeypatch: pytest.MonkeyPatch):
     print(f"{'=' * 80}\n")
 
 
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="piecewise",
+)
 def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.MonkeyPatch):
     """
     This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.

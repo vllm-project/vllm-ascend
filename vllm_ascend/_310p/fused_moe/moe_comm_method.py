@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 
 from .moe_mlp import unified_apply_mlp
 from .token_dispatcher import TokenDispatcherWithAllGather310

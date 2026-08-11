@@ -1,6 +1,6 @@
 # Multi Node Test
 
-Multi-Node CI is designed to test distributed scenarios of very large models, eg: disaggregated_prefill multi DP across multi nodes and so on.
+Multi-Node CI is designed to test distributed scenarios of very large models, for example, disaggregated_prefill multi DP across multi nodes and so on.
 
 ## How it works
 
@@ -8,7 +8,7 @@ The following picture shows the basic deployment view of the multi-node CI mecha
 
 ![alt text](../../assets/deployment.png)
 
-From the workflow perspective, we can see how the final test script is executed, The key point is that the shared files `tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2` and `tests/e2e/nightly/multi_node/scripts/run.sh` define the cluster template and pod entry script. Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` selects the pytest entrypoint from the config path: internal DP configs use `internal_dp/scripts/test_multi_node.py`, while external DP configs use `external_dp/scripts/test_external_dp.py`.
+From the workflow perspective, we can see how the final test script is executed. The key point is that the shared files `tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2` and `tests/e2e/nightly/multi_node/scripts/run.sh` define the cluster template and pod entry script. Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` selects the pytest entrypoint from the config path: internal DP configs use `internal_dp/scripts/test_multi_node.py`, while external DP configs use `external_dp/scripts/test_external_dp.py`.
 
 ![alt text](../../assets/workflow.png)
 
@@ -16,7 +16,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 1. Upload custom weights
 
-   If you need customized weights, for example, you quantized a w8a8 weight for DeepSeek-V3 and you want your weight to run on CI, uploading weights to ModelScope's [vllm-ascend](https://www.modelscope.cn/organization/vllm-ascend) organization is welcome. If you do not have permission to upload, please contact @Potabk
+    If you need customized weights, for example, you quantized a w8a8 weight for DeepSeek-V3 and you want your weight to run on CI, uploading weights to ModelScope's [vllm-ascend](https://www.modelscope.cn/organization/vllm-ascend) organization is welcome. If you do not have permission to upload, please contact @Potabk
 
 2. Add config yaml
 
@@ -78,38 +78,38 @@ From the workflow perspective, we can see how the final test script is executed,
 
 Currently, the multi-node test workflow is defined in `.github/workflows/schedule_nightly_test_a3.yaml`.
 
-    ```yaml
-    multi-node-tests:
-      name: multi-node
-      if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-      strategy:
-        fail-fast: false
-        max-parallel: 1
-        matrix:
-          test_config:
-            - name: multi-node-deepseek-pd
-              config_file_path: DeepSeek-V3.yaml
-              size: 2
-            - name: multi-node-qwen3-dp
-              config_file_path: Qwen3-235B-A22B.yaml
-              size: 2
-            - name: GLM5_1-W8A8-EP-external
-              config_file_path: GLM5_1-W8A8-EP-external.yaml
-              config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
-              size: 4
-      uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-      with:
-        soc_version: a3
-        runner: linux-aarch64-a3-0
-        image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
-        replicas: 1
-        size: ${{ matrix.test_config.size }}
-        config_file_path: ${{ matrix.test_config.config_file_path }}
-        config_base_path: ${{ matrix.test_config.config_base_path || '' }}
-        name: ${{ matrix.test_config.name }}
-      secrets:
-        KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-    ```
+```yaml
+multi-node-tests:
+  name: multi-node
+  if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+  strategy:
+    fail-fast: false
+    max-parallel: 1
+    matrix:
+      test_config:
+        - name: multi-node-deepseek-pd
+          config_file_path: DeepSeek-V3.yaml
+          size: 2
+        - name: multi-node-qwen3-dp
+          config_file_path: Qwen3-235B-A22B.yaml
+          size: 2
+        - name: GLM5_1-W8A8-EP-external
+          config_file_path: GLM5_1-W8A8-EP-external.yaml
+          config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
+          size: 4
+  uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+  with:
+    soc_version: a3
+    runner: linux-aarch64-a3-0
+    image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+    replicas: 1
+    size: {% raw %}${{ matrix.test_config.size }}{% endraw %}
+    config_file_path: {% raw %}${{ matrix.test_config.config_file_path }}{% endraw %}
+    config_base_path: {% raw %}${{ matrix.test_config.config_base_path || '' }}{% endraw %}
+    name: {% raw %}${{ matrix.test_config.name }}{% endraw %}
+  secrets:
+    KUBECONFIG_B64: {% raw %}${{ secrets.KUBECONFIG_B64 }}{% endraw %}
+```
   
 The matrix above defines all the parameters required to add a multi-machine use
 case. The parameters worth noting are `size`, `config_file_path`, and

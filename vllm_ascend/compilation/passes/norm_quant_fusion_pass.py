@@ -23,11 +23,7 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.device.mxfp_compat import (
-    is_add_rms_norm_dynamic_mx_quant_fusion_available,
-    is_rms_norm_dynamic_mx_quant_fusion_available,
-)
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 
 class AddRMSNormQuantPattern(BasePattern):
@@ -655,6 +651,27 @@ class RMSNormDynamicMXQuantSPPattern(BasePattern):
         return replacement
 
 
+def _model_uses_w4a4_quant(vllm_config: VllmConfig | None) -> bool:
+    """Check whether the model uses W4A4 int4 quantization for any layer.
+
+    W4A4 int4 schemes (e.g. W4A4_DYNAMIC, W4A4_FLATQUANT_DYNAMIC)
+    are incompatible with the fuse_norm_quant optimization,
+    so callers use this to disable that fusion.
+    """
+    if vllm_config is None:
+        return False
+    quant_config = getattr(vllm_config, "quant_config", None)
+    if quant_config is None:
+        return False
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not quant_description:
+        return False
+    w4a4_int4_schemes = ["W4A4_DYNAMIC", "W4A4_FLATQUANT_DYNAMIC"]
+    return any(
+        isinstance(quant_type, str) and quant_type in w4a4_int4_schemes for quant_type in quant_description.values()
+    )
+
+
 class AddRMSNormQuantFusionPass(VllmInductorPass):
     """
     A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
@@ -669,27 +686,22 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             logger.debug("Quant fusion not enabled: unsupported dtype %s", dtype)
             return
 
-        dynamic_mx_quant_fusion_available = is_add_rms_norm_dynamic_mx_quant_fusion_available()
-        if not dynamic_mx_quant_fusion_available:
+        if _model_uses_w4a4_quant(vllm_config):
             logger.debug(
-                "AddRMSNormDynamicMXQuant fusion not enabled: required MX symbols unavailable, or device isn't A5"
+                "Quant fusion not enabled: the model contains "
+                "W4A4 quantized weights, which are incompatible with the "
+                "norm-quant fusion pass."
             )
-
-        rms_norm_dynamic_mx_quant_fusion_available = is_rms_norm_dynamic_mx_quant_fusion_available()
-        if not rms_norm_dynamic_mx_quant_fusion_available:
-            logger.debug(
-                "RMSNormDynamicMXQuant fusion not enabled: required MX symbols unavailable, or device isn't A5"
-            )
+            return
 
         common_epsilons = [1e-5, 1e-6]
 
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             AddRMSNormDynamicQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            if dynamic_mx_quant_fusion_available:
+            if get_ascend_device_type() == AscendDeviceType.A5:
                 AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormDynamicMXQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            if rms_norm_dynamic_mx_quant_fusion_available:
                 RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 RMSNormDynamicMXQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             if enable_custom_op():

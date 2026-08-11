@@ -43,27 +43,23 @@ public:
             .AutoContiguous();
         this->Input("queryStartLoc")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT64})
+            .DataTypeList({ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
         this->Input("cacheIndices")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT64})
+            .DataTypeList({ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
         this->Input("initialStateMode")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT64})
+            .DataTypeList({ge::DT_BOOL, ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
         this->Input("numAcceptedTokens")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT64})
+            .DataTypeList({ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
 
         this->Output("y")

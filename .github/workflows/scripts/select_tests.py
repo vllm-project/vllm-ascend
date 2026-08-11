@@ -43,6 +43,12 @@ Test-only optimization:
   the broad regression triggered by ``optional: false`` modules when the
   intent of the PR is purely to add or adjust tests.
 
+Bisect-tool optimization:
+  If a PR is scoped to ``tools/bisect`` and its paired UT/config/format files,
+  the always-on modules are skipped and only modules whose dependencies match
+  the changed files are selected. This keeps maintenance-only tool changes
+  from triggering the full CPU and NPU regression suite.
+
 Routing is driven by ``test_config.yaml`` ``runner_mapping:`` (regex patterns).
 Partition sizing by ``partition:`` config block.
 See ``test_config.yaml`` for details.
@@ -72,6 +78,7 @@ class NpuType(str, Enum):
     A2 = "a2"
     A3 = "a3"
     _310P = "310p"
+    A5 = "a5"
     CPU = "cpu"
 
 
@@ -81,6 +88,7 @@ class RunnerInfo:
     npu_type: NpuType
     label: str
     image_tag: str = ""
+    csrc_cache_target: str = ""
 
 
 RunnerKey = tuple[int, NpuType]
@@ -89,6 +97,15 @@ _DEFAULT_KEY: RunnerKey = (0, NpuType.CPU)
 # The always-on CPU UT module. In test-only changes, only this module
 # is selected for UT runs (along with the changed test files).
 DEFAULT_CPU_UT_MODULE = "default_cpu_ut"
+
+_BISECT_TOOL_ROOTS = ("tools/bisect", "tests/ut/tools/bisect")
+_BISECT_TOOL_SUPPORT_FILES = {
+    ".github/workflows/scripts/select_tests.py",
+    ".github/workflows/scripts/test_config.yaml",
+    ".github/workflows/scripts/test_select_tests.py",
+    "csrc/build.sh",
+    "tests/ut/tools/__init__.py",
+}
 
 # Populated by _load_runner_mapping(). Ordered list of (regex, {key: RunnerKey}).
 _RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, RunnerKey]]] = []
@@ -175,6 +192,7 @@ def _load_runners() -> list[RunnerInfo]:
             npu_type=NpuType(info["chip"]),
             label=label,
             image_tag=info.get("image_tag", ""),
+            csrc_cache_target=info.get("csrc_cache_target", ""),
         )
         for label, info in raw.items()
     ]
@@ -249,12 +267,14 @@ def _resolve_config_inheritance(config: list[dict]) -> list[dict]:
 def _match_modules(
     changed_files: list[str],
     config: list[dict],
+    *,
+    include_always: bool = True,
 ) -> list[str]:
     if not changed_files:
         return []
     matched: list[str] = []
     for module in config:
-        if not module.get("optional", True):
+        if include_always and not module.get("optional", True):
             matched.append(module["name"])
             continue
         deps = module.get("source_file_dependencies", [])
@@ -346,6 +366,20 @@ def _is_test_only_change(changed_files: list[str]) -> bool:
     ``default_cpu_ut`` module) need to run.
     """
     return bool(changed_files) and all(_is_test_path(f) for f in changed_files)
+
+
+def _is_bisect_tool_scoped_path(file_path: str) -> bool:
+    return file_path in _BISECT_TOOL_SUPPORT_FILES or any(
+        _matches_path_dependency(file_path, root) for root in _BISECT_TOOL_ROOTS
+    )
+
+
+def _is_bisect_tool_scoped_change(changed_files: list[str]) -> bool:
+    return (
+        bool(changed_files)
+        and any(_matches_path_dependency(f, root) for f in changed_files for root in _BISECT_TOOL_ROOTS)
+        and all(_is_bisect_tool_scoped_path(f) for f in changed_files)
+    )
 
 
 def _scan_ut_test_dir(
@@ -561,6 +595,8 @@ def _build_test_group(
     }
     if runner.image_tag:
         group["image_tag"] = runner.image_tag
+    if runner.csrc_cache_target:
+        group["csrc_cache_target"] = runner.csrc_cache_target
     return group
 
 
@@ -623,10 +659,12 @@ def _write_output(
 ) -> None:
     has_tests = len(test_groups) > 0
     groups_json = json.dumps(test_groups, separators=(",", ":"))
+    cache_target_ids = sorted({group["csrc_cache_target"] for group in test_groups if group.get("csrc_cache_target")})
 
     outputs = {
         "test_groups": groups_json,
         "has_tests": str(has_tests).lower(),
+        "csrc_cache_target_ids": json.dumps(cache_target_ids, separators=(",", ":")),
         "matched_modules": ",".join(matched_modules),
     }
 
@@ -706,7 +744,18 @@ def main():
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
     )
-
+    parser.add_argument(
+        "--modules",
+        type=str,
+        default=None,
+        help="Force-select specific modules (comma-separated), bypassing file-change matching",
+    )
+    parser.add_argument(
+        "--runner-override",
+        type=str,
+        default=None,
+        help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
+    )
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
@@ -731,8 +780,14 @@ def main():
             _scan_e2e_test_dir(path, all_groups)
     else:
         changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
+        bisect_tool_scoped_change = _is_bisect_tool_scoped_change(changed_files)
         test_only_change = _is_test_only_change(changed_files)
-        if test_only_change:
+        if bisect_tool_scoped_change:
+            print(
+                "Detected bisect tool-scoped change: running only matching tool modules (skipping always-on modules).",
+                file=sys.stderr,
+            )
+        elif test_only_change:
             print(
                 "Detected test-only change: running only default_cpu_ut"
                 " and the changed test files (skipping source-driven modules).",
@@ -740,6 +795,20 @@ def main():
             )
         if args.run_all_modules:
             matched_modules = [module["name"] for module in config]
+        elif args.modules:
+            requested = set(args.modules.split(","))
+            available = {m["name"] for m in config}
+            missing = requested - available
+            if missing:
+                print(
+                    f"ERROR: unknown module(s): {', '.join(sorted(missing))}. "
+                    f"Available: {', '.join(sorted(available))}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            matched_modules = sorted(requested)
+        elif bisect_tool_scoped_change:
+            matched_modules = _match_modules(changed_files, config, include_always=False)
         elif test_only_change:
             matched_modules = [m["name"] for m in config if m["name"] == DEFAULT_CPU_UT_MODULE]
         else:
@@ -796,6 +865,16 @@ def main():
                         all_groups[key].append(f)
 
         _dedup_groups(all_groups)
+
+    if args.runner_override:
+        override_key = _parse_runner_key(args.runner_override)
+        overridden: dict[RunnerKey, list[str]] = {}
+        for (num_npus, npu_type), tests in all_groups.items():
+            if npu_type == NpuType.CPU:
+                overridden[(num_npus, npu_type)] = tests
+            else:
+                overridden.setdefault(override_key, []).extend(tests)
+        all_groups = overridden
 
     if skip_tests:
         for key in list(all_groups.keys()):

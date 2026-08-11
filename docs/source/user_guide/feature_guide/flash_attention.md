@@ -1,9 +1,9 @@
 # Flash Attention 3
 
-```{note}
-Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
-Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu) for more details.
-```
+!!! note
+
+    Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
+    Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu) for more details.
 
 This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend. FA3 provides a training-inference consistent attention implementation for Ascend NPUs.
 
@@ -44,7 +44,7 @@ The `flash_attn_with_kvcache` interface on NPU is semantically consistent with t
 
 ## Hardware Requirements
 
-FA3 currently requires Ascend Atlas A2 and A3 inference products NPUs.
+FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.
 We will support other NPUs in the future.
 
 ## Software Requirements
@@ -53,7 +53,7 @@ FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_npu_v3
 
 ### Installation
 
-Install the `flash_attn_npu` wheel package refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
+To install the `flash_attn_npu` wheel package, refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
 
 ## Enabling Flash Attention 3
 
@@ -142,9 +142,9 @@ for output in outputs:
 - **FP8 quantization not supported**: FA3 does not support FP8 quantized attention.
 - **MLA and SFA not supported**: FA3 does not support Multi-head Latent Attention (MLA) or Sparse Flash Attention (SFA).
 
-```{note}
-Enabling FA3 may cause performance degradation compared to the default FIA backend. This trade-off is intentional to guarantee training-inference consistency.
-```
+!!! note
+
+    Enabling FA3 may cause performance degradation compared to the default FIA backend. This trade-off is intentional to guarantee training-inference consistency.
 
 ## Tested Models
 

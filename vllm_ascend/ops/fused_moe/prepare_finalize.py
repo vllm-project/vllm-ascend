@@ -26,15 +26,13 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
+from vllm_ascend.lora.fused_moe import prepare_lora_indices
+from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import enable_sp, enable_sp_by_pass, npu_stream_switch
+from vllm_ascend.utils import enable_sp, enable_sp_by_pass
 
 
 class PrepareAndFinalize(ABC):
@@ -49,14 +47,12 @@ class PrepareAndFinalize(ABC):
                                      sizes, ranks, and communication settings.
     """
 
-    quant_stream: torch.npu.Stream | None = None
-
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
-        ascend_config = get_ascend_config()
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
-        if self.multistream_overlap_gate and PrepareAndFinalize.quant_stream is None:
-            PrepareAndFinalize.quant_stream = torch.npu.Stream()
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @abstractmethod
     def prepare(
@@ -155,6 +151,14 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         if not (self.replace_allreduce or self.enable_shared_expert_dp):
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
+            if self.lora_context is not None:
+                prepare_lora_indices(
+                    self.lora_context,
+                    num_tokens=self.num_tokens,
+                    pad_size=pad_size,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                )
 
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
@@ -306,8 +310,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         input_ids,
     ):
         if not self.replace_allreduce:
-            forward_context = get_forward_context()
-            target_pad_length = forward_context.padded_num_tokens
+            target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
             if pad_size > 0 and not self.enable_shared_expert_dp:
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
@@ -340,6 +343,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     TP AG → Attn → TP RS → EP AG → MoE → EP RS
     """
 
+    def _use_ep_sequence_parallel(self) -> bool:
+        """Whether MoE itself must use the EP sequence-parallel path.
+
+        ``enable_sp_by_pass`` enables the compilation pass, which already
+        inserts a TP reduce-scatter/all-gather pair around RMSNorm.  It does
+        not mean that the MoE configuration owns sequence-parallel tokens.
+        When the MoE config has ``sp_size == 1``, selecting the EP path here
+        would gather the tokens a second time before routing.
+        """
+        return enable_sp() or (enable_sp_by_pass() and self.moe_config.is_sequence_parallel)
+
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -355,7 +369,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
-        if enable_sp() or enable_sp_by_pass():
+        if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
         return self._prepare_with_dp_group(hidden_states, router_logits, enable_shared_expert_dp, replace_allreduce)
@@ -366,26 +380,21 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        elif quant_type in (QuantType.MXFP8, QuantType.W4A8MXFP):
+        elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
-                dst_type=torch.float8_e4m3fn,scale_alg=1
+                dst_type=torch.float8_e4m3fn,
+                scale_alg=1,
             )
-        elif quant_type == QuantType.MXFP4:
+        elif quant_type == QuantType.W4A4MXFP:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch_npu.float4_e2m1fn_x2,
                 round_mode="round",
             )
 
-        if self.multistream_overlap_gate:
-            assert PrepareAndFinalize.quant_stream is not None
-            PrepareAndFinalize.quant_stream.wait_stream(torch.npu.current_stream())
-            with npu_stream_switch(PrepareAndFinalize.quant_stream, enabled=self.multistream_overlap_gate):
-                hidden_states = fc3_all_gather_and_maybe_unpad_impl(hidden_states)
-        else:
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
-            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True, True)
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
+        router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True, True)
 
         # TODO(fuzhihong): To adapt to self.num_token in the all_gather_input_id_with_dp_group method,
         #  when flashcomm1 is used and dp = N(N >=2).
@@ -393,9 +402,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         if pertoken_scale is not None:
             pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale, True, True)
-
-        if self.multistream_overlap_gate:
-            torch.npu.current_stream().wait_stream(PrepareAndFinalize.quant_stream)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -505,7 +511,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             Tensor with shape [local_num_tokens, hidden_size]
         """
-        if enable_sp() or enable_sp_by_pass():
+        if self._use_ep_sequence_parallel():
             return self._finalize_with_ep_group(hidden_states)
 
         return self._finalize_with_dp_group(hidden_states, reduce_results)
@@ -538,11 +544,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             Tensor with shape [original_local_num_tokens, hidden_size]
         """
-        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
-            hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
-            hidden_states = hidden_states[: self.num_tokens]
-
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
             hidden_states = hidden_states[: self.num_tokens_pcp]
+
+        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
+            hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
+            hidden_states = hidden_states[: self.num_tokens]
         return hidden_states

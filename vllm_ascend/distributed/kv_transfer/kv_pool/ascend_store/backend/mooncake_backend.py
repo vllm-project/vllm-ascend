@@ -78,7 +78,7 @@ class MooncakeBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -187,9 +187,9 @@ class MooncakeBackend(Backend):
         return self.store.batch_is_exist(keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        self.ensure_initialized()
+        assert self.store is not None
         try:
-            self._ensure_initialized()
-            assert self.store is not None
             config = ReplicateConfig()
             if self.config.preferred_segment:
                 config.preferred_segment = self.local_seg
@@ -210,16 +210,13 @@ class MooncakeBackend(Backend):
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put %d keys out of %d. Check store state and memory.",
+                "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
                 len(keys),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                keys,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to put key details. keys=%s", keys)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
@@ -259,16 +256,13 @@ class MooncakeBackend(Backend):
             return res_list
         except Exception as e:
             logger.error(
-                "Failed to get %d keys out of %d. Check store state and network.",
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
                 len(keys),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to get key details. keys=%s, type=%s, error=%s",
-                keys,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to get key details. keys=%s", keys)
             return None
 
 

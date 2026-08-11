@@ -9,7 +9,7 @@ namespace vllm_ascend {
 
 at::Tensor npu_sparse_attention_score_prefill(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
-    const at::Tensor &block_table, 
+    const at::Tensor &block_table,
     const at::Tensor &k2q_row_ptr,
     const at::Tensor &k2q_q_indices,
     const at::Tensor &k2q_slot_indices,
@@ -33,8 +33,8 @@ at::Tensor npu_sparse_attention_score_prefill(
         key,
         value,
         block_table,
-        k2q_row_ptr, 
-        k2q_q_indices, 
+        k2q_row_ptr,
+        k2q_q_indices,
         k2q_slot_indices,
         actual_seq_lengths,
         actual_seq_lengths_kv,
@@ -47,6 +47,6 @@ at::Tensor npu_sparse_attention_score_prefill(
     );
 
     return output;
-}    
+}
 }
 #endif

@@ -10,7 +10,7 @@ This document describes the main verification steps of the model, including supp
 
 ### Model Weight
 
-`Minitron-8B-Base`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs). [Download model weight](https://www.modelscope.cn/models/nv-community/Minitron-8B-Base)
+`Minitron-8B-Base`(BF16 version): requires 1 Ascend 910B (with 1 x 64GB NPUs). [Download model weight](https://www.modelscope.cn/models/nv-community/Minitron-8B-Base)
 
 It is recommended to place the model weight in a shared cache directory, such as `/root/.cache/` or a local model path like `/data/vllm-workspace/models/Minitron-8B-Base`.
 
@@ -21,7 +21,7 @@ It is recommended to place the model weight in a shared cache directory, such as
 You can use the official docker image for deployment:
 
 ```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
   --name vllm-ascend \
   --shm-size=1g \

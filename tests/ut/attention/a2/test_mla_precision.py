@@ -184,13 +184,6 @@ def run_mla_attention_backend(
     mock_tp_group.world_size = 1
     mock_tp_group.rank = 0
 
-    mock_weight_prefetch = MagicMock()
-    mock_weight_prefetch.maybe_prefetch_mla_or_sla_weight_in_current_stream = MagicMock()
-
-    import vllm_ascend.utils as utils_module
-
-    original_weight_prefetch = utils_module._WEIGHT_PREFETCH_METHOD
-    utils_module._WEIGHT_PREFETCH_METHOD = mock_weight_prefetch
     try:
         with patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_tp_group):
             num_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
@@ -273,7 +266,7 @@ def run_mla_attention_backend(
             output = torch.empty_like(hidden_states)
             output = impl.forward("layer_0", hidden_states, kv_cache, attn_metadata, output=output)
     finally:
-        utils_module._WEIGHT_PREFETCH_METHOD = original_weight_prefetch
+        pass
 
     return output, impl
 

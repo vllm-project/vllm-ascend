@@ -1,27 +1,36 @@
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
-import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionImplBase,
+    AttentionMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.abstract import DSAAttentionImpl
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    maybe_save_kv_layer_to_connector,
+    notify_kv_cache_written,
+    split_decodes_and_prefills,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_otp_group
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
@@ -121,75 +130,12 @@ def _is_w8a8_dynamic(linear) -> bool:
     return isinstance(inner, AscendW8A8DynamicLinearMethod)
 
 
-def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
-    """
-    Pads a ragged/packed tensor into fixed-size blocks.
-
-    Args:
-        x: Input tensor of shape [t, n, d] where t = sum(length_list).
-        length_list: Tensor of shape [bs] containing valid sequence lengths.
-        block_size: The size of each block (default 128).
-
-    Returns:
-        padded_blocks: Tensor of shape [total_blocks, block_size, n, d].
-    """
-    # 1. Validation
-    if x.shape[0] != length_list.sum():
-        raise ValueError(f"Input dimension 0 ({x.shape[0]}) does not match sum of length_list ({length_list.sum()})")
-
-    bs = length_list.shape[0]
-    n, d = x.shape[1], x.shape[2]
-
-    # 2. Calculate how many blocks are needed for each request
-    # Formula: ceil(length / block_size) -> (length + block_size - 1) // block_size
-    blocks_per_req = (length_list + block_size - 1) // block_size
-    total_blocks = blocks_per_req.sum() + 1
-
-    # 3. Allocate output tensor with zeros (this handles the padding automatically)
-    # Shape: [total_blocks, block_size, n, d]
-    out = torch.zeros((total_blocks, block_size, n, d), dtype=x.dtype, device=x.device)
-
-    # 4. Fill data
-    input_offset = 0
-    block_offset = 1
-
-    for i in range(bs):
-        length = length_list[i]
-        num_blocks = blocks_per_req[i]
-
-        if length > 0:
-            # Slice the valid data for this request from the packed input
-            # Shape: [length, n, d]
-            req_data = x[input_offset : input_offset + length]
-
-            # Select the assigned blocks in the output
-            # Shape: [num_blocks, block_size, n, d]
-            target_blocks = out[block_offset : block_offset + num_blocks]
-
-            # View as a flat sequence to easily copy the data
-            # Shape: [num_blocks * block_size, n, d]
-            target_flat = target_blocks.view(-1, n, d)
-
-            # Copy valid data into the beginning of the allocated blocks
-            # The rest remains zeros
-            target_flat[:length] = req_data
-
-        # Update pointers
-        input_offset += length
-        block_offset += num_blocks
-
-    return out
-
-
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
     def get_name() -> str:
-        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
-        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
-        # rectify this when vllm disable the assertion.
-        return "ASCEND_DSA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
+        return "ASCEND_DSA"
 
     @staticmethod
     def get_builder_cls():
@@ -202,7 +148,13 @@ class AscendDSABackend(AttentionBackend):
         return AscendDSAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int) -> tuple[int, ...]:
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
 
     @staticmethod
@@ -210,7 +162,7 @@ class AscendDSABackend(AttentionBackend):
         return num_blocks, block_size, scale_size
 
     @staticmethod
-    def get_impl_cls() -> type["DSAAttentionImpl"]:
+    def get_impl_cls() -> type[AttentionImplBase[Any]]:
         from vllm_ascend.utils import enable_dsa_cp
 
         if enable_dsa_cp():
@@ -251,6 +203,9 @@ class AscendDSAPrefillMetadata:
     qli_metadata: torch.Tensor = None
     cu_c4_cmp_seqlen_list: torch.Tensor = None
     cu_c128_cmp_seqlen_list: torch.Tensor = None
+    ori_win_left: int | None = None
+    ori_win_right: int | None = None
+    dspark_swa_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -281,6 +236,9 @@ class AscendDSADecodeMetadata:
     num_reqs_actual: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
+    ori_win_left: int | None = None
+    ori_win_right: int | None = None
+    dspark_swa_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -322,22 +280,8 @@ class AscendDSAMetadata:
 
     start_pos: torch.Tensor | None = None
 
-    def __post_init__(self):
-        pass
-
 
 DSAMetadataList: TypeAlias = list[AscendDSAMetadata]
-DSAPrepareResult: TypeAlias = tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    AscendDSAMetadata,
-    bool,
-]
 
 
 def _require_prefill_metadata(metadata: AscendDSAMetadata) -> AscendDSAPrefillMetadata:
@@ -348,6 +292,69 @@ def _require_prefill_metadata(metadata: AscendDSAMetadata) -> AscendDSAPrefillMe
 def _require_decode_metadata(metadata: AscendDSAMetadata) -> AscendDSADecodeMetadata:
     assert metadata.decode is not None
     return metadata.decode
+
+
+def get_dspark_sparse_sas_window(vllm_config: Any) -> tuple[int, int]:
+    hf_config = vllm_config.model_config.hf_config
+    window_size = int(hf_config.sliding_window)
+    block_size = vllm_config.speculative_config.num_speculative_tokens
+    return window_size + block_size - 1, 0
+
+
+def _aligned_dspark_index_width(window_size: int, block_size: int, alignment: int = 128) -> int:
+    min_width = int(window_size) + int(block_size)
+    return ((min_width + alignment - 1) // alignment) * alignment
+
+
+def build_dspark_swa_indices(
+    block_table: torch.Tensor,
+    num_speculative_tokens: int,
+    window_size: int,
+    block_size: int,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_decode_tokens: int | None = None,
+    index_width: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build DSpark non-causal visible slot ids for a paged SWA cache.
+
+    Each token in a draft block sees the trailing context window plus the
+    whole current draft block. Invalid/paddedrows get lens=0 and -1 slots.
+    """
+    if index_width is None:
+        index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
+    min_width = int(window_size) + int(num_speculative_tokens)
+    if index_width < min_width:
+        raise ValueError(
+            "DSpark SWA index_width must cover window_size + block_size: "
+            f"index_width={index_width}, required={min_width}"
+        )
+    if query_start_loc is None or seq_lens is None:
+        raise ValueError("DSpark SWA query_start_loc and seq_lens must both be provided")
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    prefix_lens = seq_lens - query_lens
+    start_pos = (prefix_lens - int(window_size)).clamp(min=0)
+    visible_lens = seq_lens - start_pos
+
+    # Per-request visible-position grid [req_count, index_width]. Columns
+    # j >= visible_len are out of range and masked to -1 below.
+    cols = torch.arange(index_width, device=start_pos.device)
+    col_mask = cols[None, :] < visible_lens[:, None]
+    pos = start_pos[:, None] + cols[None, :]
+    block_nums = pos // block_size
+    # Clamp to valid block-table columns so gather never goes OOB on the
+    # out-of-range columns (their results are discarded by col_mask anyway).
+    safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
+    block_offsets = pos % block_size
+    block_ids = torch.gather(block_table, 1, safe_nums)
+    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
+
+    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
+    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+
+    return per_token_slots, per_token_lens
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
@@ -381,9 +388,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.model_config = vllm_config.model_config
         self.device = device
         scheduler_config = vllm_config.scheduler_config
-        # self.block_size = vllm_config.cache_config.block_size
-        self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
-
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
@@ -408,24 +412,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
 
         self.reorder_batch_threshold = self.decode_threshold
-        self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
-
-        self.cu_seq_lens_cpu: torch.Tensor = None
         self.num_decodes = 0
         self.num_prefills = 0
         self.num_decode_tokens = 0
         self.num_prefill_tokens = 0
-        self.context_lens_cpu: torch.Tensor = None
         self.num_actual_tokens: int | None = None
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
         self.graph_pad_size = 0
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
-
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         hf_config = self.model_config.hf_config
 
@@ -556,7 +552,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata")
         assert self.prefill_ratio_to_sas_metadata is not None
         assert self.decode_ratio_to_sas_metadata is not None
-        self.block_size = kwargs.get("block_size", 128)
+        self.block_size = kwargs.get("block_size", self.kv_cache_spec.block_size)
 
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert self.common_ratio_to_sas_metadata is not None
@@ -602,7 +598,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
             self.query_lens = self.common_ratio_to_sas_metadata["query_lens"]
 
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
 
@@ -1104,6 +1099,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSADecodeMetadata:
         assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
+        # DSpark drafting operates on the paged SWA cache, whose block size is the
+        # kv_cache_spec block size passed by the proposer (== swa_cache_layer.block_size),
+        # NOT this builder's default MLA block size (128). Honor the kwarg so the
+        # slot_mapping / dspark_swa_indices geometry matches the real cache layout.
+        self.block_size = kwargs.get("block_size", self.block_size)
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata, decode_threshold=self.decode_threshold
         )
@@ -1183,8 +1183,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
-        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
+        assert num_prefill_tokens is not None
+        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start : tokens_start + num_prefill_tokens]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
+        dspark_swa_indices = None
+        ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -1203,8 +1206,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             batch_size=len(seq_lens),
             cmp_ratio=1,
             ori_mask_mode=4,
-            ori_win_left=self.model_config.hf_config.sliding_window - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
             layout_q="TND",
             layout_kv="PA_ND",
             has_ori_kv=True,
@@ -1230,6 +1233,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=None,
             cu_c4_cmp_seqlen_list=None,
             cu_c128_cmp_seqlen_list=None,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            dspark_swa_indices=dspark_swa_indices,
         )
 
     def build_decode_metadata_for_drafting(
@@ -1264,7 +1270,22 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
 
         slot_mapping = self.spec_slot_mapping[draft_index - 1][:num_decode_tokens_typed]  # type: ignore[index]
+        dspark_swa_indices = None
+        ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         block_table = common_attn_metadata.block_table_tensor
+        if not common_attn_metadata.causal:
+            assert num_decodes is not None
+            dspark_swa_indices, _ = build_dspark_swa_indices(
+                block_table[:num_decodes],
+                self.speculative_config.num_speculative_tokens,
+                self.model_config.hf_config.sliding_window,
+                self.block_size,
+                query_start_loc[: num_decodes + 1],
+                seq_lens[:num_decodes],
+                num_decode_tokens,
+            )
+            dspark_swa_indices = dspark_swa_indices[:num_decode_tokens_typed]
+            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -1285,8 +1306,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio=1,
             ori_mask_mode=4,
             cmp_mask_mode=3,
-            ori_win_left=self.model_config.hf_config.sliding_window - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
             layout_q="TND",
             layout_kv="PA_ND",
             has_ori_kv=True,
@@ -1315,6 +1336,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             start_pos=None,
             sas_metadata=decode_sas_metadata,
             qli_metadata=None,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            dspark_swa_indices=dspark_swa_indices,
         )
         return decode_metadata
 
@@ -1350,7 +1374,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return attn_metadata
 
 
-class AscendDSAImpl(DSAAttentionImpl):
+class AscendDSAImpl(AttentionImplBase[Any]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -1422,8 +1446,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             self.weights_proj = self.indexer.weights_proj
             self.indexer_softmax_scale = self.inderxer_dim**-0.5
 
-            self.indexer_compress = self.indexer.compressor
-
             # indexer_compressor
             self.indexcom_ape = self.indexer.compressor.ape
             self.indexcom_wkv = self.indexer.compressor.wkv
@@ -1436,9 +1458,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # compress param
         if self.compressor is not None:
-            self.compressor_head_dim = self.compressor.head_dim
             self.compressor_overlap = self.compressor.overlap
-            self.compressor_rotate = self.compressor.rotate
 
             self.compressor_ape = self.compressor.ape
             self.compressor_wkv = self.compressor.wkv
@@ -1464,7 +1484,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         # dsa does not need to update graph params
@@ -1655,7 +1674,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             output[...] = self.wo_b(o_proj_input)
         return output
 
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
@@ -1666,8 +1685,11 @@ class AscendDSAImpl(DSAAttentionImpl):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         output_padded = output
-        forward_context = get_forward_context()
-        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
+        o_proj_input_shape = (
+            _EXTRA_CTX.num_tokens,
+            self.n_local_heads,
+            self.head_dim,
+        )
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
@@ -1692,6 +1714,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
+        wait_for_kv_layer_from_connector(layer_name)
         if has_prefill:
             assert attn_metadata[0].prefill is not None
             output_prefill = self._forward_prefill(
@@ -1701,16 +1724,10 @@ class AscendDSAImpl(DSAAttentionImpl):
                 attn_metadata,
             )  # type: ignore[arg-type]
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
-            cos = attn_metadata[0].prefill.cos[layer_name]
-            sin = attn_metadata[0].prefill.sin[layer_name]
-
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
             o_proj_input[:decode_tokens] = output_decode
-            cos = attn_metadata[0].decode.cos[layer_name]
-            sin = attn_metadata[0].decode.sin[layer_name]
-
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
 
@@ -1724,6 +1741,8 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # o
         self._forward_o_proj(o_proj_input, output)
+
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output_padded
 
@@ -1857,6 +1876,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_prefill_metadata.sin[layer_name]
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
+        ori_win_left = (
+            self.window_size - 1 if swa_prefill_metadata.ori_win_left is None else swa_prefill_metadata.ori_win_left
+        )
+        ori_win_right = 0 if swa_prefill_metadata.ori_win_right is None else swa_prefill_metadata.ori_win_right
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -1937,6 +1960,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         DeviceOperator.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=actual_seq_lengths_query)
 
         if self.compress_ratio <= 1:
+            if swa_prefill_metadata.dspark_swa_indices is not None:
+                extra_attn_kwargs["ori_sparse_indices"] = swa_prefill_metadata.dspark_swa_indices
+            notify_kv_cache_written(layer_name)
+            record_attention_compute_start()
             return attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1948,8 +1975,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 softmax_scale=self.softmax_scale,
                 cmp_ratio=max(self.compress_ratio, 1),
                 ori_mask_mode=4,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,
@@ -1989,7 +2016,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             cos=cos,
                             sin=sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
-                            actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
@@ -2074,6 +2100,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=prefill_offset)
 
+            notify_kv_cache_written(layer_name)
+            record_attention_compute_start()
+
             if self.compress_ratio == 4:
                 DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                     extra_attn_kwargs, cu_seqlens_cmp_kv=common_prefill_metadata.cu_c4_cmp_seqlen_list
@@ -2093,8 +2122,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=self.compress_ratio,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.window_size - 1,
-                    ori_win_right=0,
+                    ori_win_left=ori_win_left,
+                    ori_win_right=ori_win_right,
                     layout_q="TND",
                     layout_kv="PA_ND",
                     **extra_attn_kwargs,
@@ -2117,8 +2146,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=self.compress_ratio,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.window_size - 1,
-                    ori_win_right=0,
+                    ori_win_left=ori_win_left,
+                    ori_win_right=ori_win_right,
                     layout_q="TND",
                     layout_kv="PA_ND",
                     **extra_attn_kwargs,
@@ -2159,6 +2188,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_decode_metadata.sin[layer_name]
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
+        ori_win_left = (
+            self.window_size - 1 if swa_decode_metadata.ori_win_left is None else swa_decode_metadata.ori_win_left
+        )
+        ori_win_right = 0 if swa_decode_metadata.ori_win_right is None else swa_decode_metadata.ori_win_right
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -2280,7 +2313,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             cos=cos,
                             sin=sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
-                            actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
@@ -2365,10 +2397,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
+        notify_kv_cache_written(layer_name)
+        record_attention_compute_start()
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
 
         if self.compress_ratio <= 1:
+            if swa_decode_metadata.dspark_swa_indices is not None:
+                extra_attn_kwargs["ori_sparse_indices"] = swa_decode_metadata.dspark_swa_indices
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -2380,8 +2416,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 softmax_scale=self.softmax_scale,
                 cmp_ratio=max(self.compress_ratio, 1),
                 ori_mask_mode=4,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,
@@ -2402,8 +2438,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 cmp_ratio=self.compress_ratio,
                 ori_mask_mode=4,
                 cmp_mask_mode=3,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,
@@ -2423,8 +2459,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 cmp_ratio=self.compress_ratio,
                 ori_mask_mode=4,
                 cmp_mask_mode=3,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,
@@ -2531,7 +2567,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_k_cache,
             indexer_scale_cache,
             indexer_full_cache,
-            indexer_kv_state_metadata,
             indexer_kv_scale_metadata,
             indexer_slot_mapping,
             with_prefill,
@@ -2545,12 +2580,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         indexer_k_cache: torch.Tensor,
         indexer_scale_cache: torch.Tensor,
         indexer_full_cache: torch.Tensor | None,
-        indexer_kv_state_metadata,
         indexer_kv_scale_metadata,
         indexer_slot_mapping: torch.Tensor,
         with_prefill: bool,
     ):
-        q, q_scale, kv, kv_scale = self._indexer_quant_scatter(
+        q, q_scale, _, _ = self._indexer_quant_scatter(
             q,
             kv,
             indexer_k_cache,
@@ -2636,11 +2670,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        q, kv, ik, isc, ifc, indexer_kv_state_meta, isc_meta, indexer_slot_mapping, wp = self._indexer_qkv_prepare(
+        q, kv, ik, isc, ifc, isc_meta, indexer_slot_mapping, wp = self._indexer_qkv_prepare(
             x,
             qr,
             kv_cache,
@@ -2661,7 +2694,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             ik,
             isc,
             ifc,
-            indexer_kv_state_meta,
             isc_meta,
             indexer_slot_mapping,
             wp,

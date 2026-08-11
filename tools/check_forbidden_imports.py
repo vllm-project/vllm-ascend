@@ -49,6 +49,13 @@ CHECK_IMPORTS = {
         pattern=r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)",
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
+        allowed_files={
+            # docs/source/conf.py is invoked by the labeled_doctest workflow
+            # on a stock ubuntu-latest runner (no regex pre-installed); it
+            # is also designed to run in minimal environments without
+            # third-party packages (see its module docstring).
+            "docs/source/conf.py",
+        },
     ),
     "triton": ForbiddenImport(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",

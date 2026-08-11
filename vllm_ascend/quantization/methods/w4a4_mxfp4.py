@@ -15,24 +15,25 @@
 # limitations under the License.
 #
 
-from collections.abc import Callable
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
-    ensure_mxfp4_linear_available,
-    ensure_mxfp4_moe_available,
-)
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+)
 from .registry import register_scheme
 
 
@@ -46,9 +47,17 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
     """
 
     model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self):
-        ensure_mxfp4_linear_available("W4A4_MXFP4 linear quantization")
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
@@ -60,7 +69,7 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
     ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size, input_size // self.group_size, dtype=torch.uint8)
+        params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
         return params_dict
 
     def apply(
@@ -86,9 +95,9 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
             quantized_x,
             layer.weight,
             layer.weight_scale,
-            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            scale_dtype=torch_npu.float8_e8m0fnu,
             pertoken_scale=pertoken_scale,
-            pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
             x1_dtype=torch_npu.float4_e2m1fn_x2,
@@ -110,9 +119,14 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         """
 
         n_dim, k_dim = layer.weight_scale.data.shape
-        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
+        # Shape should be padded if it cannot be divided by 2
+        if k_dim % 2 != 0:
+            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
+        else:
+            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        layer.weight.data = layer.weight.data.transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
 
 @register_scheme("W4A4_MXFP4", "moe")
@@ -120,11 +134,10 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoe method for Ascend W4A4_MXFP4."""
 
     model_dtype = None
-    quant_type: QuantType = QuantType.MXFP4
+    quant_type: QuantType = QuantType.W4A4MXFP
+    supports_eplb = True
 
     def __init__(self):
-        ensure_mxfp4_moe_available("W4A4_MXFP4 MoE quantization")
-
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
@@ -132,7 +145,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not vllm_config.model_config.enforce_eager
         )
-        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
 
     @staticmethod
     def get_weight(
@@ -162,62 +175,13 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        is_prefill: bool = True,
-        enable_force_load_balance: bool = True,
-        log2phy: torch.Tensor = None,
-        global_redundant_expert_num: int = 0,
-        pertoken_scale: Any | None = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        mc2_mask: torch.Tensor | None = None,
-        tid2eid: Any | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:
-            num_shared_experts = 0
-        num_logical_experts = get_moe_num_logical_experts(
-            layer,
-            num_experts,
-            global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=num_shared_experts,
-        )
-        assert router_logits.shape[1] == num_logical_experts, "Number of global experts mismatch (excluding redundancy)"
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_experts=num_logical_experts,
-        )
-
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
-        if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
-
         if x.dtype not in [torch.uint8]:
             topk_weights = topk_weights.to(x.dtype)
 
@@ -231,22 +195,30 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 w2=layer.w2_weight,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                log2phy=log2phy,
-                pertoken_scale=pertoken_scale,
-                activation=activation,
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
                 mxfp_act_quant_type=torch_npu.float4_e2m1fn_x2,
                 mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
-                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
+                mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.uint8]),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
             )
         )
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        return [
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            layer.w13_weight_scale.transpose(1, 2),
+            layer.w2_weight_scale.transpose(1, 2),
+        ]
 
     def process_weights_after_loading(self, layer):
         g_num, n_size, k_size = layer.w13_weight_scale.shape
