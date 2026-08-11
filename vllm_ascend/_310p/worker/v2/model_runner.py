@@ -221,70 +221,91 @@ class NPUModelRunner310V2(NPUModelRunner):
             layer_names = [name for name in kv_cache_tensor.shared_by if name not in shared_layers]
             if not layer_names:
                 continue
-            layer_name = layer_names[0]
-            kv_cache_spec = layer_specs[layer_name]
-            assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
-            num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
-            assert num_blocks >= kv_cache_config.num_blocks
-
-            if isinstance(kv_cache_spec, AttentionSpec):
-                backend = layer_backends[layer_name]
-                if not issubclass(backend, AscendAttentionBackend310):
-                    raise TypeError(f"310P attention layer {layer_name} selected unexpected backend {backend}.")
-                group_id = layer_group_ids[layer_name]
-                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-                    kernel_block_size = kv_cache_spec.storage_block_size
+            cache_groups: dict[tuple[Any, ...], list[str]] = {}
+            for layer_name in layer_names:
+                kv_cache_spec = layer_specs[layer_name]
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    backend = layer_backends[layer_name]
+                    group_id = layer_group_ids[layer_name]
+                    if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                        kernel_block_size = kv_cache_spec.storage_block_size
+                    else:
+                        kernel_block_size = self.kernel_block_sizes[group_id]
+                    cache_key = (kv_cache_spec, backend, kernel_block_size)
                 else:
-                    kernel_block_size = self.kernel_block_sizes[group_id]
-                blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
-                kv_cache_shape = backend.get_kv_cache_shape(
-                    num_blocks * blocks_per_kv_block,
-                    kernel_block_size,
-                    kv_cache_spec.num_kv_heads,
-                    kv_cache_spec.head_size,
-                    self.cache_config.cache_dtype,
-                )
-                head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
-                if head_size_v != kv_cache_spec.head_size:
-                    raise NotImplementedError("310P V2 does not support asymmetric K/V head sizes.")
-                k_shape = v_shape = kv_cache_shape[1:]
-                k_cache = torch_npu.empty_with_format(
-                    size=k_shape,
-                    dtype=kv_cache_spec.dtype,
-                    device=self.device,
-                    acl_format=ACL_FORMAT_FRACTAL_NZ,
-                )
-                v_cache = torch_npu.empty_with_format(
-                    size=v_shape,
-                    dtype=kv_cache_spec.dtype,
-                    device=self.device,
-                    acl_format=ACL_FORMAT_FRACTAL_NZ,
-                )
-                cache = (k_cache, v_cache)
-            elif isinstance(kv_cache_spec, MambaSpec):
-                raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                state_tensors = []
-                storage_offset_bytes = 0
-                for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                    dtype_size = get_dtype_size(dtype)
-                    elements_per_page = kv_cache_spec.page_size_bytes // dtype_size
-                    target_shape = (num_blocks, *shape)
-                    stride = torch.empty(target_shape).stride()
-                    state_tensors.append(
-                        torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=target_shape,
-                            stride=(elements_per_page, *stride[1:]),
-                            storage_offset=storage_offset_bytes // dtype_size,
-                        )
-                    )
-                    storage_offset_bytes += stride[0] * dtype_size
-                cache = state_tensors
-            else:
-                raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}")
+                    cache_key = (kv_cache_spec,)
+                cache_groups.setdefault(cache_key, []).append(layer_name)
 
-            for name in layer_names:
-                kv_caches[name] = cache
+            for cache_key, cache_layer_names in cache_groups.items():
+                layer_name = cache_layer_names[0]
+                kv_cache_spec = layer_specs[layer_name]
+                assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                assert num_blocks >= kv_cache_config.num_blocks
+
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    _, backend, kernel_block_size = cache_key
+                    if not issubclass(backend, AscendAttentionBackend310):
+                        raise TypeError(
+                            f"310P attention layer {layer_name} selected unexpected backend {backend}."
+                        )
+                    blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+                    kv_cache_shape = backend.get_kv_cache_shape(
+                        num_blocks * blocks_per_kv_block,
+                        kernel_block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        self.cache_config.cache_dtype,
+                    )
+                    head_size_v = getattr(
+                        kv_cache_spec, "head_size_v", kv_cache_spec.head_size
+                    )
+                    if head_size_v != kv_cache_spec.head_size:
+                        raise NotImplementedError(
+                            "310P V2 does not support asymmetric K/V head sizes."
+                        )
+                    k_shape = v_shape = kv_cache_shape[1:]
+                    k_cache = torch_npu.empty_with_format(
+                        size=k_shape,
+                        dtype=kv_cache_spec.dtype,
+                        device=self.device,
+                        acl_format=ACL_FORMAT_FRACTAL_NZ,
+                    )
+                    v_cache = torch_npu.empty_with_format(
+                        size=v_shape,
+                        dtype=kv_cache_spec.dtype,
+                        device=self.device,
+                        acl_format=ACL_FORMAT_FRACTAL_NZ,
+                    )
+                    cache = (k_cache, v_cache)
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    raw_tensor = torch.zeros(
+                        kv_cache_tensor.size, dtype=torch.int8, device=self.device
+                    )
+                    state_tensors = []
+                    storage_offset_bytes = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        dtype_size = get_dtype_size(dtype)
+                        elements_per_page = kv_cache_spec.page_size_bytes // dtype_size
+                        target_shape = (num_blocks, *shape)
+                        stride = torch.empty(target_shape).stride()
+                        state_tensors.append(
+                            torch.as_strided(
+                                raw_tensor.view(dtype),
+                                size=target_shape,
+                                stride=(elements_per_page, *stride[1:]),
+                                storage_offset=storage_offset_bytes // dtype_size,
+                            )
+                        )
+                        storage_offset_bytes += stride[0] * dtype_size
+                    cache = state_tensors
+                else:
+                    raise NotImplementedError(
+                        f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}"
+                    )
+
+                for name in cache_layer_names:
+                    kv_caches[name] = cache
 
         for layer_name, target_layer_name in shared_layers.items():
             kv_caches[layer_name] = kv_caches[target_layer_name]

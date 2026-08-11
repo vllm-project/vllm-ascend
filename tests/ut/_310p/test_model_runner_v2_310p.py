@@ -10,7 +10,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.triton_dispatcher import _get_kernel_impl
 from vllm.sampling_params import SamplingParams
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
@@ -404,6 +404,55 @@ def test_v2_allocates_attention_kv_cache_directly_as_nz() -> None:
         device=torch.device("cpu"),
         acl_format=29,
     )
+
+
+def test_v2_separates_attention_and_mamba_shared_cache_slot() -> None:
+    attention_spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=128,
+        shapes=((16,),),
+        dtypes=(torch.float16,),
+        page_size_padded=attention_spec.page_size_bytes,
+        mamba_cache_mode="align",
+    )
+    num_blocks = 2
+    attention_layer = "language_model.model.layers.3.self_attn.attn"
+    mamba_layer = "language_model.model.layers.0.linear_attn"
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=attention_spec, layer_names=[attention_layer]),
+            SimpleNamespace(kv_cache_spec=mamba_spec, layer_names=[mamba_layer]),
+        ],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=num_blocks * attention_spec.page_size_bytes,
+                shared_by=[attention_layer, mamba_layer],
+            )
+        ],
+        num_blocks=num_blocks,
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.attn_groups = [
+        [SimpleNamespace(backend=AscendAttentionBackend310, layer_names=[attention_layer])]
+    ]
+    runner.kernel_block_sizes = [128, 0]
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.device = torch.device("cpu")
+    k_cache = MagicMock()
+    v_cache = MagicMock()
+
+    with patch("torch_npu.empty_with_format", side_effect=[k_cache, v_cache]):
+        caches = runner._allocate_kv_cache_tensors_310p(kv_cache_config, {})
+
+    assert caches[attention_layer] == (k_cache, v_cache)
+    assert isinstance(caches[mamba_layer], list)
+    assert caches[mamba_layer][0].layout == torch.strided
+    assert caches[mamba_layer] is not caches[attention_layer]
 
 
 def test_first_release_sampler_accepts_only_greedy() -> None:

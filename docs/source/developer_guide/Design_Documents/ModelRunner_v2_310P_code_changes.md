@@ -1038,3 +1038,42 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check`和`git diff --check`已通过。
 - 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
 - 真实310P需重新验证 Qwen3.5 KV Cache初始化及首个 eager请求。
+
+## 29. Hybrid shared cache 槽按实际 Spec 拆分分配
+
+问题现象：
+
+- Qwen3.5-4B 初始化完成后，GDN 的 `causal_conv1d` 报错：
+  `convStates` 的实际 format 为 `FRACTAL_NZ`，而 310P 算子只支持 ND。
+
+根因：
+
+- 上游 Hybrid KV Cache 对齐逻辑允许一个 `KVCacheTensor.shared_by` 同时包含
+  Full Attention 层和 GDN/Mamba 层；这是逻辑槽共享，不代表两类 cache 可以复用同一个
+  tensor 对象或物理格式。
+- 310P MRV2 首版 allocator 只读取 `shared_by` 的第一个 layer spec。若第一个 layer 是
+  Full Attention，就分配 NZ 格式 K/V cache，再把同一个 tuple 绑定给该槽内全部 layer。
+- GDN 因而把 NZ attention cache 当作卷积 state 使用，最终在
+  `aclnnCausalConv1dV310` 的 format 校验阶段失败。
+- MRV1 会遍历共享槽内的全部 layer：attention 独立分配 NZ K/V，linear attention
+  独立分配 ND state，因此没有该问题。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_runner.py`
+  - 对每个 `shared_by` 槽中的 layer 按实际 cache spec 分组，而不是只采用首个 spec。
+  - Attention 的分组键同时包含 backend 和 kernel block size，避免规格相同但实际布局要求
+    不同的 attention layer 被错误合并。
+  - 每个 Attention 分组独立分配 `FRACTAL_NZ` K/V cache；每个 Mamba/GDN 分组独立分配
+    ND state cache，只向同组 layer 绑定对应对象。
+  - 保留相同 spec/layout layer 的共享语义，也保留 `shared_layers` 的最终别名绑定。
+  - 修改仅位于 310P MRV2 allocator，不改变 MRV1、公共 MRV2 或其他机型的缓存分配。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 增加 mixed `shared_by` 回归测试：同一逻辑槽同时包含 Full Attention 和 Mamba/GDN。
+  - 验证 attention 得到 NZ K/V tuple、GDN 得到独立 ND state list，且两者不是同一对象。
+
+验证状态：
+
+- `py_compile` 和 `ruff check` 已通过。
+- 当前 Windows 本地 Python 环境未安装 `pytest`，目标 UT 需在服务器环境补充执行。
+- 真实 310P 需重新验证 Qwen3.5-4B eager，并继续验证 ACLGraph、TP 和并发场景。
