@@ -107,7 +107,7 @@ class _Ascend310PModelStateMixin:
         elif cudagraph_mode == CUDAGraphMode.FULL:
             self._refresh_capture_seq_lens(input_batch.seq_lens)
 
-        return super().prepare_attn(
+        attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
             block_tables,
@@ -116,6 +116,29 @@ class _Ascend310PModelStateMixin:
             kv_cache_config,
             for_capture=for_capture,
         )
+        self._add_hybrid_metadata_prefix_aliases(attn_metadata)
+        return attn_metadata
+
+    def _add_hybrid_metadata_prefix_aliases(
+        self, attn_metadata: dict[str, Any]
+    ) -> None:
+        """Alias wrapped-model linear-attention prefixes to KV cache names."""
+        source_names = tuple(attn_metadata)
+        for module in self.model.modules():
+            prefix = getattr(module, "prefix", None)
+            if (
+                not isinstance(prefix, str)
+                or not prefix.endswith(".linear_attn")
+                or prefix in attn_metadata
+            ):
+                continue
+            candidates = [
+                name
+                for name in source_names
+                if prefix.endswith(f".{name}") or name.endswith(f".{prefix}")
+            ]
+            if len(candidates) == 1:
+                attn_metadata[prefix] = attn_metadata[candidates[0]]
 
     def prepare_inputs(self, input_batch: AscendInputBatch, req_states):
         if self.rope_state is None:

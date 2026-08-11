@@ -878,3 +878,40 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check` 和 `git diff --check` 已通过。
 - 当前 Windows 本地 Python 环境未安装 `pytest`，新增目标 UT 需在服务器执行。
 - 真实 310P 需重新验证 Qwen3.5-4B 请求加入、eager、ACLGraph 和多并发。
+
+## 24. Qwen3.5 GDN metadata 的包装模型前缀对齐
+
+问题现象：
+
+- Qwen3.5-4B 已进入真实请求 prefill，但310P GDN `_forward_core()` 使用
+  `attn_metadata[self.prefix]` 时出现：
+  `KeyError: language_model.model.layers.0.linear_attn`。
+
+根因：
+
+- Qwen3.5 外层模型通过 `language_model` 包装文本模型，GDN模块保存的完整 prefix 为
+  `language_model.model.layers.*.linear_attn`。
+- Hybrid KV Cache和 attention group 使用文本模型内部注册名生成 metadata；当前服务器
+  对应键为去除包装层后的 `model.layers.*.linear_attn`。
+- 两个名字表示同一 GDN层，但310P GDN沿用按模块完整 prefix直接索引的实现，导致
+  metadata已经生成却无法命中。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_state.py`
+  - 在310P ModelState完成 attention metadata构建后，扫描模型中的
+    `*.linear_attn` prefix。
+  - 当模块 prefix与现有 metadata键存在唯一的点分隔后缀匹配时，为完整 prefix增加
+    指向同一 metadata对象的别名；不复制 tensor或 metadata内容。
+  - 已存在的精确键不覆盖；存在多个候选时不猜测，避免错误地把不同层绑定在一起。
+  - 修复限定在310P MRV2 ModelState，不改变公共 attention builder、GDN算子、MRV1
+    或其他设备的键语义。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 增加包装 prefix唯一匹配回归测试。
+  - 增加多候选时拒绝建立别名的边界测试。
+
+验证状态：
+
+- `py_compile`、`ruff check`和`git diff --check`已通过。
+- 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
+- 真实310P需重新验证 Qwen3.5-4B eager prefill/decode，再验证 ACLGraph。
