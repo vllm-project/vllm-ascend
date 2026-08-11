@@ -1455,16 +1455,18 @@ class NPUModelRunner(GPUModelRunner):
         metadata build and the early draft forward instead of synchronizing in
         the proposer.
         """
-        if self.num_rejected_tokens_event is None:
+        event = self.num_rejected_tokens_event
+        copy_stream = self.num_rejected_tokens_copy_stream
+        counts_cpu = self.num_rejected_tokens_cpu
+        if event is None:
             return
+        assert copy_stream is not None and counts_cpu is not None
         default_stream = torch.npu.current_stream()
-        with torch.npu.stream(self.num_rejected_tokens_copy_stream):
-            self.num_rejected_tokens_copy_stream.wait_stream(default_stream)
+        with torch.npu.stream(copy_stream):
+            copy_stream.wait_stream(default_stream)
             n = num_rejected_tokens_gpu.shape[0]
-            self.num_rejected_tokens_cpu[:n].copy_(
-                num_rejected_tokens_gpu[:n], non_blocking=True
-            )
-            self.num_rejected_tokens_event.record()
+            counts_cpu[:n].copy_(num_rejected_tokens_gpu[:n], non_blocking=True)
+            event.record()
 
     def propose_draft_token_ids(
         self,
@@ -2980,6 +2982,7 @@ class NPUModelRunner(GPUModelRunner):
             common_ratio_to_sas_metadata: dict,
             ubid: int | None = None,
         ) -> None:
+            assert num_reqs_padded is not None
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
             is_gdn_noop = skip_gdn_state_update and isinstance(
