@@ -18,9 +18,15 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Ascend 910B 64 GB NPU. Download the model weights from [Hugging Face](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) (or your configured model hub).
+The BF16 model can be deployed with one Ascend 910B 64 GB NPU. Download the model weights from [Hugging Face](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) (or your configured model hub). Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
+
+The model requires the `librosa` package for audio preprocessing. Install it inside the serving environment:
+
+```bash
+pip install librosa
+```
 
 ## 4 Installation
 
@@ -59,6 +65,14 @@ pip show vllm vllm-ascend
 
 Expected result: `docker ps` lists the container with status `Up`, and `pip show` displays version information for both packages.
 
+!!! note
+
+    If you build a custom image (for example, based on a vLLM-Ascend image matching your vLLM version), make sure `librosa` is installed in the container before serving Cohere Transcribe:
+
+    ```bash
+    pip install librosa
+    ```
+
 ### 4.2 Source Code Installation
 
 If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
@@ -78,23 +92,28 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 === "Atlas A2 inference products"
 
     ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+
     vllm serve your_model_path \
       --served-model-name cohere-transcribe \
       --trust-remote-code \
       --tensor-parallel-size 1 \
       --dtype bfloat16 \
-      --max-model-len 4096 \
-      --block-size 128 \
       --enforce-eager \
+      --block-size 128 \
+      --host 0.0.0.0 \
       --port 8000
     ```
 
     !!! note
 
         - `--trust-remote-code` is required because the model repository ships custom modeling code.
+        - `--block-size 128` is required: the model must be served with a block size of at least 128.
         - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
         - `--dtype bfloat16` matches the BF16 deployment validated on Ascend 910B.
-        - `--max-model-len 4096` limits the maximum sequence length. Always specify a conservative value explicitly for ASR workloads; automatic detection can allocate an oversized attention mask and cause an out-of-memory error.
+        - `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` are recommended when the model weights are downloaded to a local directory in advance.
 
 When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
@@ -154,7 +173,7 @@ The following settings are starting points rather than globally optimal configur
 
 | Scenario | Recommended Starting Point | Key Considerations |
 | --- | --- | --- |
-| Low latency | `--tensor-parallel-size 1`, `--max-model-len 4096` | Use short audio inputs and avoid sharing the NPU with other workloads. |
+| Low latency | `--tensor-parallel-size 1`, `--block-size 128` | Use short audio inputs and avoid sharing the NPU with other workloads. |
 | High throughput | Increase request concurrency after establishing the latency baseline | Monitor NPU memory and end-to-end latency; do not use synthetic text-only requests as a proxy for ASR traffic. |
 | Long audio | Increase `--max-model-len` only as required | Keep the value conservative because attention-mask memory grows with the configured maximum length. |
 
@@ -170,4 +189,4 @@ For common environment, installation, and general parameter issues, see the [Pub
 
 **Cause:** An automatically detected large context length can create a full causal attention mask whose memory consumption grows quadratically with `max_model_len`.
 
-**Solution:** Always set `--max-model-len` explicitly to a conservative value, such as `4096`, and increase it only after verifying available NPU memory.
+**Solution:** If an out-of-memory error occurs, set `--max-model-len` explicitly to a conservative value (for example `4096`) and increase it only after verifying available NPU memory. Also confirm that `--block-size 128` is used as required by the model.
