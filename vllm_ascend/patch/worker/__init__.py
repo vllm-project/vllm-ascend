@@ -52,6 +52,7 @@ import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
+import vllm_ascend.patch.worker.patch_step3p5_model  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # vLLM's use_v2_model_runner may enable the v2 runner without the
