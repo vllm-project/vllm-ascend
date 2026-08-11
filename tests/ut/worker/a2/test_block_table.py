@@ -77,7 +77,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
             return block_table
 
     def test_compute_slot_mapping_draft_reserves_mtp_slots(self):
-        """MTP5 draft slots can exceed the graph-padding-only capacity."""
+        """MTP5 draft slots can exceed the scheduler token capacity."""
         self.max_num_reqs = 12
         self.max_num_batched_tokens = 80
         block_table = self.create_block_table(
@@ -95,7 +95,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
         positions = np.tile(np.arange(10, dtype=np.int64), num_active_reqs)
         block_table.compute_slot_mapping_draft(req_indices, positions)
 
-        self.assertEqual(block_table.slot_mapping.cpu.numel(), 152)
+        self.assertEqual(block_table.slot_mapping.cpu.numel(), 128)
         self.assertEqual(block_table.slot_mapping.cpu[: req_indices.size].numel(), 110)
 
     def setup_block_table_data(self, block_table, num_reqs=2):
