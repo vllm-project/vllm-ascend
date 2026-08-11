@@ -1,8 +1,8 @@
 # SparseAttentionScore
 
-Sparse Attention 算子：根据外部传入的 TopK block 索引（selectIdx）+ blockTable（逻辑->物理映射），从 blocked KV cache 中 gather 对应 KV blocks，执行 FlashAttention 计算。
+Sparse attention operator that gathers the selected KV blocks from a blocked KV cache according to externally supplied Top-K block indices (`select_idx`) and a logical-to-physical block mapping (`block_table`), then performs the FlashAttention computation.
 
-## 接口
+## API
 
 ```python
 torch_npu.npu_sparse_attention_score(
@@ -19,13 +19,13 @@ torch_npu.npu_sparse_attention_score(
     scale_value=1.0,
     block_size=128,
     top_k=16,
-    attention_out_dtype=torch.bfloat16, 
+    attention_out_dtype=torch.bfloat16,
 ) -> Tensor  # [T, N, D]
 ```
 
-## 约束
+## Constraints
 
-- 平台：Ascend 950
-- blockSize = 128
-- 支持 GQA（numHeads 必须能被 numKeyValueHeads 整除）
-- fp8 输入需提供 dequant scale
+- Platform: Ascend 950
+- `block_size = 128`
+- GQA is supported (`num_heads` must be divisible by `num_key_value_heads`).
+- FP8 input requires a dequantization scale.
