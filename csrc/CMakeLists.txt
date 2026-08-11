@@ -269,6 +269,7 @@ add_subdirectory(common)
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_subdirectory(mc2)
     add_subdirectory(posembedding)
+    add_subdirectory(sample)
 endif()
 
 if(NOT DEFINED COMPILED_OPS)
