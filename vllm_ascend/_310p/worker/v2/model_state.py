@@ -116,22 +116,6 @@ class _Ascend310PModelStateMixin:
             kv_cache_config,
             for_capture=for_capture,
         )
-        if not any("linear_attn" in name for name in attn_metadata):
-            kv_layer_names = [
-                tuple(group.layer_names)
-                for group in kv_cache_config.kv_cache_groups
-            ]
-            attn_group_layer_names = [
-                [tuple(group.layer_names) for group in groups]
-                for groups in attn_groups
-            ]
-            print(
-                "[310P GDN DEBUG] "
-                f"kv_cache_groups={kv_layer_names!r}, "
-                f"attn_groups={attn_group_layer_names!r}, "
-                f"metadata_keys={tuple(attn_metadata)!r}",
-                flush=True,
-            )
         return attn_metadata
 
     def prepare_inputs(self, input_batch: AscendInputBatch, req_states):

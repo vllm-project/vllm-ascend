@@ -21,6 +21,7 @@ from vllm_ascend._310p.worker.v2.model_state import (
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -228,6 +229,34 @@ def test_uniform_decode_query_len_falls_back_to_decode_query_len() -> None:
 
     runner.uniform_decode_query_len = 2
     assert runner._get_uniform_decode_query_len() == 2
+
+
+def test_310p_v2_restores_missing_linear_attention_kv_cache_specs() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    existing_spec = object()
+    linear_spec = object()
+    linear_layer = MagicMock()
+    linear_layer.get_kv_cache_spec.return_value = linear_spec
+    ignored_layer = MagicMock()
+    runner.compilation_config = SimpleNamespace(
+        static_forward_context={
+            "language_model.model.layers.0.linear_attn": linear_layer,
+            "language_model.model.layers.3.self_attn.attn": ignored_layer,
+        }
+    )
+    runner.vllm_config = MagicMock()
+
+    with patch.object(
+        NPUModelRunner,
+        "get_kv_cache_spec",
+        return_value={"language_model.model.layers.3.self_attn.attn": existing_spec},
+    ):
+        specs = runner.get_kv_cache_spec()
+
+    assert specs["language_model.model.layers.0.linear_attn"] is linear_spec
+    assert specs["language_model.model.layers.3.self_attn.attn"] is existing_spec
+    linear_layer.get_kv_cache_spec.assert_called_once_with(runner.vllm_config)
+    ignored_layer.get_kv_cache_spec.assert_not_called()
 
 
 def test_postprocess_query_lens_ignore_full_graph_request_padding() -> None:

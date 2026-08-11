@@ -89,6 +89,20 @@ class NPUModelRunner310V2(NPUModelRunner):
         """Bridge vLLM versions that do not expose this V2 attribute."""
         return getattr(self, "uniform_decode_query_len", self.decode_query_len)
 
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        """Restore linear-attention specs omitted by some upstream V2 versions."""
+        kv_cache_spec = super().get_kv_cache_spec()
+        static_forward_context = self.compilation_config.static_forward_context
+        for layer_name, layer in static_forward_context.items():
+            if "linear_attn" not in layer_name or layer_name in kv_cache_spec:
+                continue
+            get_spec = getattr(layer, "get_kv_cache_spec", None)
+            if get_spec is None:
+                continue
+            if spec := get_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
+        return kv_cache_spec
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Initialize 310P V2 KV cache directly in its required formats."""
         kv_cache_config = deepcopy(kv_cache_config)

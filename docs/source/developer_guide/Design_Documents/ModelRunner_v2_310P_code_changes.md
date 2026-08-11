@@ -948,3 +948,32 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 影响范围：
 
 - 仅310P MRV2临时诊断路径；不修改MRV1和其他设备功能。
+
+## 26. 补回 MRV2遗漏的 GDN KV Cache spec
+
+最终现场证据：
+
+- `kv_cache_groups`从引擎下发时就只包含8个 Full Attention层。
+- `attn_groups`和最终 metadata与该输入完全一致，因此 backend初始化及 metadata builder
+  没有丢层。
+- Qwen3.5的24个 `*.linear_attn`层在 `get_kv_cache_spec()`收集阶段已被遗漏，导致既
+  没有 GDN state cache，也没有 GDN metadata。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_runner.py`
+  - 310P MRV2覆盖 `get_kv_cache_spec()`，首先保留上游收集结果。
+  - 遍历同一 `static_forward_context`，仅对上游结果中缺失的 `*.linear_attn`层调用其
+    `get_kv_cache_spec(vllm_config)`并补回有效 spec。
+  - 不覆盖上游已有 spec，不影响 Full Attention层，也不修改公共MRV2和MRV1。
+- 删除 `model_state.py`和 `gdn_310.py`中的两处临时 debug print。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 增加回归测试，验证遗漏的 linear-attention spec会被补回、已有 Full Attention
+    spec保持不变且非 linear-attention模块不会被额外调用。
+
+验证状态：
+
+- `py_compile`、`ruff check`和`git diff --check`已通过。
+- 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
+- 真实310P需确认启动日志中的 KV Cache groups同时包含 Full Attention和GDN层，并
+  重新验证 Qwen3.5 eager prefill/decode。
