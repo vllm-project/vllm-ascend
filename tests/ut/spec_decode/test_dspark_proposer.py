@@ -31,7 +31,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
-from vllm_ascend.utils import vllm_version_is
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -334,13 +333,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
         [
             pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
-            pytest.param(
-                SimpleNamespace(dspark_bonus_anchor=True)
-                if vllm_version_is("0.26.0")
-                else SimpleNamespace(sample_from_anchor=False),
-                False,
-                1 + _NUM_SPECULATIVE_TOKENS,
-            ),
+            pytest.param(SimpleNamespace(sample_from_anchor=False), False, 1 + _NUM_SPECULATIVE_TOKENS),
         ],
     )
     def test_configures_anchor_sampling(

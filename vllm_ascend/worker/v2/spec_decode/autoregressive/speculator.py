@@ -38,7 +38,6 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 
@@ -304,103 +303,53 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
 
-    # The signatures are split on vllm_version_is: v0.26.0's
-    # _multi_step_decode / _build_draft_attn_metadata do not accept
-    # seq_lens_cpu_upper_bound / step; d02df748bf+ do.
-    if vllm_version_is("0.26.0"):
+    def _multi_step_decode(  # type: ignore[misc]
+        self,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: BatchExecutionDescriptor,
+        num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+    ) -> None:
+        """Minimal override to handle the merged multi-step graph in FULL mode.
 
-        def _multi_step_decode(  # type: ignore[misc]
-            self,
-            num_reqs: int,
-            skip_attn: bool,
-            batch_desc: BatchExecutionDescriptor,
-            num_tokens_across_dp: torch.Tensor | None,
-        ) -> None:
-            """Minimal override to handle the merged multi-step graph in FULL mode.
+        In FULL mode the captured graph already contains all speculative
+        steps, so ``run_fullgraph`` is called once instead of once per
+        step.  For PIECEWISE / NONE modes we delegate to the upstream
+        ``_multi_step_decode`` which iterates over steps and calls
+        ``_generate_draft`` per step.
+        """
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert self.decode_cudagraph_manager is not None
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+            return
+        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
 
-            In FULL mode the captured graph already contains all speculative
-            steps, so ``run_fullgraph`` is called once instead of once per
-            step.  For PIECEWISE / NONE modes we delegate to the upstream
-            ``_multi_step_decode`` which iterates over steps and calls
-            ``_generate_draft`` per step.
-            """
-            if batch_desc.cg_mode == CUDAGraphMode.FULL:
-                assert self.decode_cudagraph_manager is not None
-                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-                return
-            super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp)
-
-        def _build_draft_attn_metadata(  # type: ignore[misc]
-            self,
-            num_reqs: int,
-            num_reqs_padded: int,
-            num_tokens_padded: int,
-            num_query_per_req: int = 1,
-            causal: bool = True,
-        ) -> dict[str, Any] | None:
-            with build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded):
-                attn_metadata = super()._build_draft_attn_metadata(
-                    num_reqs,
-                    num_reqs_padded,
-                    num_tokens_padded,
-                    num_query_per_req=num_query_per_req,
-                    causal=causal,
-                )
-
-            if attn_metadata is not None:
-                # Ascend-specific: force DecodeOnly attention state for the draft model.
-                for metadata in attn_metadata.values():
-                    metadata.attn_state = AscendAttentionState.DecodeOnly
-            return attn_metadata
-    else:
-
-        def _multi_step_decode(  # type: ignore[misc]
-            self,
-            num_reqs: int,
-            skip_attn: bool,
-            batch_desc: BatchExecutionDescriptor,
-            num_tokens_across_dp: torch.Tensor | None,
-            seq_lens_cpu_upper_bound: torch.Tensor | None = None,
-        ) -> None:
-            """Minimal override to handle the merged multi-step graph in FULL mode.
-
-            In FULL mode the captured graph already contains all speculative
-            steps, so ``run_fullgraph`` is called once instead of once per
-            step.  For PIECEWISE / NONE modes we delegate to the upstream
-            ``_multi_step_decode`` which iterates over steps and calls
-            ``_generate_draft`` per step.
-            """
-            if batch_desc.cg_mode == CUDAGraphMode.FULL:
-                assert self.decode_cudagraph_manager is not None
-                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-                return
-            super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
-
-        def _build_draft_attn_metadata(  # type: ignore[misc]
-            self,
-            num_reqs: int,
-            num_reqs_padded: int,
-            num_tokens_padded: int,
-            seq_lens_cpu_upper_bound: torch.Tensor,
-            step: int,
-            num_query_per_req: int = 1,
-            causal: bool = True,
-        ) -> dict[str, Any] | None:
-            with build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded):
-                attn_metadata = super()._build_draft_attn_metadata(
-                    num_reqs,
-                    num_reqs_padded,
-                    num_tokens_padded,
-                    seq_lens_cpu_upper_bound,
-                    step,
-                    num_query_per_req,
-                    causal,
-                )
-            if attn_metadata is not None:
-                # Ascend-specific: force DecodeOnly attention state for the draft model.
-                for metadata in attn_metadata.values():
-                    metadata.attn_state = AscendAttentionState.DecodeOnly
-            return attn_metadata
+    def _build_draft_attn_metadata(  # type: ignore[misc]
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        num_query_per_req: int = 1,
+        causal: bool = True,
+    ) -> dict[str, Any] | None:
+        with build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded):
+            attn_metadata = super()._build_draft_attn_metadata(
+                num_reqs,
+                num_reqs_padded,
+                num_tokens_padded,
+                seq_lens_cpu_upper_bound,
+                step,
+                num_query_per_req,
+                causal,
+            )
+        if attn_metadata is not None:
+            # Ascend-specific: force DecodeOnly attention state for the draft model.
+            for metadata in attn_metadata.values():
+                metadata.attn_state = AscendAttentionState.DecodeOnly
+        return attn_metadata
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
@@ -442,20 +391,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # params directly to build_attn_metadata, decoupling from input_buffers.
         if self.attn_architecture == "MLA":
             assert self.input_batch is not None
-            if vllm_version_is("0.26.0"):
-                attn_metadata = self._build_draft_attn_metadata(
-                    num_reqs=self.input_batch.num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_reqs_padded,  # decode: 1 token/req
-                )
-            else:
-                attn_metadata = self._build_draft_attn_metadata(  # type: ignore[call-arg]
-                    num_reqs=self.input_batch.num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_reqs_padded,  # decode: 1 token/req
-                    seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
-                    step=1,
-                )
+            attn_metadata = self._build_draft_attn_metadata(  # type: ignore[call-arg]
+                num_reqs=self.input_batch.num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_reqs_padded,  # decode: 1 token/req
+                seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
+                step=1,
+            )
             if attn_metadata is None:
                 return
 
