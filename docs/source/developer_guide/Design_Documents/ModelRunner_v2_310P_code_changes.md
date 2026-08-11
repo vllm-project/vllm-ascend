@@ -844,3 +844,37 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check` 和 `git diff --check` 已通过。
 - 当前 Windows 本地 Python 环境未安装 `pytest`，新增目标 UT 需在服务器执行。
 - 真实 310P 需重新验证 Qwen3.5-4B profile、eager 和 ACLGraph。
+
+## 23. Qwen3.5 Hybrid 上游状态初始化契约
+
+问题现象：
+
+- Qwen3.5-4B 已完成启动和 profile，但真实请求加入时在上游
+  `MambaHybridModelState.add_request()` 报错：
+  `Ascend310PMambaHybridModelState has no attribute _align_mode`。
+
+根因：
+
+- 第 21 节的首版实现为避开上游 Triton RoPE，手工复制了 Default/Hybrid 构造逻辑。
+- 服务器所使用的上游 vLLM 已在 Hybrid ModelState 中增加 `_align_mode` 等初始化契约，
+  而本地配套源码版本尚无该字段。手工复制构造逻辑无法自动跟随上游演进。
+- 该问题与 RoPE kernel 执行无关：构造上游 RoPE state 本身不会启动 Triton，真正需要
+  避免的是请求阶段调用上游 `prepare_positions()`。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_state.py`
+  - 310P Hybrid state 改为先调用完整的 `AscendMambaHybridModelState.__init__()`，继承
+    当前上游全部 Hybrid 字段和未来新增契约。
+  - 父类初始化完成后、首个请求进入前，将上游 RoPE state 替换为
+    `Ascend310PRopeState`，并依据新 RoPE state 重建 MM pruner。
+  - 标准 attention 的310P state仍沿用轻量初始化；MRV1和其他设备不进入该类。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 增加回归测试，验证专用 Hybrid state 必须执行完整父类构造，然后替换310P RoPE
+    state并初始化图模式 seq-lens buffer。
+
+验证状态：
+
+- `py_compile`、`ruff check` 和 `git diff --check` 已通过。
+- 当前 Windows 本地 Python 环境未安装 `pytest`，新增目标 UT 需在服务器执行。
+- 真实 310P 需重新验证 Qwen3.5-4B 请求加入、eager、ACLGraph 和多并发。

@@ -137,6 +137,24 @@ def test_310p_hybrid_model_state_keeps_ascend_hybrid_behavior() -> None:
     assert issubclass(Ascend310PMambaHybridModelState, AscendMambaHybridModelState)
 
 
+def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
+    state = object.__new__(Ascend310PMambaHybridModelState)
+    config = MagicMock()
+    model = MagicMock()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+
+    with (
+        patch.object(AscendMambaHybridModelState, "__init__") as parent_init,
+        patch.object(state, "_replace_310p_rope_state") as replace_rope_state,
+    ):
+        Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
+
+    parent_init.assert_called_once_with(config, model, encoder_cache, device)
+    replace_rope_state.assert_called_once_with(encoder_cache)
+    assert state._capture_seq_lens_by_ptr == {}
+
+
 def test_310p_mrope_state_prepares_cos_sin_before_model_forward() -> None:
     model_state = object.__new__(Ascend310PMambaHybridModelState)
     model_state.model_config = SimpleNamespace(uses_mrope=True)
