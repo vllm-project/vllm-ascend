@@ -26,8 +26,14 @@ def postprocess_mamba_fused_kernel(
     state_inner_sizes_ptr,  # number of elements in inner dimensions
     state_conv_widths_ptr,  # conv width for conv states (0 for temporal)
     state_group_indices_ptr,  # maps state_idx to group index in block table
+    # DS conv-state row metadata. Only read when CONV_STATE_DIM_FIRST is set,
+    # which this kernel does not support (see the static assert below).
+    state_dim_row_count_ptr,  # int32: per-block dim row count for DS conv
+    state_dim_row_stride_ptr,  # int64: bytes between rows for DS conv
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
+    # batch_idx -> req-state slot mapping, only read when HAS_IDX_MAPPING is set
+    idx_mapping_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
     num_reqs,
     # Compile-time constants (fixed after model initialization)
@@ -35,35 +41,70 @@ def postprocess_mamba_fused_kernel(
     block_size: tl.constexpr,
     # COPY_BLOCK_SIZE: fixed tuning parameter for memory copy loop
     COPY_BLOCK_SIZE: tl.constexpr,
+    # CONV_STATE_DIM_FIRST: conv state stored as (dim, state_len) per block.
+    # The copy loop below assumes the (state_len, dim) layout, so the DS layout
+    # is rejected instead of being copied with the wrong strides.
+    CONV_STATE_DIM_FIRST: tl.constexpr = False,
+    # HAS_IDX_MAPPING: when True, program_id(0) is a batch index resolved to a
+    # req-state slot via idx_mapping_ptr (V2). When False, it is the req index.
+    HAS_IDX_MAPPING: tl.constexpr = False,
+    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
+    # the post-step computed count.
+    PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
     Grid: (num_reqs, num_layers * num_state_types)
-    - program_id(0) = request index
+    - program_id(0) = request index (or batch index when HAS_IDX_MAPPING)
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
     using program_id(1). The grid dimensions encode the total state count.
+
+    The signature mirrors ``vllm.v1.worker.mamba_utils`` because this kernel is
+    swapped in for the upstream one by ``patch_mamba_utils`` while the launcher
+    stays upstream; the parameter list must therefore stay in sync with it.
     """
-    req_idx = tl.program_id(0)
+    # The copy loop below walks conv states as (state_len, dim); the DS layout
+    # would need a different stride walk, so reject it at compile time rather
+    # than silently copying the wrong bytes.
+    tl.static_assert(
+        not CONV_STATE_DIM_FIRST,
+        "Ascend postprocess_mamba_fused_kernel only supports the SD conv state "
+        "layout; unset VLLM_SSM_CONV_STATE_LAYOUT=DS.",
+    )
+
+    batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
 
     # Bounds check
-    if req_idx >= num_reqs:
+    if batch_idx >= num_reqs:
         return
+
+    if HAS_IDX_MAPPING:
+        req_idx = tl.load(idx_mapping_ptr + batch_idx)
+        if req_idx < 0:
+            return
+    else:
+        req_idx = batch_idx
 
     # Compute decision logic (mirrors postprocess_mamba Python reference)
     num_accepted = tl.load(num_accepted_tokens_ptr + req_idx)
     src_block_idx = tl.load(mamba_state_idx_ptr + req_idx)
-    num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
-    num_computed = tl.load(num_computed_tokens_ptr + req_idx)
-    num_draft = tl.load(num_draft_tokens_ptr + req_idx)
 
-    num_tokens_running_state = num_computed + num_scheduled - num_draft
-    new_num_computed = num_tokens_running_state + num_accepted - 1
+    if PRECOMPUTED_NEW_COMPUTED:
+        new_num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+        num_tokens_running_state = new_num_computed - num_accepted + 1
+    else:
+        num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
+        num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+        num_draft = tl.load(num_draft_tokens_ptr + req_idx)
+        num_tokens_running_state = num_computed + num_scheduled - num_draft
+        new_num_computed = num_tokens_running_state + num_accepted - 1
+
     aligned_new_computed = (new_num_computed // block_size) * block_size
 
     needs_copy = aligned_new_computed >= num_tokens_running_state

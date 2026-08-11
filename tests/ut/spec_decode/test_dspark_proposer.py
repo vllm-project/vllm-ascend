@@ -117,6 +117,9 @@ class _DSparkProposerTestBase:
         proposer._per_group_slot_mappings = {gid: slot}
         proposer._per_group_query_slot_mapping_buffers = {gid: slot.clone()}
         proposer._per_group_context_slot_mapping_buffers = {gid: slot.clone()}
+        # Normally set by load_model / check_gdn_layer.
+        proposer.kernel_block_size = block_size
+        proposer.has_gdn = False
         return proposer
 
     # fmt: off
@@ -699,4 +702,41 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         kv_cache_config = SimpleNamespace(kv_cache_groups=[non_overlapping_group])
         with pytest.raises(RuntimeError, match="registered draft attention groups"):
             proposer.initialize_attn_backend(kv_cache_config)
+
+
+class TestKernelBlockSizeResolution(_DSparkProposerTestBase):
+    """Slot ids must be derived from the *kernel* block size.
+
+    On hybrid (Gated-DeltaNet) targets such as Qwen3.5/Qwen3.6, vLLM enlarges the
+    attention ``kv_cache_spec.block_size`` so the attention page size matches the
+    mamba page size. ``BlockTable`` then splits each manager block into kernel
+    blocks, so block table entries and slot mappings are addressed in kernel
+    blocks. Deriving slot ids from the manager block size writes the draft query
+    block's K/V to out-of-range slots; the draft then attends over uninitialized
+    KV cache and its hidden states become NaN.
+    """
+
+    @pytest.mark.parametrize(("has_gdn", "expected"), [(True, 128), (False, 512)])
+    def test_inputs_kernel_block_size_follows_has_gdn(self, monkeypatch, has_gdn, expected):
+        num_reqs, block_size = 1, _NUM_SPECULATIVE_TOKENS
+        proposer = self._make_proposer(
+            max_num_tokens=_MAX_NUM_TOKENS, num_reqs=num_reqs, block_size=block_size
+        )
+        # Split-block group: kv manager 512, kernel 128. GDN must use the kernel
+        # block size; everything else keeps the group's own spec block size.
+        proposer.draft_attn_groups[0].kv_cache_spec = SimpleNamespace(block_size=512)
+        proposer.kernel_block_size = 128
+        proposer.has_gdn = has_gdn
+
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer."
+            "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            kernel,
+        )
+        self._invoke_set_inputs_first_pass(
+            proposer, num_reqs=num_reqs, block_size=block_size
+        )
+
+        assert kernel[1,].call_args.kwargs["block_size"] == expected
 # fmt: on

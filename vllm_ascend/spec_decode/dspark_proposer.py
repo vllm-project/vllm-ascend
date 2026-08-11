@@ -306,7 +306,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             )
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-        self.kernel_block_size = int(self.draft_attn_groups[0].kv_cache_spec.block_size)
 
         name_to_gid = {
             ln: gid
@@ -381,7 +380,16 @@ class AscendDSparkProposer(AscendDflashProposer):
             gid_block_table = self._per_group_block_table_buffers.get(gid)
             if gid_block_table is None:
                 continue
-            kv_block_size = int(attn_group.kv_cache_spec.block_size)
+            # Slot ids are addressed in kernel blocks. On GDN targets vLLM enlarges
+            # kv_cache_spec.block_size to match the mamba page size, so it is a
+            # multiple of the kernel block size and must not be used here; use the
+            # value load_model derived from the draft backend instead. Other models
+            # (e.g. DSV4) address the block table with the group's own spec block
+            # size. Mirrors llm_base_proposer's `has_gdn` branch (#12000).
+            if self.has_gdn:
+                kv_block_size = self.kernel_block_size
+            else:
+                kv_block_size = int(attn_group.kv_cache_spec.block_size)
             copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,
