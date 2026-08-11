@@ -19,9 +19,9 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     DSACPContext,
+    PreprocessType,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -112,10 +112,19 @@ class AscendSFADCPMetadataBuilder(
         max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_model_len = vllm_config.model_config.max_model_len
         total_cp_size = self.dcp_size
-        # BlockTable keeps its global maximum width even though DCP only
-        # populates rank-local blocks. Size from that padded input width before
-        # expanding every column into the replicated indexer view.
-        max_block_table_cols = cdiv(max_model_len, kv_cache_spec.block_size) * self.blocks_per_phys_block
+        # BlockTable keeps a rank-uniform width even though DCP only populates
+        # rank-local blocks: the local row covers the cdiv(max_model_len,
+        # block_size) global blocks with one column per DCP rank, so its width
+        # is rounded up to a multiple of dcp_size. The replicated view then
+        # holds one such rank-uniform row per DCP rank, i.e. dcp_size columns
+        # per global block.
+        max_block_table_cols = (
+            cdiv(
+                cdiv(max_model_len, kv_cache_spec.block_size) * self.blocks_per_phys_block,
+                total_cp_size,
+            )
+            * total_cp_size
+        )
         max_replicated_block_table_cols = max_block_table_cols * total_cp_size
         self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
             (max_num_reqs, max_replicated_block_table_cols),
@@ -446,6 +455,15 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
 
+    def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
+        # DCP shards only the SFA KV cache. PROLOG_V3 writes the SFA KV cache
+        # at the replicated-view slot mapping (global coordinates), which does
+        # not match this rank's local DCP KV shard, so keep DCP on the native
+        # path where the DCP slot mapping is passed explicitly.
+        if pp_type is PreprocessType.PROLOG_V3:
+            return False
+        return super()._try_enable_type(pp_type, act_dtype)
+
     @staticmethod
     def _has_prefill(attn_metadata: M) -> bool:
         return attn_metadata.num_prefills > 0
@@ -465,7 +483,14 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
         block_table = attn_metadata.dcp_context.kv_gather_block_table
         assert valid_block_ids is not None and block_table is not None
-        kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
+        kv_cache_dtype = kv_cache[0].dtype
+        # torch_npu index_select has no FP8 dispatch, so gather quantized 1-byte
+        # payloads (fp8_e4m3fn / fp8_e5m2) through a zero-copy uint8 view and
+        # re-interpret the bytes afterwards. The copy/cat kernels run on uint8,
+        # which keeps the work and the memory footprint identical to a native
+        # FP8 gather.
+        gather_dtype = torch.uint8 if kv_cache_dtype in (torch.float8_e4m3fn, torch.float8_e5m2) else kv_cache_dtype
+        kv = torch.index_select(kv_cache[0].view(gather_dtype), 0, valid_block_ids)
         split_sizes: tuple[int, ...]
         if self.enable_sparse_sfa_c8:
             # Sparse C8 stores nope, rope, and quantization data in one packed
@@ -476,7 +501,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         else:
             if len(kv_cache) < 2:
                 raise RuntimeError("DCP SFA KV all-gather requires nope and rope KV caches.")
-            key_rope = torch.index_select(kv_cache[1], 0, valid_block_ids)
+            key_rope = torch.index_select(kv_cache[1].view(gather_dtype), 0, valid_block_ids)
             if kv.shape[:-1] != key_rope.shape[:-1] or kv.dtype != key_rope.dtype:
                 raise RuntimeError(
                     "Cannot fuse DCP KV gather for KV/nope and KV/rope caches with "
@@ -484,6 +509,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 )
             gather_input = torch.cat([kv, key_rope], dim=-1).contiguous()
             split_sizes = (kv.shape[-1], key_rope.shape[-1])
+        if gather_dtype is torch.uint8:
+            gather_input = gather_input.view(kv_cache_dtype)
         attn_metadata.dcp_context.gather_context = self._start_dcp_gather(
             gather_input,
             dim=0,
@@ -761,8 +788,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # its local Q heads/tokens directly. In particular, DSA-CP keeps
             # its token shard local; no Q all-gather, sparse-index remap, LSE,
             # or output all-to-all merge is required.
-            attn_output = DeviceOperator.execute_sparse_flash_attention_process(
-                self,
+            attn_output = super()._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
                 gathered_kv_cache,
@@ -790,8 +816,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
         ql_nope, q_pe = self._finish_dcp_gather(gather_context)
-        sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
-            self,
+        sfa_output, softmax_max, softmax_sum = super()._execute_sparse_flash_attention_process(
             ql_nope,
             q_pe,
             kv_cache,

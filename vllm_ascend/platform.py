@@ -713,8 +713,6 @@ class NPUPlatform(Platform):
                     f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                     f"== tp_size({parallel_config.tensor_parallel_size})."
                 )
-            if get_ascend_device_type() == AscendDeviceType.A5:
-                raise NotImplementedError("SFA DCP with replicated indexer is not supported on A5 yet.")
 
         if (
             vllm_config.kv_transfer_config is not None

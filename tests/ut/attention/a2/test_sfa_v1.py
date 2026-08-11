@@ -24,7 +24,7 @@ from vllm_ascend.attention.sfa_v1 import (
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.device_op import BaseDeviceAdaptor
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -87,7 +87,7 @@ class TestAscendSFADeviceOperator(TestBase):
         attn_metadata.block_table = torch.zeros(1, 4, dtype=torch.int32)
         actual_seq_lengths_query = torch.tensor([3], dtype=torch.int32)
         actual_seq_lengths_key = torch.tensor([3], dtype=torch.int32)
-        impl = MagicMock()
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.scale = 0.125
         impl.qk_rope_head_dim = 2
         impl.sfa_qsfa_tile_size = 128
@@ -125,8 +125,7 @@ class TestAscendSFADeviceOperator(TestBase):
             create=True,
             return_value=(attn_output, softmax_max, softmax_sum),
         ) as mock_sfa:
-            output, actual_softmax_max, actual_softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
-                impl,
+            output, actual_softmax_max, actual_softmax_sum = impl._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
                 kv_cache,
@@ -157,21 +156,13 @@ class TestAscendSFADeviceOperator(TestBase):
         softmax_max = torch.ones(1, 3, 4)
         softmax_sum = torch.full((1, 3, 4), 3.0)
 
-        with (
-            patch.object(
-                torch.ops._C_ascend,
-                "npu_kv_quant_sparse_flash_attention",
-                create=True,
-                return_value=(attn_output, softmax_max, softmax_sum),
-            ) as mock_qsfa,
-            patch(
-                "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-                create=True,
-                side_effect=AssertionError("C8 SFA with LSE must use the custom op"),
-            ),
-        ):
-            output, actual_softmax_max, actual_softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
-                impl,
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_flash_attention",
+            create=True,
+            return_value=(attn_output, softmax_max, softmax_sum),
+        ) as mock_qsfa:
+            output, actual_softmax_max, actual_softmax_sum = impl._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
                 packed_kv_cache,
@@ -334,19 +325,12 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         actual_seq_lengths = torch.tensor([3], dtype=torch.int32)
         expected = torch.randn(3, 2, 32)
 
-        with (
-            patch.object(
-                torch.ops._C_ascend,
-                "npu_kv_quant_sparse_flash_attention",
-                create=True,
-                return_value=(expected, torch.empty(0), torch.empty(0)),
-            ) as mock_qsfa,
-            patch(
-                "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-                create=True,
-                side_effect=AssertionError("Base must use _C_ascend custom op"),
-            ),
-        ):
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_flash_attention",
+            create=True,
+            return_value=(expected, torch.empty(0), torch.empty(0)),
+        ) as mock_qsfa:
             result = impl._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,

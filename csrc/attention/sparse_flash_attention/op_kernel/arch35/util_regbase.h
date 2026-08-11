@@ -210,7 +210,9 @@ struct RunInfo {
     /* service mm1 mm2 pageAttention */ \
     uint32_t oriBlockSize; \
     uint32_t cmpBlockSize; \
+    uint32_t blockSize; \
     uint32_t paLayoutType; \
+    uint32_t maxBlockNumPerBatch; \
     uint32_t oriMaxBlockNumPerBatch; \
     uint32_t cmpMaxBlockNumPerBatch; \
     int32_t oriWinLeft; \
@@ -249,7 +251,11 @@ struct RunInfo {
     uint32_t oriMaxBlockNumPerBatch; \
     uint32_t cmpMaxBlockNumPerBatch; \
     uint32_t usedCoreNum; \
-    bool returnSoftmaxLse
+    bool returnSoftmaxLse; \
+    /* PA 场景的 block size 与最大单batch block 数，及稀疏mask模式，对齐上游 sparse_flash_attention util_regbase.h 定义 */ \
+    uint32_t blockSize : 12; \
+    uint32_t maxBlockNumPerBatch; \
+    uint32_t maskMode : 4
 
 struct ConstInfo {
     COMMON_CONST_INFO;
