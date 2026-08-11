@@ -362,6 +362,41 @@ class TestAscendMLAMetadataBuilder(TestBase):
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
+    def test_short_extend_classification_with_context_parallelism(self):
+        for pcp_size, dcp_size, expected in (
+            (1, 1, True),
+            (2, 1, False),
+            (1, 2, False),
+        ):
+            with self.subTest(pcp_size=pcp_size, dcp_size=dcp_size):
+                vllm_config = MagicMock()
+                vllm_config.model_config.max_model_len = 1024
+                vllm_config.model_config.get_head_size.return_value = 64
+                vllm_config.model_config.dtype = torch.float16
+                vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+                vllm_config.cache_config.block_size = 16
+                vllm_config.scheduler_config.max_num_seqs = 4
+                vllm_config.scheduler_config.enable_chunked_prefill = False
+                vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+                vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+                vllm_config.speculative_config = None
+
+                with patch(
+                    "vllm_ascend.attention.mla_v1.get_ascend_config",
+                    return_value=MagicMock(),
+                ):
+                    builder = AscendMLAMetadataBuilder(
+                        None,
+                        None,
+                        vllm_config,
+                        "cpu",
+                    )
+
+                self.assertEqual(
+                    builder.treat_short_extends_as_decodes,
+                    expected,
+                )
+
     def test_ascend_mla_metadata_builder_spec_decode(self):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
