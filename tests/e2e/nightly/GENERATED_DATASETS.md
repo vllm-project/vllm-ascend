@@ -14,7 +14,6 @@ multimodal cases must continue to use their real datasets.
 benchmarks:
   perf:
     case_type: performance
-    dataset_name: GSM8K-in3500-num2800
     dataset_generator:
       type: fixed
       input_len: 3500
@@ -36,7 +35,6 @@ benchmarks:
 benchmarks:
   perf_prefix75:
     case_type: performance
-    dataset_name: prefix75-in3500-num210
     dataset_generator:
       type: prefix
       input_len: 3500
@@ -56,9 +54,10 @@ benchmarks:
     threshold: 0.97
 ```
 
-`dataset_name` is used only in benchmark result reporting. Generated files are
-cached under `/tmp/vllm_ascend_datasets` by default. Set
-`VLLM_ASCEND_DATASET_CACHE` to use another cache directory.
+Generated files are cached under `/tmp/vllm_ascend_datasets` by default. Set
+`VLLM_ASCEND_DATASET_CACHE` to use another cache directory. Each cache
+directory name contains the dataset shape, model basename, and a configuration
+hash, for example `GSM8K-in3500-num2800-DeepSeek-V4-<hash>`.
 
 The same benchmark mapping works in the single-node, internal-DP, and
 external-DP YAML formats because dataset resolution is shared by

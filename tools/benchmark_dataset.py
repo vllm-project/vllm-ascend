@@ -207,7 +207,14 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
 def _dataset_cache_dir(model_path: str, config: dict[str, Any], cache_root: str | Path) -> Path:
     cache_description = {"version": 1, "model_path": os.path.abspath(model_path), **config}
     digest = hashlib.sha256(json.dumps(cache_description, sort_keys=True).encode()).hexdigest()[:20]
-    return Path(cache_root) / digest
+    model_name = Path(str(model_path).rstrip("/\\")).name or "model"
+    model_name = "".join(character if character.isalnum() or character in "-._" else "-" for character in model_name)
+    if config["type"] == "fixed":
+        dataset_name = f"GSM8K-in{config['input_len']}-num{config['num_samples']}"
+    else:
+        prefix_percentage = f"{config['prefix_ratio'] * 100:g}"
+        dataset_name = f"prefix{prefix_percentage}-in{config['input_len']}-num{config['num_samples']}"
+    return Path(cache_root) / f"{dataset_name}-{model_name}-{digest}"
 
 
 def _is_complete_dataset(dataset_file: Path, expected_rows: int) -> bool:
