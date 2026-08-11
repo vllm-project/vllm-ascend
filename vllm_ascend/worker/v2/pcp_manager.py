@@ -51,9 +51,6 @@ def validate_ascend_pcp_config(
         raise NotImplementedError("Ascend MRV2 GQA PCP does not support quantized models yet.")
     if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
         raise NotImplementedError("Ascend MRV2 GQA PCP supports eager mode only.")
-    if model_config.dtype != torch.bfloat16:
-        raise NotImplementedError("Ascend MRV2 GQA PCP supports BF16 models only.")
-
     text_config = model_config.hf_text_config
     if text_config.num_attention_heads == text_config.num_key_value_heads:
         raise NotImplementedError(

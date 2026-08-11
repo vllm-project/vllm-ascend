@@ -276,7 +276,6 @@ def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
         ("spec_decode", "speculative decoding"),
         ("quantization", "quantized models"),
         ("graph", "eager mode only"),
-        ("dtype", "BF16 models only"),
         ("mha", "num_attention_heads"),
     ],
 )
@@ -297,8 +296,6 @@ def test_validate_ascend_gqa_pcp_rejects_unsupported_modes(case, match):
         vllm_config.model_config.quantization = "ascend"
     elif case == "graph":
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-    elif case == "dtype":
-        vllm_config.model_config.dtype = torch.float16
     elif case == "mha":
         vllm_config.model_config.hf_text_config.num_key_value_heads = 32
 
