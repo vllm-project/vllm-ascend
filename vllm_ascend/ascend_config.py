@@ -15,7 +15,6 @@
 # limitations under the License.
 import json
 import os
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
@@ -848,65 +847,6 @@ class RejectionSamplerConfig:
             raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
 
 
-@dataclass
-class ScoreEncoderCacheConfig:
-    """Configuration for the score-based encoder cache policy."""
-
-    cpu_cache_slots: int = 100000
-    max_clock: int = 15
-    clock_decay_every: int = 64
-    watermark: float = 0.2
-    promote_percentile: float = 0.2
-
-    @classmethod
-    def from_dict(cls, manager_config: Any) -> "ScoreEncoderCacheConfig":
-        if not isinstance(manager_config, dict):
-            raise ValueError(
-                f"manager_config must be a dict, got {type(manager_config).__name__}"
-            )
-        try:
-            return cls(**manager_config)
-        except TypeError as error:
-            raise ValueError(f"Invalid Score manager_config: {error}") from error
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.cpu_cache_slots, bool)
-            or not isinstance(self.cpu_cache_slots, int)
-            or self.cpu_cache_slots <= 0
-        ):
-            raise ValueError(
-                f"manager_config.cpu_cache_slots must be a positive integer, got {self.cpu_cache_slots}"
-            )
-        if isinstance(self.max_clock, bool) or not isinstance(self.max_clock, int) or self.max_clock < 0:
-            raise ValueError(
-                f"manager_config.max_clock must be a non-negative integer, got {self.max_clock}"
-            )
-        if (
-            isinstance(self.clock_decay_every, bool)
-            or not isinstance(self.clock_decay_every, int)
-            or self.clock_decay_every <= 0
-        ):
-            raise ValueError(
-                f"manager_config.clock_decay_every must be a positive integer, got {self.clock_decay_every}"
-            )
-        if (
-            isinstance(self.watermark, bool)
-            or not isinstance(self.watermark, (int, float))
-            or not 0 <= self.watermark <= 1
-        ):
-            raise ValueError(f"manager_config.watermark must be a number in [0, 1], got {self.watermark}")
-        if (
-            isinstance(self.promote_percentile, bool)
-            or not isinstance(self.promote_percentile, (int, float))
-            or not 0 <= self.promote_percentile <= 1
-        ):
-            raise ValueError(
-                "manager_config.promote_percentile must be a number in [0, 1], "
-                f"got {self.promote_percentile}"
-            )
-
-
 class EplbConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
@@ -1267,7 +1207,4 @@ def get_ascend_config():
 def is_score_encoder_cache_manager(vllm_config) -> bool:
     from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
 
-    return (
-        vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
-        is ScoreEncoderCacheManager
-    )
+    return vllm_config.ec_manager_config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager

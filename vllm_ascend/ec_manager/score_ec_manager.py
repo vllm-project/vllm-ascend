@@ -1,12 +1,10 @@
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.request import Request
-
-from vllm_ascend.ascend_config import ScoreEncoderCacheConfig
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -30,6 +28,58 @@ class ScoreEncoderCacheManagerMetadata(EncoderCacheManagerMetadata):
     cpu_freed: list[str]
 
 
+@dataclass
+class ScoreEncoderCacheConfig:
+    """Configuration for the score-based encoder cache policy."""
+
+    cpu_cache_slots: int = 100000
+    max_clock: int = 15
+    clock_decay_every: int = 64
+    watermark: float = 0.2
+    promote_percentile: float = 0.2
+
+    @classmethod
+    def from_dict(cls, manager_config: Any) -> "ScoreEncoderCacheConfig":
+        if not isinstance(manager_config, dict):
+            raise ValueError(f"manager_config must be a dict, got {type(manager_config).__name__}")
+        try:
+            return cls(**manager_config)
+        except TypeError as error:
+            raise ValueError(f"Invalid Score manager_config: {error}") from error
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.cpu_cache_slots, bool)
+            or not isinstance(self.cpu_cache_slots, int)
+            or self.cpu_cache_slots <= 0
+        ):
+            raise ValueError(f"manager_config.cpu_cache_slots must be a positive integer, got {self.cpu_cache_slots}")
+        if isinstance(self.max_clock, bool) or not isinstance(self.max_clock, int) or self.max_clock < 0:
+            raise ValueError(f"manager_config.max_clock must be a non-negative integer, got {self.max_clock}")
+        if (
+            isinstance(self.clock_decay_every, bool)
+            or not isinstance(self.clock_decay_every, int)
+            or self.clock_decay_every <= 0
+        ):
+            raise ValueError(
+                f"manager_config.clock_decay_every must be a positive integer, got {self.clock_decay_every}"
+            )
+        if (
+            isinstance(self.watermark, bool)
+            or not isinstance(self.watermark, (int, float))
+            or not 0 <= self.watermark <= 1
+        ):
+            raise ValueError(f"manager_config.watermark must be a number in [0, 1], got {self.watermark}")
+        if (
+            isinstance(self.promote_percentile, bool)
+            or not isinstance(self.promote_percentile, (int, float))
+            or not 0 <= self.promote_percentile <= 1
+        ):
+            raise ValueError(
+                f"manager_config.promote_percentile must be a number in [0, 1], got {self.promote_percentile}"
+            )
+
+
 class ScoreEncoderCacheManager(EncoderCacheManager):
     """
     Score-based encoder cache manager.
@@ -48,7 +98,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
     """
 
     @classmethod
-    def from_vllm_config(
+    def create_manager(
         cls,
         *,
         cache_size: int,
