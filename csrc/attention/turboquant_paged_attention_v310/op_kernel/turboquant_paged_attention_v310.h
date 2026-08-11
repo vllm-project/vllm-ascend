@@ -308,19 +308,40 @@ private:
                         Add(kv, kv, kv[pl * lanes], lanes);
                         PipeBarrier<PIPE_V>();
                     }
-                    // each token's lpt partials are now CONTIGUOUS at kv[t*lpt]
-                    for (uint32_t t = 0; t < kTile; ++t) {
-                        ReduceSum(red, kv[t * lpt], wrk, lpt);
+                    /*
+                     * Each token's lpt partials are CONTIGUOUS at kv[t*lpt], so
+                     * the whole tile reduces with ONE WholeReduceSum writing the
+                     * kTile dots straight into sco -- replacing kTile ReduceSums,
+                     * kTile barriers and kTile V_S flag pairs.
+                     *
+                     * fp32 caps a repeat at 64 elements, so lpt=128 (BITS==4) is
+                     * first halved with a single strided Add; lpt=64 (BITS==2)
+                     * reduces directly. Scratch lives above the folded region:
+                     * kv holds kTile*d but only kTile*lpt = kTile*d/kPlanes is
+                     * live after the plane fold.
+                     */
+                    LocalTensor<float> rsrc = kv;
+                    if (lpt > 64) {
+                        const uint8_t sRep = static_cast<uint8_t>(lpt / 8);   // lpt fp32 in 32B blocks
+                        Add(kv[kTile * lpt], kv, kv[64], 64, kTile,
+                            BinaryRepeatParams{1, 1, 1, 8, sRep, sRep});
                         PipeBarrier<PIPE_V>();
-                        SetFlag<HardEvent::V_S>(EVENT_ID2);
-                        WaitFlag<HardEvent::V_S>(EVENT_ID2);
+                        rsrc = kv[kTile * lpt];
+                    }
+                    WholeReduceSum(sco[t0], rsrc, 64, kTile, 1, 1, 8);
+                    PipeBarrier<PIPE_V>();
+                    SetFlag<HardEvent::V_S>(EVENT_ID2);
+                    WaitFlag<HardEvent::V_S>(EVENT_ID2);
+                    for (uint32_t t = 0; t < kTile; ++t) {
                         const uint32_t tk = t0 + t;
                         if (tk < tokEnd) {
                             const float kNorm =
                                 static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh));
-                            sco.SetValue(tk, red.GetValue(0) * kNorm * t_->scale);
+                            sco.SetValue(tk, sco.GetValue(tk) * kNorm * t_->scale);
                         }
                     }
+                    SetFlag<HardEvent::S_V>(EVENT_ID1);   // scalar rewrote sco -> next tile's V ops
+                    WaitFlag<HardEvent::S_V>(EVENT_ID1);
                 }
             } else {
                 for (uint32_t tk = 0; tk < tokEnd; ++tk) {
