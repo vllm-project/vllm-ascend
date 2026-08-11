@@ -560,6 +560,7 @@ class KVCacheRecvingThread(threading.Thread):
         all_task_done: bool = False,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        report_finished: bool = True,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -579,6 +580,7 @@ class KVCacheRecvingThread(threading.Thread):
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
             "remote_block_size": remote_block_size,
+            "report_finished": report_finished,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -718,7 +720,8 @@ class KVCacheRecvingThread(threading.Thread):
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
             if self._mark_request_task_done(request_id, all_task_done):
-                self.task_tracker.update_done_task_count(request_id)
+                if req_meta.get("report_finished", True):
+                    self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
                 self._clear_failed_recv_request(request_id)
@@ -1851,13 +1854,27 @@ class MooncakeConnectorScheduler:
             params,
         )
 
-        if params is not None and (params.get("do_remote_prefill", False) or params.get("do_remote_decode", False)):
+        needs_remote_prefill = bool(params is not None and params.get("do_remote_prefill", False))
+        needs_remote_decode = bool(params is not None and params.get("do_remote_decode", False))
+        if (needs_remote_prefill and num_external_tokens > 0) or needs_remote_decode:
             self._reqs_in_batch.add(request.request_id)
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
-                if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
-                    local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
-                    local_full_block_ids = blocks.get_block_ids() if num_external_tokens > 0 else tuple()
+                if all(
+                    key in params
+                    for key in (
+                        "remote_engine_id",
+                        "remote_host",
+                        "remote_port",
+                        "remote_request_id",
+                    )
+                ):
+                    if num_external_tokens > 0:
+                        local_block_ids = blocks.get_unhashed_block_ids_all_groups()
+                        local_full_block_ids = blocks.get_block_ids()
+                    else:
+                        local_block_ids = tuple([] for _ in params["remote_block_ids"])
+                        local_full_block_ids = tuple()
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
                         request,
@@ -3571,6 +3588,7 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        report_finished=(getattr(meta, "num_external_tokens", 1) > 0),
                     )
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
