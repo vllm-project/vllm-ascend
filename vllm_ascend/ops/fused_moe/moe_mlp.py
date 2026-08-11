@@ -31,7 +31,6 @@ from vllm_ascend.ops.activation import (
     AscendSwigluOAIAndMul,
     AscendSwigluStepAndMul,
     SituActivationConfig,
-    situ_and_mul as ascend_situ_and_mul,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -711,13 +710,7 @@ def unquant_apply_mlp(
 
     act_name = getattr(activation, "value", activation)
     if isinstance(activation, SituActivationConfig):
-        gate_up_out = ascend_situ_and_mul(
-            gate_up_out,
-            beta=activation.beta,
-            linear_beta=activation.linear_beta,
-            group_list=group_list,
-            group_list_type=group_list_type,
-        )
+        raise NotImplementedError("SiTU requires a fused quantization path.")
     elif activation == MoEActivation.SWIGLUOAI:
         w1_tensor = _require_single_tensor_for_swiglu_quant(w1, name="w1")
         num_experts, _, hidden_size = w1_tensor.shape

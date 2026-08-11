@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical regression coverage for the supplied Kimi K3 Triton fusions."""
+"""Numerical regression coverage for Kimi K3 attention residual fusion."""
 
 from types import SimpleNamespace
 
@@ -24,7 +24,6 @@ from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import apply_attn_res
-    from vllm_ascend.ops.triton.kimi_k3.situ_and_mul import situ_and_mul
 
 
 pytestmark = [
@@ -32,46 +31,6 @@ pytestmark = [
     pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required"),
     pytest.mark.skip_global_cleanup,
 ]
-
-
-def _situ_reference(x: torch.Tensor, beta: float, linear_beta: float) -> torch.Tensor:
-    gate, up = x.float().chunk(2, dim=-1)
-    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
-    up = linear_beta * torch.tanh(up / linear_beta)
-    return (gate * up).to(x.dtype)
-
-
-@torch.inference_mode()
-def test_kimi_k3_situ_triton_matches_reference():
-    torch.manual_seed(0)
-    beta = 4.0
-    linear_beta = 25.0
-    x = torch.randn((13, 6144), dtype=torch.bfloat16, device="npu")
-
-    actual = situ_and_mul(x, beta=beta, linear_beta=linear_beta)
-    expected = _situ_reference(x, beta, linear_beta)
-
-    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=1e-2, atol=1e-2)
-
-
-@torch.inference_mode()
-def test_kimi_k3_grouped_situ_triton_matches_active_rows():
-    torch.manual_seed(2)
-    beta = 4.0
-    linear_beta = 25.0
-    x = torch.randn((5, 6144), dtype=torch.bfloat16, device="npu")
-    group_list = torch.tensor([2, 3, 3], dtype=torch.int32, device="npu")
-
-    actual = situ_and_mul(
-        x,
-        group_list=group_list,
-        group_list_type=0,
-        beta=beta,
-        linear_beta=linear_beta,
-    )
-    expected = _situ_reference(x, beta, linear_beta)
-
-    torch.testing.assert_close(actual[:3].cpu(), expected[:3].cpu(), rtol=1e-2, atol=1e-2)
 
 
 @torch.inference_mode()

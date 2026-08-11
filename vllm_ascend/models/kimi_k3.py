@@ -17,7 +17,7 @@
 """Native multimodal Kimi K3 model for vLLM-Ascend."""
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Annotated, Any, Literal, cast
 
@@ -100,8 +100,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import HAS_TRITON
 from vllm.transformers_utils.processor import cached_get_image_processor
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -112,10 +112,17 @@ from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3Config, KimiK3T
 from vllm_ascend.transformers_utils.processors.kimi_k3 import KimiK3Processor
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
+apply_attn_res: (
+    Callable[
+        [torch.Tensor, torch.Tensor, nn.Module, nn.Module],
+        torch.Tensor,
+    ]
+    | None
+) = None
 if HAS_TRITON:
-    from vllm_ascend.ops.triton.kimi_k3.attention_residual import apply_attn_res
-else:
-    apply_attn_res = None
+    from vllm_ascend.ops.triton.kimi_k3.attention_residual import apply_attn_res as triton_apply_attn_res
+
+    apply_attn_res = triton_apply_attn_res
 
 
 def _routed_latent_quant_config(

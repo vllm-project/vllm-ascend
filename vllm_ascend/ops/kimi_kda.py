@@ -22,6 +22,7 @@ surface while routing prefill through the Kimi AscendC kernels and decode
 through the recurrent KDA AscendC kernel.
 """
 
+from collections.abc import Callable
 from functools import partial, wraps
 
 import torch
@@ -40,6 +41,7 @@ from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -47,9 +49,22 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.kda.fused_norm_gate import apply_kda_rms_norm_sigmoid_gate
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
+
+apply_kda_rms_norm_sigmoid_gate: (
+    Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, float],
+        torch.Tensor,
+    ]
+    | None
+) = None
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.kda.fused_norm_gate import (
+        apply_kda_rms_norm_sigmoid_gate as triton_apply_kda_rms_norm_sigmoid_gate,
+    )
+
+    apply_kda_rms_norm_sigmoid_gate = triton_apply_kda_rms_norm_sigmoid_gate
 
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
@@ -268,12 +283,14 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         output_gate: torch.Tensor,
     ) -> torch.Tensor:
-        return apply_kda_rms_norm_sigmoid_gate(
-            core_attn_out,
-            output_gate,
-            self.o_norm.weight,
-            self.o_norm.eps,
-        )
+        if apply_kda_rms_norm_sigmoid_gate is not None:
+            return apply_kda_rms_norm_sigmoid_gate(
+                core_attn_out,
+                output_gate,
+                self.o_norm.weight,
+                self.o_norm.eps,
+            )
+        return self.o_norm(core_attn_out, output_gate)
 
     @staticmethod
     def _run_causal_conv1d(

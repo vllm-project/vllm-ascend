@@ -77,7 +77,10 @@ def layer_norm_gated_fwd_kernel(
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
     if HAS_BIAS:
         b_b = tl.load(b + o_d, mask=m_d).to(tl.float32)
-    b_x_hat = (b_x - b_mean[:, None]) * b_rstd[:, None] if not IS_RMS_NORM else b_x * b_rstd[:, None]
+    if IS_RMS_NORM:
+        b_x_hat = b_x * b_rstd[:, None]
+    else:
+        b_x_hat = (b_x - b_mean[:, None]) * b_rstd[:, None]
     b_y = b_x_hat * b_w[None, :] if HAS_WEIGHT else b_x_hat
     if HAS_BIAS:
         b_y = b_y + b_b[None, :]
@@ -145,7 +148,10 @@ def layer_norm_gated_fwd_kernel1(
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
     if HAS_BIAS:
         b_b = tl.load(b + o_d, mask=m_d).to(tl.float32)
-    b_x_hat = (b_x - b_mean) * b_rstd if not IS_RMS_NORM else b_x * b_rstd
+    if IS_RMS_NORM:
+        b_x_hat = b_x * b_rstd
+    else:
+        b_x_hat = (b_x - b_mean) * b_rstd
     b_y = b_x_hat * b_w if HAS_WEIGHT else b_x_hat
     if HAS_BIAS:
         b_y = b_y + b_b
