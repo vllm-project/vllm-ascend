@@ -27,8 +27,9 @@ vs V1. Being faster is allowed: the 2026-08-06 measurement showed V2 TTFT is
 
 Scenario (2026-08-09 revision, eagle3 excluded until its accuracy/perf fix
 lands upstream):
-  TP2 x DP2 + FULL_DECODE_ONLY + quantization (W8A8), max-model-len=18000,
-  num_prompts=50, max_out_len=1024, batch_size (concurrency)=2.
+  TP2 x DP2 + async-scheduling + FULL_DECODE_ONLY + quantization (W8A8),
+  max-model-len=18000, num_prompts=50, max_out_len=1024,
+  batch_size (concurrency)=2.
   Prefix caching is not enabled in this low-latency scenario.
 
 The 2026-08-06 V1 baseline (TTFT 2454.5 ms / TPOT 12.2 ms at bs=2) was
@@ -44,9 +45,11 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from tools.aisbench import run_aisbench_cases
 
-MODEL = os.getenv("QWEN3_32B_PDMIX_PATH", "/mnt/a800_weight/qwen3-32b-pdmix")
+MODEL = os.environ.get("QWEN3_32B_W8A8_MODEL_PATH", "vllm-ascend/Qwen3-32B-W8A8")
 
-DATASET_PATH = "vllm-ascend/GSM8K-in16384-bs50"
+# 16k-in dataset with 0% shared prefix, matching the no-prefix-caching
+# low-latency scenario. Published dataset, already used by existing weekly guards.
+DATASET_PATH = "vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen"
 
 # V2 latency (TTFT/TPOT) must be at most 3% worse than V1.
 LATENCY_REGRESSION_RATIO = 1.03
@@ -88,6 +91,7 @@ _SERVER_ARGS = [
     "0",
     "--distributed-executor-backend",
     "mp",
+    "--async-scheduling",
     "--no-enable-prefix-caching",
     "--compilation-config",
     '{"cudagraph_mode": "FULL_DECODE_ONLY"}',

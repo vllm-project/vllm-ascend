@@ -43,7 +43,7 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from tools.aisbench import run_aisbench_cases
 
-MODEL = os.getenv("QWEN3_32B_PDMIX_PATH", "/mnt/a800_weight/qwen3-32b-pdmix")
+MODEL = os.environ.get("QWEN3_32B_W8A8_MODEL_PATH", "vllm-ascend/Qwen3-32B-W8A8")
 
 # GPQA diamond: 198 questions.
 # Team-confirmed per-run tolerance (2026-08-09): |V2-V1| <= 3.00pp (about

@@ -43,13 +43,11 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from tools.aisbench import run_aisbench_cases
 
-MODEL = os.getenv("QWEN3_32B_PDMIX_PATH", "/mnt/a800_weight/qwen3-32b-pdmix")
+MODEL = os.environ.get("QWEN3_32B_W8A8_MODEL_PATH", "vllm-ascend/Qwen3-32B-W8A8")
 
-# The 128k-in / 1k-out dataset repeats 90% of its prefix so prefix caching is
-# exercised; it is self-constructed by the team and this is a mock placeholder
-# id. Publish the dataset under this id on ModelScope (or switch to a local
-# path via `dataset_path_local`) before enabling the guard.
-DATASET_PATH = "vllm-ascend/GSM8K-in131072-prefix90-bs16"
+# The 128k-in dataset repeats 90% of its prefix so prefix caching is exercised.
+# Published dataset, already used by existing weekly guards.
+DATASET_PATH = "vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen"
 
 # V2/V1 Total Token Throughput ratio must stay within +-3%.
 THROUGHPUT_RATIO_LOWER = 0.97
