@@ -1551,6 +1551,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
             if run_multistream_indexer:
                 assert indexer_q is not None
+                assert indexer_kv_scale_metadata is not None
                 main_stream = torch.npu.current_stream()
                 aux_stream = dsv4_dsa_overlap_stream()
                 e_compressed_kv_done = main_stream.record_event()
