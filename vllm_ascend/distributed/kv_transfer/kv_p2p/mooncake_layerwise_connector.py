@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 
 DONE_SENDING_MSG = b"done_sending_msg"
 FAILED_SENDING_MSG = b"failed_sending_msg"
+LAYERWISE_REUSE_WAIT_LOG_INTERVAL_SECONDS = 10.0
 
 
 @dataclass
@@ -224,6 +225,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         enable_c8_quant: bool,
         resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
+        reuse_completion_callback: Callable[[int, str | None], None] | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
@@ -262,6 +264,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.enable_c8_quant = enable_c8_quant
         self.ready_event = ready_event
         self.callback_func = callback_func
+        self.reuse_completion_callback = reuse_completion_callback
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -273,14 +276,20 @@ class KVCacheSendingLayerThread(threading.Thread):
             self._handle_request(send_task)
 
     def _handle_request(self, send_task: SendTask):
+        error: str | None = None
         try:
             self._transfer_kv_cache(send_task)
         except Exception as e:
+            error = str(e)
             logger.error(
                 "Failed to transfer KV cache. layer_idx=%s, error=%s. Check transfer engine and memory state.",
                 send_task.layer_idx,
                 e,
             )
+        finally:
+            if self.reuse_completion_callback is not None:
+                self.reuse_completion_callback(send_task.layer_idx, error)
+            self.send_queue.task_done()
 
     def get_transfer_meta(self, send_task: SendTask, req_id: str, req_meta: ReqMeta, layer_group_idx: int):
         src_list: list[int] = []
@@ -491,6 +500,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         elif self.pd_head_ratio > 1:
             self.resharding_stream.synchronize()
 
+        transfer_errors: list[str] = []
         for session_id, transfer_meta in session_meta.items():
             if len(transfer_meta.src) > 0:
                 req_start_time = time.perf_counter()
@@ -498,13 +508,11 @@ class KVCacheSendingLayerThread(threading.Thread):
                     session_id, transfer_meta.src, transfer_meta.dst, transfer_meta.length
                 )
                 if ret < 0:
-                    logger.error(
-                        "Mooncake transfer failed for send requests. req_ids=%s, destination=%s, ret=%d. ",
-                        transfer_meta.req_ids,
-                        session_id,
-                        ret,
+                    self.failed_reqs.update(transfer_meta.req_ids)
+                    transfer_errors.append(
+                        "Mooncake transfer failed for send requests. "
+                        f"req_ids={transfer_meta.req_ids}, destination={session_id}, ret={ret}"
                     )
-                    self.failed_reqs.add(req_id)
                 else:
                     req_end_time = time.perf_counter()
                     total_transfer_size = sum(transfer_meta.length) / 1024
@@ -525,6 +533,9 @@ class KVCacheSendingLayerThread(threading.Thread):
                                 self.failed_reqs.discard(req_id)
                             else:
                                 self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=True)
+
+        if transfer_errors:
+            raise RuntimeError("; ".join(transfer_errors))
 
 
 class KVCacheRecvingLayerThread(threading.Thread):
@@ -696,11 +707,13 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     requires_full_blocks_on_update_after_alloc = True
+    supports_layerwise_buffer_reuse = True
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
         self._is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+        self.is_producer = self._is_kv_producer
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeLayerwiseConnectorMetadata()
 
@@ -775,6 +788,10 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
         self.connector_worker.wait_for_layer_load(layer_name)
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_reuse(layer_idx)
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: list[torch.Tensor], attn_metadata: "AttentionMetadata", **kwargs
@@ -1177,6 +1194,11 @@ class MooncakeLayerwiseConnectorWorker:
         # Background thread for sending or receiving KV caches.
         self.kv_recv_layer_thread: KVCacheRecvingLayerThread | None = None
         self.kv_send_layer_thread: KVCacheSendingLayerThread | None = None
+        self.layer_storage_slots: dict[int, tuple[int, ...]] = {}
+        self.storage_send_done_events: list[threading.Event] = []
+        self._storage_send_errors: dict[int, str] = {}
+        self._pending_reuse_layers: set[int] = set()
+        self._layerwise_reuse_lock = threading.Lock()
 
         self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
         self.kernel_block_size_scale: list[int] = [1 for _ in range(self.num_kv_cache_groups)]
@@ -1215,6 +1237,62 @@ class MooncakeLayerwiseConnectorWorker:
         self.virtual_request: set[str] = set()
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
+
+    def _init_layerwise_reuse_state(self) -> None:
+        slot_by_addr: dict[int, int] = {}
+        layer_storage_slots: dict[int, tuple[int, ...]] = {}
+        for layer_idx, layer_names in self.index_to_name.items():
+            slots: list[int] = []
+            for layer_name in layer_names:
+                for addr in self.layer_metadata[layer_name].kv_caches_base_addr:
+                    slot_id = slot_by_addr.setdefault(addr, len(slot_by_addr))
+                    if slot_id not in slots:
+                        slots.append(slot_id)
+            layer_storage_slots[layer_idx] = tuple(slots)
+        self.layer_storage_slots = layer_storage_slots
+        self.storage_send_done_events = []
+        for _ in range(len(slot_by_addr)):
+            event = threading.Event()
+            event.set()
+            self.storage_send_done_events.append(event)
+
+    def _mark_layer_reuse_pending(self, layer_idx: int) -> None:
+        if layer_idx not in self.layer_storage_slots:
+            raise RuntimeError(f"Mooncake layerwise reuse mapping is missing layer {layer_idx}")
+        with self._layerwise_reuse_lock:
+            if layer_idx in self._pending_reuse_layers:
+                return
+            self._pending_reuse_layers.add(layer_idx)
+            for slot_id in self.layer_storage_slots[layer_idx]:
+                self._storage_send_errors.pop(slot_id, None)
+                self.storage_send_done_events[slot_id].clear()
+
+    def _complete_layer_reuse(self, layer_idx: int, error: str | None) -> None:
+        with self._layerwise_reuse_lock:
+            if layer_idx not in self._pending_reuse_layers:
+                return
+            self._pending_reuse_layers.remove(layer_idx)
+            for slot_id in self.layer_storage_slots[layer_idx]:
+                if error is not None:
+                    self._storage_send_errors[slot_id] = error
+                self.storage_send_done_events[slot_id].set()
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        send_thread = self.kv_send_layer_thread
+        if send_thread is None:
+            return
+        if layer_idx not in self.layer_storage_slots:
+            raise RuntimeError(f"Mooncake layerwise reuse mapping is missing layer {layer_idx}")
+        for slot_id in self.layer_storage_slots[layer_idx]:
+            event = self.storage_send_done_events[slot_id]
+            while not event.wait(timeout=LAYERWISE_REUSE_WAIT_LOG_INTERVAL_SECONDS):
+                if not send_thread.is_alive():
+                    raise RuntimeError("Mooncake send thread stopped while waiting for layerwise buffer reuse")
+                logger.info("Waiting for Mooncake transfer to release physical KV slot %d", slot_id)
+            with self._layerwise_reuse_lock:
+                error = self._storage_send_errors.get(slot_id)
+            if error is not None:
+                raise RuntimeError(f"Mooncake failed to transfer physical KV slot {slot_id}: {error}")
 
     def create_kv_buffer(self, first_kv_cache_tuple):
         alignment = 2 * 1024 * 1024
@@ -1354,6 +1432,8 @@ class MooncakeLayerwiseConnectorWorker:
         if self.total_layers < len(self.layer_metadata.keys()):
             self.total_layers = len(self.layer_metadata.keys())
 
+        self._init_layerwise_reuse_state()
+
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             te_rpc_port=self.te_rpc_port,
@@ -1382,6 +1462,7 @@ class MooncakeLayerwiseConnectorWorker:
                 enable_c8_quant=self.enable_c8_quant,
                 resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal,
+                reuse_completion_callback=self._complete_layer_reuse,
             )
             self.kv_send_layer_thread.start()
             ready_event.wait()
@@ -1836,7 +1917,21 @@ class MooncakeLayerwiseConnectorWorker:
                 logger.debug("Add request %s to kv send layer thread. req_meta_update=%r", req_id, req_meta_update)
                 layer_send_task.send_request[req_id] = req_meta_update
 
-            self.kv_send_layer_thread.send_queue.put(layer_send_task)
+            needs_reuse_gate = any(
+                len(req_meta.local_block_ids) > layer_group_idx and bool(req_meta.local_block_ids[layer_group_idx])
+                for req_meta in connector_metadata.requests.values()
+            )
+            if needs_reuse_gate:
+                # This must happen before AscendStore publishes StoreSaveDone.
+                # Otherwise its receiver may consume the previous set state
+                # and start H2D before this transfer is registered as pending.
+                self._mark_layer_reuse_pending(self.current_layer)
+            try:
+                self.kv_send_layer_thread.send_queue.put(layer_send_task)
+            except Exception as error:
+                if needs_reuse_gate:
+                    self._complete_layer_reuse(self.current_layer, str(error))
+                raise
             self.current_layer += 1
 
     # NOTE: Due to the FIA operator constraints, the expected kv cache is ND format, NZ shape,

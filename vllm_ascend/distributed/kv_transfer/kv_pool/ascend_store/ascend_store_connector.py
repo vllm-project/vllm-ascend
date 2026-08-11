@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -203,6 +203,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
+    def set_layerwise_reuse_waiter(self, waiter: Callable[[int], None]) -> bool:
+        if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
+            return False
+        self.connector_worker.set_layerwise_reuse_waiter(waiter)
+        return True
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)

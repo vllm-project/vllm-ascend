@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -1483,6 +1484,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
+        layerwise_reuse_waiter: Callable[[int], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1502,6 +1504,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self.layerwise_reuse_waiter = layerwise_reuse_waiter
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1561,6 +1564,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.layer_save_finished_events[wait_for_save].clear()
 
         if len(transfer_tasks) == 0:
+            if self.layerwise_reuse_waiter is not None:
+                self.layerwise_reuse_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
@@ -1580,6 +1585,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 task_metas.append((task, req_meta))
 
         if not task_metas:
+            if self.layerwise_reuse_waiter is not None:
+                self.layerwise_reuse_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
@@ -1611,6 +1618,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
         addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+        if self.layerwise_reuse_waiter is not None:
+            self.layerwise_reuse_waiter(layer_id)
         res = self._batch_copy_with_limits(
             gvas_array,
             addr_array,

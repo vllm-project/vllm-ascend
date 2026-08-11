@@ -66,18 +66,19 @@ def test_update_state_after_alloc_forwards_observer_without_chosen_connector():
     )
 
 
-def test_layerwise_pd_completion_is_wired_and_provider_runs_first():
+def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
     call_order = []
     provider = SimpleNamespace(
         is_producer=True,
         connector_worker=object(),
-        wait_for_layer_send=MagicMock(),
+        supports_layerwise_buffer_reuse=True,
+        wait_for_layer_reuse=MagicMock(),
         wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("pd-load")),
         save_kv_layer=MagicMock(side_effect=lambda *_args, **_kwargs: call_order.append("pd-save")),
         on_kv_cache_written=MagicMock(side_effect=lambda *_: call_order.append("pd-written")),
     )
     store = SimpleNamespace(
-        set_layerwise_pd_transfer_waiter=MagicMock(),
+        set_layerwise_reuse_waiter=MagicMock(return_value=True),
         wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("store-load")),
         save_kv_layer=MagicMock(side_effect=lambda *_args, **_kwargs: call_order.append("store-save")),
         on_kv_cache_written=MagicMock(side_effect=lambda *_: call_order.append("store-written")),
@@ -86,19 +87,62 @@ def test_layerwise_pd_completion_is_wired_and_provider_runs_first():
     # Put the store first to verify the dependency does not rely on config order.
     connector._connectors = [store, provider]
 
-    connector._configure_layerwise_pd_completion()
+    connector._configure_layerwise_reuse_completion()
 
-    waiter = store.set_layerwise_pd_transfer_waiter.call_args.args[0]
-    assert waiter == provider.wait_for_layer_send
+    waiter = store.set_layerwise_reuse_waiter.call_args.args[0]
+    waiter(7)
+    provider.wait_for_layer_reuse.assert_called_once_with(7)
 
     connector.wait_for_layer_load("model.layers.7.self_attn")
     connector.save_kv_layer("model.layers.7.self_attn", object(), object())
     connector.on_kv_cache_written("model.layers.7.self_attn")
     assert call_order == [
-        "pd-load",
         "store-load",
         "pd-save",
         "store-save",
         "pd-written",
         "store-written",
     ]
+    provider.wait_for_layer_load.assert_not_called()
+
+
+def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
+    call_order = []
+    provider = SimpleNamespace(
+        is_producer=True,
+        connector_worker=object(),
+        supports_layerwise_buffer_reuse=True,
+        wait_for_layer_reuse=MagicMock(),
+        wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("provider")),
+    )
+    sibling = SimpleNamespace(
+        wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("sibling")),
+    )
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [sibling, provider]
+
+    connector._configure_layerwise_reuse_completion()
+    connector.wait_for_layer_load("model.layers.7.self_attn")
+
+    assert call_order == ["provider", "sibling"]
+
+
+def test_layerwise_reuse_waiter_joins_all_providers():
+    providers = [
+        SimpleNamespace(
+            is_producer=True,
+            connector_worker=object(),
+            supports_layerwise_buffer_reuse=True,
+            wait_for_layer_reuse=MagicMock(),
+        )
+        for _ in range(2)
+    ]
+    store = SimpleNamespace(set_layerwise_reuse_waiter=MagicMock(return_value=True))
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [providers[0], store, providers[1]]
+
+    connector._configure_layerwise_reuse_completion()
+    store.set_layerwise_reuse_waiter.call_args.args[0](4)
+
+    for provider in providers:
+        provider.wait_for_layer_reuse.assert_called_once_with(4)
