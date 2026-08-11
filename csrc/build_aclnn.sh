@@ -105,6 +105,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
+        "categorical_sample"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
@@ -152,6 +153,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
+        "categorical_sample"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
@@ -188,6 +190,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "categorical_sample"
         "moe_gating_top_k_hash"
         "indexer_compress_epilog"
         "inplace_partial_rotary_mul"

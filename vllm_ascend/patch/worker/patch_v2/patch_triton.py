@@ -3,8 +3,9 @@ from vllm.v1.worker.gpu import structured_outputs
 from vllm.v1.worker.gpu.metrics import logits as metrics_logits
 from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, penalties, prompt_logprob, sampler, states
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
+from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
-from vllm.v1.worker.gpu.spec_decode.eagle import speculator
+from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
@@ -25,7 +26,8 @@ sampler.compute_topk_logprobs = compute_topk_logprobs
 rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
 states.apply_min_p = apply_min_p
 penalties.bincount = bincount
-speculator.gumbel_sample = gumbel_sample
+base_speculator.gumbel_sample = gumbel_sample
+dspark_speculator.gumbel_sample = gumbel_sample
 bad_words.apply_bad_words = apply_bad_words
 gumbel.apply_temperature = apply_temperature
 states.apply_temperature = apply_temperature

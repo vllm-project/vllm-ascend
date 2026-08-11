@@ -467,6 +467,35 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_categorical_sample_meta(
+    const at::Tensor& processed_logits,
+    const at::Tensor& expanded_idx_mapping,
+    const at::Tensor& temperature,
+    const at::Tensor& seed,
+    const at::Tensor& pos,
+    bool return_lse,
+    bool apply_temperature,
+    const c10::optional<at::Tensor>& output_processed_logits,
+    const c10::optional<at::Tensor>& output_processed_logits_col,
+    bool use_fp64)
+{
+    (void)apply_temperature;
+    (void)output_processed_logits;
+    (void)output_processed_logits_col;
+    (void)use_fp64;
+    TORCH_CHECK(processed_logits.dim() == 2, "processed_logits must be 2D");
+    TORCH_CHECK(expanded_idx_mapping.dim() == 1, "expanded_idx_mapping must be 1D");
+    TORCH_CHECK(temperature.dim() == 1, "temperature must be 1D");
+    TORCH_CHECK(seed.dim() == 1, "seed must be 1D");
+    TORCH_CHECK(pos.dim() == 1, "pos must be 1D");
+    auto numRows = processed_logits.sym_size(0);
+    c10::SymDimVector rowShape = {numRows};
+    c10::SymDimVector lseShape = {return_lse ? numRows : c10::SymInt(0)};
+    at::Tensor sampledTokenIds = at::empty_symint(rowShape, processed_logits.options().dtype(at::kLong));
+    at::Tensor lse = at::empty_symint(lseShape, processed_logits.options().dtype(at::kFloat));
+    return std::make_tuple(sampledTokenIds, lse);
+}
+
 at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
                                    const int64_t size) {
     auto ySize = ceil_div(input.sym_size(0), 8);
@@ -1586,6 +1615,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
+    ops.impl("npu_categorical_sample", &vllm_ascend::meta::npu_categorical_sample_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // npu_sign_bits_pack
