@@ -53,6 +53,28 @@ class TransferChunkWithBlockId(TransferChunk):
     block_ids: tuple[int, ...] = ()
 
 
+def aggregate_c128_page_chunks(
+    chunks: Iterable[TransferChunkWithBlockId],
+    slots_per_page: int | None = None,
+) -> list[TransferChunkWithBlockId]:
+    """Collapse C128 chunks to one representative key per physical page.
+
+    Every non-tail page must have its final authoritative range; an incomplete
+    page is retained only when it is the last page in the request.
+    """
+    pages: dict[tuple[int, int], TransferChunkWithBlockId] = {}
+    for chunk in chunks:
+        pages[(chunk.target_block_index, chunk.block_id)] = chunk
+    if slots_per_page is None or not pages:
+        return list(pages.values())
+    tail_page_index = max(chunk.target_block_index for chunk in pages.values())
+    return [
+        chunk
+        for chunk in pages.values()
+        if chunk.value_end >= slots_per_page or chunk.target_block_index == tail_page_index
+    ]
+
+
 # Parameters related to the key
 @dataclass
 class KeyMetadata:
@@ -732,9 +754,10 @@ class ChunkedTokenDatabase:
             )
 
         if self.is_c128_group(kv_cache_group_id):
-            # Mooncake stores a complete physical C128 page.  The key's
-            # authoritative slot range is applied after load by the staging
-            # merge path; ordinary groups use their complete transfer block.
+            # Mooncake stores a complete physical C128 page.  The load path
+            # uses the representative key for lookup and writes this complete
+            # page directly to the target block; ordinary groups use their
+            # complete transfer block.
             value_start = 0
             value_end = self.get_block_size(kv_cache_group_id)
             return self.prepare_value(

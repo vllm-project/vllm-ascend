@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
+    aggregate_c128_page_chunks,
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
@@ -1044,8 +1045,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
     def _handle_hybrid_c128_request(self, req_meta: ReqMeta) -> None:
         transfer_config = self.token_database.hybrid_cache_c128_config
         assert transfer_config.chunk_tokens is not None
-        if self._get_c128_staging_value is None or self._merge_c128_staging_chunk is None:
-            raise RuntimeError("Hybrid C128 asynchronous load requires registered staging callbacks.")
 
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
@@ -1103,19 +1102,37 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             results = self.m_store.get(key_list, addr_list, size_list)
             self._record_load_failures(req_meta, block_id_list, results)
 
+        c128_groups: dict[int, list[TransferChunkWithBlockId]] = defaultdict(list)
         for group_id, chunk in c128_chunks:
-            staging_addrs, staging_sizes = self._get_c128_staging_value(group_id)
-            results = self.m_store.get(
-                [chunk.key.to_string()],
-                [staging_addrs],
-                [staging_sizes],
-            )
-            if results is not None and len(results) == 1 and results[0] == 0:
-                # The callback copies only the authoritative range and waits for
-                # that NPU copy before the single staging page is reused.
-                self._merge_c128_staging_chunk(group_id, chunk)
-            else:
-                self._record_load_failures(req_meta, [chunk.block_id], results)
+            c128_groups[group_id].append(chunk)
+        for group_id, chunks in c128_groups.items():
+            page_chunks = aggregate_c128_page_chunks(chunks, transfer_config.c128_slots_per_page)
+            page_keys: list[str] = []
+            page_addrs: list[list[int]] = []
+            page_sizes: list[list[int]] = []
+            page_block_ids: list[int] = []
+            for chunk in page_chunks:
+                block_ids = list(chunk.block_ids) or [chunk.block_id]
+                addr, size, block_id = self._prepare_transfer_value(
+                    chunk,
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                if not addr:
+                    continue
+                page_keys.append(chunk.key.to_string())
+                page_addrs.append(addr)
+                page_sizes.append(size)
+                page_block_ids.append(block_id)
+            if not page_keys:
+                continue
+            rotation = self.tp_rank % len(page_keys)
+            page_keys = page_keys[rotation:] + page_keys[:rotation]
+            page_addrs = page_addrs[rotation:] + page_addrs[:rotation]
+            page_sizes = page_sizes[rotation:] + page_sizes[:rotation]
+            page_block_ids = page_block_ids[rotation:] + page_block_ids[:rotation]
+            results = self.m_store.get(page_keys, page_addrs, page_sizes)
+            self._record_load_failures(req_meta, page_block_ids, results)
 
         self.set_finished_request(req_id)
         self.request_queue.task_done()
