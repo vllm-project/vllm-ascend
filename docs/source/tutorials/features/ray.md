@@ -143,6 +143,8 @@ In the container, you can use vLLM as if all NPUs were on a single node. vLLM wi
 
 To set up parallelism, the common practice is to set the `tensor-parallel-size` to the number of NPUs per node, and the `pipeline-parallel-size` to the number of nodes.
 
+For PP topology planning and layer partitioning, see [Pipeline Parallelism](../../user_guide/feature_guide/pipeline_parallel.md).
+
 For example, with 16 NPUs across 2 nodes (8 NPUs per node), set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
 ```shell
