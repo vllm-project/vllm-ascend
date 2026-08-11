@@ -370,19 +370,19 @@ class VersionAdapter:
 
     @staticmethod
     def _run(command: list[str], log_file: Path | None, label: str) -> None:
-        logger.info('[version] running: %s', ' '.join(command))
+        logger.info("[version] running: %s", " ".join(command))
         try:
             if log_file is not None:
-                with open(log_file, 'a', encoding='utf-8') as out:
+                with open(log_file, "a", encoding="utf-8") as out:
                     proc = subprocess.run(command, stdout=out, stderr=subprocess.STDOUT, text=True)
-                tail = '(see version adaptation log)'
+                tail = "(see version adaptation log)"
             else:
                 proc = subprocess.run(command, capture_output=True, text=True)
-                tail = (proc.stdout or '')[-2000:]
+                tail = (proc.stdout or "")[-2000:]
         except OSError as exc:
             raise VersionAdaptationError(f"Failed to execute command {' '.join(command)}: {exc}") from exc
         if proc.returncode != 0:
-            raise VersionAdaptationError(f'{label} failed (rc={proc.returncode}):\n{tail}')
+            raise VersionAdaptationError(f"{label} failed (rc={proc.returncode}):\n{tail}")
 
 
 def _matches_expected(package: str, expected: str, installed: str | None) -> bool:

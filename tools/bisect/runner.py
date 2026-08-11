@@ -203,8 +203,8 @@ class MultiNodeRunner(BaseRunner):
         try:
             self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
         except (RuntimeError, TimeoutError) as exc:
-            self.coord.publish_verdict(round_idx, 'SKIP')
-            raise VersionAdaptationError(f'Barrier failed: {exc}') from exc
+            self.coord.publish_verdict(round_idx, "SKIP")
+            raise VersionAdaptationError(f"Barrier failed: {exc}") from exc
         self.coord.publish_start(round_idx)
 
         # 4) launch the multi-node pytest on master and read the verdict
