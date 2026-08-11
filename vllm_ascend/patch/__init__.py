@@ -48,6 +48,25 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 2. File: platform/patch_deepseek_v4_thinking.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tokenizers.deepseek_v4.get_deepseek_v4_tokenizer`
+#      `vllm.tokenizers.deepseek_v4_encoding.render_message`
+#    Why:
+#       DeepSeek-V4-Flash-0731 defines three reasoning effort levels: low has
+#       no prompt prefix, high uses the original "Absolute maximum" prefix,
+#       and max uses the new "Beyond maximum" prefix. The supported vLLM
+#       Python tokenizer predates this 0731 prompt mapping.
+#    How:
+#       Monkey-patch tokenizer normalization so omitted options select
+#       thinking with high effort and compatibility aliases map to canonical
+#       low, high, or max. Wrap render_message to prepend the official 0731
+#       prompt before the first message in thinking mode.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/50580
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #50580.
+#
 # ** 3. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
