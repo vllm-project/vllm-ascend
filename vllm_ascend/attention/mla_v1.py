@@ -1435,6 +1435,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
+        *,
+        attn_metadata: AscendMLAMetadata | None = None,
     ):
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
@@ -1694,7 +1696,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         sin = attn_metadata.prefill.sin
         prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
-        prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
+        prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
+            prefill_kv_no_split,
+            cos,
+            sin,
+            kv_cache,
+            prefill_slots,
+            attn_metadata=attn_metadata,
+        )
         prefill_k_nope, prefill_value = (
             self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -1891,37 +1900,32 @@ class AscendMLAPCPImpl(AscendMLAImpl):
         padding = tensor.new_zeros((num_tokens - tensor.shape[0], *tensor.shape[1:]))
         return torch.cat((tensor, padding), dim=0)
 
-    def mla_preprocess_prefill(
+    def exec_kv_prefill(
         self,
-        q_c: torch.Tensor,
         kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: AscendMLAPCPMetadata,
-    ) -> PrefillMLAPreprocessResult:
-        assert attn_metadata.prefill is not None
-        assert attn_metadata.pcp_slot_mapping is not None
+        slots: torch.Tensor,
+        *,
+        attn_metadata: AscendMLAMetadata | None = None,
+    ):
+        if not isinstance(attn_metadata, AscendMLAPCPMetadata):
+            raise RuntimeError("PCP MLA prefill requires AscendMLAPCPMetadata.")
+        if attn_metadata.pcp_slot_mapping is None:
+            raise RuntimeError("PCP MLA prefill requires pcp_slot_mapping.")
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
         local_num_input_tokens = attn_metadata.pcp_local_num_input_tokens
         local_prefill_capacity = local_num_input_tokens - num_decode_tokens
         local_num_prefill_tokens = num_actual_tokens - num_decode_tokens
-        if kv_no_split.shape[0] < local_num_input_tokens:
+        if kv_no_split.shape[0] != local_num_prefill_tokens:
             raise RuntimeError(
-                "PCP MLA input is shorter than the rank-local padded batch: "
-                f"{kv_no_split.shape[0]} < {local_num_input_tokens}."
+                f"PCP MLA prefill input length mismatch: {kv_no_split.shape[0]} != {local_num_prefill_tokens}."
             )
 
-        prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
-        prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
-        prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
-        prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
-
-        cos = attn_metadata.prefill.cos
-        sin = attn_metadata.prefill.sin
-        prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
-
-        local_prefill_kv = kv_no_split[num_decode_tokens:local_num_input_tokens]
+        local_prefill_kv = self._pad_tokens(kv_no_split, local_prefill_capacity)
         padded_cos = self._pad_tokens(cos, local_prefill_capacity)
         padded_sin = self._pad_tokens(sin, local_prefill_capacity)
 
@@ -1936,7 +1940,7 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             expanded_prefill_slots,
             num_decode_tokens=0,
         )
-        gathered_k_pe, gathered_k_c_normed = self.exec_kv_prefill(
+        gathered_k_pe, gathered_k_c_normed = super().exec_kv_prefill(
             gathered_kv,
             gathered_cos,
             gathered_sin,
@@ -1948,21 +1952,4 @@ class AscendMLAPCPImpl(AscendMLAImpl):
         prefill_k_pe = gathered_k_pe[local_prefill_start:local_prefill_end]
         prefill_k_c_normed = gathered_k_c_normed[local_prefill_start:local_prefill_end]
 
-        prefill_k_nope, prefill_value = (
-            self.kv_b_proj(prefill_k_c_normed)[0]
-            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        )
-        prefill_k_pe = prefill_k_pe.view(
-            local_num_prefill_tokens,
-            self.num_kv_heads,
-            -1,
-        )
-        prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
-        return PrefillMLAPreprocessResult(
-            prefill_q_nope,
-            prefill_q_pe,
-            prefill_k_nope,
-            prefill_k_pe,
-            prefill_value,
-        )
+        return prefill_k_pe, prefill_k_c_normed

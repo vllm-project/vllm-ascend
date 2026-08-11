@@ -148,12 +148,11 @@ def test_mla_pcp_prefill_gathers_cache_inputs_and_keeps_local_kv() -> None:
             slot_mapping,
         )
 
-    def fake_exec_kv_prefill(kv, cos, sin, kv_cache, slots):
+    def fake_exec_kv_prefill(self, kv, cos, sin, kv_cache, slots):
         captured["gathered_kv"] = kv
         captured["cache_slots"] = slots
         return cos, kv[:, :2]
 
-    impl.exec_kv_prefill = fake_exec_kv_prefill
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
     prefill_metadata = AscendMLAPrefillMetadata(
         attn_mask=None,
@@ -187,6 +186,11 @@ def test_mla_pcp_prefill_gathers_cache_inputs_and_keeps_local_kv() -> None:
             "vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs",
             side_effect=fake_gather,
         ),
+        patch.object(
+            AscendMLAImpl,
+            "exec_kv_prefill",
+            fake_exec_kv_prefill,
+        ),
     ):
         result = impl.mla_preprocess_prefill(
             q_c,
@@ -199,9 +203,14 @@ def test_mla_pcp_prefill_gathers_cache_inputs_and_keeps_local_kv() -> None:
         captured["slots"],
         torch.tensor([10, 11, -1, 20, 21, -1]),
     )
-    torch.testing.assert_close(captured["local_kv"], kv_no_split[1:4])
+    torch.testing.assert_close(captured["local_kv"][:2], kv_no_split[1:3])
+    torch.testing.assert_close(captured["local_kv"][2], torch.zeros(3))
     torch.testing.assert_close(captured["local_cos"][-1], torch.zeros(1))
     assert captured["gathered_kv"].shape[0] == 6
+    torch.testing.assert_close(
+        captured["cache_slots"],
+        torch.tensor([10, 11, -1, 20, 21, -1]),
+    )
     torch.testing.assert_close(result.k_nope, kv_no_split[1:3, :2].view(2, 1, 2))
     torch.testing.assert_close(result.k_pe, torch.tensor([[[1.0]], [[2.0]]]))
     assert result.q_nope.shape[0] == 2
