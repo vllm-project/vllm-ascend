@@ -1387,7 +1387,7 @@ class TestEagleProposerPropose:
             if model_type == 'deepseek':
                 assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([11]))
                 assert captured_common_attn_metadata.max_seq_len == 9
-                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([138]), torch.full((8703,), -1)]))
+                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([138]), torch.full((9215,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([11]))
                 assert captured_common_attn_metadata._seq_lens_cpu == torch.tensor([11])
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([10, 1, 2, 3, 4, 5, 6, 7, 8] + [0]*(8704-9), dtype=torch.int64))
@@ -1396,14 +1396,14 @@ class TestEagleProposerPropose:
                 if flag_prefill_decode == 'prefill':
                     assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15]))
                     assert captured_common_attn_metadata.max_seq_len == 13
-                    assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142]), torch.full((8703,), -1)]))
+                    assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142]), torch.full((9215,), -1)]))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([15]))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-13), dtype=torch.int64))
                     assert captured_common_attn_metadata.num_input_tokens == 13
                 if flag_prefill_decode == 'decode_and_prefill':
                     assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([19, 15, 15]))
                     assert captured_common_attn_metadata.max_seq_len == 0
-                    assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([146, 270, 398]), torch.full((8701,), -1)]))
+                    assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([146, 270, 398]), torch.full((9213,), -1)]))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([19, 15, 15]))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([18, 14, 14, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
                                                                                               0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
@@ -1440,17 +1440,17 @@ class TestEagleProposerPropose:
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15]))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
-                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((8701,), -1)]))
+                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((9213,), -1)]))
             if model_type == 'qwen_moe':
                 assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
-                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([145, 272, 400]), torch.full((8701,), -1)]))
+                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([145, 272, 400]), torch.full((9213,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([21, 19, 19]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([17, 15, 15]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([17, 16, 16, 18, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                           2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
             if model_type == 'deepseek':
                 assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([16, 15, 16]))
-                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142, 268, 396]), torch.full((8701,), -1)]))
+                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142, 268, 396]), torch.full((9213,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([16, 15, 16]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([12, 11, 12]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 12, 12, 13, 9, 10, 11, 12, 10, 11, 12, 13, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9] + [0]*(8704-23), dtype=torch.int64))
@@ -1476,7 +1476,7 @@ class TestEagleProposerPropose:
                                                                                        266, 267, 268, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396]))
             assert torch.equal(self.proposer.slot_mapping_group[1][:3], torch.tensor([145, 269, 397]))
             assert torch.equal(self.proposer.slot_mapping_group[2][:3], torch.tensor([146, 270, 398]))
-            assert self.proposer.slot_mapping_group[0].shape == torch.Size([8704])
+            assert self.proposer.slot_mapping_group[0].shape == torch.Size([9216])
             assert torch.equal(self.proposer.seq_lens_group[0][:3], torch.tensor([17, 13, 13]))
             assert torch.equal(self.proposer.seq_lens_group[1][:3], torch.tensor([18, 14, 14]))
             assert torch.equal(self.proposer.seq_lens_group[2][:3], torch.tensor([19, 15, 15]))
