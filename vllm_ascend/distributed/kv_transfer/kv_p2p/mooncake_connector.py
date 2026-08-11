@@ -3338,13 +3338,12 @@ class MooncakeConnectorWorker:
                 break
         if (
             replicate_group_id is None
-            or replicate_group_id not in meta.local_block_ids
-            or replicate_group_id not in meta.remote_block_ids
+            or replicate_group_id >= len(meta.local_block_ids)
+            or replicate_group_id >= len(meta.remote_block_ids)
         ):
-            group_ids = list(meta.local_block_ids.keys()) if isinstance(meta.local_block_ids, dict) else []
             logger.warning(
-                "SFA replicate-K skipped: replicated indexer cache group not found (groups=%s block_size_scale=%s)",
-                group_ids,
+                "SFA replicate-K skipped: replicated indexer cache group not found (num_groups=%s block_size_scale=%s)",
+                len(meta.local_block_ids),
                 self.block_size_scale,
             )
             return tuple(), tuple()
