@@ -239,6 +239,21 @@ def _write_dataset(dataset_file: Path, samples: list[str]) -> None:
             temporary_file.unlink()
 
 
+def _ensure_empty_train_file(dataset_dir: Path) -> None:
+    train_file = dataset_dir / "train.jsonl"
+    if train_file.is_file() and train_file.stat().st_size == 0:
+        return
+
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    temporary_file = train_file.with_name(f"{train_file.name}.{os.getpid()}.tmp")
+    try:
+        temporary_file.write_text("", encoding="utf-8")
+        os.replace(temporary_file, train_file)
+    finally:
+        if temporary_file.exists():
+            temporary_file.unlink()
+
+
 def generate_benchmark_dataset(
     *,
     model_path: str,
@@ -248,8 +263,8 @@ def generate_benchmark_dataset(
 ) -> str:
     """Generate a deterministic fixed-length performance dataset.
 
-    The returned path is a directory containing ``test.jsonl``, matching the
-    directory layout expected by the AISBench GSM8K dataset configuration.
+    The returned path contains ``test.jsonl`` and an empty ``train.jsonl``,
+    matching the directory layout expected by the AISBench GSM8K configuration.
     """
     normalized = _validate_config(config)
     dataset_dir = _dataset_cache_dir(model_path, normalized, cache_root)
@@ -266,6 +281,9 @@ def generate_benchmark_dataset(
             normalized["prefix_num"] * normalized["dp"],
         )
         if full_dataset_ready and prefix_dataset_ready:
+            _ensure_empty_train_file(dataset_dir)
+            if normalized["prewarm"]:
+                _ensure_empty_train_file(prefix_dataset_dir)
             logger.info("Reusing generated benchmark dataset: %s", dataset_dir)
             return str(dataset_dir)
 
@@ -315,8 +333,10 @@ def generate_benchmark_dataset(
                     prefix_samples.extend([prefix_text] * normalized["dp"])
                 prefix_dataset_dir.mkdir(parents=True, exist_ok=True)
                 _write_dataset(prefix_dataset_file, prefix_samples)
+                _ensure_empty_train_file(prefix_dataset_dir)
 
         _write_dataset(dataset_file, samples)
+        _ensure_empty_train_file(dataset_dir)
         metadata_file = dataset_dir / "metadata.json"
         metadata_file.write_text(json.dumps(normalized, indent=2, sort_keys=True), encoding="utf-8")
         logger.info("Generated benchmark dataset with %d samples: %s", len(samples), dataset_dir)

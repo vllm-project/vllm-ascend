@@ -82,6 +82,7 @@ def test_generate_fixed_dataset(tmpdir) -> None:
     assert len(questions) == 5
     assert all(len(tokenizer.encode(question)) == 16 for question in questions)
     assert Path(dataset_dir).name.startswith("GSM8K-in16-num5-test-model-")
+    assert (Path(dataset_dir) / "train.jsonl").read_text(encoding="utf-8") == ""
     assert (Path(dataset_dir) / "metadata.json").is_file()
 
 
@@ -106,6 +107,7 @@ def test_generate_prefix_dataset(tmpdir) -> None:
 
     tokenized = [tokenizer.encode(question) for question in _read_questions(dataset_dir)]
     assert Path(dataset_dir).name.startswith("prefix50-in20-num6-test-model-")
+    assert (Path(dataset_dir) / "train.jsonl").read_text(encoding="utf-8") == ""
     assert all(len(token_ids) == 20 for token_ids in tokenized)
     assert tokenized[0][:10] == tokenized[2][:10] == tokenized[4][:10]
     assert tokenized[1][:10] == tokenized[3][:10] == tokenized[5][:10]
@@ -159,7 +161,9 @@ def test_generate_prefix_prewarm_dataset(tmpdir) -> None:
         tokenizer=tokenizer,
     )
 
-    prefix_questions = _read_questions(get_prefix_dataset_path(dataset_dir))
+    prefix_dataset_dir = get_prefix_dataset_path(dataset_dir)
+    prefix_questions = _read_questions(prefix_dataset_dir)
+    assert (Path(prefix_dataset_dir) / "train.jsonl").read_text(encoding="utf-8") == ""
     assert len(prefix_questions) == 6
     assert prefix_questions[0] == prefix_questions[1] == prefix_questions[2]
     assert prefix_questions[3] == prefix_questions[4] == prefix_questions[5]
@@ -242,6 +246,31 @@ def test_reuse_complete_cached_dataset(tmpdir) -> None:
     )
 
     assert second_path == first_path
+
+
+def test_repair_missing_train_file_in_cached_dataset(tmpdir) -> None:
+    tmp_path = Path(str(tmpdir))
+    config = {"type": "fixed", "input_len": 8, "num_samples": 2}
+    dataset_dir = Path(
+        generate_benchmark_dataset(
+            model_path="test-model",
+            config=config,
+            cache_root=tmp_path,
+            tokenizer=FakeTokenizer(),
+        )
+    )
+    train_file = dataset_dir / "train.jsonl"
+    train_file.unlink()
+
+    reused_path = generate_benchmark_dataset(
+        model_path="test-model",
+        config=config,
+        cache_root=tmp_path,
+        tokenizer=object(),
+    )
+
+    assert reused_path == str(dataset_dir)
+    assert train_file.read_text(encoding="utf-8") == ""
 
 
 @pytest.mark.parametrize(
