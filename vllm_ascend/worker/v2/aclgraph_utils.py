@@ -76,6 +76,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # set model runner attribute, so we can access attributes model runner
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
+        self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
         # Reuse the public update_stream from model_runner (shared with draft).
         self.update_stream = self.model_runner.update_stream

@@ -28,6 +28,15 @@ import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+# Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
+# for selected architectures when the environment variable is absent.
+value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+logger.info_once(
+    "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
+    value,
+    scope="process",
+)
+
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -1069,10 +1078,7 @@ def _setup_compile_backend(vllm_config: VllmConfig, compile_backend: str) -> Non
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
     elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
-        if (
-            compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH
-        ):
+        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
