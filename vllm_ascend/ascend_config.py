@@ -206,8 +206,10 @@ class AscendConfig:
             "FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS",
             ascend_envs.FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS,
         )
-        if (not isinstance(self.ft_communication_ops_abort_timeout_ms, int)
-                or self.ft_communication_ops_abort_timeout_ms < 0):
+        if (
+            not isinstance(self.ft_communication_ops_abort_timeout_ms, int)
+            or self.ft_communication_ops_abort_timeout_ms < 0
+        ):
             raise ValueError(
                 "ft_communication_ops_abort_timeout_ms must be a non-negative "
                 f"integer, got {self.ft_communication_ops_abort_timeout_ms}"
