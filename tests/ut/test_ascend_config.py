@@ -424,7 +424,10 @@ class TestAscendConfig(TestBase):
     def test_init_ascend_config_dump_config_isolated_by_dp_rank(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         dump_config = {"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}
-        test_vllm_config.additional_config = {"dump_config": dump_config}
+        test_vllm_config.additional_config = {
+            "dump_config": dump_config,
+            "dump_config_isolate_by_dp": True,
+        }
         with tempfile.TemporaryDirectory() as td, patch("os.getcwd", return_value=td):
             with patch.dict(os.environ, {"VLLM_DP_RANK": "1"}, clear=False):
                 ascend_config = init_ascend_config(test_vllm_config)
@@ -448,7 +451,10 @@ class TestAscendConfig(TestBase):
                 json.dump({"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}, f)
 
             test_vllm_config = VllmConfig()
-            test_vllm_config.additional_config = {"dump_config_path": src_path}
+            test_vllm_config.additional_config = {
+                "dump_config_path": src_path,
+                "dump_config_isolate_by_dp": True,
+            }
 
             with patch.dict(os.environ, {"VLLM_DP_RANK": "2"}, clear=False):
                 ascend_config = init_ascend_config(test_vllm_config)
@@ -482,6 +488,22 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_dump_config_default_not_isolated(self, mock_fix_incompatible_config):
+        with tempfile.TemporaryDirectory() as td:
+            src_path = os.path.join(td, "msprobe_dump_config.json")
+            with open(src_path, "w", encoding="utf-8") as f:
+                json.dump({"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}, f)
+
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"dump_config_path": src_path}
+
+            with patch.dict(os.environ, {"VLLM_DP_RANK": "3"}, clear=False):
+                ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.dump_config_path, src_path)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_dfx_config_path_isolated_by_dp_rank(self, mock_fix_incompatible_config):
         with tempfile.TemporaryDirectory() as td:
             src_path = os.path.join(td, "dfx_config.json")
@@ -489,7 +511,10 @@ class TestAscendConfig(TestBase):
                 json.dump({"sync_mode": "broadcast", "dump": {"enabled": False}}, f)
 
             test_vllm_config = VllmConfig()
-            test_vllm_config.additional_config = {"dfx_config_path": src_path}
+            test_vllm_config.additional_config = {
+                "dfx_config_path": src_path,
+                "dfx_config_isolate_by_dp": True,
+            }
 
             with patch.dict(os.environ, {"VLLM_DP_RANK": "2"}, clear=False):
                 ascend_config = init_ascend_config(test_vllm_config)
@@ -524,10 +549,28 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_dfx_config_default_not_isolated(self, mock_fix_incompatible_config):
+        with tempfile.TemporaryDirectory() as td:
+            src_path = os.path.join(td, "dfx_config.json")
+            with open(src_path, "w", encoding="utf-8") as f:
+                json.dump({"sync_mode": "broadcast", "dump": {"enabled": False}}, f)
+
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"dfx_config_path": src_path}
+
+            with patch.dict(os.environ, {"VLLM_DP_RANK": "3"}, clear=False):
+                ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.dfx_config_path, src_path)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_default_dfx_path_isolated_by_dp_rank(self, mock_fix_incompatible_config):
         with tempfile.TemporaryDirectory() as td:
             test_vllm_config = VllmConfig()
-            test_vllm_config.additional_config = {}
+            test_vllm_config.additional_config = {
+                "dfx_config_isolate_by_dp": True,
+            }
 
             with (
                 patch("os.getcwd", return_value=td),
