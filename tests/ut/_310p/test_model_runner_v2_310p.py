@@ -259,6 +259,17 @@ def test_310p_v2_restores_missing_linear_attention_kv_cache_specs() -> None:
     ignored_layer.get_kv_cache_spec.assert_not_called()
 
 
+@pytest.mark.parametrize("needs_zeroing", [False, True])
+def test_310p_v2_initializes_kv_zeroer_when_required(needs_zeroing: bool) -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    kv_cache_config = SimpleNamespace(needs_kv_cache_zeroing=needs_zeroing)
+
+    with patch.object(runner, "_init_kv_zero_meta") as init_zero_meta:
+        runner._init_kv_zero_meta_if_needed(kv_cache_config)
+
+    assert init_zero_meta.call_count == int(needs_zeroing)
+
+
 def test_postprocess_query_lens_ignore_full_graph_request_padding() -> None:
     # Fifteen real decode requests replay a graph captured for a 16-request
     # bucket. query_start_loc has real request boundaries only, while the graph

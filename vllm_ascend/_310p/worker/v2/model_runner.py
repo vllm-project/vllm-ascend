@@ -175,6 +175,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.compilation_config.static_forward_context,
             self.kv_caches,
         )
+        self._init_kv_zero_meta_if_needed(kv_cache_config)
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
         self.pcp_manager = maybe_build_ascend_pcp_manager(
             self.vllm_config,
@@ -183,6 +184,13 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.req_states,
             self.block_tables,
         )
+
+    def _init_kv_zero_meta_if_needed(
+        self, kv_cache_config: KVCacheConfig
+    ) -> None:
+        """Initialize Mamba/GDN block zeroing for non-speculative hybrid models."""
+        if kv_cache_config.needs_kv_cache_zeroing:
+            self._init_kv_zero_meta()
 
     def _allocate_kv_cache_tensors_310p(
         self,

@@ -977,3 +977,36 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
 - 真实310P需确认启动日志中的 KV Cache groups同时包含 Full Attention和GDN层，并
   重新验证 Qwen3.5 eager prefill/decode。
+
+## 27. 非投机 Hybrid模型的 KV block zeroer初始化
+
+问题现象：
+
+- 补回 Qwen3.5 GDN `MambaSpec`后，真实请求在上游 MRV2
+  `update_requests()`中触发 `assert self.kv_block_zeroer is not None`。
+
+根因：
+
+- GDN state cache使 `kv_cache_config.needs_kv_cache_zeroing=True`，调度器会下发
+  `new_block_ids_to_zero`，要求新分配或复用的 Mamba/GDN block在使用前清零。
+- 当前 vllm-ascend公共 Worker仅在 Eagle3且投机 token数大于1时调用
+  `_init_kv_zero_meta()`；Qwen3.5首版配置 `speculative_config=None`，因此310P MRV2
+  zeroer实现存在但没有初始化。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_runner.py`
+  - 在310P KV Cache完成分配和 `bind_kv_cache()`后调用
+    `_init_kv_zero_meta_if_needed()`。
+  - 仅当 `kv_cache_config.needs_kv_cache_zeroing`为真时初始化
+    `AscendKVBlockZeroer310V2`元数据。
+  - 初始化放在 cache绑定之后，保证 zeroer读取到各 GDN层已绑定的 state cache。
+  - 不修改公共 Worker的 Eagle3逻辑，不影响MRV1和其他设备。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 参数化验证需要清零时恰好初始化一次，不需要时不初始化。
+
+验证状态：
+
+- `py_compile`、`ruff check`和`git diff --check`已通过。
+- 当前 Windows本地 Python环境未安装`pytest`，新增目标 UT需在服务器执行。
+- 真实310P需重新验证 Qwen3.5 eager首个请求、请求结束后的 block复用和连续请求。
