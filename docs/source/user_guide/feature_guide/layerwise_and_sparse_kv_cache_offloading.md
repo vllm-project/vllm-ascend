@@ -2,11 +2,11 @@
 
 This guide explains how to configure:
 
-- Layerwise KV Cache Offload on a dedicated Prefill node;
-- Sparse KV Cache Offload on a Decode node; and
-- both features in one disaggregated Prefill/Decode deployment.
+- Layerwise KV cache offloading during the Prefill phase
+- Sparse KV cache offloading during the Decode phase
+- Combining both features in a disaggregated Prefill/Decode deployment
 
-For the architecture and correctness model, see
+For the underlying architecture and implementation details, see
 [Layerwise and Sparse KV Cache Offloading Design](../../developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.md).
 
 ## Supported Models
@@ -77,10 +77,12 @@ ock.mmc.local_service.dram.size = 10GB
 The two files must use the same MetaService endpoint. The LocalService Config
 Store endpoint must match the MetaService Config Store endpoint.
 
-- Set `world_size` to the maximum number of LocalService instances.
+- Set `world_size` to the maximum supported LocalService rank count.
 - Use `device_sdma` on A3 with HCCS.
 - Use `device_rdma` on A2 or another system with device RoCE.
-- Set `dram.size` to the host memory contributed by each LocalService.
+- Set `dram.size` to at least the total KV cache size required by the target
+  sequence length and concurrency divided by the number of Prefill ranks.
+  Round the result up to a whole GiB.
 
 Start MetaService in a separate process:
 
@@ -91,10 +93,18 @@ export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.co
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
 
-Prepare every Prefill node before starting vLLM:
+On A2 with device RoCE, configure Huge Pages according to the DRAM contributed
+by each node. For example:
 
 ```bash
 echo 200000 > /proc/sys/vm/nr_hugepages
+```
+
+This step is not required on A3 with `device_sdma`.
+
+Prepare every Prefill node before starting vLLM:
+
+```bash
 source /usr/local/memcache_hybrid/set_env.sh
 source /usr/local/memfabric_hybrid/set_env.sh
 export MMC_LOCAL_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-local.conf
