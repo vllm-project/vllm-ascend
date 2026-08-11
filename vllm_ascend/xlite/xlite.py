@@ -347,7 +347,9 @@ class StandardXliteModel(XliteModelBase):
             xlite_config.rope_theta = getattr(hf_config, "rope_parameters", {}).get("rope_theta", 10000.0)
         xlite_config.softmax_scale = xlite_config.head_dim**-0.5
         xlite_config.n_dense_layers = hf_config.num_hidden_layers
-        xlite_config.intermediate_size = hf_config.intermediate_size
+        xlite_config.intermediate_size = getattr(
+            hf_config, "intermediate_size", getattr(hf_config, "moe_intermediate_size", 0)
+        )
         xlite_config.def_tp_size = tp_size = get_tensor_model_parallel_world_size()
         xlite_config.def_dp_size = vllm_config.parallel_config.data_parallel_size
         try:
@@ -667,14 +669,19 @@ def _gemma_norm_to_xlite(weight: torch.Tensor) -> torch.Tensor:
     return (weight.float() + 1.0).to(weight.dtype).contiguous()
 
 
-def _pack_mha_qkv_with_gate(
-    qkv_weight: torch.Tensor,
-    head_dim: int,
-    num_heads: int,
-    num_kv_heads: int,
-    qkv_bias: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """vLLM interleaved [Q|Gate]/K|V -> xlite [Q|K|V|Gate]."""
+def _flatten_expert_weights(weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Unbind packed ``[E, ...]`` expert tensors into per-expert 2D views."""
+    flat: list[torch.Tensor] = []
+    for weight in weights:
+        if weight.dim() >= 3:
+            flat.extend(t.contiguous() for t in weight.unbind(0))
+        else:
+            flat.append(weight if weight.is_contiguous() else weight.contiguous())
+    return flat
+
+
+def _pack_mha_qkv_weight(qkv_weight: torch.Tensor, head_dim: int, num_heads: int, num_kv_heads: int) -> torch.Tensor:
+    """vLLM interleaved [Q|Gate]/K|V -> xlite [Q|K|V|Gate] (weights)."""
     q_size = num_heads * head_dim
     kv_size = num_kv_heads * head_dim
     expected = q_size * 2 + kv_size * 2
@@ -686,20 +693,23 @@ def _pack_mha_qkv_with_gate(
     g_w = q_gate[:, 1].reshape(q_size, -1).contiguous()
     k_w = qkv_weight[q_size * 2 : q_size * 2 + kv_size]
     v_w = qkv_weight[q_size * 2 + kv_size :]
-    packed = torch.cat([q_w, k_w, v_w, g_w], dim=0)
-    packed_bias = None
-    if qkv_bias is not None:
-        q_gate_b = qkv_bias[: q_size * 2].view(num_heads, 2, head_dim)
-        packed_bias = torch.cat(
-            [
-                q_gate_b[:, 0].reshape(-1),
-                qkv_bias[q_size * 2 : q_size * 2 + kv_size],
-                qkv_bias[q_size * 2 + kv_size :],
-                q_gate_b[:, 1].reshape(-1),
-            ],
-            dim=0,
-        )
-    return packed, packed_bias
+    return torch.cat([q_w, k_w, v_w, g_w], dim=0)
+
+
+def _pack_mha_qkv_bias(qkv_bias: torch.Tensor, head_dim: int, num_heads: int, num_kv_heads: int) -> torch.Tensor:
+    """Reorder the fused QKV bias to match the packed [Q|K|V|Gate] weight layout."""
+    q_size = num_heads * head_dim
+    kv_size = num_kv_heads * head_dim
+    q_gate_b = qkv_bias[: q_size * 2].view(num_heads, 2, head_dim)
+    return torch.cat(
+        [
+            q_gate_b[:, 0].reshape(-1),
+            qkv_bias[q_size * 2 : q_size * 2 + kv_size],
+            qkv_bias[q_size * 2 + kv_size :],
+            q_gate_b[:, 1].reshape(-1),
+        ],
+        dim=0,
+    )
 
 
 def _split_linear_qkvz(weight: torch.Tensor, key_dim: int, value_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -720,165 +730,250 @@ def _resolve_full_attention_interval(hf_config: PretrainedConfig) -> int:
     interval = getattr(hf_config, "full_attention_interval", None)
     if isinstance(interval, int) and interval > 0:
         return interval
-    for idx, layer_type in enumerate(getattr(hf_config, "layer_types", None) or []):
-        if layer_type == "full_attention":
-            return idx + 1
+    # Derive the period from the layer-type list. Use the distance between the
+    # first two full-attention layers: models may start with a full layer
+    # (index 0), where `idx + 1` would wrongly yield interval == 1.
+    full_indices = [
+        idx
+        for idx, layer_type in enumerate(getattr(hf_config, "layer_types", None) or [])
+        if layer_type == "full_attention"
+    ]
+    if len(full_indices) >= 2:
+        return full_indices[1] - full_indices[0]
+    if len(full_indices) == 1:
+        return full_indices[0] + 1
     return 4
 
 
 class Qwen3_5XliteModel(StandardXliteModel):
-    """xlite adapter for dense Qwen3.5 hybrid (MHA + GDN)."""
+    """xlite adapter for the dense Qwen3.5 hybrid (MHA + GDN) architecture."""
 
     _attn_metadata_type = AscendMetadata
     _supported_architectures = ["Qwen3_5ForCausalLM", "Qwen3_5ForConditionalGeneration"]
 
     def _build_model_config(self) -> None:
         super()._build_model_config()
-        cfg, hf = self.xlite_config, self.hf_text_config
-        cfg.attn_type = AttnHybrid
-        cfg.attn_output_gate = True
-        cfg.full_attention_interval = _resolve_full_attention_interval(hf)
-        cfg.linear_num_k_heads = hf.linear_num_key_heads
-        cfg.linear_num_v_heads = hf.linear_num_value_heads
-        cfg.linear_key_head_dim = hf.linear_key_head_dim
-        cfg.linear_value_head_dim = hf.linear_value_head_dim
-        cfg.linear_conv_kernel_dim = hf.linear_conv_kernel_dim
-        if hasattr(hf, "partial_rotary_factor"):
-            partial = hf.partial_rotary_factor
-        else:
-            partial = (getattr(hf, "rope_parameters", None) or {}).get("partial_rotary_factor", 1.0)
-        cfg.rope_head_dim = int(cfg.head_dim * partial)
-        cfg.qk_norm = True
-        cfg.qkv_bias = bool(getattr(hf, "attention_bias", False) or getattr(hf, "qkv_bias", False))
-        cfg.mrope_section = []
-        cfg.mrope_interleaved = False
-        # Prefill+decode on xlite (no Ascend-GDN state sync). Size graph for chunked prefill.
-        cfg.max_m = self.vllm_config.scheduler_config.max_num_batched_tokens
+        xlite_config, hf_config = self.xlite_config, self.hf_text_config
+
+        xlite_config.attn_type = AttnHybrid
+        xlite_config.attn_output_gate = True
+        xlite_config.full_attention_interval = _resolve_full_attention_interval(hf_config)
+        xlite_config.linear_num_k_heads = hf_config.linear_num_key_heads
+        xlite_config.linear_num_v_heads = hf_config.linear_num_value_heads
+        xlite_config.linear_key_head_dim = hf_config.linear_key_head_dim
+        xlite_config.linear_value_head_dim = hf_config.linear_value_head_dim
+        xlite_config.linear_conv_kernel_dim = hf_config.linear_conv_kernel_dim
+        partial = getattr(hf_config, "partial_rotary_factor", None) or (
+            getattr(hf_config, "rope_parameters", None) or {}
+        ).get("partial_rotary_factor", 1.0)
+        xlite_config.rope_head_dim = int(xlite_config.head_dim * partial)
+        xlite_config.qk_norm = True
+        xlite_config.qkv_bias = bool(
+            getattr(hf_config, "attention_bias", False) or getattr(hf_config, "qkv_bias", False)
+        )
+        xlite_config.mrope_section = []
+        xlite_config.mrope_interleaved = False
+        # Full-hybrid: prefill and decode both run on xlite, so the graph must
+        # cover the whole chunked-prefill budget instead of the decode-sized one.
+        tp_size = max(int(xlite_config.def_tp_size), 1)
+        max_m = self.vllm_config.scheduler_config.max_num_batched_tokens
+        xlite_config.max_m = (max_m + tp_size - 1) // tp_size * tp_size
         kernel_sizes = AscendAttentionBackend.get_supported_kernel_block_sizes()
-        if kernel_sizes and cfg.block_size != int(kernel_sizes[0]):
-            logger.info("xlite hybrid block_size: manager=%s -> kernel=%s", cfg.block_size, kernel_sizes[0])
-            cfg.block_size = int(kernel_sizes[0])
+        if kernel_sizes and xlite_config.block_size != int(kernel_sizes[0]):
+            logger.info("xlite hybrid block_size: manager=%s -> kernel=%s", xlite_config.block_size, kernel_sizes[0])
+            xlite_config.block_size = int(kernel_sizes[0])
+
+        # Per-layer MHA/GDN role mask (same pattern as DeepseekV32's index_full_mask).
+        layers, _ = self._get_layers_and_model_prefix()
+        if len(layers) != int(xlite_config.n_layers):
+            raise ValueError(f"Layer count mismatch: {len(layers)} vs {xlite_config.n_layers}")
+        self._full_attention_mask = [
+            getattr(layer, "layer_type", None) == "full_attention" or hasattr(layer, "self_attn") for layer in layers
+        ]
 
     def _build_model(self) -> None:
-        xm, cfg, hf = self.xlite_model, self.xlite_config, self.hf_text_config
-        layers, prefix = self._get_layers_and_model_prefix()
-        if len(layers) != cfg.n_layers:
-            raise ValueError(f"Layer count mismatch: {len(layers)} vs {cfg.n_layers}")
+        xlite_model, xlite_config = self.xlite_model, self.xlite_config
+        hf_config = self.hf_text_config
+        layers, model_prefix = self._get_layers_and_model_prefix()
+        mask = self._full_attention_mask
+        gdn_mask = [not m for m in mask]
+        # Use the first MHA layer's module attributes: under TP they carry the
+        # per-rank shard sizes (config fields are the global values).
+        mha_layer = next(layer for layer in layers if hasattr(layer, "self_attn"))
+        qkv_kwargs = {
+            "head_dim": int(mha_layer.self_attn.head_dim),
+            "num_heads": int(mha_layer.self_attn.num_heads),
+            "num_kv_heads": int(mha_layer.self_attn.num_kv_heads),
+        }
+        tp_size = max(int(xlite_config.def_tp_size), 1)
+        key_dim = int(xlite_config.linear_num_k_heads) * int(xlite_config.linear_key_head_dim) // tp_size
+        value_dim = int(xlite_config.linear_num_v_heads) * int(xlite_config.linear_value_head_dim) // tp_size
+        to_model_dtype = lambda t: t.detach().to(dtype=self.dtype).contiguous()  # noqa: E731
 
-        xm.embed = get_dotted_attr(self.npu_runnable, f"{prefix}model.embed_tokens.weight", raises=True)
-        norm_w = _gemma_norm_to_xlite(get_dotted_attr(self.npu_runnable, f"{prefix}model.norm.weight", raises=True))
-        xm.norm = norm_w
-        xm.head = (
-            xm.embed
-            if hf.tie_word_embeddings
-            else get_dotted_attr(self.npu_runnable, f"{prefix}lm_head.weight", raises=True)
+        # Embeddings and head (tied embeddings reuse the embedding table).
+        xlite_model.embed = get_dotted_attr(self.npu_runnable, f"{model_prefix}model.embed_tokens.weight", raises=True)
+        xlite_model.norm = _gemma_norm_to_xlite(
+            get_dotted_attr(self.npu_runnable, f"{model_prefix}model.norm.weight", raises=True)
+        )
+        if hf_config.tie_word_embeddings:
+            xlite_model.head = xlite_model.embed
+        else:
+            xlite_model.head = get_dotted_attr(self.npu_runnable, f"{model_prefix}lm_head.weight", raises=True)
+
+        # Every layer-level RMSNorm in Qwen3.5 is Gemma-style (x * (1 + w)).
+        xlite_model.attn_norm = get_layer_weights(layers, "input_layernorm.weight", post_processor=_gemma_norm_to_xlite)
+        xlite_model.mlp_norm = get_layer_weights(
+            layers, "post_attention_layernorm.weight", post_processor=_gemma_norm_to_xlite
         )
 
-        empty = torch.empty(0, dtype=xm.embed.dtype, device=xm.embed.device)
-        self._xlite_weight_refs: list[torch.Tensor] = [empty, norm_w]
-        dtype = self.vllm_config.model_config.dtype
-        tp = max(int(cfg.def_tp_size), 1)
-        key_dim = (hf.linear_num_key_heads * hf.linear_key_head_dim) // tp
-        value_dim = (hf.linear_num_value_heads * hf.linear_value_head_dim) // tp
-
-        lists: dict[str, list[torch.Tensor]] = {
-            k: []
-            for k in (
-                "attn_norm",
-                "mlp_norm",
-                "mlp_up_gate",
-                "mlp_down",
-                "attn_out",
-                "mha_qkv",
-                "mha_qkv_bias",
-                "mha_q_norm",
-                "mha_k_norm",
-                "linear_in_proj_qkv",
-                "linear_in_proj_z",
-                "linear_in_proj_b",
-                "linear_in_proj_a",
-                "linear_conv1d",
-                "linear_a_log",
-                "linear_dt_bias",
-                "linear_norm",
-                "linear_out_proj",
+        # MHA layers (full attention only; GDN slots are dummy placeholders).
+        # get_layer_weights feeds dummy placeholders through post_processor too;
+        # guard with numel so the layout asserts only see real weights.
+        xlite_model.mha_qkv = get_layer_weights(
+            layers,
+            "self_attn.qkv_proj.weight",
+            mask=mask,
+            post_processor=lambda w: w if w.numel() <= 1 else _pack_mha_qkv_weight(w, **qkv_kwargs),
+        )
+        xlite_model.attn_out = get_layer_weights(layers, "self_attn.o_proj.weight", mask=mask)
+        xlite_model.mha_q_norm = get_layer_weights(
+            layers, "self_attn.q_norm.weight", mask=mask, post_processor=_gemma_norm_to_xlite
+        )
+        xlite_model.mha_k_norm = get_layer_weights(
+            layers, "self_attn.k_norm.weight", mask=mask, post_processor=_gemma_norm_to_xlite
+        )
+        with xlite_model.condition(lambda tensors: not self.all_tensors_zero(tensors)):
+            xlite_model.mha_qkv_bias = get_layer_weights(
+                layers,
+                "self_attn.qkv_proj.bias",
+                mask=mask,
+                post_processor=lambda b: b if b.numel() <= 1 else _pack_mha_qkv_bias(b, **qkv_kwargs),
             )
+            xlite_config.qkv_bias = bool(xlite_model.mha_qkv_bias) and not self.all_tensors_zero(
+                xlite_model.mha_qkv_bias
+            )
+
+        # GDN layers (linear attention; MHA slots are dummy placeholders).
+        # Note: linear_attn.norm is RMSNormGated (standard x * w), not Gemma-style.
+        # get_layer_weights feeds dummy placeholders through post_processor too;
+        # guard with numel so the layout asserts only see real weights.
+        gdn_guard = lambda w, fn: w if w.numel() <= 1 else fn(w)  # noqa: E731
+        xlite_model.linear_in_proj_qkv = get_layer_weights(
+            layers,
+            "linear_attn.in_proj_qkvz.weight",
+            mask=gdn_mask,
+            post_processor=lambda w: gdn_guard(w, lambda t: _split_linear_qkvz(t, key_dim, value_dim)[0]),
+        )
+        xlite_model.linear_in_proj_z = get_layer_weights(
+            layers,
+            "linear_attn.in_proj_qkvz.weight",
+            mask=gdn_mask,
+            post_processor=lambda w: gdn_guard(w, lambda t: _split_linear_qkvz(t, key_dim, value_dim)[1]),
+        )
+        xlite_model.linear_in_proj_b = get_layer_weights(
+            layers,
+            "linear_attn.in_proj_ba.weight",
+            mask=gdn_mask,
+            post_processor=lambda w: gdn_guard(w, lambda t: _split_linear_ba(t)[0]),
+        )
+        xlite_model.linear_in_proj_a = get_layer_weights(
+            layers,
+            "linear_attn.in_proj_ba.weight",
+            mask=gdn_mask,
+            post_processor=lambda w: gdn_guard(w, lambda t: _split_linear_ba(t)[1]),
+        )
+        xlite_model.linear_conv1d = get_layer_weights(
+            layers,
+            "linear_attn.conv1d.weight",
+            mask=gdn_mask,
+            post_processor=lambda w: gdn_guard(w, lambda t: (t.unsqueeze(1) if t.ndim == 2 else t).contiguous()),
+        )
+        xlite_model.linear_a_log = get_layer_weights(
+            layers, "linear_attn.A_log", mask=gdn_mask, post_processor=to_model_dtype
+        )
+        xlite_model.linear_dt_bias = get_layer_weights(
+            layers, "linear_attn.dt_bias", mask=gdn_mask, post_processor=to_model_dtype
+        )
+        xlite_model.linear_norm = get_layer_weights(layers, "linear_attn.norm.weight", mask=gdn_mask)
+        xlite_model.linear_out_proj = get_layer_weights(layers, "linear_attn.out_proj.weight", mask=gdn_mask)
+
+        # Dense MLP layers.
+        xlite_model.mlp_up_gate = get_layer_weights(layers, "mlp.gate_up_proj.weight")
+        xlite_model.mlp_down = get_layer_weights(layers, "mlp.down_proj.weight")
+
+        # MoE layers (empty on dense models; populated for Qwen3_5MoeXliteModel).
+        mlp_prefix = self._decoder_layer_mlp_module
+        dbg_mlp = getattr(layers[0], mlp_prefix, None)
+        logger.warning(
+            "XLITE-DBG mlp_prefix=%s mlp_type=%s has(gate/shared_expert_gate/shared_expert/experts/routed)="
+            "(%s/%s/%s/%s/%s)",
+            mlp_prefix,
+            type(dbg_mlp).__name__,
+            hasattr(dbg_mlp, "gate") if dbg_mlp is not None else None,
+            hasattr(dbg_mlp, "shared_expert_gate") if dbg_mlp is not None else None,
+            hasattr(dbg_mlp, "shared_expert") if dbg_mlp is not None else None,
+            hasattr(dbg_mlp, "experts") if dbg_mlp is not None else None,
+            (hasattr(getattr(dbg_mlp, "experts", None), "routed_experts")) if dbg_mlp is not None else None,
+        )
+        xlite_model.gate = get_layer_weights(layers, f"{mlp_prefix}.gate.weight")
+        xlite_config.gate_captured = self.is_tensor_nz(xlite_model.gate[0]) if xlite_model.gate else False
+        xlite_model.gate_bias = get_layer_weights(
+            layers,
+            f"{mlp_prefix}.gate.bias",
+            f"{mlp_prefix}.gate.e_score_correction_bias",
+            post_processor=lambda b: b.to(torch.float32),
+        )
+        # Qwen3 MoE models name the module shared_experts (plural); Qwen3.5
+        # uses shared_expert (singular) — try both, first non-empty wins.
+        xlite_model.se_up_gate = get_layer_weights(
+            layers,
+            f"{mlp_prefix}.shared_experts.gate_up_proj.weight",
+            f"{mlp_prefix}.shared_expert.gate_up_proj.weight",
+        )
+        xlite_model.se_down = get_layer_weights(
+            layers, f"{mlp_prefix}.shared_experts.down_proj.weight", f"{mlp_prefix}.shared_expert.down_proj.weight"
+        )
+        if xlite_model.se_up_gate and xlite_model.se_down:
+            # y = routed + sigmoid(se_gate(x)) * shared(x): the gate must be bound
+            # whenever a shared expert exists, otherwise shared contributes at full weight.
+            xlite_model.se_gate = get_layer_weights(layers, f"{mlp_prefix}.shared_expert_gate.weight")
+        re_kwargs: WeightGetterConfig = {
+            "secondary_flattening": f"{mlp_prefix}.experts.routed_experts.local_num_experts"
         }
-        has_qkv_bias = False
+        xlite_model.re_up_gate = get_layer_weights(
+            layers, f"{mlp_prefix}.experts.routed_experts.w13_weight", **re_kwargs
+        )
+        xlite_model.re_down = get_layer_weights(layers, f"{mlp_prefix}.experts.routed_experts.w2_weight", **re_kwargs)
+        if not xlite_model.re_up_gate:
+            re_kwargs = {"secondary_flattening": f"{mlp_prefix}.experts.local_num_experts"}  # type: ignore[assignment]
+            xlite_model.re_up_gate = get_layer_weights(layers, f"{mlp_prefix}.experts.w13_weight", **re_kwargs)
+            xlite_model.re_down = get_layer_weights(layers, f"{mlp_prefix}.experts.w2_weight", **re_kwargs)
+        xlite_config.experts_weight_nz = bool(xlite_model.re_up_gate) and self.is_tensor_nz(xlite_model.re_up_gate[0])
+        # xlite group_matmul transpose=True means [K, N] (in, out); infer from the actual slice.
+        if xlite_model.re_up_gate:
+            w0 = xlite_model.re_up_gate[0]
+            if w0.dim() == 2 and w0.shape[0] == xlite_config.hidden_size:
+                xlite_config.experts_weight_transpose = True
+            elif w0.dim() == 2 and w0.shape[1] == xlite_config.hidden_size:
+                xlite_config.experts_weight_transpose = False
 
-        for layer in layers:
-            an = _gemma_norm_to_xlite(layer.input_layernorm.weight)
-            mn = _gemma_norm_to_xlite(layer.post_attention_layernorm.weight)
-            self._xlite_weight_refs.extend([an, mn])
-            lists["attn_norm"].append(an)
-            lists["mlp_norm"].append(mn)
-            lists["mlp_up_gate"].append(layer.mlp.gate_up_proj.weight)
-            lists["mlp_down"].append(layer.mlp.down_proj.weight)
 
-            layer_type = getattr(layer, "layer_type", None)
-            is_full = (layer_type == "full_attention") if layer_type is not None else hasattr(layer, "self_attn")
-            if is_full:
-                attn = layer.self_attn
-                bias = getattr(attn.qkv_proj, "bias", None)
-                qkv_bias = bias if isinstance(bias, torch.Tensor) and bias.numel() else None
-                packed, packed_bias = _pack_mha_qkv_with_gate(
-                    attn.qkv_proj.weight, attn.head_dim, attn.num_heads, attn.num_kv_heads, qkv_bias
-                )
-                self._xlite_weight_refs.append(packed)
-                lists["mha_qkv"].append(packed)
-                lists["attn_out"].append(attn.o_proj.weight)
-                qn = _gemma_norm_to_xlite(attn.q_norm.weight)
-                kn = _gemma_norm_to_xlite(attn.k_norm.weight)
-                self._xlite_weight_refs.extend([qn, kn])
-                lists["mha_q_norm"].append(qn)
-                lists["mha_k_norm"].append(kn)
-                if packed_bias is not None:
-                    has_qkv_bias = True
-                    self._xlite_weight_refs.append(packed_bias)
-                    lists["mha_qkv_bias"].append(packed_bias)
-                else:
-                    lists["mha_qkv_bias"].append(empty)
-                for k in (
-                    "linear_in_proj_qkv",
-                    "linear_in_proj_z",
-                    "linear_in_proj_b",
-                    "linear_in_proj_a",
-                    "linear_conv1d",
-                    "linear_a_log",
-                    "linear_dt_bias",
-                    "linear_norm",
-                    "linear_out_proj",
-                ):
-                    lists[k].append(empty)
-            else:
-                la = layer.linear_attn
-                qkv_w, z_w = _split_linear_qkvz(la.in_proj_qkvz.weight, key_dim, value_dim)
-                b_w, a_w = _split_linear_ba(la.in_proj_ba.weight)
-                conv_w = la.conv1d.weight
-                if conv_w.ndim == 2:
-                    conv_w = conv_w.unsqueeze(1)
-                conv_w = conv_w.contiguous()
-                a_log = la.A_log.detach().to(dtype=dtype).contiguous()
-                dt_bias = la.dt_bias.detach().to(dtype=dtype).contiguous()
-                self._xlite_weight_refs.extend([qkv_w, z_w, b_w, a_w, conv_w, a_log, dt_bias])
-                for k in ("attn_out", "mha_qkv", "mha_qkv_bias", "mha_q_norm", "mha_k_norm"):
-                    lists[k].append(empty)
-                lists["linear_in_proj_qkv"].append(qkv_w)
-                lists["linear_in_proj_z"].append(z_w)
-                lists["linear_in_proj_b"].append(b_w)
-                lists["linear_in_proj_a"].append(a_w)
-                lists["linear_conv1d"].append(conv_w)
-                lists["linear_a_log"].append(a_log)
-                lists["linear_dt_bias"].append(dt_bias)
-                lists["linear_norm"].append(la.norm.weight)
-                lists["linear_out_proj"].append(la.out_proj.weight)
+class Qwen3_5MoeXliteModel(Qwen3_5XliteModel):
+    """xlite adapter for the Qwen3.5 MoE hybrid (MHA + GDN + sparse MoE) architecture."""
 
-        for k, v in lists.items():
-            if k == "mha_qkv_bias" and not has_qkv_bias:
-                continue
-            setattr(xm, k, v)
-        cfg.qk_norm = True
-        cfg.qkv_bias = has_qkv_bias
+    _supported_architectures = ["Qwen3_5MoeForCausalLM", "Qwen3_5MoeForConditionalGeneration"]
+
+    def _build_model_config(self) -> None:
+        super()._build_model_config()
+        xlite_config, hf_config = self.xlite_config, self.hf_text_config
+        xlite_config.n_dense_layers = 0
+        xlite_config.n_routed_experts = hf_config.num_experts
+        xlite_config.n_shared_experts = (
+            1 if int(getattr(hf_config, "shared_expert_intermediate_size", 0) or 0) > 0 else 0
+        )
+        xlite_config.n_act_experts = hf_config.num_experts_per_tok
+        xlite_config.moe_intermediate_size = hf_config.moe_intermediate_size
+        xlite_config.norm_topk_prob = bool(getattr(hf_config, "norm_topk_prob", True))
 
 
 def get_adapter_xlite_model(npu_runner: "XliteModelRunner", vllm_config: VllmConfig) -> XliteModelBase:
@@ -931,7 +1026,7 @@ class XliteWrapper:
         # prefill are imported into the xlite persistent pool at handoff.
         self._hybrid_decode_only: bool = os.environ.get("XLITE_DECODE_ONLY_HYBRID", "0") == "1"
         self._xlite_native_dirty: set[int] = set()
-        self._xlite_req_pages: dict[int, list[int]] = {}
+        self._xlite_req_pages: dict[int, list[int | None]] = {}
         self._xlite_native_gdn_groups: list[list[torch.Tensor]] = []
         self._xlite_import_log_done = False
         # A1 decode-only: native steps record their per-step state-index
@@ -1000,7 +1095,9 @@ class XliteWrapper:
         Args:
             kv_caches (list[tuple[torch.Tensor, ...]]): Runtime KV cache handles or tensors.
         """
-        adapted = self.adapter_xlite_model.extract_kv_cache(kv_caches)
+        # `extract_kv_cache` is declared to return a list, but the actual shape
+        # depends on the strategy (vLLM may hand us a dict keyed by layer name).
+        adapted: Any = self.adapter_xlite_model.extract_kv_cache(kv_caches)
         if self.adapter_xlite_model.xlite_config.attn_type == AttnHybrid:
             ordered = list(adapted.values()) if isinstance(adapted, dict) else list(adapted)
             converted = [list(c) if isinstance(c, (list, tuple)) else [c] for c in ordered]
@@ -1011,7 +1108,7 @@ class XliteWrapper:
     def _adapt_hybrid_kv_caches(self, caches: list[list[torch.Tensor]]) -> list[list[torch.Tensor]]:
         """Map hybrid caches to xlite: paged K/V for full layers, slot-major GDN states."""
         cfg = self.adapter_xlite_model.xlite_config
-        n_layers, interval = int(cfg.n_layers), int(cfg.full_attention_interval)
+        n_layers = int(cfg.n_layers)
         max_batch, tp = int(cfg.max_batch_size), max(int(cfg.def_tp_size), 1)
         n_v = int(cfg.linear_num_v_heads) // tp
         k_dim, v_dim = int(cfg.linear_key_head_dim), int(cfg.linear_value_head_dim)
@@ -1059,8 +1156,14 @@ class XliteWrapper:
                 f"full-attn KV layout mismatch: {tuple(k.shape)}, expect [*,{block_size},{kv_heads},{head_dim}]"
             )
 
+        # Layer roles must come from the same source as the weight bindings
+        # (_full_attention_mask), not from the inferred interval — the two
+        # disagree for non-canonical layer arrangements.
+        role_mask = self._full_attention_mask
+        if len(role_mask) != len(caches):
+            raise RuntimeError(f"full-attention mask length {len(role_mask)} != cache layers {len(caches)}")
         for i in range(n_layers):
-            if ((i + 1) % interval) == 0:
+            if role_mask[i]:
                 adapted.append(list(as_kv(caches[i])))
             else:
                 # A1 decode-only: native per-layer mamba pools are resolved
@@ -1081,6 +1184,7 @@ class XliteWrapper:
             len(self._xlite_native_gdn_groups),
             len(caches),
         )
+
         return adapted
 
     @staticmethod
@@ -1519,17 +1623,27 @@ class XliteWrapper:
         if getattr(forward_context, "in_profile_run", False) or (
             is_hybrid and getattr(forward_context, "capturing", False)
         ):
-            if self.full_mode and getattr(forward_context, "in_profile_run", False):
-                # In full mode, xlite handles both prefill and decode, and aclgraph runnable should not reserve memory.
-                # This is to avoid redundant memory allocation that reduces KV cache capacity and regresses performance.
+            # full_mode hybrid: never capture/run Ascend-GDN runnable here — state is not
+            # sync-compatible with xlite, and ACLGraph weak-refs of runnable output can
+            # become None on replay.
+            if self.full_mode and (
+                getattr(forward_context, "in_profile_run", False)
+                or (is_hybrid and getattr(forward_context, "capturing", False))
+            ):
                 # NOTE: returning a single hidden state tensor may break the vLLM pipeline if the runnable expects a
                 # tuple of outputs, e.g., (hidden_states, aux_hidden_states) under certain speculative scenarios
-                return self.hidden_states
-            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+                return _ensure_output(self.hidden_states, "full_mode profile/capture placeholder")
+            return _ensure_output(
+                self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                "runnable(profile/capturing)",
+            )
 
         attn_metadata_raw: Any = forward_context.attn_metadata
         if attn_metadata_raw is None:
-            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+            return _ensure_output(
+                self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                "runnable(attn_metadata=None)",
+            )
 
         if is_hybrid:
             attn_metadata = self._pick_attn_metadata(attn_metadata_raw, self.adapter_xlite_model._attn_metadata_type)
@@ -1542,7 +1656,10 @@ class XliteWrapper:
             if not isinstance(attn_metadata, self.adapter_xlite_model._attn_metadata_type):
                 attn_metadata = None
         if attn_metadata is None:
-            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+            return _ensure_output(
+                self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                "runnable(attn_metadata type mismatch)",
+            )
 
         with_prefill = attn_metadata.attn_state not in (
             AscendAttentionState.DecodeOnly,
@@ -1568,11 +1685,7 @@ class XliteWrapper:
         # Decode-Only: runnable for prefill, graph for decode
         # Hybrid: always graph (Ascend-GDN state is not sync-compatible with xlite).
         if is_hybrid:
-            if self._hybrid_decode_only:
-                # A1: hybrid decode-only — native prefill, xlite decode.
-                use_xlite_graph = not with_prefill
-            else:
-                use_xlite_graph = True
+            use_xlite_graph = True
         elif not self.full_mode and self.data_parallel_size > 1:
             num_tokens = forward_context.batch_descriptor.num_tokens
             num_reqs = forward_context.batch_descriptor.num_reqs
@@ -1583,79 +1696,6 @@ class XliteWrapper:
         if not use_xlite_graph:
             # fall back to runnable for prefill in decode-only mode
             # or when the number of tokens exceeds the graph capacity in non-full mode
-            if self._hybrid_decode_only and is_hybrid:
-                # Native steps update GDN states in the vllm mamba pools.
-                # PERF: record the per-step state-index tensor (DEVICE) and
-                # defer materialization to the next import — a .cpu() here
-                # would sync the whole stream every native step and expose
-                # scheduler latency as device idle on prefill-heavy cells.
-                # NOTE: batch_descriptor.num_reqs
-                # can be None here; read the state indices straight from the
-                # GDN metadata instead.
-                _metas = (
-                    attn_metadata_raw.values()
-                    if isinstance(attn_metadata_raw, dict)
-                    else attn_metadata_raw
-                    if isinstance(attn_metadata_raw, list)
-                    else (attn_metadata_raw,)
-                )
-                _idx = None
-                for _meta in _metas:
-                    _i = getattr(_meta, "non_spec_state_indices_tensor", None)
-                    if _i is not None and _i.numel():
-                        _idx = _i
-                        break
-                if _idx is not None:
-                    self._pending_native_ids.append(_idx)
-                    if len(self._pending_native_ids) >= 32:
-                        # safety valve for decode-free workloads (out=1): the
-                        # import never runs there, so bound the pending list
-                        for _t in self._pending_native_ids:
-                            self._xlite_native_dirty.update(int(x) for x in _t.detach().cpu().tolist())
-                        self._pending_native_ids.clear()
-                if os.environ.get("XLITE_DO_DEBUG", "0") == "1" and not getattr(self, "_dbg_mark_logged", False):
-                    logger.warning(
-                        "xlite DO-DEBUG: native step pending=%s ids (deferred marking)", len(self._pending_native_ids)
-                    )
-                    logger.warning("xlite DO-DEBUG: native model_kwargs keys=%s", list(model_kwargs.keys()))
-                    _mcp = model_kwargs.get("mamba_cache_params")
-                    if _mcp is not None:
-                        _attrs = {}
-                        for _a in dir(_mcp):
-                            if _a.startswith("_"):
-                                continue
-                            _v = getattr(_mcp, _a, None)
-                            if isinstance(_v, torch.Tensor):
-                                _attrs[_a] = (tuple(_v.shape), str(_v.dtype))
-                            elif isinstance(_v, (list, tuple)) and _v and isinstance(_v[0], torch.Tensor):
-                                _attrs[_a] = f"{len(_v)} tensors, first {tuple(_v[0].shape)}"
-                        logger.warning("xlite DO-DEBUG: mamba_cache_params fields=%s", _attrs)
-                    self._dbg_mark_logged = True
-                # A1: flush xlite states into the native pools so the native
-                # GDN (mixed step) reads current states. BOUNDED: export only
-                # the LAST xlite decode batch's requests (one .cpu() per
-                # native<->decode transition, zero per-step syncs, export size
-                # <= one batch). New prefills have native-fresh states and
-                # need no export; decode tokens computed inside mixed steps
-                # are native and get re-imported via pending_native_ids.
-                _exp_keys = None
-                if self._last_decode_keys is not None:
-                    _exp_keys = [int(x) for x in self._last_decode_keys.detach().cpu().tolist()]
-                    self._last_decode_keys = None
-                self._hybrid_export_to_native(_exp_keys)
-            # A1 decode-only: call the UNWRAPPED native model. Going through
-            # the ACLGraphWrapper here triggers a runtime lazy capture for
-            # mixed-batch shapes ("CUDA graph capturing detected at an
-            # inappropriate time") — eager native prefill is correct-first;
-            # piecewise graph acceleration can be revisited later.
-            if self._hybrid_decode_only and is_hybrid:
-                _run = self.npu_runnable
-                if hasattr(_run, "unwrap"):
-                    _run = _run.unwrap()
-                return _ensure_output(
-                    _run(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
-                    "runnable(not use_xlite_graph)",
-                )
             return _ensure_output(
                 self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
                 "runnable(not use_xlite_graph)",
@@ -1675,38 +1715,59 @@ class XliteWrapper:
             else:
                 router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
                 seq = router.seq_lens[:num_reqs]
-                cum = router.cu_query_lens[-seq.size(0) :][: num_reqs + 1]
-                if cum.device.type != "cpu":
-                    cum = cum.to("cpu")
-                query_lens_list = torch.diff(cum, prepend=cum.new_zeros(1)).tolist()
+                cum_t = router.cu_query_lens[-seq.size(0) :][: num_reqs + 1]
+                if cum_t.device.type != "cpu":
+                    cum_t = cum_t.to("cpu")
+                query_lens_list = torch.diff(cum_t, prepend=cum_t.new_zeros(1)).tolist()
                 if not seq_lens_list:
                     seq_lens_list = seq.tolist()
             query_lens_list = [int(x) for x in query_lens_list[:num_reqs]]
             seq_lens_list = [int(x) for x in seq_lens_list[:num_reqs]]
             if len(seq_lens_list) < num_reqs or len(query_lens_list) < num_reqs:
-                return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
-            cached_lens_list = [max(seq_lens_list[i] - query_lens_list[i], 0) for i in range(num_reqs)]
-            # Prefer the CPU numpy block_table: reading it avoids a
-            # per-step D2H sync that would drain the compute stream; fall
-            # back to D2H only if unavailable.
-            bt_cpu_np = getattr(attn_metadata, "block_tables_cpu_np", None)
-            if bt_cpu_np is not None:
-                block_tables_list = bt_cpu_np[:num_reqs].tolist()
-            else:
-                bt = getattr(attn_metadata, "block_tables", None)
-                if bt is None:
-                    return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
-                block_tables_list = (
-                    bt[:num_reqs].detach().to("cpu").tolist()
-                    if hasattr(bt, "device") and bt.device.type != "cpu"
-                    else bt[:num_reqs].tolist()
+                # Falling back here means the native GDN layers would resume from
+                # state this request never produced on xlite (the recurrent state
+                # is not transferred across backends in full-hybrid mode) — the
+                # response quality for this request is not guaranteed. Full state
+                # bridging lands with the decode-only pool work.
+                logger.error(
+                    "xlite hybrid: metadata lens incomplete (reqs=%s seq=%s query=%s); "
+                    "falling back to native with unbridged GDN state — output "
+                    "quality for in-flight requests is not guaranteed",
+                    num_reqs,
+                    len(seq_lens_list),
+                    len(query_lens_list),
                 )
+                return _ensure_output(
+                    self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                    "runnable(hybrid lens mismatch)",
+                )
+            cached_lens_list = [max(seq_lens_list[i] - query_lens_list[i], 0) for i in range(num_reqs)]
+            bt = getattr(attn_metadata, "block_tables", None)
+            if bt is None:
+                return _ensure_output(
+                    self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                    "runnable(hybrid block_tables=None)",
+                )
+            block_tables_list = (
+                bt[:num_reqs].detach().to("cpu").tolist()
+                if hasattr(bt, "device") and bt.device.type != "cpu"
+                else bt[:num_reqs].tolist()
+            )
             num_actual_tokens = int(attn_metadata.num_actual_tokens)
             if sum(query_lens_list) != num_actual_tokens:
                 return _ensure_output(
                     self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
                     "runnable(hybrid query_lens sum mismatch)",
                 )
+            # Refuse capture/dummy all-zero tables on decode.
+            for i, cached in enumerate(cached_lens_list):
+                if cached > 0 and (not block_tables_list[i] or int(block_tables_list[i][0]) == 0):
+                    return _ensure_output(
+                        self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                        "runnable(hybrid dummy block_table)",
+                    )
+            # slot-major state management: gather from the persistent pool;
+            # decode-only mode additionally imports/exports native state here
             _gdn_idx = self._gdn_state_ids(attn_metadata_raw, num_reqs)
             if self._hybrid_decode_only:
                 # PERF: materialize the layer-0 ids only when the dirty/
@@ -1786,6 +1847,10 @@ class XliteWrapper:
             h = self.hidden_states[:num_tokens]
             stream = torch.npu.current_stream().npu_stream
             if inputs_embeds is None:
+                # Text path requires token ids; VL batches arrive as
+                # inputs_embeds (input_ids is None) and take the branch below.
+                if input_ids is None:
+                    return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
                 self.xlite_model.forward(
                     self.xlite_rt,
                     input_ids[:num_actual_tokens],
@@ -1805,6 +1870,40 @@ class XliteWrapper:
                 if xlite_deepstack and hasattr(self.npu_runnable, "_clear_deepstack_input_embeds"):
                     self.npu_runnable._clear_deepstack_input_embeds(emb.size(0))
             self._hybrid_scatter()
+            xlite_attn_metadata = AttnMeta()
+            xlite_attn_metadata.lens = query_lens_list
+            xlite_attn_metadata.cached_lens = cached_lens_list
+            xlite_attn_metadata.block_tables_cpu = block_tables_list
+            pos = positions[0] if positions.ndim == 2 else positions
+            xlite_attn_metadata.positions = pos[:num_actual_tokens].contiguous()
+            num_tokens = (
+                getattr(forward_context, "max_tokens_across_dp", None) or forward_context.batch_descriptor.num_tokens
+            )
+            h = self.hidden_states[:num_tokens]
+            stream = torch.npu.current_stream().npu_stream
+            if inputs_embeds is None:
+                # Text path requires token ids; VL batches arrive as
+                # inputs_embeds (input_ids is None) and take the branch below.
+                if input_ids is None:
+                    return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+                self.xlite_model.forward(
+                    self.xlite_rt,
+                    input_ids[:num_actual_tokens],
+                    xlite_attn_metadata,
+                    self.kv_caches,
+                    self.freq_cis,
+                    h,
+                    stream,
+                )
+            else:
+                emb = inputs_embeds[:num_actual_tokens]
+                deepstack = getattr(self.npu_runnable, "deepstack_input_embeds", [])
+                xlite_deepstack = [d[: emb.size(0)] for d in deepstack]
+                self.xlite_model.forward_with_inputs_embeds(
+                    self.xlite_rt, emb, xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream, xlite_deepstack
+                )
+                if xlite_deepstack and hasattr(self.npu_runnable, "_clear_deepstack_input_embeds"):
+                    self.npu_runnable._clear_deepstack_input_embeds(emb.size(0))
             return _ensure_output(h[:num_actual_tokens], "xlite hybrid forward")
 
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
@@ -1852,8 +1951,6 @@ class XliteWrapper:
                 curr_stream=stream,
                 deepstack_input=xlite_deepstack_input_embeds,
             )
-            if deepstack_input_embeds and callable(
-                _clear_stack := getattr(self.npu_runnable, "_clear_deepstack_input_embeds", None)
-            ):
-                _clear_stack(inputs_embeds.size(0))
-        return h[:num_actual_tokens] if self.data_parallel_size == 1 else h[:num_tokens]
+            if xlite_deepstack_input_embeds and hasattr(self.npu_runnable, "_clear_deepstack_input_embeds"):
+                self.npu_runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
+        return _ensure_output(h[:num_actual_tokens], "xlite forward")
