@@ -123,11 +123,11 @@ class NPUModelRunner(GPUModelRunner):
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
-        # The following features are not yet supported in Ascend NPU model runner v2:
-        # - Context parallelism (prefill or decode)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
+        if parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "Decode context parallelism is not supported by Ascend NPU model runner v2."
+            )
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
