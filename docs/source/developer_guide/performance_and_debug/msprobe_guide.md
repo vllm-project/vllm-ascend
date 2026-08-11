@@ -229,7 +229,7 @@ Graph mode:
            └── dump.json
    ```
 
-   - `dump.json`: Statistics for the forward data of each API or module, including names, dtype, shape, max, min, mean, L2 norm (square root of the L2 variance), and CRC-32 when `summary_mode="md5"`. See [dump.json file description](#dumpjson-file-description) for details.
+   - `dump.json`: See [dump.json file description](#dumpjson-file-description) for details.
 
 ## 5. Analyze the results
 

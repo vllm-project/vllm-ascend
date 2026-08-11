@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -89,6 +90,19 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.rank = 0
         return config
 
+    def test_pp_handshake_metadata_is_ignored(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        metadata = {
+            (0, 0): MagicMock(),
+            (1, 0): MagicMock(),
+        }
+        original_metadata = metadata.copy()
+
+        result = connector.set_xfer_handshake_metadata_pp_aware(metadata)
+
+        self.assertIsNone(result)
+        self.assertEqual(metadata, original_metadata)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
         config = self._make_vllm_config()
@@ -97,7 +111,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         _connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         mock_scheduler_cls.assert_called_once()
 
@@ -123,7 +137,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         mock_sched = mock_scheduler_cls.return_value
 
@@ -153,7 +167,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         output = MagicMock()
         output.kv_cache_events = None
@@ -168,7 +182,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         events = _mock_events(num_workers=1)
         mock_kv_events = [MagicMock()]
@@ -188,7 +202,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         # First update
         events1 = _mock_events(num_workers=1)
@@ -215,7 +229,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         # No events
         result = list(connector.take_events())
@@ -308,6 +322,29 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_save_kv_layer_consumer_with_put_enabled(self, mock_worker_cls, mock_lookup_cls):
+        config = self._make_vllm_config(
+            kv_role="kv_consumer",
+            extra_config={
+                "use_layerwise": True,
+                "consumer_is_to_put": True,
+            },
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        connector._get_connector_metadata = MagicMock(return_value=MagicMock())
+
+        connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+
+        mock_worker_cls.return_value.save_kv_layer.assert_called_once()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
     def test_wait_for_save_consumer(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(kv_role="kv_consumer")
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -350,6 +387,95 @@ class TestAscendStoreConnector(unittest.TestCase):
         result = connector.get_kv_connector_kv_cache_events()
         self.assertIsNotNone(result)
         self.assertIsInstance(result, AscendStoreKVEvents)
+
+
+class TestAscendStoreConnectorLayerwise(unittest.TestCase):
+    """Test connector methods that are specific to layerwise mode."""
+
+    connector_mod: types.ModuleType
+
+    @classmethod
+    def setUpClass(cls):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector
+
+        cls.connector_mod = ascend_store_connector
+
+    def test_requires_piecewise_for_cudagraph_enabled(self):
+        self.assertTrue(
+            self.connector_mod.AscendStoreConnector.requires_piecewise_for_cudagraph({"use_layerwise": True})
+        )
+
+    def test_requires_piecewise_for_cudagraph_disabled(self):
+        self.assertFalse(
+            self.connector_mod.AscendStoreConnector.requires_piecewise_for_cudagraph({"use_layerwise": False})
+        )
+
+    def test_requires_piecewise_for_cudagraph_missing(self):
+        self.assertFalse(self.connector_mod.AscendStoreConnector.requires_piecewise_for_cudagraph({}))
+
+    def test_wait_for_save_layerwise_returns_early(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        with (
+            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
+        ):
+            config = MagicMock()
+            config.kv_transfer_config.kv_role = "kv_producer"
+            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
+            config.parallel_config.rank = 0
+
+            connector = self.connector_mod.AscendStoreConnector(
+                vllm_config=config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=None,
+            )
+            connector.wait_for_save()
+            mock_worker_cls.return_value.wait_for_save.assert_not_called()
+
+    def test_save_kv_layer_layerwise_producer(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        with (
+            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
+        ):
+            config = MagicMock()
+            config.kv_transfer_config.kv_role = "kv_producer"
+            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
+            config.parallel_config.rank = 0
+
+            connector = self.connector_mod.AscendStoreConnector(
+                vllm_config=config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=None,
+            )
+            connector._get_connector_metadata = MagicMock(return_value=MagicMock())
+            connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+            mock_worker_cls.return_value.save_kv_layer.assert_called_once()
+
+    def test_wait_for_layer_load_layerwise(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        with (
+            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
+        ):
+            config = MagicMock()
+            config.kv_transfer_config.kv_role = "kv_consumer"
+            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
+            config.parallel_config.rank = 0
+
+            connector = self.connector_mod.AscendStoreConnector(
+                vllm_config=config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=None,
+            )
+            connector.wait_for_layer_load("layer_0")
+            mock_worker_cls.return_value.wait_for_layer_load.assert_called_once()
 
 
 if __name__ == "__main__":

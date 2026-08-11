@@ -16,15 +16,19 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any
+from typing import Any, cast
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
@@ -33,15 +37,79 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self.input_batch: InputBatch | None = None
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        super().init_cudagraph_manager(cudagraph_mode)
+        # The Ascend graph manager is patched onto the upstream module and
+        # created by super().init_cudagraph_manager without a speculator ref.
+        # It needs this speculator to update full-graph params, so set it here.
+        self.query_cudagraph_manager.speculator = self
+        self.query_cudagraph_manager.update_stream = self.update_stream
 
     def set_attn(
         self,
         model_state: Any,
         kv_cache_config: Any,
         block_tables: Any,
+        target_input_buffers: Any,
+        target_attn_groups: Any,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
+        # npu needs attn_backends to update full graph params in run_fullgraph.
+        attn_backends: dict[str, type[AttentionBackend]] = {}
+        active_layer_names = self.draft_attn_layer_names
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            layer_names = kv_cache_group_spec.layer_names
+            if active_layer_names is not None:
+                layer_names = list(active_layer_names.intersection(layer_names))
+
+            layer_type = cast(type[Any], AttentionLayerBase)
+            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
+
+            for layer_name in layer_names:
+                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+
+        self.attn_backends = attn_backends
+
+    # The signature is split on vllm_version_is: v0.26.0's
+    # _build_draft_attn_metadata does not accept seq_lens_cpu_upper_bound /
+    # step; d02df748bf+ does.
+    if vllm_version_is("0.26.0"):
+
+        def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+            num_tokens_padded = num_reqs_padded * self.num_query_per_req
+            assert self.input_batch is not None
+            with build_attn_metadata_wrapper():
+                attn_metadata = self._build_draft_attn_metadata(
+                    num_reqs=self.input_batch.num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_tokens_padded,
+                    causal=self._group_causal,
+                )
+            return [attn_metadata]
+    else:
+
+        def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+            num_tokens_padded = num_reqs_padded * self.num_query_per_req
+            assert self.input_batch is not None
+            with build_attn_metadata_wrapper():
+                attn_metadata = self._build_draft_attn_metadata(
+                    num_reqs=self.input_batch.num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_tokens_padded,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                )
+            return [attn_metadata]
 
     def propose(
         self,
@@ -62,6 +130,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
+        self.input_batch = input_batch
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,

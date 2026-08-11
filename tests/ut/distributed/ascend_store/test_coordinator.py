@@ -28,7 +28,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
 )
-
 # isort: on
 
 
@@ -79,6 +78,12 @@ class _FakeCompressedManager:
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
         logical_block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
+        if logical_block_size != block_pool.hash_block_size:
+            scale_factor = logical_block_size // block_pool.hash_block_size
+            block_hashes = [
+                block_hashes[index + scale_factor - 1]
+                for index in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
+            ]
         max_blocks = max_length // logical_block_size
         for block_hash in list(block_hashes)[:max_blocks]:
             cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
@@ -86,7 +91,7 @@ class _FakeCompressedManager:
                 break
             for blocks, block in zip(computed, cached):
                 blocks.append(block)
-        return computed
+        return computed, len(computed[0]) * logical_block_size
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
@@ -104,7 +109,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool({(0, bytes(grouped_hash))}),
+            ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
         )
 
         self.assertEqual(hit_length, 128 * 128)
@@ -128,7 +133,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             _, hit_length = coord.find_longest_cache_hit(
                 block_hashes,
                 128 * 128,
-                ExternalCachedBlockPool({(0, bytes(grouped_hash))}),
+                ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
             )
 
         self.assertEqual(coord.group_effective_specs[0].compress_ratio, 1)
@@ -151,7 +156,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool(c1_exists),
+            ExternalCachedBlockPool(128, c1_exists),
         )
 
         self.assertEqual(hit_length, 0)
@@ -172,6 +177,24 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             masks = coord.store_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
+
+    def test_lookup_mask_uses_reachability_without_retention(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
+            scheduler_block_size=512,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+            retention_interval=256,
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, False, False, True],
+        ) as reachable:
+            masks = coord.lookup_mask(512)
+
+        self.assertEqual(masks, ([False, False, False, True],))
+        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
 
     def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
         calls = []

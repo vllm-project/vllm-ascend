@@ -1,8 +1,94 @@
 # Release Notes
 
+## v0.23.0rc1 - 2026.07.20
+
+We're excited to announce v0.23.0rc1, the first release candidate for the vLLM Ascend v0.23.0 release line. This release aligns the plugin with upstream vLLM v0.23.0 and expands model, context-parallel, KV-cache offload, and Ascend 950 support. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to get started.
+
+### Highlights
+
+- **Expanded model support**: Added GLM-5.2 support on A2 and A3, and Ascend 310P support for Qwen3-ASR-1.7B, Qwen3.5, and Qwen3.6. [#10441](https://github.com/vllm-project/vllm-ascend/pull/10441) [#11264](https://github.com/vllm-project/vllm-ascend/pull/11264) [#10257](https://github.com/vllm-project/vllm-ascend/pull/10257) [#12115](https://github.com/vllm-project/vllm-ascend/pull/12115)
+- **Sparse attention and context parallelism**: Added SFA DCP with a replicated indexer, compact KV gather, and C8 support. [#11819](https://github.com/vllm-project/vllm-ascend/pull/11819) [#11981](https://github.com/vllm-project/vllm-ascend/pull/11981) [#11846](https://github.com/vllm-project/vllm-ascend/pull/11846) [#11871](https://github.com/vllm-project/vllm-ascend/pull/11871)
+- **KV-cache lifecycle and offload**: Added recompute KV-cache offload for P/D decoder nodes, AscendStore coordination, and layerwise KV Pooling with a Memcache backend. [#10742](https://github.com/vllm-project/vllm-ascend/pull/10742) [#10393](https://github.com/vllm-project/vllm-ascend/pull/10393) [#11585](https://github.com/vllm-project/vllm-ascend/pull/11585)
+- **Ascend 950 quantization and communication**: Added W4A16 MXFP4, all-gather EP MXFP4, and low-accuracy token-dispatch paths. [#11014](https://github.com/vllm-project/vllm-ascend/pull/11014) [#11287](https://github.com/vllm-project/vllm-ascend/pull/11287) [#11718](https://github.com/vllm-project/vllm-ascend/pull/11718) [#11766](https://github.com/vllm-project/vllm-ascend/pull/11766)
+
+### Features
+
+- Added DeepSeek V4 MTP graph support. [#11062](https://github.com/vllm-project/vllm-ascend/pull/11062)
+- Added Virtual Width Network Eagle3 and Eagle3 support with chunked pipeline parallelism. [#10042](https://github.com/vllm-project/vllm-ascend/pull/10042) [#10566](https://github.com/vllm-project/vllm-ascend/pull/10566)
+
+### Experimental Features or Optimizations
+
+- Added experimental Step3P7 and Step3P5 support, including Step3P5 MTP. [#10697](https://github.com/vllm-project/vllm-ascend/pull/10697)
+- Added experimental Gemma4 support on A2 and Ascend 950. [#11091](https://github.com/vllm-project/vllm-ascend/pull/11091) [#10643](https://github.com/vllm-project/vllm-ascend/pull/10643)
+- Improved the DeepSeek V4 prefix-cache hit rate. [#11107](https://github.com/vllm-project/vllm-ascend/pull/11107)
+
+### Performance
+
+- Optimized SFA DSA-CP output merge with All-to-All communication and PCP FlashAttention restore/output merge. [#12137](https://github.com/vllm-project/vllm-ascend/pull/12137) [#11842](https://github.com/vllm-project/vllm-ascend/pull/11842)
+- Avoided H2D synchronization in context-parallel speculative decoding metadata and snapshotted query locations before asynchronous H2D copies. [#11862](https://github.com/vllm-project/vllm-ascend/pull/11862) [#12071](https://github.com/vllm-project/vllm-ascend/pull/12071)
+- Parallelized KV-cache receive with a thread pool and enabled asynchronous all-gather for DSA-CP output-projection TP weights. [#10548](https://github.com/vllm-project/vllm-ascend/pull/10548) [#10694](https://github.com/vllm-project/vllm-ascend/pull/10694)
+- Vectorized local sequence-length computation in SFA metadata. [#11816](https://github.com/vllm-project/vllm-ascend/pull/11816)
+
+### Stability and Bug Fixes
+
+- Fixed GLM-5.1 IndexCache weight loading and a GLM-4.7-Flash `IndexError` on the first request with MTP and layerwise MemCache. [#11363](https://github.com/vllm-project/vllm-ascend/pull/11363) [#11829](https://github.com/vllm-project/vllm-ascend/pull/11829)
+- Fixed Qwen3.5 GDN accuracy regressions across PCP, MTP, and DCP graph replay, including a mixed-length PCP out-of-bounds crash, while restoring the previous model-runner dispatch behavior. [#11195](https://github.com/vllm-project/vllm-ascend/pull/11195) [#11893](https://github.com/vllm-project/vllm-ascend/pull/11893) [#12027](https://github.com/vllm-project/vllm-ascend/pull/12027) [#12283](https://github.com/vllm-project/vllm-ascend/pull/12283)
+- Fixed Qwen3.5 speculative-decoding accuracy, garbled output, and out-of-bounds failures on Ascend 310P with MTP/EAGLE and full-graph execution. [#11337](https://github.com/vllm-project/vllm-ascend/pull/11337) [#11408](https://github.com/vllm-project/vllm-ascend/pull/11408) [#11920](https://github.com/vllm-project/vllm-ascend/pull/11920)
+- Fixed Qwen MoE routing overflow and shared-expert gate matrix-multiplication failures on Ascend 310P. [#11391](https://github.com/vllm-project/vllm-ascend/pull/11391) [#11730](https://github.com/vllm-project/vllm-ascend/pull/11730)
+- Fixed Qwen3-Omni ModelSlim W8A8 checkpoint loading failures caused by mismatched weight names and unquantized embedding metadata. [#12321](https://github.com/vllm-project/vllm-ascend/pull/12321)
+- Fixed Qwen3-VL rotary-embedding copy races on Ascend 310P and restored the device-specific VisionTransformer patch. [#11679](https://github.com/vllm-project/vllm-ascend/pull/11679) [#12132](https://github.com/vllm-project/vllm-ascend/pull/12132)
+- Fixed the DeepSeek-R1-0528 W8A8 shared-expert no-clamp accuracy path without regressing the clamped DeepSeek V4 path. [#11775](https://github.com/vllm-project/vllm-ascend/pull/11775)
+- Fixed DeepSeek V4 Flash W4A8-MXFP4 all-gather EP inference on Ascend 950 by preserving routing-weight precision. [#11498](https://github.com/vllm-project/vllm-ascend/issues/11498) [#11663](https://github.com/vllm-project/vllm-ascend/pull/11663) [#11718](https://github.com/vllm-project/vllm-ascend/pull/11718)
+- Fixed malformed streamed tool-call arguments and TP8+EP startup compatibility for MiniMax-M2 and MiniMax-M2.5. [#11505](https://github.com/vllm-project/vllm-ascend/pull/11505)
+- Fixed silent prefix-cache output corruption and block-table overflow for Qwen3-Next, Qwen3.5, and other hybrid Mamba models using MTP/EAGLE, plus a 310P Mamba align-postprocess hang. [#11353](https://github.com/vllm-project/vllm-ascend/pull/11353) [#11659](https://github.com/vllm-project/vllm-ascend/pull/11659) [#12038](https://github.com/vllm-project/vllm-ascend/pull/12038)
+- Fixed Mooncake KV-transfer grouping for Kimi-K2.7 Code with Kimi-K2.5-DFlash when P/D nodes use unequal TP sizes and target/draft models have different global KV-head counts. [#11887](https://github.com/vllm-project/vllm-ascend/pull/11887)
+- Fixed the AscendStore parent-block hash chain when a KV block group is only partially missing. [#12252](https://github.com/vllm-project/vllm-ascend/pull/12252)
+- Disabled shared-expert multistream overlap when fused MC2 is enabled to avoid an unsupported configuration. [#12245](https://github.com/vllm-project/vllm-ascend/pull/12245)
+- Fixed DCP/DP service hangs and restricted the recompute scheduler to decode nodes. [#12034](https://github.com/vllm-project/vllm-ascend/pull/12034) [#11490](https://github.com/vllm-project/vllm-ascend/pull/11490)
+- Delayed AscendStore initialization until the first real decode request. [#11673](https://github.com/vllm-project/vllm-ascend/pull/11673)
+- Fixed low MTP acceptance rates for SFA with DSA-CP and multiple speculative tokens. [#10878](https://github.com/vllm-project/vllm-ascend/pull/10878)
+
+### Dependencies
+
+- **Upstream vLLM**: v0.23.0.
+- **Python**: >= 3.10, < 3.13.
+- **CANN**: 9.0.1 for A2, A3, and Ascend 950; refer to the 310P installation guide for its platform-specific CANN package.
+- **PyTorch / torch_npu**: 2.10.0 / 2.10.0.post2.
+- **Triton Ascend**: 3.2.1.
+- **Mooncake**: 0.3.11.post1 in the release images.
+
+### Ready to Deprecate
+
+The following features and optimizations are planned for deprecation in a future release:
+
+- Layer sharding.
+- FlashComm2.
+- The FlashComm3 multistream-overlap gate.
+- Hamming sparse.
+- Asynchronous exponential overlap.
+- Matmul all-reduce and matmul all-reduce RMSNorm fusions.
+- Weight prefetch.
+- Dynamic-batch SLO.
+- KV offload in KV Pool.
+- Fused MC2 mode 2 (`enable_fused_mc2=2`).
+- Paged attention and `pa_shape_list`.
+- Selected plugin environment variables; their configuration will be migrated to equivalent `--additional-config` options.
+
+### Known Issues
+
+- The combination of pipeline parallelism (PP) and prefill context parallelism (PCP) is not supported in v0.23.0. Support for this combination is deferred to a later release.
+- The former `enable_sparse_c8` option has been split into `enable_sparse_sfa_c8` and `enable_sparse_li_c8`. Existing `--additional-config` settings must use one or both new options depending on whether Sparse Flash Attention C8, LightningIndexer C8, or both are required. [#12351](https://github.com/vllm-project/vllm-ascend/pull/12351)
+- The load-balance proxy can swallow decode errors and return an empty HTTP 200 response. [#12166](https://github.com/vllm-project/vllm-ascend/issues/12166)
+- Qwen3-30B-A3B floating-point serving can show a 1-2 ms TPOT regression at batch size 1 in the reported TP4 full-graph configuration. [#12337](https://github.com/vllm-project/vllm-ascend/issues/12337)
+- In the reported DeepSeek V4 Flash W8A8 MTP P/D-disaggregated deployment, the second aisbench round can cause a worker process from another card to appear on an NPU device. [#12338](https://github.com/vllm-project/vllm-ascend/issues/12338)
+- On Ascend 950, Qwen3.5-397B-W8A8-MXFP8-FULL_QUANT in a P/D-disaggregated deployment without MTP can alternate between correct and incorrect outputs. [#12339](https://github.com/vllm-project/vllm-ascend/issues/12339)
+- DeepSeek V4 Pro on A3 and Ascend 950 Products can show continuously increasing memory usage in both P/D-disaggregated and co-located deployments, eventually causing OOM or service instability. [#12345](https://github.com/vllm-project/vllm-ascend/issues/12345)
+- DeepSeek-V3.1-Terminus can show about a 15% output-throughput regression against the reported v0.18.0 baseline in high-throughput P/D-disaggregated deployments; the regression was reported on an A3 four-node 2P1D setup and an A2 large-EP setup. [#12349](https://github.com/vllm-project/vllm-ascend/issues/12349)
+- KV-cache transfer can produce precision issues and TP-shard inconsistencies when reformatting occurs before all pull tasks for a request have completed. [#12359](https://github.com/vllm-project/vllm-ascend/pull/12359)
+
 ## v0.22.1rc1 - 2026.06.30
 
-We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the first release candidate for the v0.22.1 release line, building on v0.21.0rc1 and aligning the plugin with upstream vLLM v0.22.1. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/releases-v0.22.1rc) to get started.
+We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the first release candidate for the v0.22.1 release line, building on v0.21.0rc1 and aligning the plugin with upstream vLLM v0.22.1. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.22.1rc) to get started.
 
 ### Highlights
 
@@ -196,7 +282,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 ### Features
 
 - Added Flash Attention 3 support for training-inference consistency. The backend is ready in vLLM Ascend and will become directly usable once the FA3 package is publicly available. [#9060](https://github.com/vllm-project/vllm-ascend/pull/9060)
-- Added DeepSeek PCP/DCP adaptation to improve support for disaggregated deployments. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
+- Added DeepSeek-V3.1 PCP/DCP adaptation to improve support for disaggregated deployments on Ascend 950 Products. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
 - Added a dedicated `additional_config.enable_dsa_cp` switch to decouple DSA-CP from FC1. DSA-CP now requires both FC1 and DSA-CP to be explicitly enabled, allowing FC1 to stay enabled while DSA-CP is disabled when needed. [#9878](https://github.com/vllm-project/vllm-ascend/pull/9878)
 - Added merged graph support for DFlash workloads. [#9074](https://github.com/vllm-project/vllm-ascend/pull/9074)
 - Added LoRA support for Qwen3.5 dense models. [#9023](https://github.com/vllm-project/vllm-ascend/pull/9023)
@@ -227,7 +313,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 
 - Upgraded the matched upstream vLLM baseline to v0.20.2. [#9270](https://github.com/vllm-project/vllm-ascend/pull/9270)
 - Upgraded CANN to 9.0.0 and triton-ascend to 3.2.1. [#9085](https://github.com/vllm-project/vllm-ascend/pull/9085)
-- Upgraded PyTorch and torch-npu to 2.10.0. [#9128](https://github.com/vllm-project/vllm-ascend/pull/9128)
+- Upgraded PyTorch and TorchNPU to 2.10.0. [#9128](https://github.com/vllm-project/vllm-ascend/pull/9128)
 
 ### Breaking Changes and Migration Notes
 
@@ -314,7 +400,7 @@ We're excited to announce the release of v0.18.0 for vLLM Ascend. This is the of
 
 - **vLLM**: Upgraded to 0.18.0 and dropped 0.17.0 support.
 - **CANN**: Upgraded to 8.5.1. **PS:** AscendStoreConnector with FabricMem mode, 310P device supporting and Qwen3-Omni model need upgrades CANN version to 9.0.0, if you need these features, please upgrade manually.
-- **torch-npu**: Upgraded to 2.9.0.post1+git4c901a4 because of some known issue. This version can't install by default, please upgrade manually. We can get installation pkg from this link: <https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>. **PS:** If CANN has been upgraded to version 9.0.0, please upgrade torch-npu version to 2.9.0.post2 synchronously.
+- **TorchNPU**: Upgraded to 2.9.0.post1+git4c901a4 because of some known issue. This version can't install by default, please upgrade manually. We can get installation pkg from this link: <https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>. **PS:** If CANN has been upgraded to version 9.0.0, please upgrade TorchNPU version to 2.9.0.post2 synchronously.
 - **triton-ascend**: Upgraded to 3.2.0.dev20260322 because of some known issue. This version can't install by default, please upgrade manually. We can get installation pkg from this link: <https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20260322-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl>. **PS:** If CANN has been upgraded to version 9.0.0, please upgrade triton-ascend version to 3.2.1 synchronously.
 - **Transformers**: Upgraded to >= 4.57.4.
 - **Mooncake**: Upgraded to 3.9.0.
@@ -568,7 +654,7 @@ Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest)
 
 - When running GLM-5 / GLM-5.1 models in single-node (non-PD-disaggregated) scenarios, incorrect results or runtime errors may occur. See [#8843](https://github.com/vllm-project/vllm-ascend/issues/8843) for details and workarounds.
 - triton-ascend may fail to compile with a g++ internal compiler error (Segmentation fault). Workaround: update to `triton-ascend==3.2.0.dev20260322` and clear the Triton cache (`rm -rf ~/.triton/cache/*`). [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782)
-- **torch-npu**: Please upgrade to 2.9.0.post1+git4c901a4 because of some known issue. This version can't install by default, please upgrade manually. We can get installation pkg from this link: <https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>. **PS:** If CANN has been upgraded to version 9.0.0, please upgrade torch-npu version to 2.9.0.post2 synchronously.
+- **TorchNPU**: Please upgrade to 2.9.0.post1+git4c901a4 because of some known issue. This version can't install by default, please upgrade manually. We can get installation pkg from this link: <https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>. **PS:** If CANN has been upgraded to version 9.0.0, please upgrade TorchNPU version to 2.9.0.post2 synchronously.
 
 ## v0.18.0rc1 - 2026.04.01
 
@@ -915,7 +1001,7 @@ Many custom ops and triton kernels were added in this release to speed up model 
 ### Dependencies
 
 - **CANN**: Upgraded to 8.5.0 [#6112](https://github.com/vllm-project/vllm-ascend/pull/6112)
-- **torch-npu**: Upgraded to 2.8.0.post2. It's installed in the docker container by default.
+- **TorchNPU**: Upgraded to 2.8.0.post2. It's installed in the docker container by default.
 - **triton-ascend**: Upgraded to 3.2.0 [#6105](https://github.com/vllm-project/vllm-ascend/pull/6105)
 - **vLLM**: Upgraded to 0.13.0 and dropped 0.12.0 support. [#5146](https://github.com/vllm-project/vllm-ascend/pull/5146)
 - **Transformers**: Upgraded to >= 4.57.4 [#5250](https://github.com/vllm-project/vllm-ascend/pull/5250)
@@ -995,7 +1081,7 @@ This is the first release candidate of v0.14.0 for vLLM Ascend. Please follow th
 
 ### Dependencies
 
-- torch-npu is upgraded to 2.9.0 [#6112](https://github.com/vllm-project/vllm-ascend/pull/6112)
+- TorchNPU is upgraded to 2.9.0 [#6112](https://github.com/vllm-project/vllm-ascend/pull/6112)
 
 ### Deprecation & Breaking Changes
 
@@ -1050,7 +1136,7 @@ We mainly focus on quality and performance improvement in this release. The spec
 ### Dependencies
 
 - CANN is upgraded to 8.5.0
-- torch-npu is upgraded to 2.8.0.post1. Please note that the post version will not be installed by default. Please install it by hand from [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/).
+- TorchNPU is upgraded to 2.8.0.post1. Please note that the post version will not be installed by default. Please install it by hand from [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/).
 - triton-ascend is upgraded to 3.2.0
 
 ### Deprecation & Breaking Changes
@@ -1145,7 +1231,7 @@ We're excited to announce the release of v0.11.0 for vLLM Ascend. This is the of
 
 ### Upgrade notice
 
-- torch-npu is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
+- TorchNPU is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
 - CANN is upgraded to 8.3.rc2.
 
 ### Known Issues
@@ -1193,7 +1279,7 @@ This is the first release candidate of v0.12.0 for vLLM Ascend. We landed lots o
 ### Upgrade Note
 
 - vLLM Ascend self maintained modeling file has been removed. The related python entrypoint is removed as well. So please uninstall the old version of vLLM Ascend in your env before upgrade.
-- CANN is upgraded to 8.3.RC2, PyTorch and torch-npu are upgraded to 2.8.0. Don't forget to install them.
+- CANN is upgraded to 8.3.RC2, PyTorch and TorchNPU are upgraded to 2.8.0. Don't forget to install them.
 - Python 3.9 support is dropped to keep the same with vLLM v0.12.0
 
 ### Known Issues
@@ -1211,7 +1297,7 @@ This is the third release candidate of v0.11.0 for vLLM Ascend. For quality reas
 
 ### Highlights
 
-- torch-npu is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
+- TorchNPU is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
 - Disable NZ weight loader to speed up dense model. Please note that this is a temporary solution. If you find the performance becomes bad, please let us know. We'll keep improving it. [#4495](https://github.com/vllm-project/vllm-ascend/pull/4495)
 - mooncake is installed in official docker image now. You can use it directly in container now. [#4506](https://github.com/vllm-project/vllm-ascend/pull/4506)
 
@@ -1264,7 +1350,7 @@ v0.11.0 will be the next official release version of vLLM Ascend. We'll release 
 
 ### Highlights
 
-- CANN is upgraded to 8.3.RC1. Torch-npu is upgraded to 2.7.1. [#3945](https://github.com/vllm-project/vllm-ascend/pull/3945) [#3896](https://github.com/vllm-project/vllm-ascend/pull/3896)
+- CANN is upgraded to 8.3.RC1. TorchNPU is upgraded to 2.7.1. [#3945](https://github.com/vllm-project/vllm-ascend/pull/3945) [#3896](https://github.com/vllm-project/vllm-ascend/pull/3896)
 - PrefixCache and Chunked Prefill are enabled by default. [#3967](https://github.com/vllm-project/vllm-ascend/pull/3967)
 - W4A4 quantization is supported now. [#3427](https://github.com/vllm-project/vllm-ascend/pull/3427) Official tutorial is available at [single_npu_qwen3_w4a4](https://github.com/vllm-project/vllm-ascend/pull/4076/files).
 
@@ -1286,7 +1372,7 @@ v0.11.0 will be the next official release version of vLLM Ascend. We'll release 
 
 ### Known issue
 
-- The memory may be leaked and the service may be stuck after long time serving. This is a bug from torch-npu, we'll upgrade and fix it soon.
+- The memory may be leaked and the service may be stuck after long time serving. This is a bug from TorchNPU, we'll upgrade and fix it soon.
 - The accuracy of qwen2.5 VL is not very good. This is a bug caused by CANN, we will fix it soon.
 - For long sequence input case, there is no response sometimes and the kv cache usage becomes higher. This is a bug for scheduler. We are working on it.
 - Qwen2-audio doesn't work by default, we're fixing it. Temporary solution is to set `--gpu-memory-utilization` to a suitable value, such as 0.8.
@@ -1437,7 +1523,7 @@ The following notes are especially for reference when upgrading from last final 
 
 - V0 Engine is not supported from this release. Please always set `VLLM_USE_V1=1` to use V1 engine with vLLM Ascend.
 - Mindie Turbo is not needed with this release. And the old version of Mindie Turbo is not compatible. Please do not install it. Currently all the function and enhancement is included in vLLM Ascend already. We'll consider adding it back in the future if needed.
-- Torch-npu is upgraded to 2.5.1.post1. CANN is upgraded to 8.2.RC1. Don't forget to upgrade them.
+- TorchNPU is upgraded to 2.5.1.post1. CANN is upgraded to 8.2.RC1. Don't forget to upgrade them.
 
 ### Core
 
@@ -1606,7 +1692,7 @@ This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 ### Core
 
 - Upgraded CANN to 8.2.rc1 in [#2036](https://github.com/vllm-project/vllm-ascend/pull/2036)
-- Upgraded torch-npu to 2.5.1.post1 in [#2135](https://github.com/vllm-project/vllm-ascend/pull/2135)
+- Upgraded TorchNPU to 2.5.1.post1 in [#2135](https://github.com/vllm-project/vllm-ascend/pull/2135)
 - Upgraded python to 3.11 in [#2136](https://github.com/vllm-project/vllm-ascend/pull/2136)
 - Disabled quantization in mindie_turbo  in [#1749](https://github.com/vllm-project/vllm-ascend/pull/1749)
 - Fixed v0 spec decode in [#1323](https://github.com/vllm-project/vllm-ascend/pull/1323)
@@ -1843,7 +1929,7 @@ We are excited to announce the release of 0.7.3 for vllm-ascend. This is the fir
 
 - This release includes all features landed in the previous release candidates ([v0.7.1rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.1rc1), [v0.7.3rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.3rc1), [v0.7.3rc2](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.3rc2)). And all the features are fully tested and verified. Visit the official doc to get the detail [feature](https://docs.vllm.ai/projects/ascend/en/v0.7.3/user_guide/suppoted_features.html) and [model](https://docs.vllm.ai/projects/ascend/en/v0.7.3/user_guide/supported_models.html) support matrix.
 - Upgrade CANN to 8.1.RC1 to enable chunked prefill and automatic prefix caching features. You can now enable them now.
-- Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version of torch-npu now. Now users don't need to install the torch-npu by hand. The 2.5.1 version of torch-npu will be installed automatically. [#662](https://github.com/vllm-project/vllm-ascend/pull/662)
+- Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version of TorchNPU now. Now users don't need to install the TorchNPU by hand. The 2.5.1 version of TorchNPU will be installed automatically. [#662](https://github.com/vllm-project/vllm-ascend/pull/662)
 - Integrate MindIE Turbo into vLLM Ascend to improve DeepSeek V3/R1, Qwen 2 series performance. [#708](https://github.com/vllm-project/vllm-ascend/pull/708)
 
 ### Core
@@ -1901,7 +1987,7 @@ This is the second release candidate of v0.8.4 for vllm-ascend. Please follow th
 ### Core
 
 - ACLGraph feature is supported with V1 engine now. It's disabled by default because this feature rely on CANN 8.1 release. We'll make it available by default in the next release [#426](https://github.com/vllm-project/vllm-ascend/pull/426)
-- Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version of torch-npu now. Now users don't need to install the torch-npu by hand. The 2.5.1 version of torch-npu will be installed automatically. [#661](https://github.com/vllm-project/vllm-ascend/pull/661)
+- Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version of TorchNPU now. Now users don't need to install the TorchNPU by hand. The 2.5.1 version of TorchNPU will be installed automatically. [#661](https://github.com/vllm-project/vllm-ascend/pull/661)
 
 ### Others
 

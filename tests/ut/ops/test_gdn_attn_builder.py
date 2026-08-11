@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.fla.ops import index as _fla_index
+from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -31,7 +31,6 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -50,12 +49,11 @@ def _no_pin_memory():
     # compute_causal_conv1d_metadata uses np_to_pinned_tensor which reads
     # PIN_MEMORY.  Without physical NPU, t.pin_memory() raises
     # "Please register PrivateUse1HooksInterface first".
-    with patch("vllm.utils.torch_utils.PIN_MEMORY", False):
-        if vllm_version_is("0.23.0"):
-            yield
-        else:
-            with patch("vllm.v1.attention.backends.utils.PIN_MEMORY", False):
-                yield
+    with (
+        patch("vllm.utils.torch_utils.PIN_MEMORY", False),
+        patch("vllm.v1.attention.backends.utils.PIN_MEMORY", False),
+    ):
+        yield
 
 
 @dataclass
@@ -135,7 +133,6 @@ def _make_vllm_config(
     num_speculative_tokens: int = 0,
     mamba_cache_mode: str = "none",
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    prefill_context_parallel_size: int = 1,
 ):
     speculative_config = None
     if num_speculative_tokens > 0:
@@ -160,7 +157,7 @@ def _make_vllm_config(
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
-            prefill_context_parallel_size=prefill_context_parallel_size,
+            prefill_context_parallel_size=1,
             tensor_parallel_size=1,
         ),
         model_config=model_config,
@@ -177,14 +174,12 @@ def _make_builder(
     block_size: int = 16,
     num_speculative_blocks: int = 0,
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    prefill_context_parallel_size: int = 1,
 ):
     vllm_config = _make_vllm_config(
         num_heads=num_heads,
         num_speculative_tokens=num_speculative_tokens,
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=cudagraph_mode,
-        prefill_context_parallel_size=prefill_context_parallel_size,
     )
     spec = MambaSpec(
         block_size=block_size,
@@ -640,38 +635,6 @@ def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.
     assert torch.equal(conv1d_meta.query_start_loc, torch.tensor([0, 4, 8], dtype=torch.int32))
     assert torch.equal(_cache_index_first_column(conv1d_meta.cache_indices), torch.tensor([40, 41], dtype=torch.int32))
     assert torch.equal(conv1d_meta.initial_state_mode, torch.tensor([False, False]))
-
-
-def test_pcp_prefill_initial_state_mode_is_built_in_metadata(monkeypatch: pytest.MonkeyPatch):
-    _patch_missing_runtime_cdiv(monkeypatch)
-    batch_spec = BatchSpec(
-        seq_lens=[1, 4],
-        query_lens=[1, 4],
-        name="pcp_decode_prefill",
-    )
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec=batch_spec,
-        block_size=16,
-        device=torch.device("cpu"),
-    )
-    builder = _make_builder(
-        device=torch.device("cpu"),
-        num_heads=32,
-        num_speculative_tokens=0,
-        prefill_context_parallel_size=2,
-    )
-
-    with patch(
-        "vllm_ascend.ops.gdn_attn_builder.get_pcp_group",
-        return_value=SimpleNamespace(world_size=2, rank_in_group=1),
-    ):
-        attn_metadata = builder.build(0, common_attn_metadata)
-
-    conv1d_meta = attn_metadata.non_spec_prefill_metadata.causal_conv1d
-    assert torch.equal(
-        conv1d_meta.initial_state_mode,
-        torch.tensor([False, True]),
-    )
 
 
 def test_mamba_align_cache_indices_follow_device_seq_lens(monkeypatch: pytest.MonkeyPatch):

@@ -16,8 +16,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
-from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import enable_sp_by_pass, is_vl_model, npu_stream_switch, prefetch_stream
+from vllm_ascend.utils import enable_sp_by_pass, is_vl_model
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -76,11 +75,9 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
 
-    flash_comm_v1_enabled = getattr(forward_context, "flash_comm_v1_enabled", False) or (
-        enable_sp_by_pass() and is_ep_comm
-    )
+    flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm)
 
-    if not flash_comm_v1_enabled or (forward_context.is_draft_model and is_vl_model() and not is_ep_comm):
+    if not flash_comm_v1_enabled or (_EXTRA_CTX.is_draft_model and is_vl_model() and not is_ep_comm):
         return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata
@@ -115,34 +112,12 @@ def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_c
 
 
 def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
-    if _EXTRA_CTX.flash_comm_v1_enabled or enable_sp_by_pass():
+    if _EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm):
         return torch.empty(
             (x.shape[0] // get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
         )
 
     return x
-
-
-def _prefetch_preprocess_impl(weight: torch.Tensor, start_flag: torch.Tensor, max_weight_size: int) -> None:
-    calculation_stream = torch_npu.npu.current_stream()
-    weight_prefetch_stream = prefetch_stream()
-    weight_prefetch_stream.wait_stream(calculation_stream)
-    with npu_stream_switch(weight_prefetch_stream):
-        maybe_npu_prefetch(inputs=weight, dependency=start_flag, max_size=max_weight_size)
-
-
-def _prefetch_preprocess_impl_fake(weight: torch.Tensor, start_flag: torch.Tensor, max_weight_size: int) -> None:
-    return
-
-
-def _prefetch_postprocess_impl(stop_flag: torch.Tensor) -> None:
-    calculation_stream = torch_npu.npu.current_stream()
-    weight_prefetch_stream = prefetch_stream()
-    calculation_stream.wait_stream(weight_prefetch_stream)
-
-
-def _prefetch_postprocess_impl_fake(stop_flag: torch.Tensor) -> None:
-    return
 
 
 def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tensor) -> torch.Tensor:
@@ -237,22 +212,6 @@ direct_register_custom_op(
     op_name="maybe_pad_and_reduce",
     op_func=_maybe_pad_and_reduce_impl,
     fake_impl=_maybe_pad_and_reduce_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-direct_register_custom_op(
-    op_name="prefetch_preprocess",
-    op_func=_prefetch_preprocess_impl,
-    fake_impl=_prefetch_preprocess_impl_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-direct_register_custom_op(
-    op_name="prefetch_postprocess",
-    op_func=_prefetch_postprocess_impl,
-    fake_impl=_prefetch_postprocess_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

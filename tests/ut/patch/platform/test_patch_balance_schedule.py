@@ -9,10 +9,8 @@ engine on NPU and live under e2e/nightly.
 
 What is guarded here (everything reachable from CPU UT):
 
-* the ``schedule`` override signature stays callable by BOTH vllm versions CI
-  runs (v0.23.0 calls ``schedule()``; 1f486d96 calls ``schedule(throttle_prefills)``)
-  and carries every parameter the installed ``schedule`` exposes -- NOT an
-  exact-match to the installed signature, which differs per lane;
+* the ``schedule`` override signature stays aligned with the installed
+  scheduler signature shared by both supported vLLM refs;
 * the ``BalanceScheduler.__init__`` signature stays drop-in compatible with
   upstream's ``Scheduler.__init__`` (upstream constructs ``Scheduler(...)``
   with kwargs, which after the swap constructs our subclass);
@@ -44,6 +42,8 @@ import inspect
 import subprocess
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -52,9 +52,12 @@ import pytest
 # the pristine classes/file paths first.
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler as _UpstreamScheduler
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
+
+from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -76,8 +79,136 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_run_engine_core,
+    _balance_scheduling_enabled,
     _OriginalRunEngineCore,
 )
+
+# ---------------------------------------------------------------------------
+# Scheduler config compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_balance_config_uses_initialized_scheduler_config():
+    ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(enable_balance_scheduling=True))
+    vllm_config = SimpleNamespace(additional_config={"scheduler_config": {"enable_balance_scheduling": False}})
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config):
+        assert _balance_scheduling_enabled(vllm_config) is True
+
+
+def test_balance_config_fallback_prefers_nested_config():
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "scheduler_config": {"enable_balance_scheduling": False},
+            "enable_balance_scheduling": True,
+        }
+    )
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
+        assert _balance_scheduling_enabled(vllm_config) is False
+
+
+def test_balance_config_fallback_ignores_non_dict_nested_config():
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "scheduler_config": None,
+            "enable_balance_scheduling": True,
+        }
+    )
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
+        assert _balance_scheduling_enabled(vllm_config) is True
+
+
+def test_balance_config_fallback_accepts_legacy_top_level_config():
+    vllm_config = SimpleNamespace(additional_config={"enable_balance_scheduling": True})
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
+        assert _balance_scheduling_enabled(vllm_config) is True
+
+
+@pytest.mark.parametrize("balance_enabled", [False, True])
+def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balance_enabled):
+    def fake_scheduler_init(self, *args, **kwargs):
+        del kwargs
+        self.vllm_config = args[0]
+        self.policy = SchedulingPolicy.FCFS
+        self.waiting = create_request_queue(self.policy)
+        self.skipped_waiting = create_request_queue(self.policy)
+
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=balance_enabled,
+            short_request_first_config=SimpleNamespace(
+                enabled=True,
+                threshold=256,
+                long_max_wait_ms=0.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=ascend_config,
+        ),
+    ):
+        scheduler = BalanceScheduler(
+            SimpleNamespace(
+                additional_config={},
+                parallel_config=SimpleNamespace(data_parallel_size=1),
+            ),
+            MagicMock(),
+            MagicMock(),
+            16,
+        )
+
+    assert isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
+    assert scheduler._balance_enabled is balance_enabled
+
+
+def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
+    def fake_scheduler_init(self, *args, **kwargs):
+        del kwargs
+        self.vllm_config = args[0]
+        self.policy = SchedulingPolicy.FCFS
+        self.waiting = create_request_queue(self.policy)
+
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=False,
+            short_request_first_config=SimpleNamespace(enabled=False),
+        )
+    )
+    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch("builtins.__import__", wraps=__import__) as import_mock,
+    ):
+        scheduler = BalanceScheduler(
+            SimpleNamespace(
+                additional_config={},
+                parallel_config=SimpleNamespace(data_parallel_size=1),
+            ),
+            MagicMock(),
+            MagicMock(),
+            16,
+        )
+
+    assert not any(
+        call.args[0] == "vllm_ascend.core.short_request_first_scheduler" for call in import_mock.call_args_list
+    )
+    assert not isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -108,22 +239,30 @@ def _schedule_body_ast(source: str) -> str:
     )
     assert func is not None, "no schedule() in source"
 
-    filtered = []
-    for stmt in func.body:
-        dump = ast.dump(stmt)
-        # delta 1: disabled-path early return. ``_balance_enabled`` is touched
-        # nowhere else, so its presence alone identifies this delta.
-        if "_balance_enabled" in dump:
-            continue
-        # delta 2: the balance_flag admission gate.
-        if "balance_queue" in dump and "max_num_running_reqs" in dump:
-            continue
-        # delta 3: request_queue None-check (ours: if-is-None-break;
-        # upstream: assert is-not-None). "Is" is a substring of "IsNot".
-        if "request_queue" in dump and "None" in dump and "Is" in dump:
-            continue
-        filtered.append(stmt)
-    return ast.dump(ast.Module(body=filtered, type_ignores=[]))
+    class _BalanceDeltaStripper(ast.NodeTransformer):
+        def visit_If(self, node: ast.If):  # noqa: N802
+            test = ast.dump(node.test)
+            # delta 1: disabled-path early return.
+            if "_balance_enabled" in test:
+                return None
+            # delta 2: the balance admission gate inside the WAITING loop.
+            if "balance_queue" in test and "max_num_running_reqs" in test:
+                return None
+            # delta 3 (ours): if request_queue is None: break.
+            if "request_queue" in test and "None" in test and "Is" in test:
+                return None
+            return self.generic_visit(node)
+
+        def visit_Assert(self, node: ast.Assert):  # noqa: N802
+            test = ast.dump(node.test)
+            # delta 3 (upstream): assert request_queue is not None.
+            if "request_queue" in test and "None" in test and "IsNot" in test:
+                return None
+            return self.generic_visit(node)
+
+    stripped = _BalanceDeltaStripper().visit(func)
+    assert isinstance(stripped, ast.FunctionDef)
+    return ast.dump(ast.Module(body=stripped.body, type_ignores=[]))
 
 
 def _vllm_ascend_repo_root() -> Path | None:
@@ -178,43 +317,13 @@ def _pinned_release_schedule_source() -> tuple[str, str] | None:
 
 
 # ---------------------------------------------------------------------------
-# 1. schedule() signature is callable by BOTH engine versions (dual-version CI)
+# 1. schedule() signature matches the installed supported vLLM ref
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_signature_covers_both_engine_versions():
-    """vllm-ascend CI runs against TWO vllm versions at once: the release tag
-    v0.23.0 (whose engine calls ``schedule()`` with no args) and the
-    main-verified commit 1f486d96 (whose engine calls
-    ``schedule(throttle_prefills)``). A single override signature must be
-    callable by BOTH engines, so it carries ``throttle_prefills`` with a
-    default -- a deliberate superset of v0.23.0's ``schedule(self)``.
-
-    Asserting exact equality with the *installed* signature would be wrong:
-    on the v0.23.0 lane the installed signature is ``schedule(self)`` while
-    ours is ``schedule(self, throttle_prefills=False)``, so an equality check
-    can only ever pass on ONE of the two lanes. Instead we assert the two
-    things that actually matter on both lanes:
-
-    * both engines' call shapes bind cleanly to our signature (callable); and
-    * our signature carries every parameter the installed ``schedule`` exposes
-      (so an upstream parameter addition is caught here regardless of lane)."""
-    sig = inspect.signature(BalanceScheduler.schedule)
-    # The engine invokes schedule() on an instance, so ``self`` is implicitly
-    # bound; strip it before simulating the engine's call shapes, otherwise
-    # sig.bind() complains about the missing ``self`` argument.
-    sig = sig.replace(parameters=[p for p in sig.parameters.values() if p.name != "self"])
-    # v0.23.0 engine call shape, then 1f486d96 engine call shape.
-    sig.bind()
-    sig.bind(throttle_prefills=True)
-
-    up = {k for k in inspect.signature(_UpstreamScheduler.schedule).parameters if k != "self"}
-    ours = {k for k in sig.parameters if k != "self"}
-    assert up <= ours, (
-        f"BalanceScheduler.schedule is missing parameters the installed "
-        f"vLLM Scheduler.schedule exposes ({up - ours}); the engine's call "
-        f"would raise TypeError."
-    )
+def test_schedule_signature_matches_installed_vllm():
+    """Both supported refs expose ``schedule(throttle_prefills=False)``."""
+    assert inspect.signature(BalanceScheduler.schedule) == inspect.signature(_UpstreamScheduler.schedule)
 
 
 # ---------------------------------------------------------------------------
@@ -229,13 +338,8 @@ def test_balance_deltas_present_in_schedule():
     src = inspect.getsource(BalanceScheduler.schedule)
 
     # delta 1: disabled-path early return delegates to super().schedule().
-    # Whether throttle_prefills is forwarded is decided by signature
-    # introspection (_SUPER_SCHEDULE_HAS_THROTTLE), NOT a version string, so
-    # the disabled path works on BOTH the v0.23.0 and 1f486d96 CI lanes.
     assert "if not self._balance_enabled:" in src
-    assert "_SUPER_SCHEDULE_HAS_THROTTLE" in src
     assert "super().schedule(throttle_prefills)" in src
-    assert "super().schedule()" in src
 
     # delta 2: the balance_flag admission gate (leader-at-cap => global freeze).
     assert "max(t.item() for t in self.balance_queue)" in src

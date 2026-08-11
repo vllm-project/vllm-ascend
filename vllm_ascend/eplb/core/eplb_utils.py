@@ -47,6 +47,15 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
     n_expert -= num_shared_experts
     if (n_expert + n_redundant) % ep_size != 0:
         raise ValueError("(n_expert + n_redundant) % ep_size must be 0")
+    if num_shared_experts == 0:
+        # Match vLLM's checkpoint-loading physical layout exactly:
+        # [all logical experts, redundant copies of logical experts 0..N].
+        # The flattened position is the global physical expert ID and must
+        # agree with RoutedExperts.make_expert_params_mapping.
+        physical_to_logical = np.concatenate((np.arange(n_expert), np.arange(n_redundant) % n_expert))
+        return torch.tensor(physical_to_logical.reshape(ep_size, -1), dtype=torch.int32)
+
+    # Shared-expert mix placement has a separate Ascend-only layout.
     all_experts = np.arange(n_expert)
     groups = np.array_split(all_experts, ep_size)
     for i in range(n_redundant):

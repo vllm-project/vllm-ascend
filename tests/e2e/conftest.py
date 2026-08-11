@@ -92,6 +92,20 @@ logger = logging.getLogger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--msa-m3-sparse-backend",
+        action="store",
+        default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "all"),
+        choices=("all", "triton", "torch_npu"),
+        help=(
+            "MiniMax M3 sparse-attention kernel backend for "
+            "test_minimax_m3_sparse_attn.py: all, triton reference, or msa_m3_npu (torch_npu)."
+        ),
+    )
+
+
 DISAGG_EPD_PROXY_SCRIPT = (
     Path(__file__).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
 )
@@ -881,23 +895,20 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        from vllm_ascend.utils import vllm_version_is
+        import torch
 
-        if not vllm_version_is("0.23.0"):
-            import torch
+        visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        full_device_ids: list[str] = [d for d in visible.split(",") if d]
+        if not full_device_ids:
+            full_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
-            visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
-            full_device_ids: list[str] = [d for d in visible.split(",") if d]
-            if not full_device_ids:
-                full_device_ids = [str(i) for i in range(torch.npu.device_count())]
-
-            if llm_kwargs.get("distributed_executor_backend") == "ray":
-                devs = full_device_ids
-                chunk = max(len(devs) // dp_size, 1)
-                start = dp_rank * chunk
-                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
-            else:
-                llm_kwargs["device_ids"] = full_device_ids
+        if llm_kwargs.get("distributed_executor_backend") == "ray":
+            devs = full_device_ids
+            chunk = max(len(devs) // dp_size, 1)
+            start = dp_rank * chunk
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+        else:
+            llm_kwargs["device_ids"] = full_device_ids
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
@@ -965,7 +976,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         **kwargs,
@@ -982,7 +992,6 @@ class VllmRunner:
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1168,9 +1177,12 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        del self.model
-        clear_ascend_config()
-        cleanup_dist_env_and_memory()
+        try:
+            self.model.llm_engine.engine_core.shutdown()
+        finally:
+            del self.model
+            clear_ascend_config()
+            cleanup_dist_env_and_memory()
 
 
 class ModelCache:
@@ -1396,7 +1408,6 @@ class DPVllmRunner(VllmRunner):
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         data_parallel_size: int = 2,
@@ -1419,7 +1430,6 @@ class DPVllmRunner(VllmRunner):
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1927,7 +1937,9 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    # vLLM's Hunyuan prompt update adds the image start/end tokens around
+    # this placeholder. Supplying the wrapper here would duplicate it.
+    placeholder = "<｜hy_place▁holder▁no▁102｜>"  # noqa: E501
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 

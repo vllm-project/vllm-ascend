@@ -175,42 +175,20 @@ def rope_forward_oot(
             is_neox_style=is_neox_style,
         )
     else:
-        if rotary_dim < head_size:
-            num_tokens = query.shape[0]
-            query = query.view(num_tokens, -1, head_size)
-            key = key.view(num_tokens, -1, head_size)
-            q_rot = query[..., :rotary_dim]
-            q_pass = query[..., rotary_dim:]
-            k_rot = key[..., :rotary_dim]
-            k_pass = key[..., rotary_dim:]
-            q_rot = q_rot.contiguous().view(num_tokens, -1)
-            k_rot = k_rot.contiguous().view(num_tokens, -1)
-            # only the rotary part is processed here,
-            # the dimension should be rotary_dim
-            torch_npu._npu_rotary_embedding(
-                positions,
-                q_rot,
-                k_rot,
-                rotary_dim,
-                cos_sin_cache,
-                is_neox_style,
-            )
-            q_rot = q_rot.view(num_tokens, -1, rotary_dim)
-            k_rot = k_rot.view(num_tokens, -1, rotary_dim)
-            query = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
-            key = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
-        else:
-            # TODO: Remove the contiguous in the future.
-            query = query.contiguous().view(query.shape[0], -1)
-            key = key.contiguous().view(key.shape[0], -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                query,
-                key,
-                head_size,
-                cos_sin_cache,
-                is_neox_style,
-            )
+        # npu_mrope handles both full and partial rotary internally:
+        # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
+        # where rotary_dim is inferred from cos_sin_cache.shape[-1].
+        rotary_mode = "half" if is_neox_style else "interleaved"
+        query, key = torch_npu.npu_mrope(
+            positions,
+            query.contiguous().view(query.shape[0], -1),
+            key.contiguous().view(key.shape[0], -1),
+            cos_sin_cache,
+            head_size,
+            mrope_section=[0, 0, 0],
+            rotary_mode=rotary_mode,
+            cache_mode="default",
+        )
     return query.view(query_shape), key.view(key_shape)
 
 
@@ -577,14 +555,22 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
         head_dim = x.shape[-1]
-        # cos, sin: [seq_len, head_dim // 2]
+        rotary_dim = cos.shape[-1] * 2
+        if rotary_dim > head_dim:
+            raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
+
+        # cos, sin: [seq_len, rotary_dim // 2]
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
-        # cos, sin: [1, seq_len, 1, head_dim]
-        cos = cos.reshape(1, -1, 1, head_dim)
-        sin = sin.reshape(1, -1, 1, head_dim)
+        # cos, sin: [1, seq_len, 1, rotary_dim]
+        cos = cos.reshape(1, -1, 1, rotary_dim)
+        sin = sin.reshape(1, -1, 1, rotary_dim)
 
-        output = torch_npu.npu_rotary_mul(x, cos, sin)
+        if rotary_dim == head_dim:
+            output = torch_npu.npu_rotary_mul(x, cos, sin)
+        else:
+            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin)
+            output = torch.cat((x_rot, x[..., rotary_dim:]), dim=-1)
 
         output = self._post_process(output, origin_shape, origin_dtype)
 
