@@ -95,7 +95,7 @@ def test_num_compressor_metadata_rows(
         (128, 128, 0, True),
     ],
 )
-def test_build_sas_metadata_parameters_cache_and_output_buffer(
+def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     compressor_ratio,
     expected_cmp_ratio,
     expected_cmp_topk,
@@ -108,7 +108,6 @@ def test_build_sas_metadata_parameters_cache_and_output_buffer(
     cu_seqlens_ori_kv = torch.tensor([0, 8, 14], dtype=torch.int32)
     cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
     generated_metadata = torch.arange(1024, dtype=torch.int32)
-    output_buffer = torch.zeros_like(generated_metadata)
     metadata_op = MagicMock(return_value=generated_metadata)
 
     with (
@@ -146,12 +145,11 @@ def test_build_sas_metadata_parameters_cache_and_output_buffer(
             max_seqlen_kv=8,
             cu_seqlens_ori_kv=cu_seqlens_ori_kv,
             cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            output_buffer=output_buffer,
         )
 
-    assert result is generated_metadata
-    assert cached_result is output_buffer
-    assert torch.equal(output_buffer, generated_metadata)
+    assert result is builder.sas_metadata_buffer
+    assert cached_result is builder.sas_metadata_buffer
+    assert torch.equal(builder.sas_metadata_buffer, generated_metadata)
     metadata_op.assert_called_once()
     call_kwargs = metadata_op.call_args.kwargs
     assert call_kwargs["device"] == "cpu"
@@ -165,13 +163,12 @@ def test_build_sas_metadata_parameters_cache_and_output_buffer(
     assert call_kwargs["seqused_kv"] is seq_lens
 
 
-def test_build_qli_metadata_parameters_cache_and_output_buffer():
+def test_build_qli_metadata_parameters_cache_and_builder_buffer():
     builder = _make_builder()
     metadata_cache: dict[str, torch.Tensor] = {}
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     generated_metadata = torch.arange(1024, dtype=torch.int32)
-    output_buffer = torch.zeros_like(generated_metadata)
 
     with patch.object(
         torch.ops._C_ascend,
@@ -192,12 +189,11 @@ def test_build_qli_metadata_parameters_cache_and_output_buffer():
             seq_lens=seq_lens,
             max_seqlen_q=2,
             max_seqlen_kv=8,
-            output_buffer=output_buffer,
         )
 
-    assert result is generated_metadata
-    assert cached_result is output_buffer
-    assert torch.equal(output_buffer, generated_metadata)
+    assert result is builder.qli_metadata_buffer
+    assert cached_result is builder.qli_metadata_buffer
+    assert torch.equal(builder.qli_metadata_buffer, generated_metadata)
     metadata_op.assert_called_once()
     call_kwargs = metadata_op.call_args.kwargs
     assert torch.equal(call_kwargs["actual_seq_lengths_query"], query_start_loc[1:])
@@ -294,13 +290,9 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
     if num_prefills:
         assert torch.equal(sas_kwargs["cu_seqlens_ori_kv"], query_start_loc)
         assert sas_kwargs["cu_seqlens_cmp_kv"] is None
-        assert sas_kwargs["output_buffer"] is None
-        assert qli_kwargs["output_buffer"] is None
     else:
         assert sas_kwargs["cu_seqlens_ori_kv"] is decode_cu_seqlens_ori_kv
         assert sas_kwargs["cu_seqlens_cmp_kv"] is decode_cu_seqlens_cmp_kv
-        assert sas_kwargs["output_buffer"] is builder.decode_sas_metadata
-        assert qli_kwargs["output_buffer"] is builder.decode_qli_metadata
 
     assert metadata.sas_metadata is sas_metadata
     assert metadata.qli_metadata is qli_metadata

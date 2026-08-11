@@ -357,8 +357,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.start_pos_prefill: torch.Tensor = torch.zeros(
             scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
         )
-        self.decode_sas_metadata: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
-        self.decode_qli_metadata: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
+        self.sas_metadata_buffer: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
+        self.qli_metadata_buffer: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -519,11 +519,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
 
-        # If graph_pad_size > -1, mean is running in fullgraph mode.
-        # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-        # if self.graph_pad_size > common_attn_metadata.num_reqs and \
-        #         self.speculative_config.disable_padded_drafter_batch:
-        #     return self.graph_pad_size
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         req_metadata = self.build_req_metadata(
             common_attn_metadata=common_attn_metadata,
@@ -552,7 +547,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv: int | torch.Tensor,
         cu_seqlens_ori_kv: torch.Tensor | None,
         cu_seqlens_cmp_kv: torch.Tensor | None,
-        output_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor:
         sas_metadata = metadata_cache.get(layer_name)
         if sas_metadata is None:
@@ -588,10 +582,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache[layer_name] = sas_metadata
 
-        if output_buffer is not None:
-            output_buffer[:1024] = sas_metadata
-            return output_buffer
-        return sas_metadata
+        self.sas_metadata_buffer[:1024] = sas_metadata
+        return self.sas_metadata_buffer
 
     def _build_qli_metadata(
         self,
@@ -600,7 +592,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         seq_lens: torch.Tensor,
         max_seqlen_q: int,
         max_seqlen_kv: int,
-        output_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qli_metadata = metadata_cache.get("qli")
         if qli_metadata is None:
@@ -626,10 +617,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache["qli"] = qli_metadata
 
-        if output_buffer is not None:
-            output_buffer[:1024] = qli_metadata
-            return output_buffer
-        return qli_metadata
+        self.qli_metadata_buffer[:1024] = qli_metadata
+        return self.qli_metadata_buffer
 
     def build_req_metadata(
         self,
@@ -686,8 +675,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         elif has_prefill:
             cu_seqlens_ori_kv = query_start_loc
 
-        output_sas = None if has_prefill else self.decode_sas_metadata
-        output_qli = None if has_prefill else self.decode_qli_metadata
         sas_metadata = self._build_sas_metadata(
             metadata_cache=self.common_ratio_to_sas_metadata,
             layer_name=layer_name,
@@ -697,7 +684,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_kv=max_seqlen_kv,
             cu_seqlens_ori_kv=cu_seqlens_ori_kv,
             cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            output_buffer=output_sas,
         )
         qli_metadata = self._build_qli_metadata(
             metadata_cache=self.common_ratio_to_sas_metadata,
@@ -705,7 +691,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=seq_lens,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
-            output_buffer=output_qli,
         )
 
         full_compress_cos, full_compress_sin = None, None
