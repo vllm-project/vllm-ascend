@@ -472,7 +472,10 @@ class DynamicSpecConfig:
 
     # Dynamic speculative-length methods. "dspark" relies on the DSpark
     # confidence head; models without such a head need another method.
-    SUPPORTED_METHODS = ("dspark",)
+    SUPPORTED_METHODS = (
+        "dspark",
+        "dflash",
+    )
 
     def __init__(self, config: dict | None = None):
         if config is None:
