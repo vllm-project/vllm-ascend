@@ -620,6 +620,7 @@
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
     - tests/e2e/pull_request/two_card/model_runner_v2
+    - tests/e2e/pull_request/four_card/model_runner_v2
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
 # XLite
@@ -832,6 +833,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 400
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 680
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
+  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 840
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 480
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 40
@@ -919,4 +921,3 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
-

@@ -1555,3 +1555,13 @@ def is_rot_weight_used(vllm_config: VllmConfig = None):
         quant_description = getattr(vllm_config.quant_config, "quant_description", None)
         _IS_ROT_WEIGHT_USED = quant_description.get("is_rot_used", False) if quant_description is not None else False
     return _IS_ROT_WEIGHT_USED
+
+
+def enable_sfa(vllm_config) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if hf_text_config is None:
+        return False
+    return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")

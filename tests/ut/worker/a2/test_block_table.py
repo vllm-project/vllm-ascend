@@ -44,7 +44,13 @@ class TestBlockTableComputeSlotMapping(TestBase):
         self.kernel_sizes = [128]
         self._skip_triton_kernel = True
 
-    def create_block_table(self, dcp_world_size, dcp_rank, cp_kv_cache_interleave_size):
+    def create_block_table(
+        self,
+        dcp_world_size,
+        dcp_rank,
+        cp_kv_cache_interleave_size,
+        num_speculative_tokens=0,
+    ):
         """Helper method to create BlockTable with mocked distributed groups"""
 
         with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group:
@@ -65,10 +71,32 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 device=self.device,
                 kernel_sizes=self.kernel_sizes,
                 cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-                num_speculative_tokens=0,
+                num_speculative_tokens=num_speculative_tokens,
             )
 
             return block_table
+
+    def test_compute_slot_mapping_draft_reserves_mtp_slots(self):
+        """MTP5 draft slots can exceed the scheduler token capacity."""
+        self.max_num_reqs = 12
+        self.max_num_batched_tokens = 80
+        block_table = self.create_block_table(
+            dcp_world_size=4,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+            num_speculative_tokens=5,
+        )
+
+        num_active_reqs = 11
+        for req_idx in range(num_active_reqs):
+            block_table.add_row([req_idx], req_idx)
+
+        req_indices = np.repeat(np.arange(num_active_reqs, dtype=np.int32), 10)
+        positions = np.tile(np.arange(10, dtype=np.int64), num_active_reqs)
+        block_table.compute_slot_mapping_draft(req_indices, positions)
+
+        self.assertEqual(block_table.slot_mapping.cpu.numel(), 128)
+        self.assertEqual(block_table.slot_mapping.cpu[: req_indices.size].numel(), 110)
 
     def setup_block_table_data(self, block_table, num_reqs=2):
         """Helper method to populate block table with test data"""

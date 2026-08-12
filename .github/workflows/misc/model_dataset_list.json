@@ -309,6 +309,7 @@
       "Eco-Tech/MiniMax-M2.7-eagle-model-short"
     ],
     "datasets": [
+      "vllm-ascend/mm_request",
       "vllm-ascend/GSM8K-in1024-bs210",
       "vllm-ascend/GSM8K-in3500-bs2800",
       "vllm-ascend/GSM8K-in3500-bs400",

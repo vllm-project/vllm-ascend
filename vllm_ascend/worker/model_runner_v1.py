@@ -174,6 +174,7 @@ from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
+    enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     enable_sp_by_pass,
@@ -370,11 +371,7 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-            vllm_config.model_config.hf_text_config, "index_topk"
-        ) and not hasattr(
-            vllm_config.model_config.hf_text_config, "compress_ratios"
-        )
+        self.use_sparse = enable_sfa(vllm_config)
         # dsa c8
         self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
         self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
@@ -3727,15 +3724,6 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
-
-    def _bind_routed_experts_capturer(self, capturer=None) -> None:
-        # test_qwen3_moe_routing_replay
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-        for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, AscendMoERunner):
-                module._ascend_routed_experts_capturer = capturer
-                module.routed_experts._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
