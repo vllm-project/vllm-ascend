@@ -111,46 +111,43 @@ public:
                 continue;  // padded / masked token
             }
             /*
-             * NORM WRITE -- 64B CACHE-LINE RACE.
-             * A norm record is numKvHeads halves = 8 BYTES per slot, so 8 slots
-             * share a 64B line. The old code did a scalar 2-byte
-             * normPlane.SetValue() per (slot, head); a sub-line store is a
-             * read-modify-write, so two cores writing different slots in one line
-             * lose each other's updates. The core split rounds tokensPerCore to
-             * whole lines, which only guarantees line ownership when slot order
-             * == token index order. Measured: contiguous slots CLEAN, one-slot-
-             * per-line CLEAN, permuted dense 184/512 norms WRONG. vLLM block
-             * managers hand out arbitrary slots, so production hits this.
+             * NORM WRITE -- one whole 32B block per slot.
              *
-             * Fix: stage a whole 32B block (16 halves) with ZEROS in the lanes
-             * this token does not own, then DataCopy it with atomic add. Cores
-             * sharing a block now add zero to each other's lanes instead of
-             * clobbering them, so the result is slot-order independent.
-             * The norm planes are at::zeros, so the accumulate starts from 0.
-             * (Assumes slot_mapping has no duplicate slots within one call --
-             * true for vLLM; a duplicate would sum rather than overwrite.)
+             * The plane is [num_slots, kNzC0] halves, so slot `slot` OWNS the
+             * block at slot*kNzC0 and only the first numKvHeads lanes carry
+             * data. That buys three things at once:
+             *
+             *  1. No cache-line race. The old layout packed numKvHeads halves =
+             *     8 BYTES per slot, so 8 slots shared a 64B line and a scalar
+             *     2-byte store was a read-modify-write that lost concurrent
+             *     updates (measured: 184/512 norms wrong under permuted slots).
+             *     A 32B aligned store is safe -- the packed payload is exactly
+             *     32B per (block,c1,slot) and was bit-identical under
+             *     contiguous, gapped and permuted slot layouts.
+             *  2. Idempotent rewrite, so SLOT REUSE overwrites instead of
+             *     accumulating. The previous fix used atomic-add, which is only
+             *     correct while the plane is freshly zeroed on every call.
+             *  3. The plane can therefore be a PERSISTENT caller-owned tensor.
+             *     It has to be: serving writes one token per decode step, and
+             *     allocating inside the op discarded all history (measured
+             *     cosine 0.139670 -- see talk/tq_norm_persistence.py).
              */
             LocalTensor<half> kStage = kNrmStgBuf_.Get<half>();
             LocalTensor<half> vStage = vNrmStgBuf_.Get<half>();
             Duplicate(kStage, static_cast<half>(0.0f), kNrmBlk);
             Duplicate(vStage, static_cast<half>(0.0f), kNrmBlk);
             PipeBarrier<PIPE_V>();
-            // all of a token's norms live in ONE 32B block: index = slot*nkv + h
-            const uint64_t nIdx = static_cast<uint64_t>(slot) * t_->numKvHeads;
-            const uint64_t nBase = (nIdx / kNrmBlk) * kNrmBlk;
-            const uint32_t nOff = static_cast<uint32_t>(nIdx - nBase);
+            const uint64_t nBase = static_cast<uint64_t>(slot) * kNrmBlk;
             for (uint32_t h = 0; h < t_->numKvHeads; ++h) {
                 const float kn = HandleVector(keyGm_, kCacheGm_, tok, h, slot);
                 const float vn = HandleVector(valGm_, vCacheGm_, tok, h, slot);
-                kStage.SetValue(nOff + h, static_cast<half>(kn));
-                vStage.SetValue(nOff + h, static_cast<half>(vn));
+                kStage.SetValue(h, static_cast<half>(kn));
+                vStage.SetValue(h, static_cast<half>(vn));
             }
             SetFlag<HardEvent::S_MTE3>(EVENT_ID3);
             WaitFlag<HardEvent::S_MTE3>(EVENT_ID3);
-            SetAtomicAdd<half>();
             DataCopy(kNormGm_[nBase], kStage, kNrmBlk);
             DataCopy(vNormGm_[nBase], vStage, kNrmBlk);
-            SetAtomicNone();
             SetFlag<HardEvent::MTE3_V>(EVENT_ID4);   // next token re-Duplicates the stage
             WaitFlag<HardEvent::MTE3_V>(EVENT_ID4);
         }

@@ -128,8 +128,10 @@ public:
         pipe->InitBuffer(unpF1Buf_, (kTile * d / 2) * sizeof(float));
         // norm planes prefetched per BLOCK: replaces two GM scalar reads per
         // token (dependent global loads, pure latency) with one DataCopy.
-        pipe->InitBuffer(kNrmBuf_, t_->blockSize * t_->numKvHeads * sizeof(half));
-        pipe->InitBuffer(vNrmBuf_, t_->blockSize * t_->numKvHeads * sizeof(half));
+        // norm plane is [num_slots, kNzC0] halves: each slot owns a whole 32B
+        // block (see the write kernel). 4KB each at blockSize=128.
+        pipe->InitBuffer(kNrmBuf_, t_->blockSize * kNzC0 * sizeof(half));
+        pipe->InitBuffer(vNrmBuf_, t_->blockSize * kNzC0 * sizeof(half));
         /*
          * Block-wise softmax: one score/weight slot per token in a block, but
          * rounded UP to a whole tile. Both the tile reduction
@@ -290,7 +292,7 @@ private:
             if (phys < 0) {
                 continue;
             }
-            const uint32_t nrmCount = t_->blockSize * t_->numKvHeads;
+            const uint32_t nrmCount = t_->blockSize * kNzC0;
             const uint64_t nrmBase = static_cast<uint64_t>(phys) * nrmCount;
             DataCopy(kNrm, kNormGm_[nrmBase], nrmCount);
             DataCopy(vNrm, vNormGm_[nrmBase], nrmCount);
@@ -310,7 +312,7 @@ private:
              * is a single vector Mul per query.
              */
             for (uint32_t tk = 0; tk < tokEnd; ++tk) {
-                const uint32_t ni = tk * t_->numKvHeads + kvh;
+                const uint32_t ni = tk * kNzC0 + kvh;
                 kCol.SetValue(tk, static_cast<float>(kNrm.GetValue(ni)) * t_->scale);
                 vCol.SetValue(tk, static_cast<float>(vNrm.GetValue(ni)));
             }
@@ -540,7 +542,7 @@ private:
              * so one block's norms are blockSize*numKvHeads contiguous halves
              * starting at phys*blockSize*numKvHeads.
              */
-            const uint32_t nrmCount = t_->blockSize * t_->numKvHeads;
+            const uint32_t nrmCount = t_->blockSize * kNzC0;
             const uint64_t nrmBase = static_cast<uint64_t>(phys) * nrmCount;
             DataCopy(kNrm, kNormGm_[nrmBase], nrmCount);
             DataCopy(vNrm, vNormGm_[nrmBase], nrmCount);
@@ -627,7 +629,7 @@ private:
                         const uint32_t tk = t0 + t;
                         if (tk < tokEnd) {
                             const float kNorm =
-                                static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh));
+                                static_cast<float>(kNrm.GetValue(tk * kNzC0 + kvh));
                             sco.SetValue(tk, sco.GetValue(tk) * kNorm * t_->scale);
                         }
                     }
@@ -647,7 +649,7 @@ private:
                     PipeBarrier<PIPE_V>();
                     SetFlag<HardEvent::V_S>(EVENT_ID2);
                     WaitFlag<HardEvent::V_S>(EVENT_ID2);
-                    const float kNorm = static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh));
+                    const float kNorm = static_cast<float>(kNrm.GetValue(tk * kNzC0 + kvh));
                     sco.SetValue(tk, tmp.GetValue(0) * kNorm * t_->scale);
                 }
             }
@@ -717,7 +719,7 @@ private:
                             break;
                         }
                         const float vNorm =
-                            static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
+                            static_cast<float>(vNrm.GetValue(tk * kNzC0 + kvh));
                         const float w = wgt.GetValue(tk);
                         const float wv = w * vNorm;
                         for (uint32_t pl = 0; pl < P::kPlanes; ++pl) {
@@ -733,7 +735,7 @@ private:
                     SetFlag<HardEvent::S_V>(EVENT_ID1);
                     WaitFlag<HardEvent::S_V>(EVENT_ID1);
                     DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
-                    const float vNorm = static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
+                    const float vNorm = static_cast<float>(vNrm.GetValue(tk * kNzC0 + kvh));
                     const float w = wgt.GetValue(tk);
                     Muls(kv, kv, w * vNorm, d);
                     PipeBarrier<PIPE_V>();

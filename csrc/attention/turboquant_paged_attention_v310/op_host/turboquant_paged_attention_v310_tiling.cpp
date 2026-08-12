@@ -45,7 +45,20 @@ ge::graphStatus TurboquantPagedAttentionV310Tiling::ParseInputs()
     tilingData_.c1 = static_cast<uint32_t>(cs.GetDim(1));
     tilingData_.blockSize = static_cast<uint32_t>(cs.GetDim(2));
     tilingData_.maxBlocksPerSeq = static_cast<uint32_t>(btShape->GetStorageShape().GetDim(1));
-    tilingData_.numKvHeads = static_cast<uint32_t>(normShape->GetStorageShape().GetDim(1));
+    /*
+     * numKvHeads used to be read from the norm plane's dim 1. That plane is now
+     * [num_slots, kNzC0] -- one whole 32B block per slot, only the first
+     * numKvHeads lanes carrying data -- so dim 1 is the FIXED padding, not the
+     * head count. Reading it here silently produced numKvHeads = 16 and the
+     * tiling failed with ret -1. It is derived from the cache below instead,
+     * once packedHalves is known, via the NZ invariant
+     *     numKvHeads * packedHalves == c1 * kNzC0
+     */
+    OP_CHECK_IF(normShape->GetStorageShape().GetDim(1) != kNzC0,
+                OP_LOGE(context_->GetNodeName(),
+                        "norm plane must be [num_slots, %d] (one 32B block per slot), got dim1=%ld",
+                        kNzC0, static_cast<long>(normShape->GetStorageShape().GetDim(1))),
+                return ge::GRAPH_FAILED);
 
     auto *attrs = context_->GetAttrs();
     OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs are null"),
@@ -81,10 +94,6 @@ ge::graphStatus TurboquantPagedAttentionV310Tiling::ParseInputs()
 
     OP_CHECK_IF(bits_ < 2 || bits_ > 4, OP_LOGE(context_->GetNodeName(), "bits must be in [2,4]"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tilingData_.numKvHeads == 0 || tilingData_.numHeads % tilingData_.numKvHeads != 0,
-                OP_LOGE(context_->GetNodeName(), "num_heads (%u) must be a multiple of num_kv_heads (%u)",
-                        tilingData_.numHeads, tilingData_.numKvHeads),
-                return ge::GRAPH_FAILED);
 
     const uint32_t packedBits = tilingData_.headDim * bits_;
     OP_CHECK_IF(packedBits % kBitsPerHalf != 0,
@@ -96,6 +105,17 @@ ge::graphStatus TurboquantPagedAttentionV310Tiling::ParseInputs()
                         "packed halves per head (%u) must be a multiple of %u; head_dim=%u bits=%u "
                         "is not NZ-tileable",
                         tilingData_.packedHalves, kNzC0, tilingData_.headDim, bits_),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(tilingData_.packedHalves == 0 ||
+                    (tilingData_.c1 * kNzC0) % tilingData_.packedHalves != 0,
+                OP_LOGE(context_->GetNodeName(),
+                        "c1*%d=%u not divisible by packedHalves=%u; cannot derive numKvHeads",
+                        kNzC0, tilingData_.c1 * kNzC0, tilingData_.packedHalves),
+                return ge::GRAPH_FAILED);
+    tilingData_.numKvHeads = tilingData_.c1 * kNzC0 / tilingData_.packedHalves;
+    OP_CHECK_IF(tilingData_.numKvHeads == 0 || tilingData_.numHeads % tilingData_.numKvHeads != 0,
+                OP_LOGE(context_->GetNodeName(), "num_heads (%u) must be a multiple of num_kv_heads (%u)",
+                        tilingData_.numHeads, tilingData_.numKvHeads),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(tilingData_.numKvHeads * tilingData_.packedHalves != tilingData_.c1 * kNzC0,
                 OP_LOGE(context_->GetNodeName(), "cache C1 (%u) inconsistent with kv_heads*packed (%u)",

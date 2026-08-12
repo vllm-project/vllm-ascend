@@ -2092,16 +2092,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     // codebook_mode (uniform | Lloyd-Max) are runtime tiling-data fields, so
     // all twelve A/B scenarios come from three kernel instantiations.
     ops.def(
+        // key_norms/value_norms are CALLER-OWNED and PERSISTENT: [num_slots, 16]
+        // halves, one 32B block per slot. They used to be allocated inside the op
+        // and returned, which discarded all history in serving (one write call
+        // per decode step) -- 4 of 256 norm entries survived, cosine 0.139670.
         "npu_turboquant_reshape_and_cache_v310(Tensor key, "
         "                                      Tensor value, "
         "                                      Tensor(a!) key_cache, "
         "                                      Tensor(b!) value_cache, "
+        "                                      Tensor(c!) key_norms, "
+        "                                      Tensor(d!) value_norms, "
         "                                      Tensor slot_mapping, "
         "                                      Tensor signs, "
         "                                      Tensor centroids, "
         "                                      int bits=3, "
         "                                      int variant=0, "
-        "                                      int codebook_mode=0) -> (Tensor key_norms, Tensor value_norms)");
+        "                                      int codebook_mode=0) -> ()");
     ops.impl("npu_turboquant_reshape_and_cache_v310", torch::kPrivateUse1,
              &vllm_ascend::npu_turboquant_reshape_and_cache_v310);
 
