@@ -17,7 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch_npu
@@ -1758,16 +1758,16 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
         if len(kv_cache) <= 1:
             return query, key, value, output
 
-        pcp_metadata = cast(AscendAttentionPCPMetadata, attn_metadata)
+        assert isinstance(attn_metadata, AscendAttentionPCPMetadata)
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
         if self.kv_sharing_target_layer_name is not None:
             if self.is_kv_producer:
-                pcp_metadata.reshape_cache_event.record()
+                attn_metadata.reshape_cache_event.record()
             return query, key, value, output
 
-        expanded_slot_mapping = pcp_metadata.slot_mapping
-        local_num_input_tokens = pcp_metadata.pcp_local_num_input_tokens
+        expanded_slot_mapping = attn_metadata.slot_mapping
+        local_num_input_tokens = attn_metadata.pcp_local_num_input_tokens
         if key.shape[0] < local_num_input_tokens:
             raise RuntimeError(
                 f"PCP GQA input is shorter than the rank-local padded batch: {key.shape[0]} < {local_num_input_tokens}."
@@ -1779,7 +1779,7 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
                 value[:local_num_input_tokens],
             ),
             expanded_slot_mapping,
-            pcp_metadata.num_decode_tokens,
+            attn_metadata.num_decode_tokens,
         )
         DeviceOperator.reshape_and_cache(
             key=cache_key,
