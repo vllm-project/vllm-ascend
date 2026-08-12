@@ -43,7 +43,7 @@
 # On failure a tracking GitHub issue is opened (one per day, deduplicated) and
 # the Actions run status is red -- combining the two for fast triage.
 
-name: Daily-Regression
+name: Daily
 
 on:
   schedule:
