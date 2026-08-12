@@ -1,0 +1,246 @@
+{
+    "op_type": "MatMulV3",
+    "optional_input_mode": "gen_placeholder",
+    "op_list": [
+      {
+        "bin_filename": "MatMulV3_ND_NZ_ND_ND_FP16_FP16_FP16_FP16",
+        "simplified_key": "diy,2/29/2/2/1/1/1/1",
+        "inputs": [
+          {
+            "name": "x1",
+            "index": 0,
+            "dtype": "float16",
+            "format": "ND",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "x2",
+            "index": 1,
+            "dtype": "float16",
+            "format": "FRACTAL_NZ",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "bias",
+            "index": 2,
+            "dtype": "float16",
+            "format": "ND",
+            "paramType": "optional",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "offset_w",
+            "index": 3,
+            "dtype": "int8",
+            "format": "ND",
+            "paramType": "optional",
+            "shape": [
+              -2
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "y",
+            "index": 0,
+            "dtype": "float16",
+            "format": "ND",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          }
+        ],
+        "attrs": [
+          {
+            "name": "transpose_x1",
+            "dtype": "bool",
+            "value": false
+          },
+          {
+            "name": "transpose_x2",
+            "dtype": "bool",
+            "value": false
+          },
+          {
+            "name": "offset_x",
+            "dtype": "int",
+            "value": 0
+          },
+          {
+            "name": "enable_hf32",
+            "dtype": "bool",
+            "value": false
+          }
+        ]
+      },
+      {
+        "bin_filename": "MatMulV3_NZ_NZ_ND_ND_FP16_FP16_FP16_FP16",
+        "simplified_key": "diy,29/29/2/2/1/1/1/1",
+        "inputs": [
+          {
+            "name": "x1",
+            "index": 0,
+            "dtype": "float16",
+            "format": "FRACTAL_NZ",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "x2",
+            "index": 1,
+            "dtype": "float16",
+            "format": "FRACTAL_NZ",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "bias",
+            "index": 2,
+            "dtype": "float16",
+            "format": "ND",
+            "paramType": "optional",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "offset_w",
+            "index": 3,
+            "dtype": "int8",
+            "format": "ND",
+            "paramType": "optional",
+            "shape": [
+              -2
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "y",
+            "index": 0,
+            "dtype": "float16",
+            "format": "ND",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          }
+        ],
+        "attrs": [
+          {
+            "name": "transpose_x1",
+            "dtype": "bool",
+            "value": false
+          },
+          {
+            "name": "transpose_x2",
+            "dtype": "bool",
+            "value": false
+          },
+          {
+            "name": "offset_x",
+            "dtype": "int",
+            "value": 0
+          },
+          {
+            "name": "enable_hf32",
+            "dtype": "bool",
+            "value": false
+          }
+        ]
+      },
+      {
+        "bin_filename": "MatMulV3_NZ_NZ_ND_NZ_FP16_FP16_FP16_FP16",
+        "simplified_key": "diy,29/29/2/29/1/1/1/1",
+        "inputs": [
+          {
+            "name": "x1",
+            "index": 0,
+            "dtype": "float16",
+            "format": "FRACTAL_NZ",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "x2",
+            "index": 1,
+            "dtype": "float16",
+            "format": "FRACTAL_NZ",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "bias",
+            "index": 2,
+            "dtype": "float16",
+            "format": "ND",
+            "paramType": "optional",
+            "shape": [
+              -2
+            ]
+          },
+          {
+            "name": "offset_w",
+            "index": 3,
+            "dtype": "int8",
+            "format": "ND",
+            "paramType": "optional",
+            "shape": [
+              -2
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "y",
+            "index": 0,
+            "dtype": "float16",
+            "format": "FRACTAL_NZ",
+            "paramType": "required",
+            "shape": [
+              -2
+            ]
+          }
+        ],
+        "attrs": [
+          {
+            "name": "transpose_x1",
+            "dtype": "bool",
+            "value": false
+          },
+          {
+            "name": "transpose_x2",
+            "dtype": "bool",
+            "value": false
+          },
+          {
+            "name": "offset_x",
+            "dtype": "int",
+            "value": 0
+          },
+          {
+            "name": "enable_hf32",
+            "dtype": "bool",
+            "value": false
+          }
+        ]
+      }
+    ]
+}

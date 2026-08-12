@@ -32,6 +32,7 @@ def _make_vllm_config(
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
     hidden_size: int = 2048,
+    model_quant_type: str | None = None,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -55,8 +56,14 @@ def _make_vllm_config(
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
     scheduler_config = SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens)
+    quant_config = (
+        SimpleNamespace(quant_description={"model_quant_type": model_quant_type})
+        if model_quant_type is not None
+        else None
+    )
     return SimpleNamespace(
         model_config=model_config,
+        quant_config=quant_config,
         parallel_config=parallel_config,
         compilation_config=compilation_config,
         scheduler_config=scheduler_config,
@@ -240,7 +247,7 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
         enable_fused_mc2=1,
     )
 
-    vllm_config = _make_vllm_config(quant_type="w4a8")
+    vllm_config = _make_vllm_config(quant_type="w8a8")
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
@@ -271,7 +278,7 @@ def test_select_moe_comm_method_a3_without_fused_mc2(
 @pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
-        (128, 8, MoECommType.FUSED_MC2),
+        (128, 8, MoECommType.MC2),
     ],
 )
 def test_select_moe_comm_method_a3_quant_w4a16(
@@ -297,7 +304,7 @@ def test_select_moe_comm_method_a3_quant_w4a16(
 @pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
-        (128, 8, MoECommType.FUSED_MC2),
+        (128, 8, MoECommType.MC2),
     ],
 )
 def test_select_moe_comm_method_a3_quant_w4a8(
@@ -349,7 +356,7 @@ def test_select_moe_comm_method_a3_quant_w8a8(
 @pytest.mark.parametrize(
     ("quant_type", "expected"),
     [
-        ("w4a8", True),
+        ("w4a8", False),
         ("w8a8", True),
         ("w8a16", False),
     ],
@@ -364,9 +371,27 @@ def test_cann_megamoe_supported_by_config_quant_type(
 
 
 @pytest.mark.parametrize(
+    ("model_quant_type", "expected"),
+    [
+        ("W8A8_DYNAMIC", True),
+        ("W8A8", True),
+        ("W4A8_DYNAMIC", False),
+        ("FLOAT", False),
+    ],
+)
+def test_cann_megamoe_supported_by_modelslim_quant_description(
+    model_quant_type,
+    expected,
+):
+    vllm_config = _make_vllm_config(model_quant_type=model_quant_type)
+
+    assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
+
+
+@pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
-        (128, 8, MoECommType.FUSED_MC2),
+        (128, 8, MoECommType.MC2),
     ],
 )
 def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
@@ -384,7 +409,7 @@ def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
         enable_prefill_mc2=0,
     )
 
-    vllm_config = _make_vllm_config(quant_type="w4a8", hidden_size=512)
+    vllm_config = _make_vllm_config(quant_type="w8a8", hidden_size=512)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 

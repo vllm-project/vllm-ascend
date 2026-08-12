@@ -35,6 +35,7 @@
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
+#include "mc2/mega_moe/mega_moe_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
@@ -2270,6 +2271,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None, float swiglu_limit=1000000.0) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
+
+    ops.def(
+        "mega_moe(Tensor x, Tensor topk_ids, Tensor topk_weights, Tensor[] weight1, Tensor[] weight2,"
+        "         Tensor[] weight_scales1, Tensor[] weight_scales2, Tensor? x_active_mask, str group,"
+        "         int moe_expert_num, int ep_world_size, int max_recv_token_num, int num_max_tokens_per_rank,"
+        "         str activation='swiglu', float activation_clamp=0.0, float activation_alpha=1.0,"
+        "         float activation_beta=0.0) -> (Tensor, Tensor)"
+    );
+    ops.impl("mega_moe", torch::kPrivateUse1, &vllm_ascend::mega_moe);
 
     // vLLM-Ascend custom ops
     ops.def(

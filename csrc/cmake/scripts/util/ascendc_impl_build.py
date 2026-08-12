@@ -133,6 +133,11 @@ def get_kernel_source(src_file, dir_snake, dir_ex):
     src = os.path.join(PYF_PATH, "op_kernel", src_file)
     if os.path.exists(src):
         return src
+    # Newer ops-transformer operators keep A2/A3 sources under arch22 while
+    # this vLLM Ascend build generator still looks for a flat op_kernel tree.
+    src = os.path.join(PYF_PATH, "op_kernel", "arch22", src_file)
+    if os.path.exists(src):
+        return src
     src = os.path.join(PYF_PATH, "..", "ascendc", dir_snake, "op_kernel", src_file)
     if os.path.exists(src):
         return src

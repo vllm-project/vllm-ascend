@@ -502,6 +502,7 @@ function(add_opapi_modules)
       PRIVATE
       -Dgoogle=ascend_private
       -DACLNN_LOG_FMT_CHECK
+      -DOP_LOG_LIBOPAPI_ONLY
     )
     target_link_libraries(${OPHOST_NAME}_opapi_obj
       PUBLIC

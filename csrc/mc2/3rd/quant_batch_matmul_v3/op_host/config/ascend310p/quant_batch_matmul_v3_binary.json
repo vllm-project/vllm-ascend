@@ -1,0 +1,219 @@
+{
+    "op_type": "QuantBatchMatmulV3",
+    "op_list": [
+        {
+            "bin_filename": "QuantBatchMatmulV3_ND_NZ_int8_int8_fp16",
+            "inputs": [
+                {
+                    "name": "x1",
+                    "index": 0,
+                    "dtype": "int8",
+                    "format": "ND",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "x2",
+                    "index": 1,
+                    "dtype": "int8",
+                    "format": "FRACTAL_NZ",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "scale",
+                    "index": 2,
+                    "dtype": "uint64",
+                    "format": "ND",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault",
+                    "dtype_match_mode": "DtypeByte"
+                },
+                {
+                    "name": "offset",
+                    "index": 3,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "bias",
+                    "index": 4,
+                    "dtype": "int32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "pertoken_scale",
+                    "index": 5,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "y",
+                    "index": 0,
+                    "dtype": "float16",
+                    "format": "ND",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                }
+            ],
+            "attrs": [
+                {
+                    "name": "dtype",
+                    "dtype": "int",
+                    "value": 1
+                },
+                {
+                    "name": "transpose_x1",
+                    "dtype": "bool",
+                    "value": null
+                },
+                {
+                    "name": "transpose_x2",
+                    "dtype": "bool",
+                    "value": null
+                },
+                {
+                    "name": "group_size",
+                    "dtype": "int",
+                    "value": null
+                }
+            ]
+        },
+        {
+            "bin_filename": "QuantBatchMatmulV3_ND_NZ_int8_int8_int8",
+            "inputs": [
+                {
+                    "name": "x1",
+                    "index": 0,
+                    "dtype": "int8",
+                    "format": "ND",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "x2",
+                    "index": 1,
+                    "dtype": "int8",
+                    "format": "FRACTAL_NZ",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "scale",
+                    "index": 2,
+                    "dtype": "uint64",
+                    "format": "ND",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault",
+                    "dtype_match_mode": "DtypeByte"
+                },
+                {
+                    "name": "offset",
+                    "index": 3,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "bias",
+                    "index": 4,
+                    "dtype": "int32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                },
+                {
+                    "name": "pertoken_scale",
+                    "index": 5,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "y",
+                    "index": 0,
+                    "dtype": "int8",
+                    "format": "ND",
+                    "paramType": "required",
+                    "shape": [
+                        -2
+                    ],
+                    "format_match_mode": "FormatDefault"
+                }
+            ],
+            "attrs": [
+                {
+                    "name": "dtype",
+                    "dtype": "int",
+                    "value": 2
+                },
+                {
+                    "name": "transpose_x1",
+                    "dtype": "bool",
+                    "value": null
+                },
+                {
+                    "name": "transpose_x2",
+                    "dtype": "bool",
+                    "value": null
+                },
+                {
+                    "name": "group_size",
+                    "dtype": "int",
+                    "value": null
+                }
+            ]
+        }
+    ]
+}
