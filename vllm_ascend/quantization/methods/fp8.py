@@ -23,8 +23,6 @@ from vllm.config import get_current_vllm_config
 
 from vllm_ascend.utils import FP8_METHOD
 
-from vllm_ascend.utils import FP8_METHOD
-
 from .base import QuantType, TPWeightGatherSpec
 from .registry import register_scheme
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
