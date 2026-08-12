@@ -125,6 +125,7 @@ def merge_postprocess_payload(
         test_env = {}
         testcase_info["testEnv"] = test_env
 
+    test_env["yaml_name"] = testcase_name
     test_env["request_rate"] = case_config.get("request_rate", 0)
     if "max_out_len" in case_config:
         test_env["output_len"] = case_config["max_out_len"]
