@@ -237,7 +237,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             if gid_block_table is None:
                 continue
             kv_block_size = int(attn_group.kv_cache_spec.block_size)
-            copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+            copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[batch_size,](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,
                 target_positions_ptr=target_positions,
