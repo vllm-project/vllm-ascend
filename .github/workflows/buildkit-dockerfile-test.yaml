@@ -62,12 +62,12 @@ jobs:
               ;;
           esac
 
-      - name: Login to quay.io
+      - name: Login to SWR
         uses: docker/login-action@v3
         with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          registry: swr.cn-north-12.myhuaweicloud.com
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -75,7 +75,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: quay.io/wjunlu/vllm-ascend-daily:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
+          tags: swr.cn-north-12.myhuaweicloud.com/modelfoundry/${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
           build-args: |
             CANN_QUAY_URL=swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann
             APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
