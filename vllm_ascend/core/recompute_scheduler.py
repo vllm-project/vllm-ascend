@@ -145,7 +145,6 @@ class RecomputeScheduler(Scheduler):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
-
     def schedule(self, throttle_prefills: bool = False) -> RecomputeSchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -909,7 +908,6 @@ class RecomputeScheduler(Scheduler):
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
-
 
 
 class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):

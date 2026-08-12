@@ -53,7 +53,6 @@ def test_add_request_does_not_inject_placeholder_spec_tokens():
     assert request.num_tokens_with_spec == request.num_tokens
 
 
-
 def test_dsv4_decode_node_observes_real_dense_local_cache_hit():
     register_all_kvcache_specs(MagicMock())
     init_none_hash(sha256)
