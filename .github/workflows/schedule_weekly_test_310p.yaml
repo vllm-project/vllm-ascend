@@ -230,6 +230,8 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+    secrets:
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-310p.zip

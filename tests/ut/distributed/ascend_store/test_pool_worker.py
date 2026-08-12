@@ -1507,6 +1507,18 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(len(layer_tasks), 0)
 
+    def test_empty_layerwise_step_reowns_task_lists(self):
+        worker = self._make_worker()
+        worker.use_layerwise = True
+        old_save_tasks = worker.layer_save_tasks
+        old_load_tasks = worker.layer_load_tasks
+
+        worker.start_load_kv(AscendConnectorMetadata(set(), set()))
+
+        for layer_id in range(worker.num_layers):
+            self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
+            self.assertIsNot(worker.layer_load_tasks[layer_id], old_load_tasks[layer_id])
+
     def test_layerwise_load_is_prepared_before_next_save_allocation(self):
         worker = self._make_worker()
         worker.num_layers = 0
@@ -1519,6 +1531,33 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.process_layer_data([MagicMock()])
 
         self.assertEqual(call_order, ["load", "save"])
+
+    def test_process_layer_data_reowns_task_lists_before_populating(self):
+        worker = self._make_worker()
+        old_save_tasks = worker.layer_save_tasks
+        old_load_tasks = worker.layer_load_tasks
+        save_marker = MagicMock()
+        load_marker = MagicMock()
+        worker._process_save_for_layer_batch = MagicMock(
+            side_effect=lambda _requests, layer_id, *_args: worker.layer_save_tasks[layer_id].append(save_marker)
+        )
+        worker._process_load_for_layer_batch = MagicMock(
+            side_effect=lambda _requests, layer_id, *_args: worker.layer_load_tasks[layer_id].append(load_marker)
+        )
+        worker._prepare_load_gvas = MagicMock()
+        worker._alloc_gvas_for_save = MagicMock()
+        worker._build_shared_save_data = MagicMock()
+        worker._build_shared_load_data = MagicMock()
+
+        worker.process_layer_data([MagicMock()])
+
+        for layer_id in range(worker.num_layers):
+            self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
+            self.assertIsNot(worker.layer_load_tasks[layer_id], old_load_tasks[layer_id])
+            old_save_tasks[layer_id].clear()
+            old_load_tasks[layer_id].clear()
+            self.assertEqual(worker.layer_save_tasks[layer_id], [save_marker])
+            self.assertEqual(worker.layer_load_tasks[layer_id], [load_marker])
 
     def test_build_shared_save_data_marks_last_actual_task(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -1610,6 +1649,55 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         reused_range = worker.layer_load_tasks[1][0].block_ranges[0]
         self.assertEqual((independent_range.start_block, independent_range.end_block), (1, 2))
         self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
+
+    def test_mtp_load_uses_safe_extent_not_store_skip_extent(self):
+        worker = self._make_worker()
+        worker.use_eagle = True
+        worker.layerwise_offload = True
+        worker.independent_layers = [0, 1]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=["h0", "h1"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=16,
+                can_load=True,
+                kvpool_store_skip_tokens=32,
+            ),
+        )
+
+        worker._process_load_for_layer_batch([request], 1)
+
+        self.assertEqual(worker.layer_load_tasks[1], [])
+
+    def test_mtp_gva_prepare_uses_safe_extent_not_store_skip_extent(self):
+        worker = self._make_gva_worker()
+        worker.use_eagle = True
+        key_info = MagicMock()
+        key_info.size.return_value = 64
+        key_info.gva_list.return_value = [201]
+        worker.m_store.batch_get_key_info.return_value = [key_info]
+        worker.m_store.batch_add_lease.return_value = [0]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids_by_group=[[0, 1]],
+            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+            block_hashes=["h0", "h1"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=16,
+                can_load=True,
+                kvpool_store_skip_tokens=32,
+            ),
+        )
+
+        worker._prepare_load_gvas([request])
+
+        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
+        self.assertEqual(len(queried_keys), 1)
 
     def test_full_pool_hit_uses_verified_extent(self):
         worker = self._make_gva_worker()

@@ -23,6 +23,7 @@ Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
 
+import importlib
 import importlib.util
 import logging
 import os
@@ -400,15 +401,29 @@ _distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # 
 )
 sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
 
-_kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer")
-_kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
+_kv_transfer_real_path = os.path.join(_vllm_ascend_real_path, "distributed", "kv_transfer")
+if _MOCK_VLLM_DEPS:
+    _kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer", _kv_transfer_real_path)
+    _kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
+else:
+    # Preserve the real registration entry point when vLLM is installed. This
+    # helper is imported while pytest collects the ascend_store tests, so
+    # replacing the package here would leak a MagicMock into later KV-transfer
+    # tests in the same CPU-UT process.
+    _kv_transfer_init = importlib.import_module("vllm_ascend.distributed.kv_transfer")
 
-_kv_utils_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.utils")
+_kv_utils_pkg = _make_pkg(
+    "vllm_ascend.distributed.kv_transfer.utils",
+    os.path.join(_kv_transfer_real_path, "utils"),
+)
 sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
 sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
 
-_kv_pool_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.kv_pool")
+_kv_pool_pkg = _make_pkg(
+    "vllm_ascend.distributed.kv_transfer.kv_pool",
+    os.path.join(_kv_transfer_real_path, "kv_pool"),
+)
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
 
 _ascend_store_real_path = os.path.join(
