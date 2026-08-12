@@ -320,11 +320,19 @@ private:
             // ---- pass 1: gather K ONCE per tile, dot against every query ----
             for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
                 GatherNzTile(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
-                UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
-                SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
-                WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
-                DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
-                                    t_->codebookMode);
+                if (t_->codebookMode == TQ_CB_UNIFORM) {
+                    // fused: skips the int32 round trip, ~25% less element-work
+                    UnpackDequantVec<BITS>(bytes, kv, unpH, unpF0, unpF1, kTile * d,
+                                           t_->invSqrtHeadDim);
+                    SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                } else {
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
+                    SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
+                                        t_->codebookMode);
+                }
                 for (uint32_t g = 0; g < nq; ++g) {
                     // kv must SURVIVE for the next query, so the product goes to prod
                     Mul(prod, kv, qb[g * kTile * d], kTile * d);
@@ -401,11 +409,19 @@ private:
             // ---- pass 3: gather V ONCE per tile, scatter into every acc ----
             for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
                 GatherNzTile(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
-                UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
-                SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
-                WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
-                DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
-                                    t_->codebookMode);
+                if (t_->codebookMode == TQ_CB_UNIFORM) {
+                    // fused: skips the int32 round trip, ~25% less element-work
+                    UnpackDequantVec<BITS>(bytes, kv, unpH, unpF0, unpF1, kTile * d,
+                                           t_->invSqrtHeadDim);
+                    SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                } else {
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
+                    SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
+                                        t_->codebookMode);
+                }
                 for (uint32_t t = 0; t < kTile; ++t) {
                     const uint32_t tk = t0 + t;
                     if (tk >= tokEnd) {

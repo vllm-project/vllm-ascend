@@ -274,6 +274,69 @@ struct TQPlanar {
 // scratch buffers are needed and no masking step is required:
 //     for pl = kPlanes-1 .. 0:
 //         plane = floor(rem / 2^(BITS*pl));  rem -= plane * 2^(BITS*pl)
+/*
+ * FUSED unpack + dequantise, uniform codebook only.
+ *
+ * The split form peels a plane into `pln` (a float already holding an exact
+ * integer after Floor), Casts it to int32, and DequantizeVec immediately Casts
+ * it straight back to float to compute (code - centre) * step. The int32 round
+ * trip buys nothing when the codebook is uniform.
+ *
+ * Fusing writes (pln - centre) * step directly into `out`, keeping `pln` intact
+ * for the remainder chain. Per unpack call at kPlanes=2 that is 13 -> 12 vector
+ * ops AND ~16*lanes -> ~12*lanes of element-work; the element saving is the
+ * point, because the vector pipe is now the bound (V 2509us vs S 2415us).
+ *
+ * Arithmetically identical to the split form: Floor leaves an exact integer in
+ * pln, so Cast-to-int32-and-back is the identity on it, and the subsequent
+ * Adds/Muls are the same operands in the same order. Expect BIT-IDENTICAL gates.
+ *
+ * The int32 `codes` path is still required for TQ_CB_LUT (Gather indexes by
+ * code) and for the code-dump debug variants, so this is a separate entry point
+ * rather than a replacement.
+ */
+template <int BITS>
+__aicore__ inline void UnpackDequantVec(const LocalTensor<uint8_t> &bytes,
+                                        const LocalTensor<float> &out,
+                                        const LocalTensor<half> &tmpH,
+                                        const LocalTensor<float> &rem,
+                                        const LocalTensor<float> &pln, int len,
+                                        float invSqrtLen)
+{
+    using P = TQPlanar<BITS>;
+    using T = TQTraits<BITS>;
+    const int lanes = P::Lanes(len);
+    const float centre = static_cast<float>(T::kLevels - 1) * 0.5f;
+    const float step = UniformStep(BITS) * invSqrtLen;
+
+    Cast(tmpH, bytes, RoundMode::CAST_NONE, lanes);          // u8 -> half
+    PipeBarrier<PIPE_V>();
+    Cast(rem, tmpH, RoundMode::CAST_NONE, lanes);            // half -> float (0..255)
+    PipeBarrier<PIPE_V>();
+#pragma unroll
+    for (int pl = P::kPlanes - 1; pl >= 0; --pl) {
+        float scale = 1.0f;                                   // 2^(BITS*pl)
+        for (int k = 0; k < pl; ++k) {
+            scale *= static_cast<float>(1 << BITS);
+        }
+        Muls(pln, rem, 1.0f / scale, lanes);
+        PipeBarrier<PIPE_V>();
+        Floor(pln, pln, lanes);                               // exact integer code
+        PipeBarrier<PIPE_V>();
+        // dequantise straight out of pln; pln itself must survive for the peel
+        Adds(out[pl * lanes], pln, -centre, lanes);
+        PipeBarrier<PIPE_V>();
+        Muls(out[pl * lanes], out[pl * lanes], step, lanes);
+        PipeBarrier<PIPE_V>();
+        if (pl > 0) {
+            Muls(pln, pln, scale, lanes);
+            PipeBarrier<PIPE_V>();
+            Sub(rem, rem, pln, lanes);                        // peel this plane off
+            PipeBarrier<PIPE_V>();
+        }
+    }
+}
+
 template <int BITS>
 __aicore__ inline void UnpackCodesVec(const LocalTensor<uint8_t> &bytes,
                                       const LocalTensor<int32_t> &codes,
