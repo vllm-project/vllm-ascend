@@ -176,7 +176,6 @@ from vllm_ascend.utils import (
     embedding_tp_enable,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
-    enable_sfa,
     enable_sp,
     enable_sp_by_pass,
     get_ascend_device_type,
