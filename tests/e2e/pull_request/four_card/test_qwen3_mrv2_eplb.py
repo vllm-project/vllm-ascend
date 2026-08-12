@@ -21,7 +21,7 @@ PROMPTS = [
     "The opposite of hot is",
     "The first month of the year is",
 ]
-EXPECTED_ANSWER_MARKERS = [
+EXPECTED_ANSWER_PREFIXES = [
     ("Paris",),
     ("Jupiter",),
     ("32 degrees Fahrenheit", "0 degrees Celsius"),
@@ -70,11 +70,28 @@ def _flatten_snapshots(snapshots: list[list[dict[str, Any]]]) -> list[dict[str, 
 
 
 def _assert_expected_answers(outputs, name: str) -> None:
-    assert len(outputs) == len(EXPECTED_ANSWER_MARKERS)
-    for prompt_idx, ((_, output_text), expected_markers) in enumerate(zip(outputs, EXPECTED_ANSWER_MARKERS)):
-        assert any(marker in output_text for marker in expected_markers), (
+    assert len(outputs) == len(PROMPTS) == len(EXPECTED_ANSWER_PREFIXES)
+    for prompt_idx, (prompt, (_, output_text), expected_prefixes) in enumerate(
+        zip(PROMPTS, outputs, EXPECTED_ANSWER_PREFIXES)
+    ):
+        assert output_text.startswith(prompt), (
+            f"{name} returned text that does not start with its prompt for "
+            f"prompt {prompt_idx}: expected prefix {prompt!r}, got {output_text!r}"
+        )
+        completion = output_text[len(prompt) :].lstrip()
+        matching_prefix = next(
+            (prefix for prefix in expected_prefixes if completion.startswith(prefix)),
+            None,
+        )
+        assert matching_prefix is not None, (
             f"{name} produced an incorrect answer for prompt {prompt_idx}: "
-            f"expected one of {expected_markers!r}, got {output_text!r}"
+            f"expected the completion to start with one of {expected_prefixes!r}, "
+            f"got {completion!r}"
+        )
+        suffix = completion[len(matching_prefix) :]
+        assert not suffix or not (suffix[0].isalnum() or suffix[0] == "_"), (
+            f"{name} only matched an answer as part of a longer word for "
+            f"prompt {prompt_idx}: matched {matching_prefix!r}, got {completion!r}"
         )
 
 
