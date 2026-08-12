@@ -90,6 +90,7 @@ def _extract_step_logprobs(request_output):
 
     return None, None
 
+
 @pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.e2e_coverage(
     arch="dense",

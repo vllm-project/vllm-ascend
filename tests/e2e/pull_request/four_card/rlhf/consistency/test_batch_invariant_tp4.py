@@ -36,6 +36,7 @@ SMALL_QWEN3_OVERRIDES = {
     "num_hidden_layers": 2,
 }
 
+
 @pytest.fixture(autouse=True)
 def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
     """Automatically enable batch invariant kernel overrides for all tests."""
@@ -95,6 +96,7 @@ def _extract_step_logprobs(request_output):
             return t, inner.token_ids
 
     return None, None
+
 
 @pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.e2e_coverage(
