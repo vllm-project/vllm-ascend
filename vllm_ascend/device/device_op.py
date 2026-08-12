@@ -24,12 +24,12 @@ import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES, get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
@@ -1683,12 +1683,12 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
-    ascend_device_type = get_ascend_device_type()
-    if ascend_device_type == AscendDeviceType.A5:
-        return A5DeviceAdaptor
-    if ascend_device_type == AscendDeviceType._310P:
-        return Ascend310PDeviceAdaptor
-    return BaseDeviceAdaptor
+    adaptor_by_family = {
+        DeviceAdaptorFamily.STANDARD: BaseDeviceAdaptor,
+        DeviceAdaptorFamily.FP8_OPTIMIZED: A5DeviceAdaptor,
+        DeviceAdaptorFamily.COMPATIBILITY: Ascend310PDeviceAdaptor,
+    }
+    return adaptor_by_family[get_current_hardware_profile().device_adaptor_family]
 
 
 DeviceOperator: type["BaseDeviceAdaptor"] = get_device_adaptor()

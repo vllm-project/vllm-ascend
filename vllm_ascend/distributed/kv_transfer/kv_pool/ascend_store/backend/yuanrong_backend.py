@@ -8,6 +8,7 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import split_host_port
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 
@@ -85,6 +86,7 @@ class YuanrongBackend(Backend):
             and self.config.remote_h2d_transport_backend == "HIXL"
             and not self.config.enable_fabric_mem
             and self.config.enable_dev_mem_pregister
+            and not get_current_hardware_profile().supports(HardwareCapability.SKIP_REMOTE_H2D_BUFFER_REGISTRATION)
         )
         self._registered_buffers: tuple[list[int], list[int]] | None = None
         self._buffers_registered = False

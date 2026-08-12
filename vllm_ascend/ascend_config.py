@@ -46,9 +46,10 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
 class AscendCompilationConfig:
     """Configuration for controlling the behavior of Ascend graph optimization.
 
-    Migrated to ``@config`` (pydantic dataclass). The 310P runtime downgrade
-    (disable npugraph_ex / static_kernel) and the static_kernel→npugraph_ex
-    dependency check are applied in an ``after`` model_validator.
+    Migrated to ``@config`` (pydantic dataclass). Hardware-profile runtime
+    downgrades (disable npugraph_ex / static_kernel) and the
+    static_kernel→npugraph_ex dependency check are applied in an ``after``
+    model_validator.
     """
 
     enable_npugraph_ex: bool = True
@@ -58,15 +59,16 @@ class AscendCompilationConfig:
     fuse_muls_add: bool = True
 
     @model_validator(mode="after")
-    def _apply_310p_downgrade_and_static_kernel_check(self):
-        from vllm_ascend.utils import is_310p
+    def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-        if is_310p():
+        if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if self.enable_npugraph_ex:
-                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+                logger.warning("npugraph_ex is not supported by the current hardware profile. Disabling it.")
             if self.enable_static_kernel:
                 logger.warning(
-                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                    "static kernel requires npugraph_ex, which is not supported by the current hardware profile. "
+                    "Disabling it."
                 )
             self.enable_npugraph_ex = False
             self.enable_static_kernel = False
