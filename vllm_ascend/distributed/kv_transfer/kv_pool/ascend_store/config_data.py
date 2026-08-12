@@ -885,6 +885,9 @@ class ReqMeta:
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
     token_ids: list[int] | None = None
     original_block_size: list[int] | int | None = None
+    # Wire-format KVCacheSpecKind names per group; used by Phase-1 emitters to
+    # filter Phase-1 BlockStored events to main attention groups only.
+    kv_cache_spec_kinds: list[str] | None = None
 
     event_id: int | None = None
 
@@ -904,6 +907,7 @@ class ReqMeta:
         num_prompt_tokens: int | None = None,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
+        kv_cache_spec_kinds: list[str] | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
         save_end_token: int | None = None,
@@ -946,6 +950,7 @@ class ReqMeta:
         self.num_prompt_tokens = num_prompt_tokens
         self.token_ids = token_ids
         self.original_block_size = original_block_size
+        self.kv_cache_spec_kinds = kv_cache_spec_kinds
         self.event_id = event_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
@@ -1003,6 +1008,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        kv_cache_spec_kinds: list[str] | None = None,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1101,6 +1107,7 @@ class ReqMeta:
             gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             kv_cache_families_by_group=kv_cache_group_families,
+            kv_cache_spec_kinds=kv_cache_spec_kinds,
         )
 
 

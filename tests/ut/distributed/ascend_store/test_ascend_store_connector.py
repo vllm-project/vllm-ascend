@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_events import KVCacheEvent, BlockStored
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
@@ -49,14 +49,63 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         self.assertEqual(result, mock_events)
 
     def test_aggregate(self):
+        # Union semantics: aggregate keeps unique events from get_all_events,
+        # not the intersection from get_common_events.
         ev = self._make_events()
-        common = [MagicMock()]
-        ev._aggregator.get_common_events.return_value = common
+        unique = [MagicMock(), MagicMock()]
+        ev._aggregator.get_all_events.return_value = unique
         result = ev.aggregate()
         self.assertIs(result, ev)
         ev._aggregator.clear_events.assert_called()
-        ev._aggregator.add_events.assert_called_with(common)
+        ev._aggregator.add_events.assert_called_with(unique)
         ev._aggregator.reset_workers.assert_called()
+        ev._aggregator.get_common_events.assert_not_called()
+
+    def test_aggregate_union_across_workers(self):
+        """MLA put_step shards events: each worker emits a disjoint subset."""
+        ev = AscendStoreKVEvents(num_workers=1)
+
+        def _evt(h):
+            return BlockStored(
+                block_hashes=[h],
+                parent_block_hash=None,
+                token_ids=[1],
+                block_size=16,
+                lora_id=None,
+                medium="cpu",
+                lora_name=None,
+            )
+
+        # Simulate 4 TP ranks each contributing one unique event.
+        for i in range(4):
+            if i > 0:
+                ev.increment_workers(1)
+            ev.add_events([_evt(f"h{i}")])
+
+        # Intersection would drop all (count==1 < num_workers==4).
+        self.assertEqual(len(ev._aggregator.get_common_events()), 0)
+
+        ev.aggregate()
+        events = ev.get_all_events()
+        self.assertEqual(len(events), 4)
+        self.assertEqual(ev.get_number_of_workers(), 1)
+
+    def test_aggregate_dedupes_duplicate_events(self):
+        ev = AscendStoreKVEvents(num_workers=1)
+        evt = BlockStored(
+            block_hashes=["h0"],
+            parent_block_hash=None,
+            token_ids=[1, 2],
+            block_size=16,
+            lora_id=None,
+            medium="cpu",
+            lora_name=None,
+        )
+        ev.add_events([evt, evt])
+        ev.increment_workers(1)
+        ev.add_events([evt])
+        ev.aggregate()
+        self.assertEqual(len(ev.get_all_events()), 1)
 
     def test_increment_workers(self):
         ev = self._make_events()
@@ -238,7 +287,6 @@ class TestAscendStoreConnector(unittest.TestCase):
         # With events
         events = _mock_events(num_workers=1)
         mock_event = MagicMock()
-        events._aggregator.get_common_events.return_value = [mock_event]
         events._aggregator.get_all_events.return_value = [mock_event]
         connector._kv_cache_events = events
         result = list(connector.take_events())

@@ -126,19 +126,64 @@ _events_mod.KVConnectorKVEvents = type("KVConnectorKVEvents", (), {})  # type: i
 
 
 class _FakeAggregator:
-    def __init__(self, *args, **kwargs):
-        self._mock = MagicMock()
+    """Minimal Counter-based stand-in for KVEventAggregator."""
 
-    def __getattr__(self, name):
-        return getattr(self._mock, name)
+    def __init__(self, num_workers: int = 1, *args, **kwargs):
+        from collections import Counter
+
+        self._event_counter: Counter = Counter()
+        self._num_workers = max(int(num_workers) if num_workers else 1, 1)
+
+    def add_events(self, events):
+        self._event_counter.update(events)
+
+    def get_common_events(self):
+        return [event for event, count in self._event_counter.items() if count == self._num_workers]
+
+    def get_all_events(self):
+        return list(self._event_counter.elements())
+
+    def clear_events(self):
+        self._event_counter.clear()
+
+    def increment_workers(self, count: int = 1):
+        self._num_workers += count
+
+    def reset_workers(self):
+        self._num_workers = 1
+
+    def get_number_of_workers(self):
+        return self._num_workers
 
 
 _events_mod.KVEventAggregator = _FakeAggregator  # type: ignore[attr-defined]
-_events_mod.BlockStored = type(  # type: ignore[attr-defined]
-    "BlockStored",
-    (),
-    {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
-)
+
+
+class _FakeBlockStored:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+    def __hash__(self):
+        return hash(
+            (
+                tuple(getattr(self, "block_hashes", ()) or ()),
+                getattr(self, "parent_block_hash", None),
+                tuple(getattr(self, "token_ids", ()) or ()),
+                getattr(self, "block_size", None),
+                getattr(self, "lora_id", None),
+                getattr(self, "medium", None),
+                getattr(self, "group_idx", None),
+                getattr(self, "kv_cache_spec_kind", None),
+            )
+        )
+
+    def __eq__(self, other):
+        if not isinstance(other, _FakeBlockStored):
+            return NotImplemented
+        return self.__dict__ == other.__dict__
+
+
+_events_mod.BlockStored = _FakeBlockStored  # type: ignore[attr-defined]
 
 _kv_cache_utils_mod: Any = sys.modules["vllm.v1.core.kv_cache_utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_cache_utils_mod.BlockHash = bytes  # type: ignore[attr-defined]

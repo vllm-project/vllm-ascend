@@ -442,12 +442,65 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             current_event=None,
             token_ids=list(range(16)),
             original_block_size=16,
+            kv_cache_spec_kinds=["mla_attention"],
         )
         t.add_stored_request("r1")
         t.request_queue.put(req)
         t._handle_request(req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].medium, "cpu")
+        self.assertEqual(events[0].kv_cache_spec_kind, "mla_attention")
+        self.assertEqual(events[0].group_idx, 0)
+        self.assertEqual(events[0].block_size, 16)
+        self.assertEqual(events[0].token_ids, list(range(16)))
+
+    def test_handle_request_kv_event_uses_effective_block_size(self):
+        """DSV4 MLA compress_ratio: storage start/end is shrunk, Phase-1 must
+        emit conductor/HBM-aligned effective block_size and token window."""
+        t, store = self._make_thread([0, 0], enable_kv_event=True)
+        t.token_database.group_cache_families = {"kv": {0: "c4"}, "state": {}}
+        # Fine-grained hashes so get_block_hashes(..., 64, ...) can combine.
+        fine_hashes = [f"h{i}".encode() for i in range(8)]
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=128,
+            block_ids=[0, 1],
+            block_hashes=fine_hashes,  # type: ignore[arg-type]
+            current_event=None,
+            token_ids=list(range(128)),
+            original_block_size=16,
+            kv_cache_spec_kinds=["mla_attention"],
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        events = t.get_kv_events()
+        self.assertEqual(len(store.put_calls), 1)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].block_size, 64)
+        self.assertEqual(events[0].token_ids, list(range(64)))
+        self.assertEqual(events[1].block_size, 64)
+        self.assertEqual(events[1].token_ids, list(range(64, 128)))
+
+    def test_handle_request_skips_kv_event_for_non_main_group(self):
+        t, store = self._make_thread([0], enable_kv_event=True)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            current_event=None,
+            token_ids=list(range(16)),
+            original_block_size=16,
+            kv_cache_spec_kinds=["sliding_window_mla"],
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        # Put still happens; Phase-1 event is skipped for non-main group.
+        self.assertEqual(len(store.put_calls), 1)
+        self.assertEqual(len(t.get_kv_events()), 0)
 
     def test_handle_request_consumer_role(self):
         t, store = self._make_thread([0], kv_role="kv_consumer")
