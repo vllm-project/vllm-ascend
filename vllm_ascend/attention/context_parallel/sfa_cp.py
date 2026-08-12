@@ -878,6 +878,18 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         softmax_lse = softmax_max + torch.log(softmax_sum)
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
+        # ==== TEMP DEBUG: dump local shard attention output / LSE stats per rank ====
+        if _SFA_DCP_DEBUG_COUNT <= 5:
+            _sm_max = softmax_max.flatten()
+            _sm_sum = softmax_sum.flatten()
+            _out = sfa_output.flatten()
+            print(
+                f"[SFA-DCP-debug rank={self.dcp_rank}] interleave={self._dcp_interleave_size} "
+                f"sfa_output[mean/absmax]={float(_out.mean().item()):.4f}/{float(_out.abs().max().item()):.4f} "
+                f"softmax_max[0:4]={_sm_max[:4].cpu().tolist()} softmax_sum[0:4]={_sm_sum[:4].cpu().tolist()} "
+                f"lse[0:4]={softmax_lse.flatten()[:4].cpu().tolist()}"
+            )
+        # ==== end TEMP DEBUG ====
         # ==== TEMP DEBUG (experiment A): skip LSE merge, keep this rank's head slice over its local KV shard ====
         # Interpretation: meaningful-but-half output => local attention OK, LSE/merge is broken.
         # Garbage output => problem is before the local attention (remap/seq_lens/block_table).
