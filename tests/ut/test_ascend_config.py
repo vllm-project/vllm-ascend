@@ -401,6 +401,36 @@ class TestAscendConfig(TestBase):
         mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.warning_once")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_migrated_config_warns_when_env_conflicts(self, mock_fix_incompatible_config, mock_warning_once):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"weight_nz_mode": 0}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}, clear=True):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.weight_nz_mode, 0)
+        mock_warning_once.assert_any_call(
+            "AscendConfig.weight_nz_mode is set to 0 by additional_config, but environment variable "
+            "VLLM_ASCEND_ENABLE_NZ requests 1. additional_config takes precedence; unset VLLM_ASCEND_ENABLE_NZ "
+            "to silence this warning, because it will be removed in the next release."
+        )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.warning_once")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_migrated_config_quiet_when_env_agrees(self, mock_fix_incompatible_config, mock_warning_once):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"weight_nz_mode": 1}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}, clear=True):
+            init_ascend_config(test_vllm_config)
+
+        conflict_logs = [
+            call.args[0] for call in mock_warning_once.call_args_list if "takes precedence" in call.args[0]
+        ]
+        self.assertEqual(conflict_logs, [])
+
+    @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True)
     def test_enable_flashcomm1_config_overrides_disabled_env(self, mock_fix_incompatible_config):

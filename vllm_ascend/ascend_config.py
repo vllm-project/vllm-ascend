@@ -332,6 +332,15 @@ class AscendConfig:
         if config_key in additional_config:
             value = additional_config[config_key]
             logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
+            # A half-finished migration is easy to miss: the env var is still
+            # exported somewhere (image, launch script) but silently loses to
+            # additional_config, so say which one won instead of dropping it.
+            if env_key in os.environ and value != env_value:
+                logger.warning_once(
+                    f"AscendConfig.{config_key} is set to {value} by additional_config, but environment variable "
+                    f"{env_key} requests {env_value}. additional_config takes precedence; unset {env_key} to "
+                    "silence this warning, because it will be removed in the next release."
+                )
             return value
         if env_key in os.environ:
             logger.info_once(
