@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from tests.ut.sample.custom_op_utils import require_categorical_sampling_operator
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 
 DEVICE = "npu"
@@ -648,6 +649,10 @@ class TestGumbelSampling:
         torch.testing.assert_close(cache, logits, rtol=0, atol=0)
         assert sampled.item() == vocab_size - 1
 
+    @pytest.mark.skipif(
+        not vllm_version_is("0.26.0"),
+        reason="The post-v0.26 vLLM main logits-cache contract requires a separate main2main adaptation.",
+    )
     def test_speculator_cache_drives_rejection_sampling(self):
         """The speculator wrapper fills draft logits consumed by rejection sampling."""
         from vllm.v1.worker.gpu.spec_decode import rejection_sampler_utils
