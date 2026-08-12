@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export ASCEND_LAUNCH_BLOCKING=1
+
 enable_coverage=false
 if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
