@@ -20,6 +20,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
 from ..utils import weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -239,6 +241,19 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
+        # In async scheduling or multi-threaded (MT) scenarios, it is possible that
+        # the CPU's record event (from update_attn_params) for the iteration i completes
+        # before the grph replay of iteration i-1.
+        # To ensure proper ordering, we must call synchronize here before replaying,
+        # so that update_attn_params only executes after the previous graph replay has fully completed.
+        # If we do not in main model and in full-graph mode when using merge-eagle-graph,
+        # we do not need to synchronize.
+        # When enable_enpu is on, model_runner orders update vs replay; skip here.
+        # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+        if not self.enable_enpu and need_sync:
+            torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
 
