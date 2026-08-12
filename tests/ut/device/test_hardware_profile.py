@@ -31,6 +31,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
         HardwareCapability.NPUGRAPH_EX,
+        HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
@@ -56,8 +57,12 @@ _EXPECTED_CAPABILITIES = {
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+            HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
+            HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
+            HardwareCapability.DSA_O_PROJ_TP,
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+            HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FP8_ATTENTION,
             HardwareCapability.LOCAL_KV_COMM_RESOURCE,
             HardwareCapability.LORA_CUSTOM_OPS,
@@ -66,6 +71,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.TRITON_BATCH_MEMCPY,
+            HardwareCapability.UNRESTRICTED_MLAPO,
         }
     ),
 }

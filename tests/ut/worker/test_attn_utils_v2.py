@@ -23,10 +23,11 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSASWABackend,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -280,8 +281,8 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
 ):
     monkeypatch.setattr(
         dsa_v1,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
 
     assert AscendDSAC4Backend.get_supported_kernel_block_sizes() == [128, 256, 512]
