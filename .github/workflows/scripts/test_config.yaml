@@ -330,6 +330,7 @@
 - name: models_minimax_m2
   optional: false
   # Run only on PRs tagged with both `ready` (job-level gate) and `mrv2`.
+  # Callers that do not pass --pr-labels (e.g. nightly/schedule) are not gated.
   required_pr_labels: [mrv2]
   source_file_dependencies:
     - vllm_ascend/patch/worker/patch_minimax_m2.py
