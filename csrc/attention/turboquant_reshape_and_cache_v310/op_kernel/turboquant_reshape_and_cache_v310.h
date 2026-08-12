@@ -35,6 +35,13 @@ using namespace TurboQuant;
 
 constexpr int32_t kNzC0 = 16;        // fp16 NZ tile on 310P
 constexpr int32_t kBufferNum = 1;    // single-buffered; the vector work dominates
+/*
+ * Norm staging block: 16 halves = 32B, the smallest aligned GM write. A token's
+ * numKvHeads norms always fall inside ONE such block (index = slot*numKvHeads + h,
+ * numKvHeads <= 16), so one atomic-add DataCopy per plane per token replaces the
+ * racy per-head scalar stores.
+ */
+constexpr int32_t kNrmBlk = 16;
 
 struct TQWriteParams {
     GM_ADDR key;
@@ -68,6 +75,8 @@ public:
 
         pipe->InitBuffer(inQue_, kBufferNum, d * sizeof(half));
         pipe->InitBuffer(vecBuf_, d * sizeof(float));
+        pipe->InitBuffer(kNrmStgBuf_, kNrmBlk * sizeof(half));   // atomic norm staging
+        pipe->InitBuffer(vNrmStgBuf_, kNrmBlk * sizeof(half));
         pipe->InitBuffer(tmpBuf_, d * sizeof(float));
         pipe->InitBuffer(codeBuf_, d * sizeof(int32_t));
         pipe->InitBuffer(byteBuf_, TQTraits<BITS>::PackedBytes(d));
@@ -101,10 +110,49 @@ public:
             if (slot < 0) {
                 continue;  // padded / masked token
             }
+            /*
+             * NORM WRITE -- 64B CACHE-LINE RACE.
+             * A norm record is numKvHeads halves = 8 BYTES per slot, so 8 slots
+             * share a 64B line. The old code did a scalar 2-byte
+             * normPlane.SetValue() per (slot, head); a sub-line store is a
+             * read-modify-write, so two cores writing different slots in one line
+             * lose each other's updates. The core split rounds tokensPerCore to
+             * whole lines, which only guarantees line ownership when slot order
+             * == token index order. Measured: contiguous slots CLEAN, one-slot-
+             * per-line CLEAN, permuted dense 184/512 norms WRONG. vLLM block
+             * managers hand out arbitrary slots, so production hits this.
+             *
+             * Fix: stage a whole 32B block (16 halves) with ZEROS in the lanes
+             * this token does not own, then DataCopy it with atomic add. Cores
+             * sharing a block now add zero to each other's lanes instead of
+             * clobbering them, so the result is slot-order independent.
+             * The norm planes are at::zeros, so the accumulate starts from 0.
+             * (Assumes slot_mapping has no duplicate slots within one call --
+             * true for vLLM; a duplicate would sum rather than overwrite.)
+             */
+            LocalTensor<half> kStage = kNrmStgBuf_.Get<half>();
+            LocalTensor<half> vStage = vNrmStgBuf_.Get<half>();
+            Duplicate(kStage, static_cast<half>(0.0f), kNrmBlk);
+            Duplicate(vStage, static_cast<half>(0.0f), kNrmBlk);
+            PipeBarrier<PIPE_V>();
+            // all of a token's norms live in ONE 32B block: index = slot*nkv + h
+            const uint64_t nIdx = static_cast<uint64_t>(slot) * t_->numKvHeads;
+            const uint64_t nBase = (nIdx / kNrmBlk) * kNrmBlk;
+            const uint32_t nOff = static_cast<uint32_t>(nIdx - nBase);
             for (uint32_t h = 0; h < t_->numKvHeads; ++h) {
-                HandleVector(keyGm_, kCacheGm_, kNormGm_, tok, h, slot);
-                HandleVector(valGm_, vCacheGm_, vNormGm_, tok, h, slot);
+                const float kn = HandleVector(keyGm_, kCacheGm_, tok, h, slot);
+                const float vn = HandleVector(valGm_, vCacheGm_, tok, h, slot);
+                kStage.SetValue(nOff + h, static_cast<half>(kn));
+                vStage.SetValue(nOff + h, static_cast<half>(vn));
             }
+            SetFlag<HardEvent::S_MTE3>(EVENT_ID3);
+            WaitFlag<HardEvent::S_MTE3>(EVENT_ID3);
+            SetAtomicAdd<half>();
+            DataCopy(kNormGm_[nBase], kStage, kNrmBlk);
+            DataCopy(vNormGm_[nBase], vStage, kNrmBlk);
+            SetAtomicNone();
+            SetFlag<HardEvent::MTE3_V>(EVENT_ID4);   // next token re-Duplicates the stage
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID4);
         }
     }
 
@@ -114,9 +162,8 @@ private:
      * pack -> scatter. The norm is stored separately, so the packed plane keeps
      * its exact NZ tile alignment.
      */
-    __aicore__ inline void HandleVector(const GlobalTensor<half> &src, const GlobalTensor<half> &cache,
-                                        GlobalTensor<half> &normPlane, uint32_t tok, uint32_t h,
-                                        int32_t slot)
+    __aicore__ inline float HandleVector(const GlobalTensor<half> &src, const GlobalTensor<half> &cache,
+                                         uint32_t tok, uint32_t h, int32_t slot)
     {
         const uint32_t d = t_->headDim;
         LocalTensor<half> in = inQue_.AllocTensor<half>();
@@ -175,7 +222,7 @@ private:
         PipeBarrier<PIPE_V>();
 
         ScatterNz(cache, bytes, h, slot);
-        normPlane.SetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + h, static_cast<half>(nrm));
+        return nrm;   // caller batches the norms into one atomic 32B block
     }
 
     /*
@@ -206,7 +253,8 @@ private:
     GlobalTensor<int32_t> slotGm_;
     GlobalTensor<float> signGm_, cbGm_;
     TQue<QuePosition::VECIN, kBufferNum> inQue_;
-    TBuf<TPosition::VECCALC> vecBuf_, tmpBuf_, codeBuf_, byteBuf_, signBuf_, cbBuf_,
+    TBuf<TPosition::VECCALC> kNrmStgBuf_, vNrmStgBuf_,
+        vecBuf_, tmpBuf_, codeBuf_, byteBuf_, signBuf_, cbBuf_,
         pkHBuf_, pkF0Buf_, pkF1Buf_;
     LocalTensor<float> signs_, cb_;
     float invSqrtLen_{1.0f};
