@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from functools import lru_cache
 from importlib import import_module
 
 import torch
@@ -142,30 +143,6 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
     )
 
 
-def zero_experts_compute(
-    expert_indices: torch.Tensor,
-    expert_scales: torch.Tensor,
-    num_experts: int,
-    zero_expert_type: str,
-    hidden_states: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if zero_expert_type == "identity":
-        zero_expert_mask = expert_indices < num_experts
-        zero_expert_scales = expert_scales.clone()
-        zero_expert_scales = torch.where(zero_expert_mask, 0.0, zero_expert_scales)
-
-        hidden_states = hidden_states.unsqueeze(1)
-        zero_expert_scales = zero_expert_scales.unsqueeze(2)
-        result = hidden_states * zero_expert_scales
-        result = result.sum(dim=1)
-
-    normal_expert_mask = expert_indices >= num_experts
-    expert_indices = torch.where(normal_expert_mask, 0, expert_indices)
-    expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
-
-    return expert_indices, expert_scales, result
-
-
 def get_moe_num_logical_experts(
     layer: torch.nn.Module,
     num_experts: int,
@@ -178,3 +155,11 @@ def get_moe_num_logical_experts(
         return int(num_logical_experts)
 
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
+
+
+@lru_cache(maxsize=1)
+def enable_fusion_gmmswigluquant():
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    ascend_config = get_ascend_config()
+    return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant

@@ -11,18 +11,15 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
 from vllm_ascend.ops.fused_moe.moe_mlp import (
     cumsum_group_list,
     quant_apply_mlp,
     unified_apply_mlp,
     unquant_apply_mlp,
 )
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEMlpComputeInput,
-    MoEQuantParams,
-    MoEWeights,
-)
-from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
@@ -194,6 +191,69 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 self.assertEqual(quant_kwargs["weight_quant_type"], mxfp_dtype)
                 self.assertFalse(quant_kwargs["use_bf16"])
                 mock_unquant.assert_not_called()
+
+    def test_active_quantized_lora_uses_registered_backend(self):
+        expected = (torch.randn(2, 8), None)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones(1, 8, 16, dtype=torch.int8)],
+                w2=[torch.ones(1, 8, 8, dtype=torch.int8)],
+                w1_scale=[torch.ones(1, 16)],
+                w2_scale=[torch.ones(1, 8)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=True,
+            expanded_row_idx=torch.tensor([0, 1], dtype=torch.int32),
+            topk_ids=torch.tensor([[0], [0]], dtype=torch.int32),
+            lora_context=SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)),
+        )
+
+        with (
+            patch(
+                "vllm_ascend.lora.quant_moe.quant_apply_mlp_with_moe_lora",
+                return_value=expected,
+            ) as mock_lora,
+            patch(f"{MOE_MLP}.quant_apply_mlp") as mock_quant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        mock_lora.assert_called_once_with(mlp_compute_input=mlp_compute_input)
+        mock_quant.assert_not_called()
+
+    def test_base_only_quantized_lora_context_keeps_existing_path(self):
+        expected = (torch.randn(2, 8), None)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.ones(2, 8, dtype=torch.int8),
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=torch.ones(2),
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones(1, 8, 16, dtype=torch.int8)],
+                w2=[torch.ones(1, 8, 8, dtype=torch.int8)],
+                w1_scale=[torch.ones(1, 16)],
+                w2_scale=[torch.ones(1, 8)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=True,
+            lora_context=SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True)),
+        )
+
+        with (
+            patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch("vllm_ascend.lora.quant_moe.quant_apply_mlp_with_moe_lora") as mock_lora,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        mock_quant.assert_called_once()
+        mock_lora.assert_not_called()
 
     def test_request_quant_path_passes_w4a8_per_channel_flag(self):
         hidden_states = torch.randn(2, 8)

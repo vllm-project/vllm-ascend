@@ -16,6 +16,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -39,7 +40,10 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark probabilistic draft sampling is not supported on the v1 "
                 "model runner; use greedy (the default) instead."
             )
-        self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
+        if vllm_version_is("0.26.0"):
+            self.sample_from_anchor = not getattr(self.draft_model_config.hf_config, "dspark_bonus_anchor", False)
+        else:
+            self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
         else:
@@ -433,8 +437,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + self.num_query_per_req
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
-        # Currently, attention causality across draft layers are uniform.
-        cad.causal = self.model.get_draft_attn_causal()[0]
+        if hasattr(self.model, "get_draft_attn_causal"):
+            # Currently, attention causality across draft layers are uniform.
+            cad.causal = self.model.get_draft_attn_causal()[0]
+        else:
+            cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 

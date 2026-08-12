@@ -25,7 +25,7 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 
 from .base import (
@@ -199,7 +199,6 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                log2phy=layer.log2phy,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
                 mxfp_act_quant_type=torch_npu.float4_e2m1fn_x2,
@@ -209,9 +208,6 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.uint8]),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
             )
         )
 

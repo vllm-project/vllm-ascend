@@ -178,7 +178,7 @@ def test_hccl_weight_transfer_updates_server_weights():
         "--load-format",
         "dummy",
         "--weight-transfer-config",
-        '{"backend": "nccl"}',
+        '{"backend": "hccl"}',
         "--tensor-parallel-size",
         str(INFERENCE_WORLD_SIZE),
         "--max-model-len",

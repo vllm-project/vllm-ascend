@@ -68,7 +68,6 @@ env_decode: &env_decode
   <<: *env_common
   VLLM_ASCEND_ENABLE_MLAPO: "1"
   HCCL_BUFFSIZE: "800"
-  ASCEND_BUFFER_POOL: "4:8"
 
 templates:
   - node_index: 0
