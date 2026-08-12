@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+import torch_npu._inductor  # noqa: F401  # registers the NPU inductor backend
 from torch._inductor import config as inductor_config
 from vllm.forward_context import ForwardContext, override_forward_context
 

@@ -1,6 +1,8 @@
 """Regression tests for SFA PD transfer into SparseKVOffloadManager."""
 
 import asyncio
+import os
+import sys
 import threading
 from concurrent.futures import Future
 from types import SimpleNamespace
@@ -11,6 +13,15 @@ import pytest
 
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
+
+# The SFA PD RD2H examples live under ``examples/`` (a namespace package with no
+# __init__.py). pytest only inserts the rootdir on sys.path when it is also the
+# current directory; running from another cwd leaves ``examples`` unresolvable
+# and fails collection. Add the repo root explicitly so collection is
+# cwd-independent.
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,

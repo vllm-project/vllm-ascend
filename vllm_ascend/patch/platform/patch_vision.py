@@ -22,10 +22,12 @@
 # passes eps=0.0 it works fine upstream, but fails on vllm-ascend with
 # "batch_norm eps must be positive" on Ascend. This patch replaces eps to avoid
 # the error.
+#
+# Upstream main later replaced the F.batch_norm call with a direct per-channel
+# affine transform, so the eps issue is gone there. The patched forward mirrors
+# that new implementation to keep this module version-safe.
 
 import contextlib
-
-import torch
 
 
 def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
@@ -36,17 +38,12 @@ def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
     patches, size = grid_thw.shape
     patch_size = size // self.channel
 
-    grid_thw = grid_thw.view(patches, self.channel, patch_size)
-    grid_thw = torch.nn.functional.batch_norm(
-        grid_thw.to(self.dtype),
-        running_mean=self.running_mean,
-        running_var=self.running_var,
-        weight=self.weight,
-        bias=self.bias,
-        training=False,
-        eps=1e-5,
-    )
-    return grid_thw.view(patches, size).to(visual_dtype)
+    # Direct per-channel affine transform (upstream main's implementation).
+    # Equivalent to the old F.batch_norm(..., eps=0.0) but without the eps>0
+    # requirement that breaks on the bundled PyTorch 2.10.
+    x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
+    x = x * self.weight.view(1, self.channel, 1) + self.bias.view(1, self.channel, 1)
+    return x.view(patches, size).to(visual_dtype)
 
 
 def install_patch():

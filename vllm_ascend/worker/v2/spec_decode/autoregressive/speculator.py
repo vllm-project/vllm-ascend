@@ -233,6 +233,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.on_prefill_begin(self.max_num_reqs)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
             self.model_state,
@@ -242,12 +243,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
+        self.on_prefill_end(self.max_num_reqs)
 
         if self.num_speculative_steps == 1:
             return
 
         # Capture all decode draft generation steps as a single graph.
         assert self.decode_cudagraph_manager is not None
+        self.on_multi_step_decode_begin(self.max_num_reqs)
         with build_attn_metadata_wrapper():
             self.decode_cudagraph_manager.capture(
                 self._multi_step_decode,
@@ -258,6 +261,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
             )
+        self.on_multi_step_decode_end(self.max_num_reqs)
 
     @torch.inference_mode()
     def _run_model(

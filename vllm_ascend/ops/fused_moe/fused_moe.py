@@ -189,13 +189,23 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
+            # main: upstream models always pass router_logits=hidden_states and
+            # apply the gate inside MoERunner._forward_impl. Mirror that here
+            # (v0.26.0 models applied the gate themselves when not internal).
+            if not vllm_version_is("0.26.0") and self.gate is not None:
+                if self.is_internal_router:
+                    hidden_states_fp32 = hidden_states.float()
+                    router_logits = F.linear(hidden_states_fp32, self.gate.weight_fp32)
+                else:
+                    router_logits, _ = self.gate(hidden_states)
+
             if self.ascend_shared_experts is None:
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
-            if self.is_internal_router:
+            if self.is_internal_router and vllm_version_is("0.26.0"):
                 gate = self.gate
                 assert gate is not None
                 # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
