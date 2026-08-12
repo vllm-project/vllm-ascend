@@ -283,7 +283,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
 
         # check if quant config exist
-        from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
+        from vllm_ascend.models.llama_eagle3 import get_rotation_path
 
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
 
