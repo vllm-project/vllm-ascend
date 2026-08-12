@@ -23,7 +23,6 @@ def _apply_attn_res_kernel(
     EPS: tl.constexpr,
     NUM_CORES: tl.constexpr,
     NB: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
 ):
     block_size = (N - 1) // NUM_CORES + 1
     pid = tl.program_id(0)
@@ -32,12 +31,11 @@ def _apply_attn_res_kernel(
         return
     tok1 = tl.minimum(tok0 + block_size, N)
 
-    cols = tl.arange(0, BLOCK_SIZE)
-    mask = cols < H
+    cols = tl.arange(0, H)
     s_idx = tl.arange(0, NB)
 
-    norm_w = tl.load(norm_w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-    proj_w = tl.load(proj_w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    norm_w = tl.load(norm_w_ptr + cols).to(tl.float32)
+    proj_w = tl.load(proj_w_ptr + cols).to(tl.float32)
     w = norm_w * proj_w
 
     br_stride = B * H
@@ -46,13 +44,9 @@ def _apply_attn_res_kernel(
         scores = tl.full([NB], -float("inf"), dtype=tl.float32)
         for s in range(B + 1):
             if s < B:
-                v = tl.load(
-                    block_residual_ptr + tok * br_stride + s * H + cols,
-                    mask=mask,
-                    other=0.0,
-                ).to(tl.float32)
+                v = tl.load(block_residual_ptr + tok * br_stride + s * H + cols).to(tl.float32)
             else:
-                v = tl.load(prefix_sum_ptr + tok * H + cols, mask=mask, other=0.0).to(tl.float32)
+                v = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
             ms = tl.sum(v * v) / H
             rstd = tl.rsqrt(ms + EPS)
             k = v * rstd
@@ -62,20 +56,16 @@ def _apply_attn_res_kernel(
         exp_scores = tl.exp(scores - scores_max)
         weights = exp_scores / tl.sum(exp_scores)
 
-        out = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        out = tl.zeros([H], dtype=tl.float32)
         for s in range(B + 1):
             if s < B:
-                v = tl.load(
-                    block_residual_ptr + tok * br_stride + s * H + cols,
-                    mask=mask,
-                    other=0.0,
-                ).to(tl.float32)
+                v = tl.load(block_residual_ptr + tok * br_stride + s * H + cols).to(tl.float32)
             else:
-                v = tl.load(prefix_sum_ptr + tok * H + cols, mask=mask, other=0.0).to(tl.float32)
+                v = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
             w_s = tl.sum(tl.where(s_idx == s, weights, 0.0))
             out += w_s * v
 
-        tl.store(out_ptr + tok * H + cols, out.to(out_ptr.dtype.element_ty), mask=mask)
+        tl.store(out_ptr + tok * H + cols, out.to(out_ptr.dtype.element_ty))
 
 
 def apply_attn_res(
@@ -97,7 +87,6 @@ def apply_attn_res(
         device=prefix_sum.device,
     )
     num_streams = triton.next_power_of_2(num_blocks + 1)
-    block_size = triton.next_power_of_2(hidden_size)
     init_device_properties_triton()
     num_vectorcore = get_vectorcore_num()
     _apply_attn_res_kernel[(num_vectorcore,)](
@@ -112,7 +101,6 @@ def apply_attn_res(
         EPS=eps,
         NUM_CORES=num_vectorcore,
         NB=num_streams,
-        BLOCK_SIZE=block_size,
         multibuffer=True,
     )
     return out
