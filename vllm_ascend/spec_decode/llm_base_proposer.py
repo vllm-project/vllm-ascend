@@ -635,8 +635,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     extra_attn_metadata_args: dict = {}
                     if self.use_compress:
                         extra_attn_metadata_args.update(
-                            prefill_ratio_to_sas_metadata=dict(),
-                            decode_ratio_to_sas_metadata=dict(),
                             common_ratio_to_sas_metadata=dict(),
                             block_size=kv_cache_spec.block_size,
                         )
@@ -1711,8 +1709,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         extra_attn_metadata_args = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
-                prefill_ratio_to_sas_metadata=dict(),
-                decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
@@ -2159,8 +2155,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
                 extra_attn_metadata_args = dict(
-                    prefill_ratio_to_sas_metadata=dict(),
-                    decode_ratio_to_sas_metadata=dict(),
                     common_ratio_to_sas_metadata=dict(),
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
