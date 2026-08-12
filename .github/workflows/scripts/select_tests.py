@@ -847,6 +847,7 @@ def main():
         help="List of explicit e2e test paths (files or directories) to run. "
         "Bypasses module matching and routes each path to the appropriate runner. "
         "Use this for the /e2e slash command to run a specific subset of tests. "
+        "Note: this explicit path bypasses required_pr_labels label gating. "
         "Supports ``::nodeid`` suffix (e.g. ``test_foo.py::TestClass::test_method``) "
         "to run a single test method.",
     )
