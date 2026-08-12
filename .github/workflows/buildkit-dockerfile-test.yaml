@@ -77,6 +77,7 @@ jobs:
           push: true
           tags: quay.io/wjunlu/vllm-ascend-daily:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
           build-args: |
+            CANN_QUAY_URL=swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann
             APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
             PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
             PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
