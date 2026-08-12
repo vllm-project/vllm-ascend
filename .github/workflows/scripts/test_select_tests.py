@@ -844,6 +844,58 @@ def test_pr_labels_gate_modules_via_modules_flag(tmp_path, monkeypatch, capsys):
     assert not any("test_gated.py" in t for t in selected)
 
 
+def test_pr_labels_gate_modules_nodeid_targets(tmp_path, monkeypatch, capsys):
+    """Nodeid-style module test entries must still be gated by file path."""
+    test_root = tmp_path / "tests"
+    e2e_dir = test_root / "e2e" / "pull_request" / "four_card"
+    e2e_dir.mkdir(parents=True)
+    gated_test = e2e_dir / "test_gated.py"
+    gated_test.write_text("")
+
+    config = [
+        {
+            "name": "gated",
+            "optional": False,
+            "required_pr_labels": ["mrv2"],
+            "source_file_dependencies": ["src/gated.py"],
+            "tests": ["tests/e2e/pull_request/four_card/test_gated.py::test_case"],
+        },
+    ]
+    config_path = tmp_path / "config.yaml"
+    runner_mapping = {"tests/e2e/pull_request/four_card": {"default": "a3_x4"}}
+    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
+    runner_file = tmp_path / "runner_label.json"
+    runner_file.write_text(json.dumps({"a3-runner-4": {"chip": "a3", "npu_num": 4}}))
+    monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)
+    monkeypatch.chdir(tmp_path)
+
+    def run(labels):
+        capsys.readouterr()
+        argv = [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "tests/e2e/pull_request/four_card/test_gated.py",
+        ]
+        if labels is not None:
+            argv += ["--pr-labels", labels]
+        monkeypatch.setattr(sys, "argv", argv)
+        select_tests.main()
+        out = capsys.readouterr().out
+        groups_line = next(line for line in out.splitlines() if line.startswith("test_groups="))
+        test_groups = json.loads(groups_line.removeprefix("test_groups="))
+        return {t for group in test_groups for t in group["tests"].split()}
+
+    # Without mrv2 the nodeid target is dropped via its file path.
+    selected = run(labels="ready")
+    assert not any("test_gated.py" in t for t in selected)
+
+    # With mrv2 the nodeid target is selected.
+    selected = run(labels="ready,mrv2")
+    assert any("test_gated.py" in t for t in selected)
+
+
 def _write_two_doc_config(path, modules, meta):
     """Write a two-document YAML config (modules + meta) for select_tests.py."""
     path.write_text(yaml.safe_dump(modules) + "---\n" + yaml.safe_dump(meta))

@@ -296,7 +296,7 @@ def _filter_label_gated_modules(
         required = set(_as_base_list(module.get("required_pr_labels", [])))
         if required and not required.issubset(labels):
             for target in module.get("tests", []):
-                gated_targets.add(target.rstrip("/"))
+                gated_targets.add(_pytest_node_file_path(target).rstrip("/"))
             continue
         active.append(module)
     return active, gated_targets
