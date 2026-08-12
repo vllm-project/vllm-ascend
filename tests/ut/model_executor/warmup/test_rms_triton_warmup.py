@@ -16,10 +16,13 @@ def test_triton_rms_warmup():
     fake_module = SimpleNamespace(triton_q_rms=mock_triton_q_rms)
     num_vectorcore = 4
 
-    with patch.object(rw, "HAS_TRITON", True), patch.object(rw, "_model_uses_triton_q_rms", return_value=True):
-        with patch.object(rw, "get_vectorcore_num", return_value=num_vectorcore):
-            with patch.dict("sys.modules", {"vllm_ascend.ops.triton.rms_norm": fake_module}):
-                rw.triton_rms_warmup(worker)
+    with (
+        patch.object(rw, "HAS_TRITON", True),
+        patch.object(rw, "_model_uses_triton_q_rms", return_value=True),
+        patch.object(rw, "get_vectorcore_num", return_value=num_vectorcore),
+        patch.dict("sys.modules", {"vllm_ascend.ops.triton.rms_norm": fake_module}),
+    ):
+        rw.triton_rms_warmup(worker)
 
     assert mock_triton_q_rms.call_count == rw._ROW_BLOCK_SIZE
     q, eps = mock_triton_q_rms.call_args_list[0][0]
