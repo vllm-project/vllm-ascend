@@ -282,11 +282,11 @@ class NPUWorker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _check_nz_disabled(self) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        if get_ascend_config().weight_nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter "
                 "precision issues in the RL scenarios. Please set "
-                "VLLM_ASCEND_ENABLE_NZ=0."
+                "weight_nz_mode=0 via --additional-config."
             )
 
     def start_weight_update(self) -> None:

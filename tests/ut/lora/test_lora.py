@@ -7,6 +7,7 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
+    _assert_ascend_moe_lora_supported,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     has_lora,
@@ -121,3 +122,21 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [], 2, 100)
     assert wrapper.no_lora is expected_no_lora
+
+
+def test_moe_lora_guard_reads_additional_config() -> None:
+    # additional_config disables fused MC2, so the guard must let LoRA through
+    # even when the deprecated env var is still set to 1.
+    base_layer = SimpleNamespace(dynamic_eplb=False, _shared_experts=None)
+
+    with (
+        patch("vllm_ascend.lora.fused_moe.get_ascend_config") as mock_config,
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_FUSED_MC2", 1),
+    ):
+        mock_config.return_value.enable_fused_mc2 = 0
+        _assert_ascend_moe_lora_supported(base_layer)
+
+    with patch("vllm_ascend.lora.fused_moe.get_ascend_config") as mock_config:
+        mock_config.return_value.enable_fused_mc2 = 1
+        with pytest.raises(AssertionError, match="FusedMC2"):
+            _assert_ascend_moe_lora_supported(base_layer)
