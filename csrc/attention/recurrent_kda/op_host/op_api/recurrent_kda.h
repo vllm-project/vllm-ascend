@@ -12,20 +12,22 @@
 #include <array>
 
 namespace l0op {
-const std::array<const aclTensor *, 2> RecurrentKda(
+const std::array<const aclTensor *, 3> RecurrentKda(
     const aclTensor *query,
     const aclTensor *key,
     const aclTensor *value,
     const aclTensor *gate,
     const aclTensor *beta,
-    aclTensor *stateRef,
-    const aclTensor *cuSeqlens,
+    aclTensor *initialStateRef,
+    const aclTensor *cuSeqlensOptional,
     const aclTensor *ssmStateIndicesOptional,
     const aclTensor *aLogOptional,
     const aclTensor *dtBiasOptional,
     const aclTensor *numAcceptedTokensOptional,
     const char *layout,
     double scale,
+    bool outputFinalState,
+    bool inplaceFinalState,
     bool useQkL2normInKernel,
     bool useGateInKernel,
     bool useBetaSigmoidInKernel,
@@ -33,7 +35,8 @@ const std::array<const aclTensor *, 2> RecurrentKda(
     bool safeGate,
     double lowerBound,
     bool stateVFirst,
-    const aclTensor *out,
+    const aclTensor *attnOut,
+    const aclTensor *finalState,
     aclOpExecutor *executor);
 }
 
