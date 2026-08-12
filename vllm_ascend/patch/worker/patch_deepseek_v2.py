@@ -83,7 +83,7 @@ def _validate_indexshare_pp_partition(
             has_full_indexer = True
         elif normalized_type == "shared" and not has_full_indexer:
             raise ValueError(
-                "GLM-5.2 IndexShare group crosses a pipeline-parallel stage boundary: "
+                "IndexShare group crosses a pipeline-parallel stage boundary: "
                 f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
                 f"but layer {layer_id} is shared before a full Indexer exists in this stage. "
                 "Cross-PP Top-K index propagation is not supported. "
