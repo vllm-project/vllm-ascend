@@ -364,9 +364,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             or not getattr(self.rotary_emb, "is_neox_style", True)
         ):
             q, k, v = main_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            v = v.contiguous()
             q, k = self._qk_norm(q, k)
             q, k = self.rotary_emb(positions, q, k)
+            q = q.contiguous()
+            k = k.contiguous()
+            v = v.contiguous()
         else:
             q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=main_qkv.contiguous(),
@@ -768,10 +770,11 @@ class MiniMaxM3Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        v = v.contiguous()
-
         q, k = self._qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
 
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)

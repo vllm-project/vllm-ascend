@@ -380,6 +380,9 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "get_ascend_device_type() == AscendDeviceType.A5" in source
     assert 'main_qkv.device.type != "npu"' in source
     assert "1.0 + self.q_norm.weight" in source
+    assert "q = q.contiguous()" in source
+    assert "k = k.contiguous()" in source
+    assert "v = v.contiguous()" in source
 
 
 def test_a5_index_decode_uses_a5_triton_without_tp_block_sharding() -> None:

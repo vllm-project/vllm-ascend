@@ -49,7 +49,7 @@ class _IdentityRotary(nn.Module):
 class _AssertContiguousAttention(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.saw_contiguous_v = False
+        self.saw_contiguous_qkv = False
 
     def forward(
         self,
@@ -57,9 +57,12 @@ class _AssertContiguousAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> torch.Tensor:
-        self.saw_contiguous_v = v.is_contiguous()
-        if not self.saw_contiguous_v:
-            raise AssertionError(f"Expected contiguous v, got stride {v.stride()}")
+        self.saw_contiguous_qkv = all(tensor.is_contiguous() for tensor in (q, k, v))
+        if not self.saw_contiguous_qkv:
+            raise AssertionError(
+                "Expected contiguous q/k/v, got strides "
+                f"q={q.stride()}, k={k.stride()}, v={v.stride()}"
+            )
         return q + k + v
 
 
@@ -166,14 +169,14 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         self.assertEqual(kwargs["swiglu_alpha"], config.swiglu_alpha)
         self.assertEqual(kwargs["swiglu_beta"], config.swiglu_beta)
 
-    def test_attention_makes_value_states_contiguous(self) -> None:
+    def test_attention_makes_qkv_states_contiguous(self) -> None:
         attention = _make_attention()
         hidden_states = torch.zeros(3, 4)
         positions = torch.arange(3)
 
         output = attention(positions=positions, hidden_states=hidden_states)
 
-        self.assertTrue(attention.attn.saw_contiguous_v)
+        self.assertTrue(attention.attn.saw_contiguous_qkv)
         self.assertEqual(output.shape, (3, 2))
 
     def test_dense_attention_uses_small_qkv_ops(self) -> None:
