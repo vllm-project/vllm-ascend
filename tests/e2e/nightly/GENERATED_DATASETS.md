@@ -41,7 +41,7 @@ benchmarks:
       num_samples: 210
       prefix_ratio: 0.75
       prefix_num: 1
-      prewarm: true
+      warmup_prefix: true
       dp: 4
       seed: 42
     request_conf: vllm_api_stream_chat
@@ -65,7 +65,7 @@ The same benchmark mapping works in the single-node, internal-DP, and
 external-DP YAML formats because dataset resolution is shared by
 `tools/aisbench.py`.
 
-When `prewarm` is enabled, each distinct prefix is repeated `dp` times in a
+When `warmup_prefix` is enabled, each distinct prefix is repeated `dp` times in a
 prefix-only dataset. AISBench runs that dataset first with `batch_size=dp` and
 `max_out_len=1`, then runs the full dataset against the same server process.
 This mirrors the original prefix tool's behavior, but it does not guarantee

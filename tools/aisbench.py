@@ -108,7 +108,7 @@ class AisbenchRunner:
         self.exp_folder = None
         self.result_line = None
         self.prefix_dataset_path = None
-        if generated_dataset and dataset_generator.get("prewarm", False):
+        if generated_dataset and dataset_generator.get("warmup_prefix", False):
             self.prefix_dataset_path = get_prefix_dataset_path(self.dataset_path)
             self._run_prefix_warmup(dataset_generator)
         self._init_dataset_conf()
@@ -139,7 +139,7 @@ class AisbenchRunner:
             self.max_out_len = 1
             self.batch_size = dp
             logger.info(
-                "Starting prefix prewarm: dataset=%s, prefixes=%d, dp=%d",
+                "Starting prefix warmup: dataset=%s, prefixes=%d, dp=%d",
                 self.dataset_path,
                 prefix_num,
                 dp,
@@ -148,7 +148,7 @@ class AisbenchRunner:
             self._init_request_conf()
             self._run_aisbench_task()
             self._wait_for_task()
-            logger.info("Prefix prewarm completed")
+            logger.info("Prefix warmup completed")
         finally:
             self.dataset_path = original_dataset_path
             self.num_prompts = original_num_prompts

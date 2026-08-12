@@ -159,9 +159,9 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if dataset_type not in SUPPORTED_DATASET_TYPES:
         raise ValueError(f"dataset_generator.type must be one of {sorted(SUPPORTED_DATASET_TYPES)}")
 
-    prewarm = config.get("prewarm", False)
-    if not isinstance(prewarm, bool):
-        raise ValueError("dataset_generator.prewarm must be a boolean")
+    warmup_prefix = config.get("warmup_prefix", False)
+    if not isinstance(warmup_prefix, bool):
+        raise ValueError("dataset_generator.warmup_prefix must be a boolean")
 
     expanded_path = os.path.expandvars(os.path.expanduser(str(GSM8K_SOURCE_PATH)))
     resolved_path = Path(expanded_path).resolve()
@@ -177,7 +177,7 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
         "seed": int(config.get("seed", 1)),
         "prefix_ratio": float(config.get("prefix_ratio", 0.0)),
         "prefix_num": int(config.get("prefix_num", 1)),
-        "prewarm": prewarm,
+        "warmup_prefix": warmup_prefix,
         "dp": int(config.get("dp", 1)),
         "source_dataset_path": source_dataset_path,
         "source_dataset_sha256": source_dataset_sha256,
@@ -195,8 +195,8 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("dataset_generator.prefix_ratio must be in [0, 1]")
     if dataset_type == "fixed" and normalized["prefix_ratio"] != 0.0:
         raise ValueError("fixed datasets do not accept a non-zero prefix_ratio")
-    if dataset_type == "fixed" and normalized["prewarm"]:
-        raise ValueError("prewarm is only supported for prefix datasets")
+    if dataset_type == "fixed" and normalized["warmup_prefix"]:
+        raise ValueError("warmup_prefix is only supported for prefix datasets")
     if dataset_type == "prefix" and normalized["prefix_ratio"] <= 0.0:
         raise ValueError("prefix datasets require prefix_ratio > 0")
     if dataset_type == "prefix" and int(normalized["input_len"] * normalized["prefix_ratio"]) == 0:
@@ -276,13 +276,13 @@ def generate_benchmark_dataset(
     dataset_dir.parent.mkdir(parents=True, exist_ok=True)
     with filelock.FileLock(str(lock_path)):
         full_dataset_ready = _is_complete_dataset(dataset_file, normalized["num_samples"])
-        prefix_dataset_ready = not normalized["prewarm"] or _is_complete_dataset(
+        prefix_dataset_ready = not normalized["warmup_prefix"] or _is_complete_dataset(
             prefix_dataset_file,
             normalized["prefix_num"] * normalized["dp"],
         )
         if full_dataset_ready and prefix_dataset_ready:
             _ensure_empty_train_file(dataset_dir)
-            if normalized["prewarm"]:
+            if normalized["warmup_prefix"]:
                 _ensure_empty_train_file(prefix_dataset_dir)
             logger.info("Reusing generated benchmark dataset: %s", dataset_dir)
             return str(dataset_dir)
@@ -325,7 +325,7 @@ def generate_benchmark_dataset(
                 source_texts=source_texts,
                 seed=normalized["seed"],
             )
-            if normalized["prewarm"]:
+            if normalized["warmup_prefix"]:
                 prefix_samples = []
                 for index, token_ids in enumerate(prefix_token_ids):
                     filler_text = prefix_texts[index]

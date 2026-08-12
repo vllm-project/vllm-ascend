@@ -140,7 +140,7 @@ def test_generate_full_prefix_dataset(tmpdir) -> None:
     assert all(len(tokenizer.encode(question)) == 12 for question in questions)
 
 
-def test_generate_prefix_prewarm_dataset(tmpdir) -> None:
+def test_generate_prefix_warmup_dataset(tmpdir) -> None:
     tmp_path = Path(str(tmpdir))
     tokenizer = FakeTokenizer()
     config = {
@@ -149,7 +149,7 @@ def test_generate_prefix_prewarm_dataset(tmpdir) -> None:
         "num_samples": 6,
         "prefix_ratio": 0.5,
         "prefix_num": 2,
-        "prewarm": True,
+        "warmup_prefix": True,
         "dp": 3,
         "seed": 11,
     }
@@ -206,7 +206,7 @@ def test_generate_prefix_dataset_from_gsm8k_source(tmpdir) -> None:
         "num_samples": 4,
         "prefix_ratio": 0.5,
         "prefix_num": 2,
-        "prewarm": True,
+        "warmup_prefix": True,
         "dp": 2,
         "seed": 3,
     }
@@ -280,9 +280,12 @@ def test_repair_missing_train_file_in_cached_dataset(tmpdir) -> None:
         ({"type": "fixed", "input_len": 0, "num_samples": 2}, "input_len"),
         ({"type": "fixed", "input_len": 8, "num_samples": 0}, "num_samples"),
         ({"type": "fixed", "input_len": 8, "num_samples": 2, "prefix_ratio": 0.5}, "prefix_ratio"),
-        ({"type": "fixed", "input_len": 8, "num_samples": 2, "prewarm": True}, "prewarm"),
+        ({"type": "fixed", "input_len": 8, "num_samples": 2, "warmup_prefix": True}, "warmup_prefix"),
         ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 0.5, "dp": 0}, "dp"),
-        ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 0.5, "prewarm": "yes"}, "boolean"),
+        (
+            {"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 0.5, "warmup_prefix": "yes"},
+            "boolean",
+        ),
         ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 0}, "prefix_ratio"),
         ({"type": "prefix", "input_len": 2, "num_samples": 2, "prefix_ratio": 0.1}, "too small"),
         ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 1.1}, "prefix_ratio"),
