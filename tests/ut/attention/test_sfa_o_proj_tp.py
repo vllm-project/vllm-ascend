@@ -144,13 +144,15 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl._store_parallel_kv = MagicMock(return_value=(None, None, None))
         impl._get_indexcache_topk_indices = MagicMock(return_value=MagicMock())
         impl._execute_sparse_flash_attention_process = MagicMock(return_value=MagicMock())
-        impl._v_up_proj = MagicMock(return_value=MagicMock())
+        attn_output = MagicMock()
+        impl._v_up_proj = MagicMock(return_value=attn_output)
         impl.o_proj = MagicMock()
 
         output = MagicMock()
+        finalized_output = MagicMock()
         kv_cache = (MagicMock(), MagicMock())
         impl._compose_sfa_kv_cache = MagicMock(return_value=kv_cache)
-        impl._finalize_o_proj = MagicMock(return_value=output)
+        impl._finalize_o_proj = MagicMock(return_value=finalized_output)
 
         attn_metadata = MagicMock()
         attn_metadata.dcp_context = None
@@ -179,7 +181,8 @@ class TestAscendSFAOProjTPParams(TestBase):
                 output=output,
             )
 
-        self.assertIs(result, output)
+        self.assertIs(result, finalized_output)
+        impl._finalize_o_proj.assert_called_once_with(attn_output, output, True)
         record_gate.assert_called_once_with()
         save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))
         impl.o_proj.assert_not_called()
