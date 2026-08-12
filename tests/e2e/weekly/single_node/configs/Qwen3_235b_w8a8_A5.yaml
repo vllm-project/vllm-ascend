@@ -56,7 +56,7 @@ _benchmarks_perf1: &benchmarks_perf1
 
 test_cases:
   - name: "vllm_Qwen3_235B_Accuracy_FULL_Graph_GPQA"
-    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
     envs:
       TASK_QUEUE_ENABLE: "1"
       HCCL_OP_EXPANSION_MODE: "AIV"
@@ -89,7 +89,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_gpqa
   - name: "longSeq_pcpdcp_performance_0004"
-    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
     envs:
       ASCEND_LAUNCH_BLOCKING: "0"
       OMP_NUM_THREADS: "100"
