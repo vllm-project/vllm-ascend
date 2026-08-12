@@ -66,6 +66,11 @@ on:
         required: false
         default: '2026.08.03'
         type: string
+      base_image_date:
+        description: "Base image date (YYYYMMDD). 'auto' to auto-detect latest available, or specify a custom date."
+        required: false
+        default: 'auto'
+        type: string
 
 permissions:
   contents: read
@@ -187,6 +192,7 @@ jobs:
       build_type: ${{ inputs.build_type }}
       quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
       cann_version: ${{ inputs.cann_version }}
+      base_image_date: ${{ inputs.base_image_date }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
