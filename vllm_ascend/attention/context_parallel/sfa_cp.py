@@ -636,6 +636,10 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         weights = torch.softmax(lse_recv, dim=0)
         weights = torch.nan_to_num(weights, nan=0.0)
 
+        # ==== TEMP DEBUG FIX: zero-weight ranks may carry NaN local outputs;
+        # 0 * NaN would poison the merge. Neutralize NaN/Inf payloads first. ====
+        output_recv = torch.nan_to_num(output_recv, nan=0.0, posinf=0.0, neginf=0.0)
+        # ==== end TEMP DEBUG FIX ====
         output = (output_recv.to(lse_recv.dtype) * weights.unsqueeze(-1)).sum(dim=0)
         return output.movedim(token_dim - 1, 0).contiguous()
 
@@ -825,7 +829,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # ==== TEMP DEBUG (experiment B): dump DCP decode inputs on first calls ====
         global _SFA_DCP_DEBUG_COUNT
         num_actual = int(attn_metadata.num_actual_tokens) if hasattr(attn_metadata, "num_actual_tokens") else None
-        if _SFA_DCP_DEBUG_COUNT < 5:
+        if _SFA_DCP_DEBUG_COUNT < 50:
             _SFA_DCP_DEBUG_COUNT += 1
             flat = topk_indices.flatten(0, 1)  # (T, K)
             if num_actual is not None and num_actual < flat.shape[0]:
@@ -845,7 +849,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             )
         # ==== end TEMP DEBUG ====
         topk_indices = self._remap_sparse_indices(topk_indices)
-        if _SFA_DCP_DEBUG_COUNT <= 5:
+        if _SFA_DCP_DEBUG_COUNT <= 50:
             flat = topk_indices.flatten(0, 1)
             if num_actual is not None and num_actual < flat.shape[0]:
                 flat = flat[:num_actual]
@@ -879,13 +883,18 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
         # ==== TEMP DEBUG: dump local shard attention output / LSE stats per rank ====
-        if _SFA_DCP_DEBUG_COUNT <= 5:
+        if _SFA_DCP_DEBUG_COUNT <= 50:
             _sm_max = softmax_max.flatten()
             _sm_sum = softmax_sum.flatten()
             _out = sfa_output.flatten()
+            _nan_out = int(torch.isnan(_out).sum().item())
+            _nan_sum = int(torch.isnan(_sm_sum).sum().item())
+            _nan_max = int(torch.isnan(_sm_max).sum().item())
             print(
                 f"[SFA-DCP-debug rank={self.dcp_rank}] interleave={self._dcp_interleave_size} "
-                f"sfa_output[mean/absmax]={float(_out.mean().item()):.4f}/{float(_out.abs().max().item()):.4f} "
+                f"nan[out/sum/max]={_nan_out}/{_nan_sum}/{_nan_max} "
+                f"sfa_output[mean/absmax]={float(torch.nan_to_num(_out, nan=0.0).mean().item()):.4f}/"
+                f"{float(torch.nan_to_num(_out, nan=0.0).abs().max().item()):.4f} "
                 f"softmax_max[0:4]={_sm_max[:4].cpu().tolist()} softmax_sum[0:4]={_sm_sum[:4].cpu().tolist()} "
                 f"lse[0:4]={softmax_lse.flatten()[:4].cpu().tolist()}"
             )
