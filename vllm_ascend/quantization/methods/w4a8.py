@@ -278,6 +278,8 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                 if bias is not None:
                     output = output + bias
                 return output.reshape(*input_shape[:-1], output.shape[-1])
+            if isinstance(x, tuple):
+                raise TypeError("pre-quantized input requires shared-expert grouped matmul")
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
             need_unsqueeze = pertoken_scale.dim() == 2
             if need_unsqueeze:
@@ -295,6 +297,8 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             return output.unsqueeze(dim=1) if need_unsqueeze else output
 
         # Per-group INT4 weights use the weight-only quantized operator.
+        if isinstance(x, tuple):
+            raise TypeError("pre-quantized input is not supported for per-group W4A8 weights")
         return torch_npu.npu_weight_quant_batchmatmul(
             x,
             layer.weight,
