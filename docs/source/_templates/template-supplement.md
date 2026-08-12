@@ -236,7 +236,6 @@ Wrap Jinja template code with `{% raw %} ... {% endraw %}` blocks to instruct th
 
 Sphinx uses Docutils to parse Markdown and **does not include the Jinja2 template engine**, so `{{ }}` in the document body is not processed and is rendered as-is.
 
-
 ### 7.1 Background
 
 This issue **only occurs in Chinese documentation**.
