@@ -945,6 +945,62 @@ class ShortRequestFirstConfig:
             raise ValueError(f"short_request_first_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
 
 
+class PrefillAdmissionConfig:
+    """Configuration for low-bandwidth PP prefill admission throttling."""
+
+    _defaults = {
+        "enabled": False,
+        "prefill_interval": 4,
+        "decode_low_watermark": 0,
+        "max_prefill_wait_ms": 1000.0,
+        "prefill_tokens_per_pp_bubble": 512,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        user_config = user_config or {}
+        unknown = set(user_config) - set(self._defaults)
+        if unknown:
+            raise ValueError(f"Unknown prefill_admission_config keys: {sorted(unknown)}")
+
+        self.enabled = bool(user_config.get("enabled", self._defaults["enabled"]))
+        self.prefill_interval = int(user_config.get("prefill_interval", self._defaults["prefill_interval"]))
+        self.decode_low_watermark = int(
+            user_config.get("decode_low_watermark", self._defaults["decode_low_watermark"])
+        )
+        self.max_prefill_wait_ms = float(
+            user_config.get("max_prefill_wait_ms", self._defaults["max_prefill_wait_ms"])
+        )
+        self.prefill_tokens_per_pp_bubble = int(
+            user_config.get(
+                "prefill_tokens_per_pp_bubble",
+                self._defaults["prefill_tokens_per_pp_bubble"],
+            )
+        )
+        self._validate_config()
+
+    def _validate_config(self) -> None:
+        if self.prefill_interval <= 0:
+            raise ValueError(
+                "prefill_admission_config.prefill_interval must be a positive int; "
+                f"got {self.prefill_interval}"
+            )
+        if self.decode_low_watermark < 0:
+            raise ValueError(
+                "prefill_admission_config.decode_low_watermark must be a non-negative int; "
+                f"got {self.decode_low_watermark}"
+            )
+        if self.max_prefill_wait_ms <= 0:
+            raise ValueError(
+                "prefill_admission_config.max_prefill_wait_ms must be positive; "
+                f"got {self.max_prefill_wait_ms}"
+            )
+        if self.prefill_tokens_per_pp_bubble <= 0:
+            raise ValueError(
+                "prefill_admission_config.prefill_tokens_per_pp_bubble must be a positive int; "
+                f"got {self.prefill_tokens_per_pp_bubble}"
+            )
+
+
 class SchedulerConfig:
     """Configuration object for ``additional_config[\"scheduler_config\"]``."""
 
@@ -977,6 +1033,9 @@ class SchedulerConfig:
         )
         self.batch_job_sched_config = BatchJobSchedConfig(
             self._get_config_value(scheduler_config, additional_config, "batch_job_sched_config", {})
+        )
+        self.prefill_admission_config = PrefillAdmissionConfig(
+            scheduler_config.get("prefill_admission_config", {})
         )
 
     @staticmethod

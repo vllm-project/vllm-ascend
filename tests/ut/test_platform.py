@@ -65,6 +65,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
         mock_ascend_config.scheduler_config.profiling_chunk_config.enabled = False
+        mock_ascend_config.scheduler_config.prefill_admission_config.enabled = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
 
@@ -971,6 +972,82 @@ class TestNPUPlatform(TestBase):
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
+
+    def test_configure_prefill_admission_scheduler_is_shared_by_model_runners(self):
+        from vllm_ascend import platform
+
+        for use_v2_model_runner in (False, True):
+            for async_scheduling in (False, True):
+                with self.subTest(
+                    use_v2_model_runner=use_v2_model_runner,
+                    async_scheduling=async_scheduling,
+                ):
+                    vllm_config = self.mock_vllm_config()
+                    vllm_config.use_v2_model_runner = use_v2_model_runner
+                    vllm_config.parallel_config.pipeline_parallel_size = 2
+                    vllm_config.scheduler_config.enable_chunked_prefill = True
+                    vllm_config.scheduler_config.async_scheduling = async_scheduling
+                    scheduler_extension_config = self.mock_vllm_ascend_config().scheduler_config
+                    scheduler_extension_config.prefill_admission_config.enabled = True
+
+                    platform._configure_prefill_admission_scheduler(vllm_config, scheduler_extension_config)
+
+                    expected_cls = (
+                        "vllm_ascend.core.prefill_admission_scheduler.PrefillAdmissionAsyncScheduler"
+                        if async_scheduling
+                        else "vllm_ascend.core.prefill_admission_scheduler.PrefillAdmissionScheduler"
+                    )
+                    self.assertEqual(vllm_config.scheduler_config.scheduler_cls, expected_cls)
+
+    def test_configure_prefill_admission_scheduler_requires_pp_and_chunking(self):
+        from vllm_ascend import platform
+
+        scheduler_extension_config = self.mock_vllm_ascend_config().scheduler_config
+        scheduler_extension_config.prefill_admission_config.enabled = True
+        vllm_config = self.mock_vllm_config()
+        vllm_config.scheduler_config.enable_chunked_prefill = True
+
+        with pytest.raises(ValueError, match="pipeline parallelism"):
+            platform._configure_prefill_admission_scheduler(vllm_config, scheduler_extension_config)
+
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.scheduler_config.enable_chunked_prefill = False
+        with pytest.raises(ValueError, match="requires chunked prefill"):
+            platform._configure_prefill_admission_scheduler(vllm_config, scheduler_extension_config)
+
+    def test_configure_prefill_admission_scheduler_rejects_disaggregated_pd(self):
+        from vllm_ascend import platform
+
+        scheduler_extension_config = self.mock_vllm_ascend_config().scheduler_config
+        scheduler_extension_config.prefill_admission_config.enabled = True
+        vllm_config = self.mock_vllm_config()
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.scheduler_config.enable_chunked_prefill = True
+        vllm_config.kv_transfer_config = MagicMock(kv_role="kv_consumer")
+
+        with pytest.raises(ValueError, match="PD-mixed"):
+            platform._configure_prefill_admission_scheduler(vllm_config, scheduler_extension_config)
+
+    def test_configure_prefill_admission_scheduler_composes_short_request_first_async(self):
+        from vllm_ascend import platform
+
+        scheduler_extension_config = self.mock_vllm_ascend_config().scheduler_config
+        scheduler_extension_config.prefill_admission_config.enabled = True
+        scheduler_extension_config.short_request_first_config.enabled = True
+        vllm_config = self.mock_vllm_config()
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.scheduler_config.enable_chunked_prefill = True
+        vllm_config.scheduler_config.async_scheduling = True
+        vllm_config.scheduler_config.scheduler_cls = (
+            "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
+        )
+
+        platform._configure_prefill_admission_scheduler(vllm_config, scheduler_extension_config)
+
+        self.assertEqual(
+            vllm_config.scheduler_config.scheduler_cls,
+            "vllm_ascend.core.prefill_admission_scheduler.PrefillAdmissionAsyncScheduler",
+        )
 
     def test_update_block_size_for_backend_preserves_hybrid_block_size(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
