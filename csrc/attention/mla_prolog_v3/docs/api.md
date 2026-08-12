@@ -1,116 +1,122 @@
-# MlaPrologV3 API 与调用示例
+# MlaPrologV3 API and Usage Examples
 
-## 1. API 总览
+## 1. API Overview
 
-| 通路 | API/入口 | 支持情况 |
+| Path | API / Entry | Support |
 | --- | --- | --- |
-| vllm-ascend 单算子入口 | `torch.ops._C_ascend.npu_mla_prolog_v3` | 支持 |
-| aclnn | `aclnnMlaPrologV3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3WeightNz` | 支持 |
-| Ascend C `<<<>>>` | `mla_prolog_v3<<<blockDim, nullptr, stream>>>` | 支持（诊断/直调；需自备 tiling） |
+| vllm-ascend custom op | `torch.ops._C_ascend.npu_mla_prolog_v3` | Supported |
+| aclnn | `aclnnMlaPrologV3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3WeightNz` | Supported |
+| Ascend C `<<<>>>` | `mla_prolog_v3<<<blockDim, nullptr, stream>>>` | Supported (diagnostics / direct invoke; caller must provide tiling) |
 
-各入口表达同一套 MLA 前处理融合语义：下采样 → RMSNorm → 上采样 / RoPE → 写入 KV/KR Cache（及可选量化）。  
-底层算子名为 **MlaPrologV3**，权重 `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 需以 **FRACTAL_NZ** 格式传入。
+All entries implement the same fused MLA preprocess semantics: down-projection → RMSNorm → up-projection / RoPE → write KV/KR cache (with optional quantization).  
+The underlying operator name is **MlaPrologV3**. Weights `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` must be passed in **FRACTAL_NZ** format.
 
-## 2. 公共参数与约束
-
-### 2.0 形状符号
-
-| 符号 | 含义 | 典型/约束值 |
+**Platform support**
+| Platform | Arch | Notes |
 | --- | --- | --- |
-| `B` / `S` / `T` | batch / seq / 合轴 token 数（`T=B*S`） | `T≤1M`；允许部分维为 0（空 Tensor） |
-| `He` | 隐层宽度 | `{1024,2048,3072,4096,5120,6144,7168,7680,8192}` |
-| `Hcq` | Query 压缩维 | `1536` |
-| `Hckv` | KV 压缩维 | `512` |
-| `D` | Qc 头维 | `128` |
-| `Dr` | RoPE 维 | `64` |
-| `N` | Query head 数 | `[1, 128]` |
-| `Nkv` | KV head 数 | `1` |
-| `BlockNum` / `BlockSize` | PA cache 页数/页长 | `BlockSize∈[16,1024]` 且为 16 的倍数 |
+| Ascend910B / Ascend910_93 (A2/A3) | arch22 (DAV_2201) | `weight_quant_mode ∈ {0,1,2}` only; no MXFP8/FP8/HIF8 full-quant; no SplitM |
+| Ascend950 (A5) | arch35 (DAV_3510) | All quant modes in §2.3; SplitM supported where applicable |
 
-### 2.1 输入
+## 2. Common Parameters and Constraints
 
-| 名称 | 必选/可选 | Shape | Dtype | Layout | 说明 |
+### 2.0 Shape Symbols
+
+| Symbol | Meaning | Typical / constrained values |
+| --- | --- | --- |
+| `B` / `S` / `T` | batch / seq / fused token count (`T=B*S`) | `T≤1M`; some dims may be 0 (empty tensor) |
+| `He` | hidden size | `{1024,2048,3072,4096,5120,6144,7168,7680,8192}` |
+| `Hcq` | Query compression dim | `1536` |
+| `Hckv` | KV compression dim | `512` |
+| `D` | Qc head dim | `128` |
+| `Dr` | RoPE dim | `64` |
+| `N` | Query head count | `[1, 128]` |
+| `Nkv` | KV head count | `1` |
+| `BlockNum` / `BlockSize` | PA cache pages / page length | `BlockSize∈[16,1024]` and multiple of 16 |
+
+### 2.1 Inputs
+
+| Name | Required / optional | Shape | Dtype | Layout | Description |
 | --- | --- | --- | --- | --- | --- |
-| `token_x` | 必选 | 合轴 `(T,He)` 或非合轴 `(B,S,He)` | BF16 / INT8 / FP8_E4M3 / HIF8 | ND | 输入隐状态 |
-| `weight_dq` | 必选 | `(He,Hcq)` | 同量化场景 | **FRACTAL_NZ** | \(W^{DQ}\) |
-| `weight_uq_qr` | 必选 | `(Hcq,N*(D+Dr))` | 同量化场景 | **FRACTAL_NZ** | \(W^{UQ}\|W^{QR}\) |
-| `weight_uk` | 必选 | `(N,D,Hckv)` | BF16 | ND | \(W^{UK}\) |
-| `weight_dkv_kr` | 必选 | `(He,Hckv+Dr)` | 同量化场景 | **FRACTAL_NZ** | \(W^{DKV}\|W^{KR}\) |
-| `rmsnorm_gamma_cq` | 必选 | `(Hcq,)` | BF16 | ND | Cq RMSNorm \(\gamma\) |
-| `rmsnorm_gamma_ckv` | 必选 | `(Hckv,)` | BF16 | ND | Ckv RMSNorm \(\gamma\) |
-| `rope_sin` / `rope_cos` | 条件必选 | 合轴 `(T,Dr)` 或非合轴 `(B,S,Dr)`；禁用 RoPE 时传 `nullptr` | BF16 | ND | RoPE 参数；同时非空时启用，同时为空时禁用，混合 null 返回错误 |
-| `kv_cache` | 必选（可变） | 见 2.4 CacheMode | BF16 / INT8 / FP8… | ND | \(k^C\) 原地更新 |
-| `kr_cache` | 必选（可变） | 见 2.4；`ckvkr_repo_mode=1` 时可为空 | BF16 / INT8 | ND | \(k^R\) 原地更新 |
-| `cache_index` | 条件必选 | PA：`(T,)` 或 `(B,S)` 等 | INT64 | ND | PA 写 cache 槽位；取值见 2.4 |
-| `dequant_scale_x` | 条件必选 | FULL/MXFP8/FP8/HIF8 必传 | FP32 / FP8_E8M0 | ND | `token_x` 反量化 |
-| `dequant_scale_w_dq` | 条件必选 | 同上 | FP32 / FP8_E8M0 | ND | `weight_dq` 反量化 |
-| `dequant_scale_w_uq_qr` | 条件必选 | PARTIAL 及以上必传 | FP32 / FP8_E8M0 | ND | `weight_uq_qr` 反量化 |
-| `dequant_scale_w_dkv_kr` | 条件必选 | FULL 及以上必传 | FP32 / FP8_E8M0 | ND | `weight_dkv_kr` 反量化 |
-| `quant_scale_ckv` / `quant_scale_ckr` | 条件必选 | KV per-channel / per-tensor 等 | FP32 | ND | cache 量化 scale |
-| `smooth_scales_cq` | 可选 | `(Hcq,)` 等 | FP32 | ND | Cq 动态量化 smooth |
-| `actual_seq_len` | 条件必选 | `(B,)` | INT32 | ND | `PA_BLK_*` 时必传 |
-| `k_nope_clip_alpha` | 可选 | 标量/向量 | FP32 | ND | Ckv clip 缩放 |
+| `token_x` | required | fused `(T,He)` or non-fused `(B,S,He)` | BF16 / INT8 / FP8_E4M3 / HIF8 | ND | Input hidden states |
+| `weight_dq` | required | `(He,Hcq)` | per quant scenario | **FRACTAL_NZ** | \(W^{DQ}\) |
+| `weight_uq_qr` | required | `(Hcq,N*(D+Dr))` | per quant scenario | **FRACTAL_NZ** | \(W^{UQ}\|W^{QR}\) |
+| `weight_uk` | required | `(N,D,Hckv)` | BF16 | ND | \(W^{UK}\) |
+| `weight_dkv_kr` | required | `(He,Hckv+Dr)` | per quant scenario | **FRACTAL_NZ** | \(W^{DKV}\|W^{KR}\) |
+| `rmsnorm_gamma_cq` | required | `(Hcq,)` | BF16 | ND | Cq RMSNorm \(\gamma\) |
+| `rmsnorm_gamma_ckv` | required | `(Hckv,)` | BF16 | ND | Ckv RMSNorm \(\gamma\) |
+| `rope_sin` / `rope_cos` | required (may be empty) | fused `(T,Dr)` or non-fused `(B,S,Dr)`; empty when RoPE is off | BF16 | ND | RoPE tables; both non-empty enables RoPE, both empty disables; mixed empty/non-empty is invalid |
+| `kv_cache` | required (mutable) | see 2.4 CacheMode | BF16 / INT8 / FP8… | ND | \(k^C\) updated in-place |
+| `kr_cache` | required (mutable) | see 2.4; may be empty when `ckvkr_repo_mode=1` | BF16 / INT8 | ND | \(k^R\) updated in-place |
+| `cache_index` | conditionally required | PA: `(T,)` or `(B,S)`, etc. | INT64 | ND | PA write slots; values in 2.4 |
+| `dequant_scale_x` | conditionally required | required for FULL/MXFP8/FP8/HIF8 | FP32 / FP8_E8M0 | ND | `token_x` dequant scale |
+| `dequant_scale_w_dq` | conditionally required | same as above | FP32 / FP8_E8M0 | ND | `weight_dq` dequant scale |
+| `dequant_scale_w_uq_qr` | conditionally required | required for PARTIAL and above | FP32 / FP8_E8M0 | ND | `weight_uq_qr` dequant scale |
+| `dequant_scale_w_dkv_kr` | conditionally required | required for FULL and above | FP32 / FP8_E8M0 | ND | `weight_dkv_kr` dequant scale |
+| `quant_scale_ckv` / `quant_scale_ckr` | conditionally required | KV per-channel / per-tensor, etc. | FP32 | ND | cache quant scales |
+| `smooth_scales_cq` | optional | `(Hcq,)`, etc. | FP32 | ND | Cq dynamic-quant smooth |
+| `actual_seq_len` | conditionally required | `(B,)` | INT32 | ND | required for `PA_BLK_*` |
+| `k_nope_clip_alpha` | optional | scalar / vector | FP32 | ND | Ckv clip scale |
 
-### 2.2 输出
+### 2.2 Outputs
 
-| 名称 | Shape | Dtype | 说明 |
+| Name | Shape | Dtype | Description |
 | --- | --- | --- | --- |
-| `query` | 合轴 `(T,N,Hckv)` / 非合轴 `(B,S,N,Hckv)` | BF16 / INT8 / FP8… | \(q^N\) |
-| `query_rope` | 合轴 `(T,N,Dr)` / 非合轴 `(B,S,N,Dr)` | BF16 | \(q^R\) |
-| `dequant_scale_q_nope` | 全量化 + KV per-tensor 时非空，否则空 | FP32 | Query 动态量化 scale |
-| `query_norm` | `query_norm_flag=True` 时非空 | BF16 / 量化 dtype | \(c^Q\) |
-| `dequant_scale_q_norm` | `query_norm_flag` 且量化时非空 | FP32 / FP8_E8M0 | `query_norm` 反量化 scale |
+| `query` | fused `(T,N,Hckv)` / non-fused `(B,S,N,Hckv)` | BF16 / INT8 / FP8… | \(q^N\) |
+| `query_rope` | fused `(T,N,Dr)` / non-fused `(B,S,N,Dr)` | BF16 | \(q^R\) |
+| `dequant_scale_q_nope` | non-empty for full-quant + KV per-tensor; otherwise empty | FP32 | Query dynamic-quant scale |
+| `query_norm` | non-empty when `query_norm_flag=True` | BF16 / quant dtype | \(c^Q\) |
+| `dequant_scale_q_norm` | non-empty when `query_norm_flag` and quantized | FP32 / FP8_E8M0 | `query_norm` dequant scale |
 
-`kv_cache` / `kr_cache` 为可变输入：按 `cache_index` 原地写入，不作为独立 alias 输出返回。
+`kv_cache` / `kr_cache` are mutable inputs: they are written in-place by `cache_index` and are not returned as separate aliased outputs.
 
-### 2.3 属性
+### 2.3 Attributes
 
-| 名称 | 类型 | 默认值 | 取值范围 | 说明 |
+| Name | Type | Default | Range | Description |
 | --- | --- | --- | --- | --- |
 | `rmsnorm_epsilon_cq` | float | `1e-5` | `>0` | Cq RMSNorm \(\epsilon\) |
 | `rmsnorm_epsilon_ckv` | float | `1e-5` | `>0` | Ckv RMSNorm \(\epsilon\) |
-| `cache_mode` | str | `"PA_BSND"` | 见 2.4 | cache 布局 |
-| `query_norm_flag` | bool | `false` | `{false,true}` | 是否输出 `query_norm` |
-| `weight_quant_mode` | int | `0` | `{0,1,2,3,4,5}` | 权重/激活量化模式 |
-| `kv_cache_quant_mode` | int | `0` | `{0,1,2,3}` | KV cache 量化模式 |
-| `query_quant_mode` | int | `0` | `{0,1}` | Query 量化；per-tensor KV 时需为 1 |
-| `ckvkr_repo_mode` | int | `0` | `{0,1}` | 与 `quant_scale_repo_mode` 成对；pertile 必须为 1 |
-| `quant_scale_repo_mode` | int | `0` | `{0,1}` | 同上 |
-| `tile_size` | int | `128` | pertile 时必须为 `128` | per-token-per-group tile |
-| `qc_qr_scale` | float | `1.0` | 有限浮点 | Query 尺度 \(\alpha_q\) |
-| `kc_scale` | float | `1.0` | 有限浮点 | Key 尺度 \(\alpha_{kv}\) |
+| `cache_mode` | str | `"PA_BSND"` | see 2.4 | cache layout |
+| `query_norm_flag` | bool | `false` | `{false,true}` | whether to emit `query_norm` |
+| `weight_quant_mode` | int | `0` | `{0,1,2,3,4,5}` (A2/A3: `{0,1,2}` only) | weight / activation quant mode |
+| `kv_cache_quant_mode` | int | `0` | `{0,1,2,3}` | KV cache quant mode |
+| `query_quant_mode` | int | `0` | `{0,1}` | Query quant; must be `1` for KV per-tensor |
+| `ckvkr_repo_mode` | int | `0` | `{0,1}` | paired with `quant_scale_repo_mode`; must be `1` for pertile |
+| `quant_scale_repo_mode` | int | `0` | `{0,1}` | same as above |
+| `tile_size` | int | `128` | must be `128` for pertile | per-token-per-group tile |
+| `qc_qr_scale` | float | `1.0` | finite float | Query scale \(\alpha_q\) |
+| `kc_scale` | float | `1.0` | finite float | Key scale \(\alpha_{kv}\) |
 
-RoPE 开关由 `ropeSin` / `ropeCos` 的 nullity 推导：同时非空 → 开启，同时为空 → 关闭；混合 null 返回参数错误。
+RoPE enablement is derived from `ropeSin` / `ropeCos` emptiness: both non-empty → on; both empty → off; mixed empty/non-empty → parameter error. Supported on A2/A3/A5.
 
-`kv_cache` / `kr_cache` 在 Ascend 950PR/Ascend 950DT 上支持首轴非连续；除首轴外的其余轴必须连续。
+On Ascend 950PR/Ascend 950DT, `kv_cache` / `kr_cache` may be non-contiguous on the first axis; all other axes must be contiguous.
 
-#### 量化模式合法组合（`weight_quant_mode` × `kv_cache_quant_mode`）
+#### Legal quant combinations (`weight_quant_mode` × `kv_cache_quant_mode`)
 
-| wq | 含义 | 合法 kvq |
-| --- | --- | --- |
-| `0` | 非量化 | `{0}` |
-| `1` | PARTIAL（仅 `weight_uq_qr` 量化） | `{0, 2, 3}` |
-| `2` | FULL INT8 | `{0, 1, 3}` |
-| `3` | MXFP8 | `{0, 1, 3}` |
-| `4` | FP8 | `{0, 1, 3}` |
-| `5` | HIF8 | `{0, 1, 3}` |
+| wq | Meaning | Legal kvq | A2/A3 |
+| --- | --- | --- | --- |
+| `0` | non-quant | `{0}` | yes |
+| `1` | PARTIAL (`weight_uq_qr` only) | `{0, 2, 3}` | yes (`kvq∈{0,2}` typical) |
+| `2` | FULL INT8 | `{0, 1, 3}` | yes |
+| `3` | MXFP8 | `{0, 1, 3}` | **no** |
+| `4` | FP8 | `{0, 1, 3}` | **no** |
+| `5` | HIF8 | `{0, 1, 3}` | **no** |
 
-`kvq`：`0` 非量化，`1` per-tensor，`2` per-channel，`3` per-tile。
+`kvq`: `0` non-quant, `1` per-tensor, `2` per-channel, `3` per-tile.
 
 ### 2.4 CacheMode
 
-| `cache_mode` | `token_x` | `kv_cache` / `kr_cache`（非 pertile） | `cache_index` |
+| `cache_mode` | `token_x` | `kv_cache` / `kr_cache` (non-pertile) | `cache_index` |
 | --- | --- | --- | --- |
-| `PA_BSND` / `PA_NZ` | `(T,He)` | `(BlockNum,BlockSize,Nkv,Hckv/Dr)` | `(T,)`，值 ∈ `[0, BlockNum*BlockSize)` |
-| `PA_BLK_BSND` / `PA_BLK_NZ` | `(T,He)` | 同上 | block 级 index；需 `actual_seq_len` |
+| `PA_BSND` / `PA_NZ` | `(T,He)` | `(BlockNum,BlockSize,Nkv,Hckv/Dr)` | `(T,)`, values ∈ `[0, BlockNum*BlockSize)` |
+| `PA_BLK_BSND` / `PA_BLK_NZ` | `(T,He)` | same as above | block-level index; requires `actual_seq_len` |
 | `BSND` | `(B,S,He)` | `(B,S,Nkv,Hckv/Dr)` | `(B,S)` |
 | `TND` | `(T,He)` | `(T,Nkv,Hckv/Dr)` | `(T,)` |
 
-pertile（`kvq=3`）时 `ckvkr_repo_mode=quant_scale_repo_mode=1`，`kv_cache` 末维为打包 `Dtile`，`kr_cache` 为空 Tensor。
+For pertile (`kvq=3`), `ckvkr_repo_mode=quant_scale_repo_mode=1`, the last dim of `kv_cache` is packed `Dtile`, and `kr_cache` is an empty tensor.
 
 ## 3. aclnn API
 
-### 3.1 接口签名
+### 3.1 Signatures
 
 ```cpp
 aclnnStatus aclnnMlaPrologV3WeightNzGetWorkspaceSize(
@@ -138,14 +144,14 @@ aclnnStatus aclnnMlaPrologV3WeightNz(
     void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream);
 ```
 
-`GetWorkspaceSize` 完成参数校验与 executor 创建；第二段在传入 stream 上异步执行。  
-`ropeSin` / `ropeCos` 同时非空时启用 RoPE，同时为空时禁用；一个空一个非空时返回参数错误。  
-`kvCacheRef` / `krCacheRef` 同时是输入和输出。输入、输出、workspace 和 executor 必须保持有效直到 stream 完成。
+`GetWorkspaceSize` validates parameters and builds the executor; the second API runs asynchronously on the given stream.  
+`ropeSin` / `ropeCos` both non-empty enable RoPE; both empty disable RoPE; mixed empty/non-empty returns a parameter error.  
+`kvCacheRef` / `krCacheRef` are both inputs and outputs. Inputs, outputs, workspace, and executor must remain valid until the stream completes.
 
-### 3.2 调用示例
+### 3.2 Example
 
 ```cpp
-// 按 2.1/2.2 创建 aclTensor；weightDq/UqQr/DkvKr 为 FRACTAL_NZ。
+// Create aclTensors per §2.1/2.2; weightDq/UqQr/DkvKr must be FRACTAL_NZ.
 uint64_t workspaceSize = 0;
 aclOpExecutor *executor = nullptr;
 ACLNN_CHECK(aclnnMlaPrologV3WeightNzGetWorkspaceSize(
@@ -166,7 +172,7 @@ ACL_CHECK(aclrtSynchronizeStream(stream));
 
 ## 4. `torch.ops._C_ascend` API
 
-### 4.1 接口签名
+### 4.1 Signature
 
 ```python
 query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
@@ -189,21 +195,21 @@ query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
 )
 ```
 
-在 Ascend910B / Ascend910_93（A2/A3）或 Ascend950 构建并加载 `vllm_ascend_C` + 自定义 opp 后可用。  
-`rope_sin` / `rope_cos` 为必传位置参数：同时非空启用 RoPE，同时为空（`numel()==0`）禁用；不允许一空一非空（A2/A3/A5 均支持该开关）。  
-`token_x` rank=2 为合轴 `(T,He)`，rank=3 为 `(B,S,He)`。  
-`kv_cache` / `kr_cache` 原地更新；不需要的 optional 输出以空 Tensor 返回。  
-A2/A3 不支持 MXFP8/FP8/HIF8 全量化及 SplitM；`weight_quant_mode` 仅 `{0,1,2}`。
+Available after building for Ascend910B / Ascend910_93 (A2/A3) or Ascend950 and loading `vllm_ascend_C` plus the custom opp package.  
+`rope_sin` / `rope_cos` are required positional args: both non-empty enables RoPE; both empty (`numel()==0`) disables RoPE; mixed empty/non-empty is invalid (supported on A2/A3/A5).  
+`token_x` rank=2 is fused `(T,He)`; rank=3 is `(B,S,He)`.  
+`kv_cache` / `kr_cache` are updated in-place; unused optional outputs are returned as empty tensors.  
+A2/A3 do not support MXFP8/FP8/HIF8 full-quant or SplitM; `weight_quant_mode` is limited to `{0,1,2}`.
 
-NZ 权重可用 `torch_npu.npu_format_cast(w.contiguous(), 29)` 转换。
+NZ weights can be converted with `torch_npu.npu_format_cast(w.contiguous(), 29)`.
 
-### 4.2 调用示例（bf16 / PA_BSND）
+### 4.2 Example (bf16 / PA_BSND)
 
 ```python
 import torch
 import torch_npu
 
-# 需已加载 vllm_ascend_C，并 source 自定义 opp set_env.bash
+# Requires vllm_ascend_C loaded and custom opp set_env.bash sourced.
 torch_npu.npu.config.allow_internal_format = True
 t, he, n = 2, 1024, 8
 hcq, hckv, d, dr = 1536, 512, 128, 64
@@ -236,12 +242,12 @@ q_no_rope, qr_no_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
     gamma_cq, gamma_ckv, empty_rope, empty_rope, kv_cache.clone(), kr_cache.clone(),
     cache_index=cache_index, cache_mode="PA_BSND")
 torch.npu.synchronize()
-# query: [T,N,Hckv], query_rope: [T,N,Dr]；kv/kr_cache 已按 cache_index 写入
+# query: [T,N,Hckv], query_rope: [T,N,Dr]; kv/kr_cache written by cache_index
 ```
 
-## 5. Ascend C `<<<>>>` 直调
+## 5. Ascend C `<<<>>>` Direct Invoke
 
-`blockDim`、workspace 与序列化 tiling data 必须来自同一组 host tiling。参数顺序与 kernel 定义一致：
+`blockDim`, workspace, and serialized tiling data must come from the same host tiling. Argument order matches the kernel definition:
 
 ```cpp
 mla_prolog_v3<<<blockDim, nullptr, stream>>>(
@@ -255,25 +261,25 @@ mla_prolog_v3<<<blockDim, nullptr, stream>>>(
     workspace, tiling);
 ```
 
-直调通路只作 route/诊断入口；公开 Python / aclnn 负责完整校验。GM 按连续物理布局解释。
+Direct invoke is for routing / diagnostics only; public Python / aclnn paths perform full validation. GM buffers are interpreted as contiguous physical layouts.
 
-## 6. 已知限制
+## 6. Known Limitations
 
-- Torch schema 始终注册，实际可用性取决于 `csrc/build_aclnn.sh` 是否按 **Ascend910B / Ascend910_93 / Ascend950** 构建并安装了该自定义算子包。
-- `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 必须为 **FRACTAL_NZ**。
-- `Hcq=1536`，`Hckv=512`，`D=128`，`Dr=64`，`Nkv=1`；`He` 仅白名单集合；`N∈[1,128]`。
-- `weight_quant_mode` 与 `kv_cache_quant_mode` 必须落在 §2.3 合法表内。
-- pertile 要求 `ckvkr_repo_mode=quant_scale_repo_mode=1` 且 `tile_size=128`；`kr_cache` 为空。
-- KV per-tensor 时 `query_quant_mode` 必须为 `1`。
-- `PA_BLK_*` 需要 `actual_seq_len`；末项语义与合轴 `T` 一致。
-- RoPE 开关由 `rope_sin` / `rope_cos` 是否为空决定：同时非空启用，同为空（`numel()==0`）禁用。
-- B/S/T/Skv 允许为 0：空 query 时不更新 cache；Skv=0 时正常算 query 但不写 cache。
+- Torch schema is always registered; runtime availability depends on building and installing the custom opp via `csrc/build_aclnn.sh` for **Ascend910B / Ascend910_93 / Ascend950**.
+- `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` must be **FRACTAL_NZ**.
+- `Hcq=1536`, `Hckv=512`, `D=128`, `Dr=64`, `Nkv=1`; `He` must be in the whitelist; `N∈[1,128]`.
+- `weight_quant_mode` and `kv_cache_quant_mode` must match the legal table in §2.3 (A2/A3: `weight_quant_mode∈{0,1,2}` only).
+- Pertile requires `ckvkr_repo_mode=quant_scale_repo_mode=1` and `tile_size=128`; `kr_cache` must be empty.
+- For KV per-tensor, `query_quant_mode` must be `1`.
+- `PA_BLK_*` requires `actual_seq_len`; the last element must match fused `T`.
+- RoPE on/off is controlled by whether `rope_sin` / `rope_cos` are empty: both non-empty enables, both empty (`numel()==0`) disables.
+- B/S/T/Skv may be 0: empty query does not update cache; Skv=0 computes query but does not write cache.
 
-## 7. 异常与返回码
+## 7. Errors and Return Codes
 
-| 条件 | 返回码/异常 |
+| Condition | Return code / exception |
 | --- | --- |
-| 必选 tensor、workspaceSize 或 executor 为空 | `ACLNN_ERR_PARAM_NULLPTR` |
-| rank/shape/dtype/layout、量化组合或 CacheMode 非法 | `ACLNN_ERR_PARAM_INVALID` / tiling `GRAPH_FAILED` |
-| 内部 tensor 创建或 L0 调用失败 | `ACLNN_ERR_INNER_NULLPTR` |
-| torch 侧未注册算子（非 950 构建）或输入非法 | `RuntimeError` / `AttributeError` |
+| Required tensor, workspaceSize, or executor is null | `ACLNN_ERR_PARAM_NULLPTR` |
+| Illegal rank/shape/dtype/layout, quant combo, or CacheMode | `ACLNN_ERR_PARAM_INVALID` / tiling `GRAPH_FAILED` |
+| Internal tensor create or L0 call failure | `ACLNN_ERR_INNER_NULLPTR` |
+| Op not registered (package not built for the target SOC) or illegal torch inputs | `RuntimeError` / `AttributeError` |
