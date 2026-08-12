@@ -227,6 +227,20 @@ def test_npu_model_runner_uses_ascend_pcp_manager() -> None:
     assert runner.pcp_manager_cls is AscendPCPManager
 
 
+def test_initialize_kv_cache_skips_pcp_binding_when_disabled() -> None:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.pcp_manager = None
+    kv_cache_config = MagicMock()
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper"),
+        patch("vllm.v1.worker.gpu.model_runner.GPUModelRunner.initialize_kv_cache") as initialize_kv_cache,
+    ):
+        runner.initialize_kv_cache(kv_cache_config)
+
+    initialize_kv_cache.assert_called_once_with(kv_cache_config)
+
+
 def test_validate_ascend_gqa_pcp_config():
     AscendPCPManager.validate_config(
         _make_gqa_pcp_config(),
