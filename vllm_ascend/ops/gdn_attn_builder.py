@@ -51,6 +51,31 @@ def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
     return torch.argsort(tensor, stable=True)
 
 
+def _treat_single_token_prefills_with_state_as_decodes(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> CommonAttentionMetadata:
+    """Treat stateful one-token prefill tails as decode rows.
+
+    Full-graph selection is shape based, so a final one-token prompt chunk can
+    replay the same graph as an ordinary decode. Once a request has recurrent
+    state, both cases must construct identical GDN metadata. A prompt's first
+    token remains on the prefill path because it has no prior state to update.
+    """
+    is_prefilling = common_attn_metadata.is_prefilling
+    seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+    if is_prefilling is None or seq_lens_cpu is None:
+        return common_attn_metadata
+
+    query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
+    prefill_to_decode = is_prefilling & (query_lens_cpu == 1) & (seq_lens_cpu > 1)
+    if not torch.any(prefill_to_decode).item():
+        return common_attn_metadata
+
+    is_prefilling = is_prefilling.clone()
+    is_prefilling[prefill_to_decode] = False
+    return common_attn_metadata.replace(is_prefilling=is_prefilling)
+
+
 @dataclass
 class GDNChunkedPrefillMetadata:
     cu_seqlens_host: tuple[int, ...]
@@ -416,7 +441,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
-        m = common_attn_metadata
+        m = _treat_single_token_prefills_with_state_as_decodes(common_attn_metadata)
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
