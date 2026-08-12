@@ -977,25 +977,23 @@ class NPUWorker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-            # Restrict to mamba and full attn hybrid models (e.g. Qwen3.x).
-            #
-            # When eagle3 is enabled with num_speculative_tokens>1, mamba blocks may be reallocated to full blocks if
-            # the target and draft models share the same kv cache tensor (e.g. unaligned full attn layers with
-            # different num_kv_heads and head_size). In addition, for performance reasons, the current mtp/eagle path
-            # does not update seq_lens_cpu with num_rejected_tokens for step>1, since it would require d2h sync. As a
-            # result, seq_lens_cpu can become stale and some blocks will be unintentionally used.
-            #
-            # If an uncleared mamba block is later reused, the stale state combined with the incorrect seq_lens_cpu may
-            # lead to NaNs and reduced acceptance rate.
-            if (
-                kv_cache_config.needs_kv_cache_zeroing
-                and hasattr(self.model_runner, "_init_kv_zero_meta")
-                and self.vllm_config is not None
-                and self.vllm_config.speculative_config is not None
-                and self.vllm_config.speculative_config.method == "eagle3"
-                and self.vllm_config.speculative_config.num_speculative_tokens > 1
-            ):
-                self.model_runner._init_kv_zero_meta()
+        # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
+        # set, so its worker-side consumer must use the same condition. Keep the
+        # narrower Eagle3 condition for MRV1, where zeroing was introduced only
+        # for the multi-step speculative-decode reuse issue.
+        speculative_config = self.vllm_config.speculative_config
+        needs_mrv1_eagle_zeroing = (
+            speculative_config is not None
+            and speculative_config.method == "eagle3"
+            and speculative_config.num_speculative_tokens > 1
+        )
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
+            self.use_v2_model_runner or needs_mrv1_eagle_zeroing
+        )
+        # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
+        # survive sleep/wake cycles.
+        if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
+            self.model_runner._init_kv_zero_meta()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)

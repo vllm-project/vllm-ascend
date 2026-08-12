@@ -1867,7 +1867,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
                 if has_ec_transfer() and not get_ec_transfer().is_consumer:
-                    self._start_dump_data()
+                    self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
@@ -1907,7 +1907,7 @@ class NPUModelRunner(GPUModelRunner):
                     if not has_kv_transfer_group():
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-                self._start_dump_data()
+                self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 (
@@ -3650,10 +3650,10 @@ class NPUModelRunner(GPUModelRunner):
             load_model_total_time,
         )
 
-    def _start_dump_data(self) -> None:
+    def _start_dump_data(self, **kwargs) -> None:
         if self.debugger is None or self._debugger_started:
             return
-        self.debugger.start(self.model)
+        self.debugger.start(self.model, **kwargs)
         self._debugger_started = True
 
     def _finalize_dump_data(self, **kwargs) -> None:

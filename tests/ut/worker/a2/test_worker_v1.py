@@ -1382,6 +1382,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
             worker.vllm_config.kv_transfer_config = None
+            worker.use_v2_model_runner = False
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -1391,6 +1392,7 @@ class TestNPUWorker(TestBase):
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
+            mock_kv_cache_config.needs_kv_cache_zeroing = False
 
             # Test initialize_from_config
             worker.initialize_from_config(mock_kv_cache_config)
@@ -1469,15 +1471,38 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
             worker.vllm_config.kv_transfer_config = None
+            worker.use_v2_model_runner = False
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
+            mock_kv_cache_config.needs_kv_cache_zeroing = False
 
             # Test initialize_from_config
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
+    def test_initialize_from_config_initializes_kv_block_zeroer_for_mrv2_mamba(self, mock_ensure_kv_transfer):
+        """MRV2 KV-zero metadata follows the cache config without spec decode."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.speculative_config = None
+            worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.use_v2_model_runner = True
+
+            mock_kv_cache_config = MagicMock()
+            mock_kv_cache_config.needs_kv_cache_zeroing = True
+
+            worker.initialize_from_config(mock_kv_cache_config)
+
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)

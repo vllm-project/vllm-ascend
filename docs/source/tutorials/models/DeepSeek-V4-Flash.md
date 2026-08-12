@@ -266,7 +266,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         "multistream_overlap_shared_expert": true}'
     ```
 
-=== "A3 series DSpark"
+=== "A3 series with DSpark"
 
     Run the following script to execute online inference.
 
@@ -305,7 +305,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
                 "enable_static_kernel": false
             },
             "enable_cpu_binding": true,
-            "enable_dsa_cp": true,
             "enable_flashcomm1": true,
             "multistream_overlap_shared_expert": true
         }'
@@ -315,7 +314,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference. When using a DSpark model, set the speculative decoding method to `dspark`.
+- `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `enable_flashcomm1` enables the FlashComm communication optimization.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
@@ -479,6 +478,8 @@ Before you start, please:
 
 2. Prepare the script `run_dp_template.sh` on each node.
 
+=== "A3 series"
+
     1. Prefill node
 
         ```shell
@@ -626,6 +627,7 @@ Before you start, please:
         ```
 
 === "A3 series with dspark"
+
     1. Prefill node
 
         ```shell
@@ -730,15 +732,15 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 120 \
-            --max-num-seqs 60 \
+            --max-num-batched-tokens 256 \
+            --max-num-seqs 32 \
             --async-scheduling \
             --block-size 32 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
             --trust-remote-code \
             --tokenizer-mode deepseek_v4 \
-            --safetensors-load-strategy 'prefetch' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
@@ -768,7 +770,8 @@ Before you start, please:
                     "enable_static_kernel":false
                 },
                 "enable_cpu_binding":true,
-                "multistream_overlap_shared_expert":true
+                "multistream_overlap_shared_expert":true,
+                "recompute_scheduler_enable":true
             }'
         ```
 
@@ -918,8 +921,7 @@ Before you start, please:
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --safetensors-load-strategy 'prefetch' \
-            --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -1056,7 +1058,7 @@ Key Parameter Descriptions:
 
 - `enable_flashcomm1`: enables the communication optimization function on the prefill nodes.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
-- `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens. For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
+- `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.

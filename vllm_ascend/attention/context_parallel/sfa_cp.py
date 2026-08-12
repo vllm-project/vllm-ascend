@@ -1,10 +1,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import torch
 import torch.distributed as dist
+import torch_npu
+from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_tp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -18,13 +21,39 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
-    DSACPContext,
+    SFAForwardContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin
+from vllm_ascend.utils import (
+    _round_up,
+    enable_dsa_cp,
+    enable_dsa_cp_with_o_proj_tp,
+    enable_sfa_dcp_replicated_indexer,
+)
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+@dataclass
+class DSACPContext:
+    num_tokens: int
+    num_tokens_pad: int
+    local_start: int
+    local_end: int
+    local_end_with_pad: int
+    slot_mapping_cp: torch.Tensor
+    actual_seq_lengths_query: torch.Tensor
+    actual_seq_lengths_key: torch.Tensor
+
+
+@dataclass
+class AscendSFADSACPMetadata(AscendSFAMetadata):
+    """SFA metadata fields used only by the DSA-CP execution path."""
+
+    dsa_cp_context: DSACPContext | None = None
 
 
 class DCPGatherContext(NamedTuple):
@@ -51,6 +80,402 @@ class AscendSFADCPMetadata(AscendSFAMetadata):
     """SFA metadata fields used only by the DCP execution path."""
 
     dcp_context: DCPContext | None = None
+
+
+@dataclass
+class AscendSFADSADCPMetadata(AscendSFADCPMetadata):
+    """SFA metadata for the combined DSA-CP and DCP execution path."""
+
+    dsa_cp_context: DSACPContext | None = None
+
+
+class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
+    """Adds TP-token-sharded DSA-CP metadata to the shared SFA builder."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ):
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls or AscendSFADSACPMetadata,
+            supports_dcp_with_varlen,
+        )
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
+        self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
+        self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
+        self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
+        if self.speculative_config:
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            self.spec_actual_seq_lengths_query = [
+                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
+            self.spec_actual_seq_lengths_key = [
+                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
+
+    def _prepare_parallel_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        cum_query_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        draft_index: int | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+        cos, sin, slot_mapping, extra = super()._prepare_parallel_metadata(
+            common_attn_metadata,
+            cos,
+            sin,
+            slot_mapping,
+            cum_query_lens,
+            seq_lens,
+            draft_index,
+        )
+        global_tp_size = get_tp_group().world_size
+        num_tokens = common_attn_metadata.num_input_tokens
+        num_tokens_pad = _round_up(num_tokens, global_tp_size)
+        num_tokens_per_device = num_tokens_pad // global_tp_size
+        local_start = get_tp_group().rank_in_group * num_tokens_per_device
+        local_end_with_pad = local_start + num_tokens_per_device
+        local_end = min(local_end_with_pad, common_attn_metadata.num_actual_tokens)
+
+        assert cos.shape == sin.shape, f"cos.shape must equal sin.shape, got {cos.shape} and {sin.shape}"
+        pad_size = num_tokens_pad - cos.shape[0]
+        if pad_size > 0:
+            cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
+            sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
+        pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
+        if pad_size_slot > 0:
+            slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size_slot), value=-1)
+        else:
+            slot_mapping = slot_mapping[:num_tokens_pad]
+
+        slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
+        cos = cos[local_start:local_end_with_pad]
+        sin = sin[local_start:local_end_with_pad]
+        assert cos.shape[0] == num_tokens_per_device
+        assert slot_mapping_cp.shape[0] == num_tokens_per_device
+        assert slot_mapping.shape[0] == num_tokens_pad
+
+        if draft_index is not None:
+            assert self.spec_actual_seq_lengths_query is not None
+            assert self.spec_actual_seq_lengths_key is not None
+            actual_seq_lengths_query = self.spec_actual_seq_lengths_query[draft_index - 1]
+            actual_seq_lengths_key = self.spec_actual_seq_lengths_key[draft_index - 1]
+        else:
+            actual_seq_lengths_query = self.actual_seq_lengths_query
+            actual_seq_lengths_key = self.actual_seq_lengths_key
+
+        num_segs = cum_query_lens.shape[0]
+        global_start = common_attn_metadata.query_start_loc[:num_segs]
+        global_end = cum_query_lens
+        req_local_start = global_start.clamp(min=local_start)
+        req_local_end = global_end.clamp(max=local_end_with_pad)
+        num_local_tokens = req_local_end - req_local_start
+        local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
+        offset = global_end - req_local_end
+        local_key_lens = torch.where(
+            num_local_tokens > 0,
+            torch.clamp_min(seq_lens - offset, 0),
+            0,
+        )
+        actual_seq_lengths_query[:num_segs] = local_query_lens
+        actual_seq_lengths_key[:num_segs] = local_key_lens
+
+        extra["dsa_cp_context"] = DSACPContext(
+            num_tokens=num_tokens,
+            num_tokens_pad=num_tokens_pad,
+            local_start=local_start,
+            local_end=local_end,
+            local_end_with_pad=local_end_with_pad,
+            slot_mapping_cp=slot_mapping_cp,
+            actual_seq_lengths_query=actual_seq_lengths_query[: common_attn_metadata.num_reqs],
+            actual_seq_lengths_key=actual_seq_lengths_key[: common_attn_metadata.num_reqs],
+        )
+        return cos, sin, slot_mapping, extra
+
+    def _update_parallel_slot_mapping(
+        self,
+        metadata: AscendSFAMetadata,
+        slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+    ) -> None:
+        super()._update_parallel_slot_mapping(metadata, slot_mapping, num_input_tokens)
+        dsa_cp_context = getattr(metadata, "dsa_cp_context", None)
+        if dsa_cp_context is None:
+            return
+        local_mapping = slot_mapping[:num_input_tokens]
+        if dsa_cp_context.num_tokens_pad > local_mapping.shape[0]:
+            local_mapping = nn.functional.pad(
+                local_mapping,
+                (0, dsa_cp_context.num_tokens_pad - local_mapping.shape[0]),
+                value=-1,
+            )
+        else:
+            local_mapping = local_mapping[: dsa_cp_context.num_tokens_pad]
+        dsa_cp_context.slot_mapping_cp = local_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
+
+
+class AscendSFADSACPImpl(AscendSFAImpl):
+    """SFA implementation for DSA-CP token sharding in the TP group."""
+
+    o_proj_full_pools: dict[Any, torch.Tensor] = {}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.local_num_heads = self.num_heads * self.tp_size
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        result = super().process_weights_after_loading(act_dtype)
+        self._o_proj_tp_weight_switch_enabled = False
+        if self.enable_dsa_cp_with_o_proj_tp:
+            self._enable_o_proj_tp_full_weight_switch()
+        return result
+
+    def _get_fused_type_unsupported_reasons(self, pp_type):
+        reasons = super()._get_fused_type_unsupported_reasons(pp_type)
+        reasons.insert(0, "Fused preprocessing does not support DSA-CP.")
+        return reasons
+
+    def _parallel_query_gather_dim(self) -> int:
+        return 0
+
+    def _prepare_native_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        need_gather_q_kv: bool,
+    ) -> torch.Tensor:
+        return hidden_states
+
+    def _get_parallel_forward_context(
+        self,
+        attn_metadata: M,
+        num_input_tokens: int,
+        hidden_states: torch.Tensor,
+    ) -> SFAForwardContext:
+        context = getattr(attn_metadata, "dsa_cp_context", None)
+        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
+        gather_full_o_proj = (
+            self.tp_size > 1
+            and self.enable_dsa_cp_with_o_proj_tp
+            and attn_metadata.attn_state
+            not in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            }
+        )
+        return SFAForwardContext(
+            actual_seq_lengths_query=context.actual_seq_lengths_query,
+            actual_seq_lengths_key=context.actual_seq_lengths_key,
+            kv_slot_mapping=context.slot_mapping_cp,
+            topk_num_tokens=context.local_end_with_pad - context.local_start,
+            gather_full_o_proj=gather_full_o_proj,
+        )
+
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        if self.enable_sparse_sfa_c8:
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        kv_a_layernorm = self.kv_a_layernorm
+        assert kv_a_layernorm is not None, "kv_a_layernorm must be initialized for DSA-CP KV preprocessing"
+        B = kv_no_split.shape[0]
+        kv_no_split = kv_no_split.view(B, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim)
+        _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+            kv_no_split,
+            kv_a_layernorm.weight,
+            cos,
+            sin,
+            slots.to(torch.int64),
+            kv_cache[1],
+            kv_cache[0],
+            epsilon=kv_a_layernorm.variance_epsilon,
+            cache_mode="PA",
+            is_output_kv=True,
+        )
+        return k_pe, k_nope, None
+
+    def _prepare_kv_for_parallel(
+        self,
+        k_pe,
+        k_nope,
+        knope_scale,
+        k_li,
+        k_li_scale,
+        full_gather_o_proj_enabled,
+    ):
+        assert k_pe is not None and k_nope is not None
+        async_op = full_gather_o_proj_enabled
+        handles: list[torch.distributed.Work] = []
+        if self.enable_sparse_sfa_c8:
+            assert knope_scale is not None
+            parts = [
+                k_nope.view(-1, k_nope.shape[-1]),
+                k_pe.view(-1, k_pe.shape[-1]),
+                knope_scale.view(-1, knope_scale.shape[-1]),
+            ]
+        else:
+            parts = [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1])]
+            if self.has_indexer and not self.enable_sparse_li_c8:
+                assert k_li is not None
+                parts.append(k_li.view(-1, k_li.shape[-1]))
+        fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=async_op)
+        if handle is not None:
+            handles.append(handle)
+        if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
+            assert k_li is not None
+            k_li, handle = all_gather_async(k_li, get_tp_group(), async_op=async_op)
+            if handle is not None:
+                handles.append(handle)
+        if self.has_indexer and self.enable_sparse_li_c8:
+            assert k_li_scale is not None
+            k_li_scale, handle = all_gather_async(k_li_scale, get_tp_group(), async_op=async_op)
+            if handle is not None:
+                handles.append(handle)
+        return k_li, k_li_scale, fused_kv, handles
+
+    def _store_parallel_kv(
+        self,
+        k_pe,
+        k_nope,
+        knope_scale,
+        k_li,
+        fused_kv_no_split,
+        kv_ag_handles,
+        kv_cache,
+        slot_mapping_sfa,
+        attn_metadata,
+        full_gather_o_proj_enabled,
+    ):
+        for handle in kv_ag_handles:
+            handle.wait()
+        if full_gather_o_proj_enabled:
+            self._enable_o_proj_tp_full_weight_switch()
+            linear_method = self._get_o_proj_linear_method()
+            assert isinstance(linear_method, TPWeightSwitchMixin)
+            assert self.o_proj_tp_weight_state is not None
+            linear_method.all_gather_tp_weight(
+                self.o_proj_tp_weight_state,
+                get_tp_group(),
+            )
+
+        if kv_cache is not None:
+            assert fused_kv_no_split is not None
+            if self.enable_sparse_sfa_c8:
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
+                    slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
+                    fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                )
+                k_pe = k_nope = None
+            elif not self.has_indexer:
+                k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
+            elif not self.enable_sparse_li_c8:
+                k_pe, k_nope, k_li = fused_kv_no_split.split(
+                    [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1
+                )
+            else:
+                k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
+            if not self.enable_sparse_sfa_c8:
+                assert k_pe is not None and k_nope is not None
+                k_nope = k_nope.view(k_nope.shape[0], 1, -1)
+                k_pe = k_pe.view(k_pe.shape[0], 1, -1)
+                DeviceOperator.reshape_and_cache(
+                    key=k_nope[: attn_metadata.num_actual_tokens],
+                    value=k_pe[: attn_metadata.num_actual_tokens],
+                    key_cache=kv_cache[0],
+                    value_cache=kv_cache[1],
+                    slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
+                )
+        return k_pe, k_nope, k_li
+
+    def _enable_o_proj_tp_full_weight_switch(self) -> None:
+        if self._o_proj_tp_weight_switch_enabled:
+            return
+
+        linear_method = self._get_o_proj_linear_method()
+        if not isinstance(linear_method, TPWeightSwitchMixin) or not linear_method.supports_tp_weight_switch:
+            raise RuntimeError(
+                "SFA DSA-CP o_proj full-weight switching requires a TP weight-switch capable method, "
+                f"got {type(linear_method).__name__}."
+            )
+        self.o_proj_tp_weight_state = linear_method.enable_tp_weight_switch(
+            self.o_proj,
+            self.tp_size,
+            pool=AscendSFADSACPImpl.o_proj_full_pools,
+            pool_key_prefix=(type(linear_method).__qualname__, "sfa_o_proj"),
+        )
+        self._o_proj_tp_weight_switch_enabled = True
+
+    def _get_o_proj_linear_method(self):
+        quant_method = self.o_proj.quant_method
+        return getattr(quant_method, "quant_method", quant_method)
+
+    def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
+        return self._get_o_proj_linear_method().apply(self.o_proj, attn_output)
+
+    def _finalize_o_proj(
+        self,
+        attn_output,
+        output,
+        gather_full_o_proj,
+    ):
+        if not self.enable_dsa_cp_with_o_proj_tp:
+            return super()._finalize_o_proj(
+                attn_output,
+                output,
+                gather_full_o_proj,
+            )
+        if gather_full_o_proj:
+            linear_method = self._get_o_proj_linear_method()
+            assert isinstance(linear_method, TPWeightSwitchMixin)
+            assert self.o_proj_tp_weight_state is not None
+            linear_method.wait_tp_weight_all_gather(self.o_proj_tp_weight_state)
+            linear_method.switch_tp_weight(
+                self.o_proj,
+                self.o_proj_tp_weight_state,
+                use_full_weight=True,
+            )
+            output[...] = self._apply_o_proj_full_weight(attn_output)
+            linear_method.switch_tp_weight(
+                self.o_proj,
+                self.o_proj_tp_weight_state,
+                use_full_weight=False,
+            )
+            return output
+
+        send = (
+            attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+            .permute(1, 0, 2)
+            .reshape(-1, self.num_heads * self.v_head_dim)
+        )
+        sharded_output = torch.empty_like(send)
+        torch.distributed.all_to_all_single(sharded_output, send, group=get_tp_group().device_group)
+        return super()._finalize_o_proj(
+            sharded_output,
+            output,
+            gather_full_o_proj,
+        )
 
 
 # SFA DCP replicated-indexer layout:
@@ -247,27 +672,6 @@ class AscendSFADCPMetadataBuilder(
         )
         return slot_mapping_replicated_view
 
-    def _update_dsa_cp_slot_mapping_for_dcp(
-        self,
-        metadata: AscendSFAMetadata,
-        dcp_slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> None:
-        if metadata.dsa_cp_context is None:
-            return
-
-        dsa_cp_context = metadata.dsa_cp_context
-        slot_mapping = dcp_slot_mapping[:num_input_tokens]
-        if dsa_cp_context.num_tokens_pad > slot_mapping.shape[0]:
-            slot_mapping = torch.nn.functional.pad(
-                slot_mapping,
-                (0, dsa_cp_context.num_tokens_pad - slot_mapping.shape[0]),
-                value=-1,
-            )
-        else:
-            slot_mapping = slot_mapping[: dsa_cp_context.num_tokens_pad]
-        dsa_cp_context.slot_mapping_cp = slot_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
-
     def _build_compact_kv_gather_metadata(
         self,
         dcp_block_table: torch.Tensor,
@@ -340,40 +744,8 @@ class AscendSFADCPMetadataBuilder(
         metadata.num_decodes = num_decodes
         metadata.num_decode_tokens = num_decode_tokens
         metadata.num_prefills = num_prefills
-        self._update_dsa_cp_slot_mapping_for_dcp(metadata, dcp_slot_mapping, num_input_tokens)
+        self._update_parallel_slot_mapping(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool = False,
-        **kwargs,
-    ) -> AscendSFAMetadata:
-        return self._build_with_metadata_view(
-            common_attn_metadata,
-            lambda: super(AscendSFADCPMetadataBuilder, self).build(
-                common_prefix_len,
-                common_attn_metadata,
-                fast_build,
-                **kwargs,
-            ),
-        )
-
-    def build_for_drafting(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        draft_index: int,
-        **kwargs,
-    ) -> AscendSFAMetadata:
-        return self._build_with_metadata_view(
-            common_attn_metadata,
-            lambda: super(AscendSFADCPMetadataBuilder, self).build_for_drafting(
-                common_attn_metadata,
-                draft_index,
-                **kwargs,
-            ),
-        )
 
     def build_for_graph_capture(
         self,
@@ -650,7 +1022,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
     ) -> DCPGatherContext:
-        query_gather_dim = 0 if self.enable_dsa_cp else 1
+        query_gather_dim = self._parallel_query_gather_dim()
         assert self.dcp_group is not None, "DCP query gather requires dcp_group when dcp_size > 1."
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
             raise RuntimeError(
@@ -693,7 +1065,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert attn_metadata.dcp_context is not None
         return attn_metadata.dcp_context.slot_mapping
 
-    def _maybe_store_kvcache_for_c8_n_dsacp(
+    def _store_parallel_kv(
         self,
         k_pe: torch.Tensor | None,
         k_nope: torch.Tensor | None,
@@ -710,7 +1082,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        result = super()._maybe_store_kvcache_for_c8_n_dsacp(
+        result = super()._store_parallel_kv(
             k_pe,
             k_nope,
             knope_scale,
@@ -779,7 +1151,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         dcp_context.gather_context = None
         if gather_context is None:
             gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
-        if self.enable_dsa_cp:
+        dsa_cp_context = getattr(attn_metadata, "dsa_cp_context", None)
+        if dsa_cp_context is not None:
             # DSA-CP shards the token sequence. Restore the flat token order for
             # SFA, and use the original full query lengths for varlen metadata.
             actual_seq_lengths_query = attn_metadata.cum_query_lens
@@ -809,5 +1182,64 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         softmax_lse = softmax_max + torch.log(softmax_sum)
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
-        output = self._merge_dcp_outputs(sfa_output, softmax_lse, attn_metadata.dsa_cp_context)
+        output = self._merge_dcp_outputs(
+            sfa_output,
+            softmax_lse,
+            getattr(attn_metadata, "dsa_cp_context", None),
+        )
         return output.to(output_dtype)
+
+
+class AscendSFADSADCPMetadataBuilder(
+    AscendSFADCPMetadataBuilder,
+    AscendSFADSACPMetadataBuilder,
+):
+    """Composes DCP's outer KV view with DSA-CP token sharding."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ):
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls or AscendSFADSADCPMetadata,
+            supports_dcp_with_varlen,
+        )
+
+
+class AscendSFADSADCPImpl(AscendSFADCPImpl, AscendSFADSACPImpl):
+    """Composes DCP collectives around the DSA-CP SFA implementation."""
+
+
+def resolve_sfa_metadata_builder() -> type[AscendSFAMetadataBuilder]:
+    """Resolve one SFA metadata builder from the two independent CP switches."""
+    dsa_cp_enabled = enable_dsa_cp()
+    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    if dsa_cp_enabled and dcp_enabled:
+        return AscendSFADSADCPMetadataBuilder
+    if dsa_cp_enabled:
+        return AscendSFADSACPMetadataBuilder
+    if dcp_enabled:
+        return AscendSFADCPMetadataBuilder
+    return AscendSFAMetadataBuilder
+
+
+def resolve_sfa_impl() -> type[AscendSFAImpl]:
+    """Resolve one SFA implementation from the two independent CP switches."""
+    dsa_cp_enabled = enable_dsa_cp()
+    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    if dsa_cp_enabled and dcp_enabled:
+        return AscendSFADSADCPImpl
+    if dsa_cp_enabled:
+        return AscendSFADSACPImpl
+    if dcp_enabled:
+        return AscendSFADCPImpl
+    return AscendSFAImpl
