@@ -258,35 +258,6 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
 
 @wait_until_npu_memory_free()
 def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
-    import os
-    from pathlib import Path
-
-    from safetensors import safe_open
-
-    print("ls -lah /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct:")
-    os.system("ls -lah /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct")
-
-    print("ls -lah /root/.cache/modelscope/hub/models/vllm-ascend/qwen3-4b-vl-lora-vision-connector")
-    os.system("ls -lah /root/.cache/modelscope/hub/models/vllm-ascend/qwen3-4b-vl-lora-vision-connector")
-
-    roots = [
-        Path("/root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct"),
-        Path("/root/.cache/modelscope/hub/models/vllm-ascend/qwen3-4b-vl-lora-vision-connector"),
-    ]
-
-    failed = []
-
-    for root in roots:
-        for path in root.rglob("*.safetensors"):
-            try:
-                with safe_open(str(path), framework="pt", device="cpu") as f:
-                    list(f.keys())
-                print("OK:", path, path.stat().st_size)
-            except Exception as exc:
-                failed.append(path)
-                print("BAD:", path, exc)
-
-    assert not failed, f"Some model weight files failed: {failed}"
 
     config = TestConfig(
         model_path=QWEN3VL_MODEL_PATH,
