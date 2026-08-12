@@ -2763,18 +2763,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
 
     ops.def(
-        "npu_sparse_attention_score("
-        "Tensor query, Tensor key, Tensor value, Tensor select_idx, "
-        "Tensor block_table, *, "
-        "Tensor? select_num_idx=None, "
-        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, "
-        "Tensor? v_dequant_scale=None, "
-        "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
-        "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
-        "int num_key_value_heads=1, float scale_value=1.0, "
-        "int block_size=128, int top_k=16, int inner_precise=0) -> Tensor"
+        "npu_sparse_attention_score(Tensor query, Tensor key, Tensor value,"
+        "                           Tensor select_idx, Tensor block_table,"
+        "                           int num_key_value_heads, float scale_value,"
+        "                           int block_size, int top_k, int inner_precise, *,"
+        "                           Tensor? select_num_idx=None,"
+        "                           Tensor? actual_seq_lengths=None,"
+        "                           Tensor? actual_seq_lengths_kv=None,"
+        "                           Tensor? q_dequant_scale=None,"
+        "                           Tensor? k_dequant_scale=None,"
+        "                           Tensor? v_dequant_scale=None) -> Tensor"
     );
-    ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
-             &vllm_ascend::npu_sparse_attention_score);
+    ops.impl("npu_sparse_attention_score", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score);
 }
 #endif

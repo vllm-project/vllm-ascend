@@ -213,7 +213,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
         "store_kv_block_metadata"
-        "sparse_attention_score"
         "k2q_csr"
     )
 

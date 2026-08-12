@@ -309,23 +309,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
 at::Tensor npu_sparse_attention_score_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &select_idx, const at::Tensor &block_table,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise,
     const c10::optional<at::Tensor> &select_num_idx,
-    const c10::optional<at::Tensor> &q_dequant_scale,
-    const c10::optional<at::Tensor> &k_dequant_scale,
-    const c10::optional<at::Tensor> &v_dequant_scale,
     const c10::optional<at::Tensor> &actual_seq_lengths,
     const c10::optional<at::Tensor> &actual_seq_lengths_kv,
-    c10::string_view q_input_layout, c10::string_view kv_input_layout,
-    int64_t num_key_value_heads, double scale_value, int64_t block_size,
-    int64_t top_k, int64_t inner_precise)
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale
+    )
 {
-    TORCH_CHECK(std::string(q_input_layout) == "TND",
-                "npu_sparse_attention_score only supports query TND layout");
-    at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
-                                   ? at::kHalf
-                                   : query.scalar_type();
-    return at::empty_symint(query.sym_sizes(),
-                            query.options().dtype(out_dtype).device(c10::kMeta));
+
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+    return output;
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
