@@ -254,7 +254,7 @@ def _benchmark_pair(
     bench_args: list[str],
     case: str,
     num_repeats: int,
-) -> dict[str, Any]:
+) -> None:
     """Run the same scenario on V1 then V2 and assert V2 >= V1 * 0.97.
 
     Each side runs *num_repeats* rounds on a single server and the
@@ -272,4 +272,3 @@ def _benchmark_pair(
         num_repeats=num_repeats,
     )
     _assert_v2_not_slower(v1_results, v2_results, case)
-    return v2_results[-1]
