@@ -13,6 +13,7 @@ import pytest
 import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
@@ -381,6 +382,11 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         json.dump(output, f, indent=2, ensure_ascii=False)
     logger.info("Benchmark results saved to %s", output_path)
     print(f"Benchmark results saved to {output_path}")
+
+    postprocess_benchmark_results(
+        list(zip(benchmark_keys, case_configs, results)),
+        job_name=job_name,
+    )
 
 
 def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:

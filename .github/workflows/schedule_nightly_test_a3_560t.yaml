@@ -234,6 +234,7 @@ jobs:
       KUBECONFIG_B64_560T: ${{ secrets.KUBECONFIG_B64_560T }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   double-node-tests:
     name: double-node
@@ -276,6 +277,7 @@ jobs:
       KUBECONFIG_B64_560T: ${{ secrets.KUBECONFIG_B64_560T }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   double-node-pods-started:
     name: Wait for all double-node pods launched
@@ -321,6 +323,8 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+    secrets:
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   multi-card-tests:
     name: single-node
@@ -355,6 +359,7 @@ jobs:
     secrets:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0-cn12-001

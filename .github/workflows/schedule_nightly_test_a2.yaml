@@ -234,6 +234,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   remove-taints:
     name: Remove node taints
@@ -289,6 +290,7 @@ jobs:
     secrets:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
 
   generate-accuracy-matrix:
