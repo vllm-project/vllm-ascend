@@ -22,14 +22,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.pcp_manager import PCPManager, maybe_build_pcp_manager
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import (
-    AscendPCPManager,
-    maybe_build_ascend_pcp_manager,
-)
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -191,24 +189,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
 
 
-def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
-    )
-
-    assert (
-        maybe_build_ascend_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=MagicMock(),
-            block_tables=MagicMock(),
-        )
-        is None
-    )
-
-
-def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
+def test_npu_model_runner_uses_ascend_pcp_manager():
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=2,
@@ -220,22 +201,32 @@ def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
     pcp_group = SimpleNamespace(rank_in_group=1)
     dcp_group = SimpleNamespace(rank_in_group=0)
     req_states = MagicMock()
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+
+    assert runner.pcp_manager_cls is AscendPCPManager
 
     with (
         patch.object(PCPManager, "validate_config") as validate_config,
-        patch.object(pcp_manager_module, "get_pcp_group", return_value=pcp_group),
-        patch.object(pcp_manager_module, "get_dcp_group", return_value=dcp_group),
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.get_pcp_group",
+            return_value=pcp_group,
+        ),
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.get_dcp_group",
+            return_value=dcp_group,
+        ),
     ):
-        manager = maybe_build_ascend_pcp_manager(
+        manager = maybe_build_pcp_manager(
             vllm_config,
             torch.device("cpu"),
             supports_mm_inputs=False,
             req_states=req_states,
             block_tables=None,
+            cls=runner.pcp_manager_cls,
         )
 
     assert isinstance(manager, AscendPCPManager)
-    assert manager.vllm_config is vllm_config
+    assert manager.vllm_config is None
     assert manager.pcp_world_size == 2
     assert manager.pcp_rank == 1
     assert manager.dcp_world_size == 2
