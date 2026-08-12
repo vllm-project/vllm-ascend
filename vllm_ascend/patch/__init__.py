@@ -126,6 +126,23 @@
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
 #       for selecting the MoE runner implementation.
 #
+# ** 6a. File: platform/patch_glm_reasoning_usage_accounting.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.glm47_moe.Glm47MoeParser`
+#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#    Why:
+#       GLM starts reasoning from the prompt and may generate only `</think>`,
+#       while the parser counter starts at depth zero. Chat completions also do
+#       not yet expose parser-derived reasoning usage on this vLLM revision.
+#    How:
+#       Count GLM's implicit leading reasoning span and bind token tracking plus
+#       usage injection only to serving instances configured with the GLM parser.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/41077
+#       https://github.com/vllm-project/vllm/pull/45802
+#    Future Plan:
+#       Remove this patch once both upstream fixes are in the supported vLLM.
+#
 # ** 7. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
