@@ -153,9 +153,7 @@ def _get_index_cache_skip_topk(config: Any, layer_id: int) -> bool:
     index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
 
     if index_topk_pattern is None:
-        return (
-            max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-        )
+        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
     if 0 <= layer_id < len(index_topk_pattern):
         return index_topk_pattern[layer_id] == "S"
     return False
