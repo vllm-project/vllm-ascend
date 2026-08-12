@@ -831,8 +831,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             if num_actual is not None and num_actual < flat.shape[0]:
                 flat = flat[:num_actual]
             valid_rows = int((flat >= 0).any(dim=-1).sum().item())
+            from vllm.distributed import get_dcp_group
+
+            _grp = get_dcp_group()
             print(
-                f"[SFA-DCP-debug rank={self.dcp_rank}] num_input_tokens={flat.shape[0]} num_actual={num_actual} "
+                f"[SFA-DCP-debug rank={self.dcp_rank}] dcp_group_ws={_grp.world_size} dcp_group_rank={_grp.rank_in_group} "
+                f"impl_dcp_size={self.dcp_size} num_input_tokens={flat.shape[0]} num_actual={num_actual} "
                 f"valid_rows={valid_rows}/{flat.shape[0]} "
                 f"seq_lens={attn_metadata.seq_lens[:4].cpu().tolist()} "
                 f"local_seq_lens={dcp_context.seq_lens[:4].cpu().tolist()} "
