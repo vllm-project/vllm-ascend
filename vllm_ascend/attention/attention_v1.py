@@ -2235,6 +2235,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     paged cache, and FIA consumes them from the transposed cache layout.
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Hamming sparse/KVComp is unavailable on the a7e05750 baseline.
+        # Initialize the compatibility guard used by forward().
+        self.enable_hamming_sparse = False
+
     def _transpose_kv_cache(
         self, kv_cache: tuple[torch.Tensor]
     ) -> tuple[torch.Tensor]:
