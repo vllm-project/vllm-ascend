@@ -295,7 +295,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(self, layerwise_reuse_waiter=None):
+    def _make_thread(self, layerwise_reuse_waiter=None, save_failure_checker=None):
         store = MagicMock()
         store.store.batch_copy.return_value = 0
         load_finished = [threading.Event(), threading.Event()]
@@ -328,6 +328,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             num_layers=2,
             group_builders=[builder],
             layerwise_reuse_waiter=layerwise_reuse_waiter,
+            save_failure_checker=save_failure_checker,
         )
         return thread, load_finished, save_finished, sync_events
 
@@ -370,6 +371,22 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         sync_events[0].synchronize.assert_called_once_with()
         self.assertFalse(save_finished[0].is_set())
         self.assertTrue(load_finished[1].is_set())
+
+    def test_source_save_failure_stops_receiver_wait(self):
+        save_failure_checker = MagicMock(side_effect=RuntimeError("save thread failed"))
+        thread, _, save_finished, _ = self._make_thread(save_failure_checker=save_failure_checker)
+        save_finished[0] = MagicMock()
+        save_finished[0].wait.return_value = False
+        load_task = LayerLoadTask(
+            wait_for_save_layer=0,
+            transfer_tasks=[],
+            layer_id=1,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "save thread failed"):
+            thread._handle_request(load_task)
+
+        save_failure_checker.assert_called_once_with()
 
     def test_h2d_waits_for_source_save_then_target_layer_reuse(self):
         call_order: list[tuple[str, int]] = []

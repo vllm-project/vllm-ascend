@@ -530,6 +530,9 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_bytes,
                     group_builders=self._build_group_layer_builders(),
                     layerwise_reuse_waiter=self.layerwise_reuse_waiter,
+                    save_failure_checker=(
+                        self.kv_send_thread.raise_if_failed if self.kv_send_thread is not None else None
+                    ),
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(

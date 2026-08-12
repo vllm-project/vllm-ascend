@@ -1485,6 +1485,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
         layerwise_reuse_waiter: Callable[[int], None] | None = None,
+        save_failure_checker: Callable[[], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1505,6 +1506,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
         self.layerwise_reuse_waiter = layerwise_reuse_waiter
+        self.save_failure_checker = save_failure_checker
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1555,7 +1557,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if wait_for_save is not None:
             while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
+                if self.save_failure_checker is not None:
+                    self.save_failure_checker()
                 logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+            if self.save_failure_checker is not None:
+                self.save_failure_checker()
             # Non-saving TP ranks have no D2H task to synchronize the event.
             # Their CPU save-finished signal only means the event was recorded;
             # wait for the NPU work before reusing the local HBM buffer.
