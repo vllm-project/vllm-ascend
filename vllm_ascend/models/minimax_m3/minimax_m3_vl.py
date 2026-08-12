@@ -39,7 +39,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import import_from_path
 
-from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SparseForCausalLM
+from vllm_ascend.models.minimax_m3.minimax_m3 import (
+    MiniMaxM3SparseForCausalLM,
+    _EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS,
+)
 
 
 def _load_vllm_minimax_m3_common_module(module_name: str):
@@ -361,7 +364,10 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
         return self.language_model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_substrs=_EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS,
+        )
         raw_tensors = 0
         prefix_counts: dict[str, int] = {}
 

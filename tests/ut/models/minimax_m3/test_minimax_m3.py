@@ -15,8 +15,13 @@ from vllm_ascend.models.minimax_m3 import (
     MiniMaxM3Attention,
     MiniMaxM3MoE,
     MiniMaxM3SparseAttention,
+    MiniMaxM3SparseForCausalLM,
+    MiniMaxM3SparseForConditionalGeneration,
     _get_rope_parameters,
     _sparse_attention_layer_ids,
+)
+from vllm_ascend.models.minimax_m3.minimax_m3 import (
+    _EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS,
 )
 
 
@@ -79,6 +84,30 @@ def _make_attention() -> MiniMaxM3Attention:
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+    def test_top_level_loaders_skip_unquantized_embedding_aux_scales(self) -> None:
+        for model_cls, loader_path in (
+            (
+                MiniMaxM3SparseForCausalLM,
+                "vllm_ascend.models.minimax_m3.minimax_m3.AutoWeightsLoader",
+            ),
+            (
+                MiniMaxM3SparseForConditionalGeneration,
+                "vllm_ascend.models.minimax_m3.minimax_m3_vl.AutoWeightsLoader",
+            ),
+        ):
+            model = model_cls.__new__(model_cls)
+            nn.Module.__init__(model)
+            model.hf_to_vllm_mapper = None
+
+            with patch(loader_path) as loader_cls:
+                loader_cls.return_value.load_weights.return_value = set()
+                model.load_weights(iter(()))
+
+            loader_cls.assert_called_once_with(
+                model,
+                skip_substrs=_EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS,
+            )
+
     def test_sparse_index_q_norm_uses_index_head_dim(self) -> None:
         attention = MiniMaxM3SparseAttention.__new__(MiniMaxM3SparseAttention)
         nn.Module.__init__(attention)

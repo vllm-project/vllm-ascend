@@ -101,6 +101,12 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
+_EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS = (
+    "embed_tokens.weight_scale",
+    "lm_head.weight_scale",
+)
+
+
 def _scatter_index_cache(
     cache: torch.Tensor,
     updates: torch.Tensor,
@@ -1221,7 +1227,10 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_substrs=_EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS,
+        )
         raw_tensors = 0
         text_tensors = 0
         skipped_multimodal_tensors = 0
