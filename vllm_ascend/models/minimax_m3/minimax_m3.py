@@ -101,10 +101,10 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
-_EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS = (
+_EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS = [
     "embed_tokens.weight_scale",
     "lm_head.weight_scale",
-)
+]
 
 
 def _scatter_index_cache(

@@ -85,6 +85,7 @@ def _make_attention() -> MiniMaxM3Attention:
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
     def test_top_level_loaders_skip_unquantized_embedding_aux_scales(self) -> None:
+        self.assertIsInstance(_EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS, list)
         for model_cls, loader_path in (
             (
                 MiniMaxM3SparseForCausalLM,
