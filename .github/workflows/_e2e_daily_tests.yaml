@@ -101,6 +101,11 @@ jobs:
           ref: ${{ inputs.vllm_ascend_branch }}
           fetch-depth: 1
 
+      - name: Set MAX_JOBS based on runner
+        run: |
+          CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
+          echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
+
       - name: Install vllm-ascend from main HEAD
         working-directory: ${{ github.workspace }}
         run: |
