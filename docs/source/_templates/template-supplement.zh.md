@@ -25,6 +25,7 @@
 | **提示框（Note）** | `!!! note "标题"` | `:::{note}` ... `:::` |
 | **警告框** | `!!! warning "标题"` | `:::{warning}` ... `:::` / `{caution}` |
 | **Jinja 模板转义** | `{% raw %}` ... `{% endraw %}` | 无需转义 |
+| **中文锚点生成** | 过滤中文字符<br>`## 5. 在线部署` → `#5` | 保留中文字符<br>`## 5. 在线部署` → `#5.-在线部署` |
 
 ## 3 标签页
 
@@ -126,9 +127,56 @@ export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
-## 5 Jinja 模板转义
+## 5 Note / 提示框
 
-### 5.1 问题背景
+> **适用场景**：需要突出显示重要说明、警告、注意事项等信息。
+
+### 5.1 MkDocs + Material
+
+使用 `!!! note "标题"` 语法，内容通过**缩进**控制范围，支持多种类型标识符。
+
+**语法：**
+
+```markdown
+!!! note "自定义标题（可选）"
+    提示内容行1
+    提示内容行2
+    提示内容行3
+```
+
+**示例：**
+
+```markdown
+!!! note "Atlas 300I DUO"
+    Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
+```
+
+**关键规则**：内容必须与 `!!!` 声明行保持 **4 个空格** 缩进，且内容之间用空行分隔即可（无需额外缩进）。
+
+### 5.2 Sphinx + MyST-Parser
+
+使用 `::{note}` 指令语法，内容通过 **冒号层级 + 缩进** 控制范围，需要显式闭合。
+
+**基本语法：**
+
+```markdown
+:::{note}
+内容行1
+内容行2
+:::
+```
+
+**示例：**
+
+```markdown
+:::{note} Atlas 300I DUO
+Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
+:::
+```
+
+## 6 Jinja 模板转义
+
+### 6.1 问题背景
 
 在 vLLM-Ascend 的文档中，有时需要展示包含 Jinja 模板语法的代码示例（如 prompt 模板、RAG 评测脚本等），两种框架的处理方式不同。这些示例中本身包含 `{{ variable }}` 语法。
 MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视为模板变量进行渲染，导致原本希望展示的 Jinja 示例代码出现异常。
@@ -138,7 +186,7 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
 | Sphinx + MyST-Parser | 不解析，原样保留 | 无 |
 | MkDocs + Material | 解析为模板变量，尝试替换 | 渲染异常，模板代码被破坏 |
 
-### 5.2 解决方案
+### 6.2 解决方案
 
 > **适用分支**：`main`（latest 版本）及 v0.24.0 之后的所有版本
 
@@ -176,55 +224,58 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
     ```
 ```
 
-### 5.3 Sphinx（v0.23.0 及更早）：无需转义
+### 6.3 Sphinx（v0.23.0 及更早）：无需转义
 
 > **适用分支**：`v0.23.0`、`v0.18.0` 等历史版本分支
 
 Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因此文档正文中的 `{{ }}` 不会被特殊处理，直接原样渲染。
 
-## 6 Note / 提示框
+## 7 锚点异常
 
-> **适用场景**：需要突出显示重要说明、警告、注意事项等信息。
+### 7.1 问题背景
 
-### 6.1 MkDocs + Material
+该问题**仅出现在中文文档中**。
+vLLM Ascend 社区的中文文档通过 PO 文件 + gettext 工具链从英文源文件翻译生成。中文版本会继承英文源文件的锚点 ID 结构。
+在 Sphinx 框架下，英文源文件中若未显式指定锚点，中文翻译会保留中文字符生成锚点（如 `#5-在线服务部署`）。在 MkDocs 框架中，MkDocs 会自动过滤锚点中的非 ASCII 字符，导致同一中文标题生成的锚点 ID 与 Sphinx 不一致（如 `#5-在线服务部署` → `#5`）。
 
-使用 `!!! note "标题"` 语法，内容通过**缩进**控制范围，支持多种类型标识符。
+### 7.2 锚点生成规则对比
 
-**语法：**
+| 框架 | 锚点生成规则 | 示例标题 | 生成的锚点 |
+|------|-------------|----------|-----------|
+| Sphinx + MyST-Parser | 保留中文字符 | `## 5. 在线服务部署` | `#5.-在线服务部署` |
+| MkDocs + Material | 过滤中文字符，仅保留数字、字母和连字符 | `## 5. 在线服务部署` | `#5` |
 
-```markdown
-!!! note "自定义标题（可选）"
-    提示内容行1
-    提示内容行2
-    提示内容行3
-```
+### 7.3 解决方案
 
-**示例：**
-
-```markdown
-!!! note "Atlas 300I DUO"
-    Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
-```
-
-**关键规则**：内容必须与 `!!!` 声明行保持 **4 个空格** 缩进，且内容之间用空行分隔即可（无需额外缩进）。
-
-### 6.2 Sphinx + MyST-Parser
-
-使用 `::{note}` 指令语法，内容通过 **冒号层级 + 缩进** 控制范围，需要显式闭合。
-
-**基本语法：**
-
-```markdown
-:::{note}
-内容行1
-内容行2
-:::
-```
+**方案一：手动指定锚点（推荐）**
 
 **示例：**
 
+在英文 Markdown 源文件中为标题指定锚点 ID：
+
 ```markdown
-:::{note} Atlas 300I DUO
-Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
-:::
+Online Serving {#5-online-serving}
 ```
+
+中文翻译文件（通过 PO/gettext 生成）会自动继承该锚点 ID，生成对应的中文标题锚点：
+
+```markdown
+在线服务部署 {#5-online-serving}
+```
+
+引用时使用自定义锚点：
+
+```markdown
+请参见[在线服务部署](#5-online-serving)
+```
+
+**方案二：使用 HTML 锚点标签**
+
+**示例：**
+略
+
+### 7.4 建议
+
+- 锚点 ID 建议仅使用 ASCII 字符（字母、数字、连字符），确保在两种框架下均能正确解析
+- 锚点 ID 在英文源文件中指定后，无需在中文文件中重复指定
+- 跨文件引用时，统一使用 ASCII 锚点 ID：
