@@ -824,9 +824,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         # ==== TEMP DEBUG (experiment B): dump DCP decode inputs on first calls ====
         global _SFA_DCP_DEBUG_COUNT
+        num_actual = int(attn_metadata.num_actual_tokens) if hasattr(attn_metadata, "num_actual_tokens") else None
         if _SFA_DCP_DEBUG_COUNT < 5:
             _SFA_DCP_DEBUG_COUNT += 1
-            num_actual = int(attn_metadata.num_actual_tokens) if hasattr(attn_metadata, "num_actual_tokens") else None
             flat = topk_indices.flatten(0, 1)  # (T, K)
             if num_actual is not None and num_actual < flat.shape[0]:
                 flat = flat[:num_actual]
