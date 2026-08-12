@@ -208,6 +208,7 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
+            self.pcp_manager.vllm_config = self.vllm_config
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
