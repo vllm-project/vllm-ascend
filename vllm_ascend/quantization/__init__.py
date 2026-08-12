@@ -24,10 +24,10 @@ paths and circular imports during startup.
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .compressed_tensors_config import AscendCompressedTensorsConfig
-    from .fp8_config import AscendFp8Config
+    from .configs.compressed_tensors_config import AscendCompressedTensorsConfig
+    from .configs.fp8_config import AscendFp8Config
     from .modelopt_mxfp8_config import AscendModelOptMxFp8Config
-    from .modelslim_config import AscendModelSlimConfig
+    from .configs.modelslim_config import AscendModelSlimConfig
 
 __all__ = [
     "AscendModelSlimConfig",
@@ -39,15 +39,15 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     if name == "AscendModelSlimConfig":
-        from .modelslim_config import AscendModelSlimConfig
+        from .configs.modelslim_config import AscendModelSlimConfig
 
         return AscendModelSlimConfig
     if name == "AscendCompressedTensorsConfig":
-        from .compressed_tensors_config import AscendCompressedTensorsConfig
+        from .configs.compressed_tensors_config import AscendCompressedTensorsConfig
 
         return AscendCompressedTensorsConfig
     if name == "AscendFp8Config":
-        from .fp8_config import AscendFp8Config
+        from .configs.fp8_config import AscendFp8Config
 
         return AscendFp8Config
     if name == "AscendModelOptMxFp8Config":

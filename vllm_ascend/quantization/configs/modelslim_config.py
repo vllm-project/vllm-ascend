@@ -35,7 +35,6 @@ from transformers import PretrainedConfig
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
@@ -49,12 +48,8 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
 )
 
-from .methods import get_scheme_class
-
-
-def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    return isinstance(layer, (MoERunner, RoutedExperts))
-
+from ..methods import get_scheme_class
+from ..utils import is_fused_moe_layer
 
 _MOE_WEIGHT_LOADER_NAME_MAP = {
     "w13_scale_bias": "w13_scale",
@@ -762,7 +757,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         return prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
-        from .method_adapters import (
+        from ..method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,
             AscendKVCacheMethod,
@@ -808,11 +803,11 @@ class AscendModelSlimConfig(QuantizationConfig):
             logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa/indexer]")
             return AscendKVCacheMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix):
-            from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
+            from ..methods.kv_cache.kv_c8 import AscendC8KVCacheAttentionMethod
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
-        elif _is_fused_moe_layer(layer):
+        elif is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod

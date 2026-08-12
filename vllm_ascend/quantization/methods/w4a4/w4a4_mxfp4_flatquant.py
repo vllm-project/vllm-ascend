@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-import math
 from typing import Any
 
 import torch
@@ -24,10 +23,10 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import RowParallelLinear
 
-from .base import AscendLinearScheme
-from .registry import register_scheme
+from ..base import AscendLinearScheme
+from ..registry import register_scheme
+from .w4a4_flatquant import solve_kronecker_decompose
 
-# Maximum supported dimension for Kronecker quantization left_trans_dim and right_trans_dim
 MAX_SUPPORT_DIM = 256
 
 
@@ -41,26 +40,17 @@ def get_decompose_dim(n: int, m: int) -> tuple[int, int]:
     Raises:
         ValueError: If decomposed dimension exceeds MAX_SUPPORT_DIM
     """
-    a = int(math.sqrt(n))
-    if a * a < n:
-        a += 1
+    a_minus_b, a_plus_b = solve_kronecker_decompose(n)
 
-    while True:
-        tmp = a * a - n
-        b = int(math.sqrt(tmp))
-        if b * b == tmp:
-            break
-        a += 1
-
-    if (a + b) > MAX_SUPPORT_DIM:
+    if a_plus_b > MAX_SUPPORT_DIM:
         raise ValueError(
             f"Kronecker quantization left_trans_dim and right_trans_dim should be less than {MAX_SUPPORT_DIM}"
         )
 
-    if (a - b) * m > MAX_SUPPORT_DIM:
+    if a_minus_b * m > MAX_SUPPORT_DIM:
         return MAX_SUPPORT_DIM, m * n // MAX_SUPPORT_DIM
 
-    return a - b, a + b
+    return a_minus_b, a_plus_b
 
 
 @register_scheme("W4A4_MXFP4_FLATQUANT", "linear")

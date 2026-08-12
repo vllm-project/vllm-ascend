@@ -4,24 +4,19 @@ from typing import Optional
 import torch
 from compressed_tensors.quantization import QuantizationArgs
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_fused_moe_layer, is_layer_skipped
 from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
 from vllm_ascend.utils import FP8_METHOD
 
-from .methods import get_scheme_class
+from ..methods import get_scheme_class
 
 # vLLM 0.27.1's is_layer_skipped has no match_mode; newer trees default to exact.
 _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE = "match_mode" in inspect.signature(is_layer_skipped).parameters
-
-
-def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    return isinstance(layer, (MoERunner, RoutedExperts))
 
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
@@ -127,7 +122,7 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
         prefix: str,
         tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
-        from .method_adapters import (
+        from ..method_adapters import (
             AscendFusedMoEMethod,
             AscendLinearMethod,
         )
@@ -137,7 +132,7 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
             assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_linear"
             quant_method = AscendLinearMethod(scheme_class(self.weight_block_size))
             return quant_method
-        if _is_fused_moe_layer(layer):
+        if is_fused_moe_layer(layer):
             if self.expert_dtype == "fp4":
                 scheme_class = get_scheme_class(FP8_METHOD, "ds_w4a8_moe")
                 assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_w4a8_moe"

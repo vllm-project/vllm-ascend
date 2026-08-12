@@ -19,8 +19,8 @@ from typing import Any
 
 import torch
 
-from .base import QuantType
-from .registry import register_scheme
+from ..base import QuantType
+from ..registry import register_scheme
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 
 
