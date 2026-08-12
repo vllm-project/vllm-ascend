@@ -120,7 +120,7 @@
       "Shanghai_AI_Laboratory/internlm-7b-chat",
       "Shanghai_AI_Laboratory/internlm-7bi-chat",
       "Shanghai_AI_Laboratory/internlm-chat-7b",
-      "Tencent-Hunyuan/HunyuanOCR",
+      "vllm-ascend/HunyuanOCR",
       "Tencent-Hunyuan/Hunyuan-A13B-Instruct",
       "Tencent-Hunyuan/Hy3-preview",
       "Tengyunw/qwen3_8b_eagle3",

@@ -1959,7 +1959,7 @@ PROMPT_CONFIGS = {
         },
     },
     "hunyuan-vl": {
-        "model": "Tencent-Hunyuan/HunyuanOCR",
+        "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
     },
