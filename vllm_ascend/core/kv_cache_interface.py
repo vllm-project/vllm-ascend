@@ -30,6 +30,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # main-cache property here; indexer-specific C8 properties belong to the
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
+    store_on_host: bool = False
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -67,6 +68,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             "All attention layers in the same KV cache group must use the same sparse SFA C8 setting."
         )
         first_spec = specs[0]
+        store_on_host_set = set(spec.store_on_host for spec in specs)
+        assert len(store_on_host_set) == 1, (
+            "All attention layers in the same KV cache group must use the same host storage setting."
+        )
         return cls(
             block_size=first_spec.block_size,
             num_kv_heads=first_spec.num_kv_heads,
@@ -82,6 +87,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             compress_ratio=first_spec.compress_ratio,
             model_version=first_spec.model_version,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
+            store_on_host=store_on_host_set.pop(),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

@@ -112,9 +112,11 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
     # Tests
     # ------------------------------------------------------------------ #
 
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_single_instance_positive_kv_cache(self, mock_logger):
+    def test_single_instance_positive_kv_cache(self, mock_logger, mock_get_ascend_config):
         """Baseline: single instance on an empty card yields positive KV cache."""
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         total = int(64 * GiB_bytes)
         gpu_util = 0.9
         requested_memory = int(total * gpu_util)  # 57.6 GiB
@@ -134,8 +136,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         self.assertEqual(result, expected)
         self.assertGreater(result, 0)
 
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_determine_available_memory_does_not_profile_npugraph_memory(self, mock_logger):
+    def test_determine_available_memory_does_not_profile_npugraph_memory(self, mock_logger, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         total = int(64 * GiB_bytes)
         requested_memory = int(total * 0.9)
         init_free = int(60 * GiB_bytes)
@@ -156,8 +160,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         self.assertFalse(hasattr(worker, "npugraph_memory_estimate"))
         self.assertEqual(result, requested_memory - non_kv_cache)
 
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_second_instance_on_same_card_positive_kv_cache(self, mock_logger):
+    def test_second_instance_on_same_card_positive_kv_cache(self, mock_logger, mock_get_ascend_config):
         """
         Regression test for PR #7427.
 
@@ -176,6 +181,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         Before the fix, non_kv_cache_memory was inflated to include first
         instance memory (~25.6 GiB), yielding available ≈ -1.32 GiB (OOM).
         """
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         total = int(64 * GiB_bytes)
         gpu_util = 0.4
         requested_memory = int(total * gpu_util)  # 25.6 GiB
@@ -209,8 +215,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         # Verify model_runner.profile_run() was called during profiling
         worker.model_runner.profile_run.assert_called_once()
 
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_second_instance_buggy_non_kv_cache_gives_negative(self, mock_logger):
+    def test_second_instance_buggy_non_kv_cache_gives_negative(self, mock_logger, mock_get_ascend_config):
         """
         Documents the *pre-fix* buggy behaviour that PR #7427 addresses.
 
@@ -222,6 +229,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         This test is intentionally asserting the *negative* outcome to
         document the regressed state; it is NOT testing the fix itself.
         """
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         total = int(64 * GiB_bytes)
         gpu_util = 0.4
         requested_memory = int(total * gpu_util)  # 25.6 GiB
@@ -273,8 +281,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         self.assertIn("Error in memory profiling", str(ctx.exception))
 
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_second_instance_tight_memory_still_positive(self, mock_logger):
+    def test_second_instance_tight_memory_still_positive(self, mock_logger, mock_get_ascend_config):
         """
         Edge case: card is almost full when second instance starts.
 
@@ -282,6 +291,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         non_kv_cache_memory (i.e. there is room for at least some KV blocks),
         the result must be positive.
         """
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         total = int(32 * GiB_bytes)  # smaller card (e.g. 910B1)
         gpu_util = 0.3
         requested_memory = int(total * gpu_util)  # 9.6 GiB
