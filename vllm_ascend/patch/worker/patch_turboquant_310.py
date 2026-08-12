@@ -35,6 +35,9 @@ _ENABLED = os.environ.get("VLLM_ASCEND_TURBOQUANT", "0") == "1"
 _BITS = int(os.environ.get("VLLM_ASCEND_TQ_BITS", "3"))
 _K_BITS = int(os.environ.get("VLLM_ASCEND_TQ_K_BITS", str(_BITS)))
 _V_BITS = int(os.environ.get("VLLM_ASCEND_TQ_V_BITS", str(_BITS)))
+# Tier 2 = the custom AscendC kernels (dequant inside attention). Tier 0 keeps
+# the gather+dense path. Opt-in because Tier 2 needs K and V at the same width.
+_TIER2 = os.environ.get("VLLM_ASCEND_TQ_TIER2", "0") == "1"
 
 
 def _log(msg):
@@ -88,10 +91,69 @@ if _ENABLED:
         return shape
 
     AscendAttentionBackend310.get_kv_cache_shape = staticmethod(_tq_kv_cache_shape)
-    AscendAttentionBackend310.get_impl_cls = staticmethod(
-        lambda: AscendTurboQuantAttentionBackendImpl310
-    )
-    _log(f"ENABLED k={_K_BITS} v={_V_BITS} bits -- patched AscendAttentionBackend310")
+
+    if _TIER2:
+        from vllm_ascend.attention.turboquant_attn_310_tier2 import (
+            AscendTurboQuantTier2AttentionBackendImpl310,
+            norm_bytes_per_block,
+        )
+
+        if _K_BITS != _V_BITS:
+            raise ValueError(
+                f"VLLM_ASCEND_TQ_TIER2=1 needs matching widths; got k={_K_BITS} "
+                f"v={_V_BITS}. The kernels take a single `bits` per op."
+            )
+        AscendAttentionBackend310.get_impl_cls = staticmethod(
+            lambda: AscendTurboQuantTier2AttentionBackendImpl310
+        )
+        _patch_page_size_for_norms()
+        _log(f"ENABLED TIER 2 (AscendC kernels) k={_K_BITS} v={_V_BITS} bits")
+    else:
+        AscendAttentionBackend310.get_impl_cls = staticmethod(
+            lambda: AscendTurboQuantAttentionBackendImpl310
+        )
+        _log(f"ENABLED k={_K_BITS} v={_V_BITS} bits -- patched AscendAttentionBackend310")
+
+
+def _patch_page_size_for_norms():
+    """Budget the Tier-2 norm planes into page_size_bytes.
+
+    vLLM sizes the cache as `num_blocks = kv_cache_tensor.size // page_size_bytes`,
+    and the turboquant backend's get_kv_cache_shape describes only the PACKED
+    payload. The norm planes are separate tensors the impl allocates, so without
+    this they are invisible to the block accounting and the allocation is
+    over-committed.
+
+    `AttentionSpec.page_size_padded` is vLLM's own hook for exactly this: its
+    page_size_bytes already grows for per-token-head scales, with the comment
+    that they live in "separate tensors managed by the attention backend, but
+    the memory is carved from the raw KV cache allocation so it must be budgeted
+    here". That built-in formula assumes num_kv_heads*fp32, which UNDER-counts
+    this layout 2x (16 lanes of fp16), so the mechanism is reused, not the
+    constant.
+
+    At d=256, NKV=4, block=128, b=4: payload 131072 B + norms 8192 B = +6.25%,
+    making the honest saving vs fp16 3.77x rather than 4.00x.
+    """
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
+    # imported here, not from the caller's scope: _enable() binds it locally
+    from vllm_ascend.attention.turboquant_attn_310_tier2 import norm_bytes_per_block
+
+    if getattr(AttentionSpec, "_tq_page_patched", False):
+        return
+    _orig = AttentionSpec.page_size_bytes.fget
+
+    def _padded(self):
+        base = _orig(self)
+        if self.page_size_padded is not None:
+            return base          # caller already pinned it; do not double-add
+        return base + norm_bytes_per_block(self.block_size)
+
+    AttentionSpec.page_size_bytes = property(_padded)
+    AttentionSpec._tq_page_patched = True
+    _log("page_size_bytes now budgets the norm planes "
+         f"(+{norm_bytes_per_block(128)} B per 128-token block)")
 
 
 # --- per-channel RMS diagnostic (VLLM_ASCEND_TQ_STATS=1) --------------------

@@ -117,6 +117,12 @@ class TurboQuantCodec:
         signs = (torch.randint(0, 2, (head_dim,), generator=g, dtype=torch.int8) * 2 - 1)
         d = signs.to(device=device, dtype=compute_dtype)
         self.pi = d.unsqueeze(1) * hadamard(head_dim, device, compute_dtype) * d.unsqueeze(0)
+        # SINGLE SOURCE OF TRUTH for the rotation. Tier 0 uses `pi` directly;
+        # the Tier-2 AscendC kernels take this raw sign vector and rebuild
+        # Pi = D@H@D on device. If the two ever drifted, keys written by one
+        # path and read by the other would decode to garbage, so both must
+        # come from this one draw.
+        self.signs = d
 
         # (idx >> shift) & mask extracts each sub-byte code; see pack()/unpack().
         self._shifts = torch.arange(0, 8 * (self.nbytes // (head_dim * bits // 8)), device=device)
