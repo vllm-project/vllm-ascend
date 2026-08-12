@@ -201,10 +201,10 @@ a3:
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
       - name: Kimi-K2.6-w4a8-A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.6-w4a8-A3.yaml
       - name: Minimax_m2.7_w8a8_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Minimax_m2.7_w8a8_A3.yaml
   multi_card:
     test_config:
