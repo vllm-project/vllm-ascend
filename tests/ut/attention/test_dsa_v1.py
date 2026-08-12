@@ -21,11 +21,11 @@ import pytest
 import torch
 
 from vllm_ascend.attention.dsa_v1 import (
+    DSA_METADATA_BUFFER_SIZE,
     AscendDSAImpl,
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
-    DSA_METADATA_BUFFER_SIZE,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 
