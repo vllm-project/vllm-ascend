@@ -19,8 +19,6 @@ import importlib.util
 import os
 import sys
 
-# from vllm.logger import logger as vllm_logger
-
 _triton_available = importlib.util.find_spec("triton") is not None
 
 # main2main compatibility: stub triton.experimental.gluon modules that
@@ -75,17 +73,6 @@ def _ensure_global_patch():
 def register():
     """Register the NPU platform."""
 
-    # Upstream auto-enables breakable CUDAGraph for selected architectures
-    # only when the environment variable is absent. Keep it opt-in on Ascend
-    # while preserving any value explicitly set by users.
-    # from vllm.logger import logger as vllm_logger
-
-    # value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
-    # vllm_logger.info_once(
-    #     "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
-    #     value,
-    #     scope="process",
-    # )
     return "vllm_ascend.platform.NPUPlatform"
 
 

@@ -170,10 +170,13 @@ class ModelWithContext(nn.Module):
         self.is_draft_model_prefill = is_draft_model_prefill
 
     def forward(self, *args, **kwargs):
+        forward_context = get_forward_context()
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
-        if torch.npu.is_current_stream_capturing():
-            _EXTRA_CTX.capturing = True
+        _EXTRA_CTX.capturing = (
+            torch.npu.is_current_stream_capturing()
+            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+        )
         if self.is_draft_model:
             _EXTRA_CTX.is_draft_model = True
         if self.is_draft_model_prefill:

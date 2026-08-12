@@ -21,6 +21,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import torch
+from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.sequence import IntermediateTensors
@@ -134,7 +135,10 @@ class NPUModelRunner(GPUModelRunner):
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+            )
             and not self.model_config.enforce_eager
         )
         load_collection_phase = self.ascend_config.eplb_config.load_collection_phase

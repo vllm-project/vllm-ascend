@@ -519,7 +519,6 @@ setup(
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
             "ascend_model = vllm_ascend:register_model",
-            # "ascend_register = vllm_ascend:register",
         ],
     },
 )
