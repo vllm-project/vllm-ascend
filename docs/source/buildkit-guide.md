@@ -10,8 +10,8 @@ Two self-hosted runners are available:
 
 | Runner | Target Architecture | Description |
 |---|---|---|
-| `linux-amd64-cpu-4-buildkit` | `amd64` (x86_64) | Native amd64 build |
-| `linux-aarch64-cpu-4-buildkit` | `arm64` (aarch64) | Native arm64 build |
+| `linux-amd64-cpu-4` | `amd64` (x86_64) | Native amd64 build |
+| `linux-aarch64-cpu-4` | `arm64` (aarch64) | Native arm64 build |
 
 ### Build for both architectures
 
@@ -21,8 +21,8 @@ jobs:
     strategy:
       matrix:
         runner_info:
-          - {runner: linux-amd64-cpu-4-buildkit, arch: amd64}
-          - {runner: linux-aarch64-cpu-4-buildkit, arch: arm64}
+          - {runner: linux-amd64-cpu-4, arch: amd64}
+          - {runner: linux-aarch64-cpu-4, arch: arm64}
     runs-on: ${{ matrix.runner_info.runner }}
 ```
 
@@ -31,7 +31,7 @@ jobs:
 ```yaml
 jobs:
   build:
-    runs-on: linux-amd64-cpu-4-buildkit  # amd64 only
+    runs-on: linux-amd64-cpu-4  # amd64 only
 ```
 
 > **Important**: Do `NOT` use `--platform linux/amd64,linux/arm64` in `docker/build-push-action`. The runner architecture determines the target natively. Using `--platform` with a single runner unnecessarily triggers QEMU emulation.
@@ -109,8 +109,8 @@ jobs:
       fail-fast: false
       matrix:
         runner_info:
-          - {runner: linux-amd64-cpu-4-buildkit, arch: amd64}
-          - {runner: linux-aarch64-cpu-4-buildkit, arch: arm64}
+          - {runner: linux-amd64-cpu-4, arch: amd64}
+          - {runner: linux-aarch64-cpu-4, arch: arm64}
 
     steps:
       - uses: actions/checkout@v7
@@ -145,7 +145,7 @@ jobs:
 ```yaml
 jobs:
   build:
-    runs-on: linux-amd64-cpu-4-buildkit
+    runs-on: linux-amd64-cpu-4
     # ... same steps as above
 ```
 
@@ -154,7 +154,7 @@ jobs:
 ```yaml
 jobs:
   build:
-    runs-on: linux-aarch64-cpu-4-buildkit
+    runs-on: linux-aarch64-cpu-4
     # ... same steps as above
 ```
 
