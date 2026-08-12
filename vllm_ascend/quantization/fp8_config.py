@@ -59,13 +59,13 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
 
         if isinstance(layer, LinearBase):
             scheme_class = get_scheme_class(FP8_METHOD, "ds_linear")
-            assert scheme_class is not None, f"No sheme registered for {FP8_METHOD}/ds_linear"
+            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_linear"
             quant_method = AscendLinearMethod(scheme_class(self.weight_block_size))
             return quant_method
         if _is_fused_moe_layer(layer):
             if self.expert_dtype == "fp4":
                 scheme_class = get_scheme_class(FP8_METHOD, "ds_w4a8_moe")
-                assert scheme_class is not None, f"No sheme registered for {FP8_METHOD}/ds_w4a8_moe"
+                assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_w4a8_moe"
             else:
                 raise NotImplementedError
             quant_method = AscendFusedMoEMethod(scheme_class(), layer.moe_config, tid2eid=tid2eid)
