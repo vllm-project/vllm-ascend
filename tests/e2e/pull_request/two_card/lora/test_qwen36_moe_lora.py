@@ -111,12 +111,10 @@ def _run_mixed_2d_3d_lora_test(
         mixed_outputs = _generate(llm, [lora_2d, lora_3d])
 
         assert mixed_outputs[0] == outputs_2d_alone[0], (
-            f"Mixed-batch 2D output {mixed_outputs[0]!r} does not match "
-            f"standalone 2D output {outputs_2d_alone[0]!r}"
+            f"Mixed-batch 2D output {mixed_outputs[0]!r} does not match standalone 2D output {outputs_2d_alone[0]!r}"
         )
         assert mixed_outputs[1] == outputs_3d_alone[1], (
-            f"Mixed-batch 3D output {mixed_outputs[1]!r} does not match "
-            f"standalone 3D output {outputs_3d_alone[1]!r}"
+            f"Mixed-batch 3D output {mixed_outputs[1]!r} does not match standalone 3D output {outputs_3d_alone[1]!r}"
         )
 
         # Reverse assignment: neither adapter should be silently aliased.
