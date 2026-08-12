@@ -877,7 +877,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 950
   tests/e2e/pull_request/four_card/test_minimax_m2_7_128k.py: 4000
-  tests/e2e/pull_request/four_card/test_minimax_m2_7_16k.py: 3600
+  tests/e2e/pull_request/four_card/test_minimax_m2_7_16k.py: 4200
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 190
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 670
