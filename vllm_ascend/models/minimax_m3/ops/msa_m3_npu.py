@@ -84,9 +84,7 @@ def minimax_m3_sparse_attn_decode(
 ) -> None:
     """Run sparse decode through the AscendC sparse-attention operator."""
     if q.shape[0] != seq_lens.shape[0] * decode_query_len:
-        raise ValueError(
-            "Decode query tokens must equal request count times decode_query_len"
-        )
+        raise ValueError("Decode query tokens must equal request count times decode_query_len")
 
     key, value = _split_main_kv_cache(kv_cache)
     query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)

@@ -6,7 +6,7 @@
 
 ### Core Computation
 
-```
+```text
 O = softmax(Q @ K^T / sqrt(d)) @ V
 ```
 
@@ -61,7 +61,7 @@ Q attends only to the Top-K KV blocks instead of the complete KV cache, thereby 
 
 ### Task Decomposition
 
-```
+```text
 totalTaskNum = totalQTokens x kvHeads
 blockDim = min(totalTaskNum, aicNum)
 ```
@@ -83,7 +83,7 @@ The host calculates the following tiling data and passes it to the kernel:
 
 ### 4.1 Overall Pipeline
 
-```
+```text
 +-------------------------------------------------------------+
 |  Per task: 1 token x groupSize heads x Top-K KV blocks    |
 +-------------------------------------------------------------+
@@ -118,7 +118,7 @@ int64_t gmOffsetQ = qToken * strideQO + qHeadStart * embed_;
 
 ### 4.3 Matmul Dimensions
 
-```
+```text
 QK: M=groupSize, N=kvBlockSize (<=128), K=headDim (128)
     Q[groupSize, D] x K[D, blockSize]^T -> S[groupSize, blockSize]
 
@@ -141,7 +141,7 @@ int64_t gmOffsetK = physicalBlockId * strideKVBlock + kvHeadIdx * embed_;
 
 The Top-K KV blocks are processed one at a time using online softmax:
 
-```
+```text
 for each KV block:
     S = Q x K^T (BF16 matmul)
     S_scaled = S * scale (BF16)
@@ -253,7 +253,7 @@ SparseAttentionScore on A5 (Ascend 950PR/950DT) supports **only `inner_precise=4
 
 Its computation and storage precision are assigned as follows:
 
-```
+```text
 +-------------------+---------------------------+------------------------+
 | Stage             | Computation precision     | Storage precision      |
 +-------------------+---------------------------+------------------------+

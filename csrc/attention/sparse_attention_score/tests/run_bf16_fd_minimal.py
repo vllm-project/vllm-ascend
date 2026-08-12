@@ -6,8 +6,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch_npu
-
 
 # Make the repository's Python wrapper importable when this file is run directly.
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -18,9 +16,20 @@ from cann_ops_transformer.ops.sparse_attention_score import (  # noqa: E402
 )
 
 
-def run_once(query, key, value, select_idx, block_table, select_num_idx,
-             actual_seq_lengths, actual_seq_lengths_kv, kv_heads, head_dim,
-             block_size, top_k):
+def run_once(
+    query,
+    key,
+    value,
+    select_idx,
+    block_table,
+    select_num_idx,
+    actual_seq_lengths,
+    actual_seq_lengths_kv,
+    kv_heads,
+    head_dim,
+    block_size,
+    top_k,
+):
     return npu_sparse_attention_score(
         query,
         key,
@@ -63,9 +72,18 @@ def main():
     actual_seq_lengths_kv = torch.tensor([kv_seq_len], dtype=torch.int32).npu()
 
     fd_output = run_once(
-        query, key, value, select_idx, block_table,
-        select_num_idx, actual_seq_lengths, actual_seq_lengths_kv,
-        kv_heads, head_dim, block_size, top_k,
+        query,
+        key,
+        value,
+        select_idx,
+        block_table,
+        select_num_idx,
+        actual_seq_lengths,
+        actual_seq_lengths_kv,
+        kv_heads,
+        head_dim,
+        block_size,
+        top_k,
     )
 
     torch.npu.synchronize()
