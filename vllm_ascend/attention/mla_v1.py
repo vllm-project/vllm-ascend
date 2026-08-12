@@ -30,7 +30,6 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_dcp,
-    enable_pcp,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -82,7 +81,7 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls():
         dcp_enabled = enable_dcp()
-        pcp_enabled = enable_pcp()
+        pcp_enabled = get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
         if dcp_enabled and pcp_enabled:
             raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
         if dcp_enabled:
@@ -106,7 +105,7 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
         dcp_enabled = enable_dcp()
-        pcp_enabled = enable_pcp()
+        pcp_enabled = get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
         if dcp_enabled and pcp_enabled:
             raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
         if dcp_enabled:
@@ -232,8 +231,9 @@ class AscendMLAMetadata:
 class AscendMLAPCPMetadata(AscendMLAMetadata):
     """MLA metadata needed to write the complete PCP prefill KV cache."""
 
-    pcp_slot_mapping: torch.Tensor | None = None
     pcp_local_num_input_tokens: int = 0
+    pcp_local_prefill_start: int = 0
+    pcp_local_prefill_end: int = 0
 
 
 M = TypeVar("M", bound=AscendMLAMetadata)
@@ -266,15 +266,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
 
         scheduler_config = vllm_config.scheduler_config
-        parallel_config = vllm_config.parallel_config
 
-        pcp_enabled = parallel_config.prefill_context_parallel_size > 1
-        dcp_enabled = parallel_config.decode_context_parallel_size > 1
-
-        # The regular MLA path may classify short extensions as decodes. PCP
-        # and DCP must instead preserve the scheduler's per-request prefill
-        # classification.
-        self.treat_short_extends_as_decodes = not (pcp_enabled or dcp_enabled)
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
@@ -455,12 +447,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        parallel_config = self.vllm_config.parallel_config
 
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=self.treat_short_extends_as_decodes,
+                treat_short_extends_as_decodes=not (
+                    parallel_config.prefill_context_parallel_size > 1
+                    or parallel_config.decode_context_parallel_size > 1
+                ),
             )
         )
         self.set_num_actual_tokens(common_attn_metadata)
@@ -751,25 +747,25 @@ class AscendMLAPCPMetadataBuilder(AscendMLAMetadataBuilder):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
-        rank_slot_mappings = expanded_slot_mapping.view(
-            self.pcp_size,
-            local_num_input_tokens,
+        local_prefill_capacity = (
+            local_num_input_tokens - metadata.num_decode_tokens
         )
-        num_decode_tokens = metadata.num_decode_tokens
-        # Decode rows are replicated on every PCP rank. PCPManager keeps the
-        # valid cache-write slots only in rank 0's expanded row. Prefill rows
-        # use the slots belonging to this rank's DualChunkSwap partition.
-        metadata.slot_mapping = torch.cat(
-            (
-                rank_slot_mappings[0, :num_decode_tokens],
-                rank_slot_mappings[
-                    self.pcp_rank,
-                    num_decode_tokens : metadata.num_actual_tokens,
-                ],
-            )
-        )
-        metadata.pcp_slot_mapping = expanded_slot_mapping
+        metadata.slot_mapping = expanded_slot_mapping
         metadata.pcp_local_num_input_tokens = local_num_input_tokens
+        metadata.pcp_local_prefill_start = (
+            self.pcp_rank * local_prefill_capacity
+        )
+        metadata.pcp_local_prefill_end = (
+            metadata.pcp_local_prefill_start
+            + metadata.num_actual_tokens
+            - metadata.num_decode_tokens
+        )
+        # PCP partitions prefill tokens into rank-local chunks, including
+        # continued prefills whose uncached suffix contains only one token.
+        # Keep decode-only batches on their graph path, but route every batch
+        # containing prefill work through the chunked-prefill implementation.
+        if metadata.num_prefills > 0:
+            metadata.attn_state = AscendAttentionState.ChunkedPrefill
         return metadata
 
 
@@ -1912,8 +1908,6 @@ class AscendMLAPCPImpl(AscendMLAImpl):
     ):
         if not isinstance(attn_metadata, AscendMLAPCPMetadata):
             raise RuntimeError("PCP MLA prefill requires AscendMLAPCPMetadata.")
-        if attn_metadata.pcp_slot_mapping is None:
-            raise RuntimeError("PCP MLA prefill requires pcp_slot_mapping.")
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1930,16 +1924,25 @@ class AscendMLAPCPImpl(AscendMLAImpl):
         padded_sin = self._pad_tokens(sin, local_prefill_capacity)
 
         pcp_group = get_pcp_group()
-        rank_slot_mappings = attn_metadata.pcp_slot_mapping.view(
+        rank_slot_mappings = attn_metadata.slot_mapping.view(
             pcp_group.world_size,
             local_num_input_tokens,
         )
+        # Remove the decoding area and flatten it.
         expanded_prefill_slots = rank_slot_mappings[:, num_decode_tokens:].flatten()
         (gathered_kv, gathered_cos, gathered_sin), gathered_prefill_slots = _gather_prefill_cache_inputs(
             (local_prefill_kv, padded_cos, padded_sin),
             expanded_prefill_slots,
             num_decode_tokens=0,
         )
+        logger.info(
+            "[MLA PCP] rank=%d, local_kv=%s, gathered_kv=%s, slots=%s",
+            pcp_group.rank_in_group,
+            tuple(local_prefill_kv.shape),
+            tuple(gathered_kv.shape),
+            tuple(gathered_prefill_slots.shape),
+        )
+        # TODO Due to the npu_kv_rmsnorm_rope_cache fusion operator, the RMSNorm rope of the KV layer involves repeated calculations, leaving room for optimization.
         gathered_k_pe, gathered_k_c_normed = super().exec_kv_prefill(
             gathered_kv,
             gathered_cos,
@@ -1947,9 +1950,11 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             kv_cache,
             gathered_prefill_slots,
         )
-        local_prefill_start = pcp_group.rank_in_group * local_prefill_capacity
-        local_prefill_end = local_prefill_start + local_num_prefill_tokens
-        prefill_k_pe = gathered_k_pe[local_prefill_start:local_prefill_end]
-        prefill_k_c_normed = gathered_k_c_normed[local_prefill_start:local_prefill_end]
+        prefill_k_pe = gathered_k_pe[
+            attn_metadata.pcp_local_prefill_start : attn_metadata.pcp_local_prefill_end
+        ]
+        prefill_k_c_normed = gathered_k_c_normed[
+            attn_metadata.pcp_local_prefill_start : attn_metadata.pcp_local_prefill_end
+        ]
 
         return prefill_k_pe, prefill_k_c_normed

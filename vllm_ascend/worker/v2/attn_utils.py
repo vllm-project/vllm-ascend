@@ -220,10 +220,7 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
-        group_is_prefilling = common_attn_metadata_extra_kwargs.pop(
-            "is_prefilling",
-            is_prefilling,
-        )
+
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -236,7 +233,7 @@ def build_attn_metadata(
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
             positions=positions,
-            is_prefilling=group_is_prefilling,
+            is_prefilling=is_prefilling,
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
