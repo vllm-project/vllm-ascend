@@ -430,10 +430,11 @@ jobs:
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install regex
-          python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}'
+            pip install regex
+            python3 .github/workflows/scripts/select_tests.py \
+              --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
+              --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}' \
+              --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
 
       - name: Set no-tests output when no tests selected
         id: noop

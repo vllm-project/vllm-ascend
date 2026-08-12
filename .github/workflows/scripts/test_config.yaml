@@ -326,6 +326,8 @@
 
 - name: models_minimax_m2
   optional: false
+  # Run only on PRs tagged with both `ready` (job-level gate) and `mrv2`.
+  required_pr_labels: [mrv2]
   source_file_dependencies:
     - vllm_ascend/patch/worker/patch_minimax_m2.py
     - vllm_ascend/patch/worker/patch_minimax_m2_linear_attn.py
