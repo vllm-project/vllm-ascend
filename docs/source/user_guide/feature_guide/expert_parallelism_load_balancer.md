@@ -2,7 +2,7 @@
 
 ## Overview
 
-Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. Our solution aims to minimize the negative impacts caused by the operation.
+Expert Parallel Load Balancing (EPLB) redistributes physical expert replicas according to observed MoE traffic. It can improve Time To First Token (TTFT) or Time Per Output Token (TPOT) when expert imbalance is the bottleneck, but recording load and moving weights also add overhead. Benchmark the target workload before enabling it in production.
 
 vLLM Ascend provides two EPLB integration paths:
 
@@ -15,10 +15,11 @@ vLLM Ascend provides two EPLB integration paths:
 The two paths use different switches and configuration schemas. Do not mix
 MRv1 environment variables or legacy fields with MRv2 EPLB configuration.
 
-## EPLB Effects
+## Expected Effects
 
-- Reduced Latency: Dynamically balances expert loads to minimize TTFT and TPOT by distributing workloads evenly across experts.
-- Adaptive Scaling: Automatically adjusts to workload fluctuations while maintaining stable performance.
+- EPLB can reduce rank imbalance by changing the placement of logical experts and redundant replicas as traffic changes.
+- MRv2 performs weight movement asynchronously and skips unchanged layers, reducing the amount of rearrangement work on cycles where only part of the placement changes.
+- EPLB does not guarantee lower latency. The result depends on model shape, redundant-expert count, topology, traffic stability, and transfer frequency.
 
 ## Support Scenarios
 
@@ -28,10 +29,7 @@ EPLB applies only to MoE models that support expert parallelism and whose MoE
 quantization method exposes a complete expert-weight movement layout. Support
 also depends on the selected model runner and hardware generation.
 
-Legacy MRv1 performance has primarily been verified on DeepSeek-V3.1/R1. The
-initial MRv2 model-level validation uses Qwen3-30B-A3B W8A8 with asynchronous
-EPLB and graph mode. Validate accuracy and performance with the target model,
-topology, and traffic before production deployment.
+Legacy MRv1 performance has primarily been verified on DeepSeek-V3.1/R1. MRv2 has an in-tree four-card Qwen3-30B-A3B W8A8 regression using asynchronous scheduling and `FULL_AND_PIECEWISE` graph mode. This regression does not imply that every model, topology, or traffic pattern has equivalent accuracy and performance coverage.
 
 > [!IMPORTANT]
 > Ascend 950 Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16", "W4A16MXFP4".
@@ -104,7 +102,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `window_size` | `1000` | Number of recent steps used for expert-load recording. |
-| `step_interval` | `3000` | Interval between expert rearrangements. |
+| `step_interval` | `3000` | Number of EPLB steps between placement evaluations. When it exceeds `window_size`, only the most recent window contributes to the decision. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
 | `use_async` | `true` | Must remain `true`. Expert movement uses Gloo CPU staging on a background worker. |
 | `policy` | `default` | Leave at the upstream default. Ascend internally fixes MRv2 placement to STAIR. |
@@ -114,6 +112,8 @@ MRv2 uses the upstream `EPLBConfig` fields:
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
+
+STAIR uses the configured load window directly and optimizes rank-load balance. It does not require an offline transfer-cost profile or any STAIR-specific tuning parameter. Start with the upstream `window_size` and `step_interval` defaults, then shorten them only when the traffic changes faster than the default evaluation cadence. Smaller values react sooner but evaluate and move experts more frequently.
 
 #### MRv2 Load Collection Phase
 
@@ -128,12 +128,7 @@ non-matching batches.
 | `prefill` | Collect only from batches containing at least one prefill request. | Optimize prefill balance and TTFT. |
 | `decode` | Collect only from batches containing decode requests and no prefill request. | Optimize decode balance and TPOT. |
 
-Classification is performed once per batch. A batch containing any prefill
-request is classified entirely as prefill; otherwise it is decode. A batch
-that does not match `load_collection_phase` does not contribute load and does
-not advance the EPLB load window. It still participates in the global EPLB
-scheduling and communication sequence so that data-parallel ranks remain
-synchronized.
+Classification is performed once per batch. A batch containing any prefill request is classified entirely as prefill; otherwise it is decode. A batch that does not match `load_collection_phase` does not contribute load and does not advance its local EPLB load-window cursor. It still advances the global EPLB scheduling state and communication sequence so that data-parallel ranks remain synchronized.
 
 For example, to collect only prefill load:
 
@@ -148,10 +143,10 @@ vllm serve Qwen/Qwen3-30B-A3B \
 > [!IMPORTANT]
 > MRv2 EPLB on Ascend supports the asynchronous Gloo path only. It rejects
 > synchronous movement, elastic EP, legacy `dynamic_eplb`, recording/static-map
-> fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`. The validated regression
-> scope includes `FULL_AND_PIECEWISE` graph mode, DP2 × TP2, and EP world size
-> four. Validate other topologies, multi-node deployment, and speculative
-> decoding independently before use.
+> fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`. The in-tree regression scope
+> is one node with DP2 × TP2, EP world size four, asynchronous scheduling, and
+> `FULL_AND_PIECEWISE` graph mode. Multi-node deployment, other topologies, and
+> speculative decoding require independent validation.
 
 ### Model Runner V1: Legacy EPLB
 
