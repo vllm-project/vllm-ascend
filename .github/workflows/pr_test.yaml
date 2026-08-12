@@ -291,11 +291,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${HAS_READY_ALL}" = "true" ]; then
-            MODE=diff
+            MODE="diff"
           elif [ "${RECOMMEND_RESULT}" = "success" ] && [ -n "${COVERAGE_PATHS// /}" ]; then
-            MODE=recommended
+            MODE="recommended"
           else
-            MODE=diff
+            MODE="diff"
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "Selection mode: ${MODE}"
