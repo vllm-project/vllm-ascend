@@ -51,7 +51,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp, set_potential_max_tokens
+from vllm_ascend.utils import enable_sp, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -281,7 +281,29 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
-    def prepare_inputs(
+    # The GPUModelRunner.prepare_inputs signature gained batch_req_state on
+    # vllm main (it was gather_batch_req_state + per-arg on v0.26.0). Define
+    # both overloads so the override matches the base on each version lane.
+    if vllm_version_is("0.26.0"):
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs(scheduler_output, batch_desc)
+    else:
+        from vllm.v1.worker.gpu.model_runner import BatchReqState
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs(scheduler_output, batch_desc)
+
+    def _prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
         batch_desc: BatchExecutionDescriptor,
@@ -482,6 +504,7 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
+            **({"has_prefill": batch_has_prefill} if not vllm_version_is("0.26.0") else {}),
         )
 
         input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)

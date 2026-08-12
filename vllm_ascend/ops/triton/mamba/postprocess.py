@@ -49,14 +49,20 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
+    # TEMPORAL_TILES CTAs along the byte inner range. Callers must launch a
+    # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
+    # the existing 2D-grid contract (program_id(2) reads 0).
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
-    Grid: (num_reqs, num_layers * num_state_types)
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
     - program_id(0) = request index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
+    - program_id(2) = temporal-copy tile index (0 when TEMPORAL_TILES == 1)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
@@ -64,6 +70,7 @@ def postprocess_mamba_fused_kernel(
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
     # Bounds check: num_reqs is the number of active batch rows. With
     # HAS_IDX_MAPPING, req_idx is a (possibly sparse) request-state slot, so it
@@ -170,7 +177,7 @@ def postprocess_mamba_fused_kernel(
         # Use natural block data size (inner_size * elem_size), NOT
         # state_block_stride which is the page stride and can exceed the
         # actual data when the state tensor uses as_strided page padding.
-        copy_size = state_inner_size * state_elem_size
+        copy_size = state_inner_size.to(tl.int64) * state_elem_size.to(tl.int64)
 
     # Mirror postprocess_mamba's trailing
     #     if src_block_idx == dest_block_idx: num_accepted_tokens_cpu[i] = 1
@@ -180,7 +187,9 @@ def postprocess_mamba_fused_kernel(
     # snapshot; v0.26.0 passes None for the output and updates the input buffer
     # in place under HAS_IDX_MAPPING. Distinguish by whether an output buffer
     # was provided, since both lanes use HAS_IDX_MAPPING=True on the V2 path.
-    if src_block_idx == dest_block_idx and state_idx == 0:
+    # Guard on tile_idx == 0 so tiles > 0 (TEMPORAL_TILES > 1) do not
+    # duplicate the store.
+    if (src_block_idx == dest_block_idx and state_idx == 0) and tile_idx == 0:
         if num_accepted_tokens_out_ptr is None:
             tl.store(num_accepted_tokens_ptr + req_idx, 1)
         else:
@@ -204,6 +213,9 @@ def postprocess_mamba_fused_kernel(
         # (conv_width - accept_token_bias) * elem_size bytes, advancing both
         # src and dst by dim_row_stride per row. Load the row metadata here
         # (not earlier) so it stays in the same scope as the copy loop.
+        # Conv states are small; only tile 0 copies.
+        if tile_idx > 0:
+            return
         dim_row_count = tl.load(state_dim_row_count_ptr + state_idx)
         dim_row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
         for row in range(dim_row_count):
@@ -213,11 +225,28 @@ def postprocess_mamba_fused_kernel(
                 mask = (i + offsets) < copy_size
                 data = tl.load(row_src + i + offsets, mask=mask)
                 tl.store(row_dst + i + offsets, data, mask=mask)
-    else:
-        # SD conv / temporal: single contiguous region.
+    elif is_conv_state:
+        # SD conv: small per-block bytes (~60-80 KiB) make tiling degenerate,
+        # so conv runs as a single-CTA copy (only tile 0).
+        if tile_idx > 0:
+            return
         src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
         dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
         for i in range(0, copy_size, COPY_BLOCK_SIZE):
             mask = (i + offsets) < copy_size
+            data = tl.load(src_ptr + i + offsets, mask=mask)
+            tl.store(dst_ptr + i + offsets, data, mask=mask)
+    else:
+        # Temporal state: partition the byte copy across TEMPORAL_TILES CTAs
+        # to keep the SMs filled for the (multi-MiB) temporal copies. All
+        # tile/range math is int64 (copy_size is already widened above).
+        src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
+        per_tile = tl.cdiv(copy_size, TEMPORAL_TILES)
+        per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        tile_start = tile_idx.to(tl.int64) * per_tile
+        tile_end = tl.minimum(tile_start + per_tile, copy_size)
+        for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < tile_end
             data = tl.load(src_ptr + i + offsets, mask=mask)
             tl.store(dst_ptr + i + offsets, data, mask=mask)

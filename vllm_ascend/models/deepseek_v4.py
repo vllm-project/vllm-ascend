@@ -89,6 +89,7 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
 
 
@@ -474,21 +475,19 @@ class DeepseekV4MoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoEFactory class
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=hidden_states,
-                input_ids=input_ids,
-            )
-        else:
+        # main: upstream models always pass router_logits=hidden_states; the
+        # MoERunner owns the gate. v0.26.0 models applied the gate themselves
+        # when the runner was not internal.
+        if vllm_version_is("0.26.0") and not self.experts.is_internal_router:
             # router_logits: (num_tokens, n_experts)
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+        else:
+            router_logits = hidden_states
+        fused_moe_out = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            input_ids=input_ids,
+        )
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
         if fused_moe_out_is_tuple:
