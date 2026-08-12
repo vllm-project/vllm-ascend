@@ -27,9 +27,9 @@ from tests.e2e.pull_request.four_card.minimax_m2_7_common import (
     _benchmark_pair,
 )
 
-# Each V1/V2 side runs 5 rounds; the first round is discarded and the
-# assertion compares the mean of the remaining 4 rounds.
-NUM_BENCH_REPEATS = 5
+# Each V1/V2 side runs a single long benchmark (160 requests / 8 concurrent)
+# with warm-up requests, so no first-round discard is needed.
+NUM_BENCH_REPEATS = 1
 
 
 @pytest.mark.e2e_model(MINIMAX_M2_7_MODEL)
@@ -44,7 +44,7 @@ NUM_BENCH_REPEATS = 5
 )
 @wait_until_npu_memory_free()
 def test_minimax_m2_7_128k1k_v2_vs_v1() -> None:
-    """128k1k: 32 requests, 8 concurrent, ~90% shared prefix, V2 >= V1 * 0.97."""
+    """128k1k: 160 requests, 8 concurrent, ~90% shared prefix, V2 >= V1 * 0.97."""
     _benchmark_pair(
         bench_args=BENCH_128K_ARGS,
         case="128k1k",

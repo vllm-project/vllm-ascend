@@ -29,21 +29,19 @@ surplus ``layers.{16..61}`` weights during loading.
 
 Both scenarios run ModelRunner V1 and V2 on the same machine and assert
 that V2 mean output throughput is not worse than V1 by more than 3%
-(``V2 >= V1 * 0.97``). Each side runs several benchmark rounds and the
-first round is discarded; the assertion compares the mean of the remaining
-rounds to reduce single-run throughput noise.
+(``V2 >= V1 * 0.97``). Each side runs a single long benchmark with 5x the
+requests (16k1k: 400, 128k1k: 160).
 
 Benchmarks use vLLM's built-in ``vllm bench serve`` CLI with its synthetic
 datasets (``random`` for 16k1k, ``prefix_repetition`` for 128k1k), so no
-external dataset publication is required. Each round is preceded by 5
-warm-up requests that are excluded from the metrics, and the first round
-itself is discarded, mirroring the internal methodology of discarding the
-first complete round. (Nightly single-node cases use aisbench instead;
-this PR E2E case follows the PR E2E toolchain, whose only performance
-precedent is ``tools/vllm_bench.py``.)
+external dataset publication is required. The measurement is preceded by 5
+warm-up requests that are excluded from the metrics, mirroring the internal
+methodology of discarding the first complete run. (Nightly single-node
+cases use aisbench instead; this PR E2E case follows the PR E2E toolchain,
+whose only performance precedent is ``tools/vllm_bench.py``.)
 
 The 16k1k and 128k1k cases live in separate test files so each runs as its
-own CI job; the 16k case runs 5 rounds per side and the 128k case 3 rounds.
+own CI job; each case runs a single long round.
 """
 
 from __future__ import annotations
@@ -144,7 +142,7 @@ BENCH_16K_ARGS = [
     "--dataset-name",
     "random",
     "--num-prompts",
-    "80",
+    "400",
     "--max-concurrency",
     "20",
     "--random-input-len",
@@ -157,7 +155,7 @@ BENCH_128K_ARGS = [
     "--dataset-name",
     "prefix_repetition",
     "--num-prompts",
-    "32",
+    "160",
     "--max-concurrency",
     "8",
     "--prefix-repetition-prefix-len",
@@ -228,10 +226,10 @@ def _mean_output_throughput(
     case: str,
     label: str,
 ) -> float:
-    """Return the mean output throughput over all rounds except the first."""
+    """Return the mean output throughput over all rounds."""
     for round_index, result in enumerate(results, 1):
         assert result["failed"] == 0, f"[{case}] {label} round {round_index} had {result['failed']} failed request(s)"
-    kept = results[1:]
+    kept = results
     values = [float(result["output_throughput"]) for result in kept]
     mean = sum(values) / len(values)
     print(f"[{case}] {label} output_throughput per kept round: {[f'{v:.2f}' for v in values]} tok/s")
@@ -259,8 +257,8 @@ def _benchmark_pair(
 ) -> dict[str, Any]:
     """Run the same scenario on V1 then V2 and assert V2 >= V1 * 0.97.
 
-    Each side runs *num_repeats* rounds on a single server; the first round
-    is discarded and the assertion compares mean throughput.
+    Each side runs *num_repeats* rounds on a single server and the
+    assertion compares mean throughput.
     """
     v1_results = _run_server_and_bench(
         use_v2=False,
