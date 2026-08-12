@@ -323,14 +323,15 @@ class NPUModelRunner310V2(NPUModelRunner):
                     storage_offset_bytes = 0
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         dtype_size = get_dtype_size(dtype)
-                        elements_per_page = kv_cache_spec.page_size_bytes // dtype_size
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
                         state_tensors.append(
                             torch.as_strided(
                                 raw_tensor.view(dtype),
                                 size=target_shape,
-                                stride=(elements_per_page, *stride[1:]),
+                                # Mamba state pages are contiguous in the hybrid raw cache.
+                                # page_size_bytes is the allocation unit, not a tensor stride.
+                                stride=(stride[0], *stride[1:]),
                                 storage_offset=storage_offset_bytes // dtype_size,
                             )
                         )

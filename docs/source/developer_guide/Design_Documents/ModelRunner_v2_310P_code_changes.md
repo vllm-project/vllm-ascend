@@ -1114,3 +1114,46 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check`和`git diff --check`已通过。
 - 当前 Windows本地 Python环境未安装`pytest`，目标 UT需在服务器执行。
 - 真实310P需重新验证 Qwen3.5-4B eager和ACLGraph，并确认日志中KV Cache采用64 kernel block。
+
+## 31. GDN/Mamba state cache 的连续 stride 修复
+
+问题现象：
+
+- Qwen3.5-4B 在 eager 模式下已不再出现 cache format 或 Paged Attention setup 报错，
+  但 `temperature=0` 的确定性请求仍从首轮生成开始输出乱码。
+- eager 模式同样异常，因此该问题与 ACLGraph 捕获或重放无关。
+
+根因：
+
+- 310P MRV2 为每个 Mamba/GDN state 构造 `torch.as_strided()` 视图时，曾把
+  `kv_cache_spec.page_size_bytes / dtype_size` 作为第一维 block stride。
+- `page_size_bytes` 是整个 Hybrid cache page 的分配单位，可能同时覆盖 convolution state、
+  recurrent state 和对齐填充；它不是单个 state tensor 相邻 block 之间的元素跨度。
+- 与此同时，`storage_offset_bytes` 又按照每个 state 完整连续 tensor 的大小向后移动，导致
+  state 起始偏移采用“按 state 连续分区”布局，而第一维 stride 采用“按 page 交错”布局，
+  两种地址语义互相矛盾。
+- 结果是 state 的 shape、dtype 和 ND format 都合法，算子不会在参数检查阶段报错，
+  但 GDN 会读取错误的状态地址并造成模型精度异常。
+
+MRV1 对照：
+
+- MRV1 使用
+  `raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)`，为每个 state 从 raw buffer
+  中划分完整的连续区域。
+- 对形状 `(num_blocks, *shape)` 的 state，正确第一维 stride 是 `prod(shape)`，即
+  `torch.empty(target_shape).stride()[0]`，而不是整个 Hybrid page 的元素数。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_runner.py`
+  - 删除 `elements_per_page = kv_cache_spec.page_size_bytes // dtype_size`。
+  - 将 Mamba/GDN state 视图第一维改为 tensor 自身的连续 stride：
+    `stride=(stride[0], *stride[1:])`。
+  - 保留基于 `storage_offset_bytes` 的 state 分区，使 raw cache 布局与 MRV1 一致：
+    `[state0 的全部 blocks][state1 的全部 blocks][padding]`。
+  - 修改仅影响310P MRV2的 Mamba/GDN state视图，不改变Attention NZ cache、MRV1或其他机型。
+
+验证状态：
+
+- 需要在真实310P上重新验证 Qwen3.5-4B eager首token、连续decode和多请求场景。
+- eager精度恢复后，再继续验证 ACLGraph、TP和并发场景。
