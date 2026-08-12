@@ -27,6 +27,23 @@ def _using_kv_store(vllm_config) -> bool:
     return False
 
 
+def _uses_kimi_k3_mla_c8_cache(vllm_config) -> bool:
+    """Return whether Kimi-K3 stores its MLA latent K cache as INT8."""
+    model_config = vllm_config.model_config
+    quant_config = vllm_config.quant_config
+    if not model_config.use_mla or quant_config is None:
+        return False
+
+    hf_config = getattr(model_config, "hf_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    is_kimi_k3 = getattr(hf_config, "model_type", None) == "kimi_k3" or (
+        getattr(hf_text_config, "model_type", None) == "kimi_linear"
+        and bool(getattr(hf_text_config, "mla_use_output_gate", False))
+        and getattr(hf_text_config, "routed_expert_hidden_size", None) is not None
+    )
+    return is_kimi_k3 and getattr(quant_config, "enable_fa_quant", False)
+
+
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
     """
@@ -84,6 +101,24 @@ def verify_and_update_config(cls, vllm_config) -> None:
         qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
         attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        if _uses_kimi_k3_mla_c8_cache(vllm_config):
+            # MLA C8 quantizes only the latent K cache; RoPE/V remains in the
+            # model dtype. Account for the actual INT8 K bytes here so the
+            # logical block grows from 384 to 768 tokens and a contiguous K
+            # block still spans one full Mamba recurrent-state slot. K and V
+            # share this doubled token capacity.
+            kv_dtype_size = get_dtype_size(kv_cache_dtype)
+            assert kv_dtype_size == 2, (
+                "Hybrid MLA C8 cache currently requires a 2-byte "
+                f"unquantized KV dtype, got {kv_cache_dtype}."
+            )
+            attn_single_token_k_page_size //= kv_dtype_size
+            logger.info(
+                "Using hybrid MLA C8 double-token block layout: K=%d "
+                "B/token, V=%d B/token.",
+                attn_single_token_k_page_size,
+                attn_rope_token_page_size,
+            )
         attn_token_page_size = attn_single_token_k_page_size + attn_rope_token_page_size
     else:
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
