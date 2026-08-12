@@ -185,13 +185,15 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
     except OSError as exc:
         print(f"Warning: Failed to run postprocess script {script_path}: {exc}")
         return
+    # upload_to_openlibing uses logging (stderr); always forward both streams
     if completed.stdout:
         print(completed.stdout.rstrip())
+    if completed.stderr:
+        print(completed.stderr.rstrip())
     if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
         print(
             f"Warning: Postprocess script exited with code {completed.returncode} "
-            f"for {output_path}" + (f": {stderr}" if stderr else "")
+            f"for {output_path}"
         )
 
 
