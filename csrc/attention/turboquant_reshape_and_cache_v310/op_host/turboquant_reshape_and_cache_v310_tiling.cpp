@@ -109,31 +109,28 @@ ge::graphStatus TurboquantReshapeAndCacheV310Tiling::ComputeSplit()
         coreNum = 1;
     }
     /*
-     * CACHE-LINE OWNERSHIP (multi-core correctness, not tuning).
+     * CACHE-LINE OWNERSHIP -- NO LONGER REQUIRED.
      *
-     * The norm planes are written with scalar SetValue to GM, and GM scalar
-     * writes commit at CACHE-LINE granularity, not element granularity. One
-     * token's norms occupy numKvHeads*2 bytes (8 B at 4 kv heads), so with a
-     * small tokensPerCore several cores read-modify-write the SAME line and
-     * clobber each other: measured [0.0, 16.59, 0.0, 0.0] at numTokens=4, i.e.
-     * three of four norms silently lost, nondeterministically.
+     * This used to round tokensPerCore up to a whole 64B cache line. The norm
+     * planes were [num_slots, num_kv_heads] halves = 8 B per token, so 8 slots
+     * shared a 64B line and the scalar GM writes read-modify-wrote each other
+     * (measured [0.0, 16.59, 0.0, 0.0] at numTokens=4 -- three of four norms
+     * silently lost).
      *
-     * Give every core a whole number of cache lines. At 4 kv heads that is 8
-     * tokens per 64 B line; the last core simply gets a short tail, which is
-     * safe because no other core touches its lines.
+     * The plane is now [num_slots, 16] halves: every slot owns a whole 32B block
+     * and is written with one aligned DataCopy, so no two cores can touch the
+     * same line regardless of how the slots are distributed. The rounding was
+     * also never sufficient -- it assumed token index order == slot order, which
+     * is false for real block-manager slot mappings (permuted slots still raced
+     * until the layout changed).
+     *
+     * Dropping it also restores parallelism: rounding forced perCore to a
+     * multiple of 8, so a 4-token write collapsed onto a single core.
      */
-    constexpr uint32_t kLineBytes = 64;
-    const uint32_t bytesPerToken = tilingData_.numKvHeads * static_cast<uint32_t>(sizeof(uint16_t));
-    uint32_t tokensPerLine = (bytesPerToken == 0) ? 1U : (kLineBytes + bytesPerToken - 1) / bytesPerToken;
-    if (tokensPerLine == 0) {
-        tokensPerLine = 1;
-    }
-
     uint32_t perCore = (tilingData_.numTokens + coreNum - 1) / coreNum;
     if (perCore == 0) {
         perCore = 1;
     }
-    perCore = ((perCore + tokensPerLine - 1) / tokensPerLine) * tokensPerLine;  // round up to a line
     tilingData_.tokensPerCore = perCore;
     tilingData_.vectorCoreNum = (tilingData_.numTokens + perCore - 1) / perCore;
     if (tilingData_.vectorCoreNum == 0) {

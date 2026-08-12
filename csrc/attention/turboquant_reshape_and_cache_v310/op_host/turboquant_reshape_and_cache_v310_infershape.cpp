@@ -8,7 +8,10 @@
  */
 /*!
  * \file turboquant_reshape_and_cache_v310_infershape.cpp
- * \brief Norm planes: [num_slots, num_kv_heads]; num_slots = num_blocks * block_size.
+ * \brief Norm planes: [num_slots, 16]; num_slots = num_blocks * block_size.
+ *        One whole 32B block per slot (only the first num_kv_heads lanes carry
+ *        data) so each slot owns its block: the write is a plain aligned
+ *        DataCopy, idempotent under slot reuse, with no 64B cache-line sharing.
  */
 #include "register/op_impl_registry.h"
 #include "tiling_base/error_log.h"
@@ -31,14 +34,15 @@ static ge::graphStatus InferShapeTurboquantReshapeAndCacheV310(InferShapeContext
         OP_LOGE(opName, "[InferShape] shape is null");
         return ge::GRAPH_FAILED;
     }
-    const int64_t numKvHeads = keyShape->GetDim(1);
+    constexpr int64_t kNormLanes = 16;   // one 32B block per slot
+    (void)keyShape->GetDim(1);           // num_kv_heads no longer sets the stride
     const int64_t numSlots = cacheShape->GetDim(0) * cacheShape->GetDim(2);
     kNormOut->SetDimNum(2);
     kNormOut->SetDim(0, numSlots);
-    kNormOut->SetDim(1, numKvHeads);
+    kNormOut->SetDim(1, kNormLanes);
     vNormOut->SetDimNum(2);
     vNormOut->SetDim(0, numSlots);
-    vNormOut->SetDim(1, numKvHeads);
+    vNormOut->SetDim(1, kNormLanes);
     return ge::GRAPH_SUCCESS;
 }
 
