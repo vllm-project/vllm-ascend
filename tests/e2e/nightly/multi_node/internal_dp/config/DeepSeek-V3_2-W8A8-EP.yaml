@@ -52,7 +52,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false}'
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -98,7 +98,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false}'
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":false}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config

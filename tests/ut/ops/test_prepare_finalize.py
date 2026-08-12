@@ -16,7 +16,6 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # Mock FusedMoEConfig
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_context_parallel = False
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         self.mock_get_config_utils = patch("vllm_ascend.utils.get_ascend_config")
         mock_config_utils = self.mock_get_config_utils.start()
         mock_config_utils.return_value = mock_ascend_config

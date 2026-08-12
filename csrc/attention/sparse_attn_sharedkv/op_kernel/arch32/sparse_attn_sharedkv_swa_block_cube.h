@@ -41,7 +41,8 @@ public:
                                                GlobalTensor<OUT_T> attentionOutGm);
     __aicore__ inline void InitPageAttentionInfo(GlobalTensor<KV_T> oriKvGm, // const GlobalTensor<KV_T>& kvMergeGm,
                                                  GlobalTensor<int32_t> oriBlockTableGm,
-                                                 GlobalTensor<int32_t> cmpBlockTableGm);
+                                                 GlobalTensor<int32_t> cmpBlockTableGm,
+                                                 GlobalTensor<int32_t> oriSparseIndicesGm);
     __aicore__ inline void InitBuffers(TPipe *pipe);
 
     __aicore__ inline void AllocEventID();
@@ -113,6 +114,7 @@ private:
     // block_table
     GlobalTensor<int32_t> oriBlockTableGm;
     GlobalTensor<int32_t> cmpBlockTableGm;
+    GlobalTensor<int32_t> oriSparseIndicesGm;
 
     TBuf<TPosition::A1> bufQPL1;
     TBuf<TPosition::A1> bufKVL1;
@@ -185,10 +187,13 @@ __aicore__ inline void SWACubeBlock<SAST>::InitMm2GlobalTensor(GlobalTensor<KV_T
 template <typename SAST>
 __aicore__ inline void
 SWACubeBlock<SAST>::InitPageAttentionInfo(GlobalTensor<KV_T> oriKvGm, // const GlobalTensor<KV_T>& kvMergeGm,
-                                          GlobalTensor<int32_t> oriBlockTableGm, GlobalTensor<int32_t> cmpBlockTableGm)
+                                          GlobalTensor<int32_t> oriBlockTableGm,
+                                          GlobalTensor<int32_t> cmpBlockTableGm,
+                                          GlobalTensor<int32_t> oriSparseIndicesGm)
 {
     this->oriKvGm = oriKvGm;
     this->oriBlockTableGm = oriBlockTableGm;
+    this->oriSparseIndicesGm = oriSparseIndicesGm;
     if (constInfo.templateMode == CFA_TEMPLATE) {
         this->cmpBlockTableGm = cmpBlockTableGm;
     }
@@ -373,7 +378,28 @@ __aicore__ inline void SWACubeBlock<SAST>::ComputeMm1(const RunInfo &info, const
                     LocalTensor<KV_T> kTensor;
                     uint32_t copyRowCnt = 0;
 
-                    while (copyFinishRowCnt < nL1Size) {
+                    if (constInfo.hasOriSparseIndices) {
+                        Position startPos;
+                        startPos.bIdx = info.bIdx;
+                        startPos.n2Idx = info.n2Idx;
+                        startPos.s2Idx = 0;
+                        startPos.dIdx = kL1 * 256;
+                        PAShape shape;
+                        shape.blockSize = constInfo.paOriBlockSize;
+                        shape.headNum = constInfo.kvHeadNum;
+                        shape.headDim = constInfo.headDim;
+                        shape.kvStride = constInfo.oriKvStride;
+                        shape.actHeadDim = 256;
+                        shape.maxblockNumPerBatch = constInfo.oriMaxBlockNumPerBatch;
+                        shape.copyRowNum = nL1Size;
+                        shape.copyRowNumAlign = nL1SizeAlign;
+                        uint64_t sparseIndexBaseOffset =
+                            (info.qTokenOffset * constInfo.kvHeadNum + info.n2Idx) * constInfo.oriSparseIndexWidth;
+                        uint32_t sparseIndexStart = info.s2Idx * constInfo.s2BaseSize + nL1 * N_SPLIT_SIZE;
+                        DataCopyPABySlots<KV_T>(bL1Tensor, oriKvGm, oriSparseIndicesGm, shape, startPos,
+                                                sparseIndexBaseOffset, sparseIndexStart);
+                    } else {
+                        while (copyFinishRowCnt < nL1Size) {
                         // 由于ori_left的存在， 即使第一块搬运也可能并非是pa_block的零点位
                         copyRowCnt = constInfo.paOriBlockSize - curS2Offset % constInfo.paOriBlockSize;
                         if (copyFinishRowCnt + copyRowCnt > nL1Size) {
@@ -399,6 +425,7 @@ __aicore__ inline void SWACubeBlock<SAST>::ComputeMm1(const RunInfo &info, const
                         // 更新循环变量
                         copyFinishRowCnt += copyRowCnt;
                         curS2Offset += copyRowCnt;
+                        }
                     }
                 } else if constexpr (KV_LAYOUT_T == SAS_LAYOUT::BSND) {
                     Nd2NzParams nd2nzPara;
@@ -681,7 +708,29 @@ __aicore__ inline void SWACubeBlock<SAST>::ComputeMm2(const RunInfo &info, const
                 if (info.isOri) {
                     if constexpr (KV_LAYOUT_T == SAS_LAYOUT::PA_ND) {
                         uint32_t curS2Offset = info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint + kL1 * K_L0_SPLIT_SIZE;
-                        while (copyFinishRowCnt < kL0Size) {
+                        if (constInfo.hasOriSparseIndices) {
+                            Position startPos;
+                            startPos.bIdx = info.bIdx;
+                            startPos.n2Idx = info.n2Idx;
+                            startPos.s2Idx = 0;
+                            startPos.dIdx = nL1 * N_SPLIT_SIZE;
+                            PAShape shape;
+                            shape.blockSize = constInfo.paOriBlockSize;
+                            shape.headNum = constInfo.kvHeadNum;
+                            shape.headDim = constInfo.headDim;
+                            shape.kvStride = constInfo.oriKvStride;
+                            shape.actHeadDim = nL1Size;
+                            shape.maxblockNumPerBatch = constInfo.oriMaxBlockNumPerBatch;
+                            shape.copyRowNum = kL0Size;
+                            shape.copyRowNumAlign = kL0SizeAlign;
+                            subvTensor = bL1Tensor[(kL1 - kOffset) * K_L0_SPLIT_SIZE * N_SPLIT_SIZE];
+                            uint64_t sparseIndexBaseOffset =
+                                (info.qTokenOffset * constInfo.kvHeadNum + info.n2Idx) * constInfo.oriSparseIndexWidth;
+                            uint32_t sparseIndexStart = info.s2Idx * constInfo.s2BaseSize + kL1 * K_L0_SPLIT_SIZE;
+                            DataCopyPABySlots<KV_T>(subvTensor, oriKvGm, oriSparseIndicesGm, shape, startPos,
+                                                    sparseIndexBaseOffset, sparseIndexStart);
+                        } else {
+                            while (copyFinishRowCnt < kL0Size) {
                             copyRowCnt = constInfo.paOriBlockSize - curS2Offset % constInfo.paOriBlockSize;
                             if (copyFinishRowCnt + copyRowCnt > kL0Size) {
                                 copyRowCnt = kL0Size - copyFinishRowCnt;
@@ -706,6 +755,7 @@ __aicore__ inline void SWACubeBlock<SAST>::ComputeMm2(const RunInfo &info, const
                             // 更新循环变量
                             copyFinishRowCnt += copyRowCnt;
                             curS2Offset += copyRowCnt;
+                            }
                         }
                     } else if constexpr (KV_LAYOUT_T == SAS_LAYOUT::BSND) {
                         subvTensor = bL1Tensor[(kL1 - kOffset) * K_L0_SPLIT_SIZE * N_SPLIT_SIZE];

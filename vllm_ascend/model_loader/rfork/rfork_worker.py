@@ -64,10 +64,10 @@ class RForkWorker:
         self.rfork_seed = self.seed_protocol.get_seed()
         return self.rfork_seed is not None
 
-    def pre_transfer(self, model) -> bool:
+    def pre_transfer(self, model, processed_layout: bool) -> bool:
         try:
             assert self.transfer_backend.is_initialized(), "transfer_backend is not initialized, cannot pre_transfer."
-            result = self.transfer_backend.register_memory_region(model)
+            result = self.transfer_backend.register_memory_region(model, processed_layout)
             self.ready_to_start_seed_service = result
             return result
         except AssertionError as e:
@@ -81,7 +81,7 @@ class RForkWorker:
             logger.warning("Failed to unregister rfork memory region: %s", e)
         self.ready_to_start_seed_service = False
 
-    def transfer(self, model) -> bool:
+    def transfer(self, model, processed_layout: bool) -> bool:
         try:
             assert self.transfer_backend.is_initialized(), "transfer_backend is not initialized, cannot transfer."
             assert self.rfork_seed is not None, "rfork seed is None, cannot transfer."
@@ -90,6 +90,7 @@ class RForkWorker:
                 seed_instance_ip=self.rfork_seed["seed_ip"],
                 seed_instance_service_port=self.rfork_seed["seed_port"],
                 local_seed_key=self.seed_protocol.get_local_seed_key(),
+                processed_layout=processed_layout,
             )
         except AssertionError as e:
             logger.exception(
@@ -107,13 +108,13 @@ class RForkWorker:
         self.rfork_seed = None
         return True
 
-    def start_seed_service(self, model):
+    def start_seed_service(self, model, processed_layout: bool):
         if self.seed_service_started:
             logger.info("Seed service already started, skipping.")
             return
 
         if not self.ready_to_start_seed_service:
-            if not self.pre_transfer(model):
+            if not self.pre_transfer(model, processed_layout):
                 logger.warning(
                     "start_seed_service aborted for device_id=%s: pre_transfer failed",
                     self.device_id,

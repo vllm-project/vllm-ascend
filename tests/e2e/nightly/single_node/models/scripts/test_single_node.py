@@ -13,6 +13,7 @@ import pytest
 import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
@@ -188,7 +189,6 @@ _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
     "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
     "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
@@ -262,8 +262,6 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         val = str(envs.get(env_key, "0"))
         if val not in ("0", "", "false", "False"):
             features.append(feature_name)
-    if int(envs.get("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)) > 0:
-        features.append("flashcomm2")
 
     return features
 
@@ -384,6 +382,11 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         json.dump(output, f, indent=2, ensure_ascii=False)
     logger.info("Benchmark results saved to %s", output_path)
     print(f"Benchmark results saved to {output_path}")
+
+    postprocess_benchmark_results(
+        list(zip(benchmark_keys, case_configs, results)),
+        job_name=job_name,
+    )
 
 
 def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:

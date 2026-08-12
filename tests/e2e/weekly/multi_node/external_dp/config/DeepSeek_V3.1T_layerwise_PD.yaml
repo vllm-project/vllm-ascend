@@ -48,6 +48,7 @@ config:
 
 env_common: &env_common
   SERVER_PORT: "${PORT}"
+  VLLM_USE_MODELSCOPE: "true"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   ASCEND_LOG_DEVICE_FLUSH_TIMEOUT: "0"
   VLLM_RPC_TIMEOUT: "3600000"
@@ -65,7 +66,6 @@ env_common: &env_common
   PYTHONHASHSEED: "0"
   ASCEND_CONNECT_TIMEOUT: "10000"
   ASCEND_TRANSFER_TIMEOUT: "10000"
-  ASCEND_BUFFER_POOL: "4:8"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
 
 env_prefill: &env_prefill

@@ -22,12 +22,7 @@ class TestChunkGatedDeltaRule(PytestBase):
         initial_state = torch.randn(3, 8, 128, 128, dtype=torch.bfloat16).npu()
         q_start_loc = torch.range(0, 3, dtype=torch.int).npu()
 
-        mock_pcp_group = MagicMock()
-        mock_pcp_group.world_size = 1
-        with (
-            patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context),
-            patch("vllm_ascend.ops.triton.fla.chunk.get_pcp_group", return_value=mock_pcp_group),
-        ):
+        with patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,

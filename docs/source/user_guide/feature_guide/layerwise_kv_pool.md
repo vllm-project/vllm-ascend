@@ -11,6 +11,10 @@ disaggregation** (`kv_role: "kv_producer"` / `"kv_consumer"`) scenarios. See the
 [KV Pool guide](kv_pool.md) for the general KV Pool architecture and backend
 setup.
 
+For Prefill-side NPU memory reduction through cross-layer KV buffer reuse,
+including MTP and sparse C8 layouts, see
+[Layerwise and Sparse KV Cache Offloading](layerwise_and_sparse_kv_cache_offloading.md).
+
 ## How It Works (Brief)
 
 Without layerwise mode, the KV cache for a request is saved to (or loaded from)

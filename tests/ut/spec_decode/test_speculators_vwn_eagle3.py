@@ -125,10 +125,8 @@ def _mock_npu_env():
 
     _mock = _MockTPGroup()
     mock_cfg = MagicMock()
-    mock_cfg.enable_flashcomm2_parallel_size = 0
     mock_cfg.enable_context_parallel = False
     mock_cfg.enable_flashcomm1 = False
-    mock_cfg.enable_matmul_allreduce = False
     mock_cfg.weight_nz_mode = 1
     mock_cfg.enable_mlapo = True
     mock_cfg.enable_fused_mc2 = 0
@@ -147,7 +145,6 @@ def _mock_npu_env():
         patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=_mock),
         patch("vllm_ascend.utils.get_ascend_config", return_value=mock_cfg),
         patch.object(torch.ops.vllm, "unquantized_gemm", F.linear),
-        patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None),
         patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x),
         patch("vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather", lambda x, *a, **kw: x),
         patch.object(torch_npu, "npu_rms_norm", side_effect=_cpu_rms_norm, create=True),
@@ -158,12 +155,15 @@ def _mock_npu_env():
             side_effect=_cpu_add_rms_norm_bias,
             create=True,
         ),
-        # enable_cp() reads parallel_config.*_context_parallel_size and runs `> 1`.
-        # On MagicMock these fields yield TypeError on Python 3.12, so short-circuit
-        # the check everywhere it's imported.
-        patch("vllm_ascend.attention.attention_v1.enable_cp", return_value=False),
-        patch("vllm_ascend.attention.sfa_v1.enable_cp", return_value=False, create=True),
-        patch("vllm_ascend.attention.mla_v1.enable_cp", return_value=False, create=True),
+        # DCP routing reads decode_context_parallel_size. On MagicMock this
+        # field can yield TypeError on Python 3.12, so short-circuit each
+        # backend's routing check.
+        patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
+        patch(
+            "vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer",
+            return_value=False,
+        ),
+        patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False),
     ):
         yield
 

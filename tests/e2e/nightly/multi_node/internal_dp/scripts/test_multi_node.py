@@ -21,6 +21,7 @@ from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     filter_environment,
     write_results_json,
 )
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tools.aisbench import run_aisbench_cases
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,6 @@ _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
     "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
     "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
@@ -107,8 +107,6 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         val = str(envs.get(env_key, "0"))
         if val not in ("0", "", "false", "False"):
             features.append(feature_name)
-    if int(envs.get("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)) > 0:
-        features.append("flashcomm2")
 
     return features
 
@@ -152,6 +150,11 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
 
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "")
     write_results_json(output, job_name=job_name)
+
+    postprocess_benchmark_results(
+        [(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)],
+        job_name=job_name or config.test_name,
+    )
 
 
 @pytest.mark.asyncio

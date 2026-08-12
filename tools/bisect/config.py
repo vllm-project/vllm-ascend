@@ -147,6 +147,7 @@ class BisectInput:
     scene: str  # SCENE_SINGLE | SCENE_MULTI
     config_yaml: str  # CONFIG_YAML_PATH value: the whole failing case file
     bad_commit: str  # current failing commit (resolved to full sha later)
+    soc: str  # hardware generation, part of the good-table composite key
     name: str | None = None  # nightly case name, to match the good-table 'name'
     config_base_path: str | None = None  # CONFIG_BASE_PATH override (multi/ext dp)
     good_commit: str | None = None  # explicit good; else looked up in the table
@@ -218,7 +219,7 @@ class BisectOptions:
     # ``done`` file on every leader exit path).
     release_file: str | None = None
     # Per-trial pytest timeout (seconds).
-    trial_timeout_s: float = 5400.0
+    trial_timeout_s: float = 7200.0
 
     @property
     def is_master(self) -> bool:

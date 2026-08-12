@@ -695,6 +695,8 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
+    requires_full_blocks_on_update_after_alloc = True
+
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
@@ -1336,7 +1338,8 @@ class MooncakeLayerwiseConnectorWorker:
         if use_kv_buffer:
             self.create_kv_buffer(kv_buffer)
 
-        num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+        model_type = self.vllm_config.model_config.hf_text_config.model_type
+        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
         mtp_layer_name = ""
         for layer_name in kv_caches:
             if "mtp" in layer_name:

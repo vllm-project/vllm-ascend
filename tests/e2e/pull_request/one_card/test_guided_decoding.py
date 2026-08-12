@@ -23,6 +23,7 @@ from unittest.mock import patch
 import jsonschema
 import pytest
 import regex as re
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
@@ -40,8 +41,6 @@ REGEX_COMPILATION_TIMEOUT_ENV = {"VLLM_REGEX_COMPILATION_TIMEOUT_S": "30"}
 @pytest.fixture(params=[False, True], ids=["v1", "v2"])
 def model_runner_env(request):
     use_v2_model_runner = request.param
-    if use_v2_model_runner and vllm_version_is("0.24.0"):
-        pytest.skip("The v2 model runner is not supported on vLLM v0.24.0.")
 
     with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
         yield
@@ -223,8 +222,14 @@ def test_guided_auto_rejects_mixed_structured_output_backends(vllm_runner):
     )
     prompts = [f"Give an example JSON that fits this schema: {guidance_schema}"]
     inputs = vllm_runner.get_inputs(prompts)
-    with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
-        vllm_runner.model.generate(inputs, sampling_params=guidance_params)
+    # main2main compat: on 0.26.0 the upstream validation may raise
+    # ValueError, while the ascend patch on main raises VLLMValidationError.
+    if vllm_version_is("0.26.0"):
+        with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
+            vllm_runner.model.generate(inputs, sampling_params=guidance_params)
+    else:
+        with pytest.raises(VLLMValidationError, match="already using 'xgrammar'.*'guidance'"):
+            vllm_runner.model.generate(inputs, sampling_params=guidance_params)
 
 
 @pytest.mark.timeout(1000)

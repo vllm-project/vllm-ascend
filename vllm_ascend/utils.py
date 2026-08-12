@@ -24,7 +24,6 @@ import json
 import math
 import os
 from contextlib import nullcontext
-from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +37,13 @@ from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import (  # noqa: F401
+    AscendDeviceType,
+    check_ascend_device_type,
+    get_ascend_device_type,
+    is_310p,
+    is_950,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -75,6 +81,7 @@ _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
+_IS_ROT_WEIGHT_USED = None
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -126,11 +133,7 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
         vllm_config = get_current_vllm_config()
 
     parallel_config = vllm_config.parallel_config
-    return (
-        model_uses_sfa_sparse(vllm_config.model_config)
-        and parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size == 1
-    )
+    return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
 def clear_enable_sp():
@@ -139,10 +142,6 @@ def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
     _libc_getenv.cache_clear()
-
-
-def is_310p():
-    return get_ascend_device_type() == AscendDeviceType._310P
 
 
 _IS_RC_DEVICE: bool | None = None
@@ -169,10 +168,6 @@ def is_rc_device() -> bool:
     except (subprocess.CalledProcessError, FileNotFoundError):
         _IS_RC_DEVICE = False
     return _IS_RC_DEVICE
-
-
-def is_950():
-    return get_ascend_device_type() == AscendDeviceType.A5
 
 
 def _mark_op_side_effectful(op: Any) -> None:
@@ -679,6 +674,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -733,6 +730,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
+        "MoERunner": AscendMoERunner,
+        "RoutedExperts": AscendRoutedExperts,
     }
     if vllm_config is None:
         try:
@@ -748,6 +747,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
+        from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -776,6 +776,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
+                "MoERunner": AscendMoERunner310,
+                "RoutedExperts": AscendRoutedExperts310,
             }
         )
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -783,57 +785,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
-
-
-class AscendDeviceType(Enum):
-    A2 = 0
-    A3 = 1
-    _310P = 2
-    A5 = 3
-
-
-_ascend_device_type = None
-
-
-def _init_ascend_device_type():
-    global _ascend_device_type
-    from vllm_ascend import _build_info  # type: ignore
-
-    device_type = getattr(_build_info, "__device_type__", None)
-    if device_type is None:
-        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
-        device_type = "_310P" if "310P" in soc_version else "A2"
-    _ascend_device_type = AscendDeviceType[device_type]
-
-
-def check_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
-        _init_ascend_device_type()
-
-    soc_version = torch_npu.npu.get_soc_version()
-    if 220 <= soc_version <= 225:
-        cur_device_type = AscendDeviceType.A2
-    elif 250 <= soc_version <= 255:
-        cur_device_type = AscendDeviceType.A3
-    elif 200 <= soc_version <= 205:
-        cur_device_type = AscendDeviceType._310P
-    elif soc_version == 260:
-        cur_device_type = AscendDeviceType.A5
-    else:
-        raise RuntimeError(f"Can not support soc_version: {soc_version}.")
-
-    assert _ascend_device_type == cur_device_type, (
-        f"Current device type: {cur_device_type} does not match the installed version's device type: "
-        f"{_ascend_device_type}, please check your installation package."
-    )
-
-
-def get_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
-        _init_ascend_device_type()
-    return _ascend_device_type
 
 
 def lmhead_tp_enable() -> bool:
@@ -854,10 +805,6 @@ def olora_tp_enable() -> bool:
 
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
-
-
-def matmul_allreduce_enable() -> bool:
-    return get_ascend_config().enable_matmul_allreduce
 
 
 def enable_sp_by_pass():
@@ -929,29 +876,6 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
         if "Step3p5MTP" in model_configs["architectures"]:
             _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
-
-
-def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
-    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
-    if vllm_config.speculative_config is None:
-        return True
-    speculative_method = getattr(vllm_config.speculative_config, "method", None)
-    if speculative_method in [None, "ngram", "suffix"]:
-        return True
-    if speculative_method in ["eagle", "eagle3"]:
-        if is_drafter_moe_model(vllm_config):
-            draft_model_config = vllm_config.speculative_config.draft_model_config
-            hf_text_config = draft_model_config.hf_text_config
-            quant_type = getattr(hf_text_config, "moe_quantize", None)
-            if quant_type is None:
-                quant_type = getattr(hf_text_config, "quantize", None)
-            return quant_type == "w8a8_dynamic"
-        else:
-            return True
-    if speculative_method == "mtp":
-        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
-        return mtp_quant_type == "w8a8_dynamic"
-    return False
 
 
 def _is_contain_expert(config: Any):
@@ -1131,7 +1055,7 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
             return False
-        return get_ascend_config().recompute_scheduler_enable
+        return get_ascend_config().scheduler_config.recompute_scheduler_enable
     except (RuntimeError, AttributeError):
         return False
 
@@ -1199,7 +1123,7 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     Skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
     - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
-    - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+    - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
     a non-zero global_bs and must NOT receive mc2_mask.
@@ -1238,7 +1162,9 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+    return decode_must_use_mc2 and (
+        prefill_must_use_mc2 or get_ascend_config().scheduler_config.recompute_scheduler_enable
+    )
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1249,71 +1175,6 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if _HAS_LAYER_IDX is None:
         _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
-
-
-def flashcomm2_enable() -> bool:
-    config_val = get_ascend_config().enable_flashcomm2_parallel_size
-    return config_val > 0
-
-
-def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
-    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-
-    if ascend_config.enable_flashcomm2_parallel_size <= 0:
-        return 0
-
-    logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
-
-    if not ascend_config.enable_flashcomm1:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
-        )
-    if ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
-        raise AssertionError(
-            "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
-        )
-    if global_tp_size <= flashcomm2_oproj_tp_size:
-        raise AssertionError(
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed "
-            f"global tensor parallel size ({global_tp_size})"
-        )
-    if global_tp_size % flashcomm2_oproj_tp_size != 0:
-        raise AssertionError(
-            f"Global tensor parallel size ({global_tp_size}) must be divisible by "
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
-        )
-    if vllm_config.kv_transfer_config is None:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment "
-            "may lead to decode performance degradation."
-        )
-    if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
-        raise AssertionError(
-            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support "
-            "for hybrid deployment scenarios. It is not applicable in D-scenario environments."
-        )
-
-    return flashcomm2_oproj_tp_size
-
-
-def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
-    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation,
-    # each batch_id corresponds to the rank_id within the DP domain.
-    # For example, when DP = [0, 1, 2, ..., 15] and flashcomm2_oproj_tensor_parallel_size = 2,
-    # the reorganized batch_ids will be [[batch0, batch8], [batch1, batch9], ..., [batch7, batch15]].
-    flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-    num_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
-
-    reorgnized_batch_ids = []
-    for i in range(num_oproj_tensor_parallel_groups):
-        ranks = []
-        for j in range(flashcomm2_otp_size):
-            rank_idx = i + j * num_oproj_tensor_parallel_groups
-            ranks.append(rank_idx)
-        reorgnized_batch_ids.append(ranks)
-
-    return reorgnized_batch_ids
 
 
 def refresh_block_size(vllm_config):
@@ -1494,10 +1355,12 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
 
-    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # Keep the original TP o_proj weight when:
     # 1) KV pooling is disabled, or
-    # 2) KV pooling is enabled with kv_role == "kv_both".
-    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
+    # 2) KV pooling is enabled on a prefill producer (including kv_both).
+    # DSA-CP prefill produces a full-head attention output, so the runtime
+    # asynchronously gathers a temporary full o_proj weight for the forward.
+    return kv_transfer_config is None or kv_transfer_config.is_kv_producer
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1649,10 +1512,12 @@ def get_compressed_pos_and_indices(
     return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
 
 
-def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
+def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
+        getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
+    )
 
 
 def is_hidden_state_cache_spec(spec) -> bool:
@@ -1678,3 +1543,15 @@ def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
     if raw is None:
         return None
     return raw.decode(encoding)
+
+
+def is_rot_weight_used(vllm_config: VllmConfig = None):
+    global _IS_ROT_WEIGHT_USED
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+    if _IS_ROT_WEIGHT_USED is None and vllm_config is not None:
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None)
+        _IS_ROT_WEIGHT_USED = quant_description.get("is_rot_used", False) if quant_description is not None else False
+    return _IS_ROT_WEIGHT_USED

@@ -97,7 +97,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
     )
     def test_mlp_optimize(self, mock_enable_sp, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -119,7 +119,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
     )
     def test_oproj_tp(self, mock_enable_sp, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -137,7 +137,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
     def test_merged_mlp_tp_init(self):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -202,6 +202,13 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
 
+    def test_multimodal_encoder_prefix_skips_sp_column(self):
+        """Multimodal encoder variants should not enter the SP column path."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._get_column_op("model.vision_model_proj.indexer_proj"))
+        self.assertIsNone(self._get_column_op("model.vision_tower_encoder.qkv_proj"))
+
 
 class TestRowParallelOpDispatch(unittest.TestCase):
     """Tests for _get_row_parallel_op — mtp_block, share_expert."""
@@ -214,8 +221,6 @@ class TestRowParallelOpDispatch(unittest.TestCase):
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
-            patch("vllm_ascend.ops.linear_op.matmul_allreduce_enable", return_value=False),
-            patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=False),
         ]
         for p in self._patches:
             p.start()
@@ -229,25 +234,19 @@ class TestRowParallelOpDispatch(unittest.TestCase):
 
         return _get_row_parallel_op(prefix, self.mock_layer)
 
-    def test_mtp_block_excluded_from_flashcomm2_oproj(self):
-        """No6: mtp_block prefix excluded from FlashComm2 o_proj."""
-        mock_op = MagicMock()
-        self._patches.append(patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=True))
-        self._patches.append(patch("vllm_ascend.ops.linear_op.Flashcomm2OProjRowParallelOp", return_value=mock_op))
-        for p in self._patches[-2:]:
-            p.start()
-        # Normal o_proj should use FlashComm2
-        result = self._op("model.layers.0.self_attn.o_proj")
-        self.assertIs(result, mock_op)
-        # But mtp_block.o_proj should NOT use FlashComm2
-        self.assertIsNone(self._op("model.mtp_block.self_attn.o_proj"))
-
     def test_share_expert_disabled_with_sp_row(self):
         """share_expert / shared_expert prefix → None when SP enabled."""
         self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
         self._patches[-1].start()
         self.assertIsNone(self._op("model.layers.0.mlp.share_expert.down_proj"))
         self.assertIsNone(self._op("model.layers.0.mlp.shared_expert.down_proj"))
+
+    def test_multimodal_encoder_prefix_skips_sp_row(self):
+        """Multimodal encoder variants should not enter the SP row path."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._op("model.multi_modal_projector.down_proj"))
+        self.assertIsNone(self._op("model.patch_merge_mlp.out_proj"))
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):

@@ -62,7 +62,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
         try:
             from vllm_ascend.ascend_config import get_ascend_config
 
-            get_ascend_config().profiling_chunk_config.need_timing = False
+            get_ascend_config().scheduler_config.profiling_chunk_config.need_timing = False
         except RuntimeError:
             pass
         # Mark the scheduler so that the next scheduler_output carries

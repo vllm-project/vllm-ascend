@@ -60,11 +60,6 @@ msgstr "## 2. 安装依赖"
 msgid "## 3. Run basic benchmarks"
 msgstr "## 3. 运行基本基准测试"
 
-msgid ""
-"This section introduces how to perform performance testing using the "
-"benchmark suite built into VLLM."
-msgstr "本节介绍如何使用 VLLM 内置的基准测试套件进行性能测试。"
-
 msgid "### 3.1 Dataset"
 msgstr "### 3.1 数据集"
 
@@ -89,12 +84,12 @@ msgstr ""
 "</style>"
 
 msgid ""
-"The datasets mentioned above are all links to datasets on huggingface.\n"
-"    The dataset's `dataset-name` should be set to `hf`.\n"
+"Most datasets mentioned above are links to datasets on huggingface.\n"
+"    For these datasets, the dataset's `dataset-name` should be set to `hf`.\n"
 "    For local `dataset-path`, please set `hf-name` to its Hugging Face ID like"
 msgstr ""
-"上述数据集均为 huggingface 上的数据集链接。\n"
-"    数据集的 `dataset-name` 应设置为 `hf`。\n"
+"大多数据集均为 huggingface 上的数据集链接。\n"
+"    对于这些数据集的 `dataset-name` 应设置为 `hf`。\n"
 "    对于本地 `dataset-path`，请将 `hf-name` 设置为其 Hugging Face ID，例如"
 
 msgid "### 3.2 Run basic benchmark"
@@ -187,3 +182,8 @@ msgstr ""
 
 msgid "| Custom | ✅ | ✅ | Local file: `data.jsonl` |"
 msgstr "| 自定义 | ✅ | ✅ | 本地文件：`data.jsonl` |"
+
+msgid ""
+"This section introduces how to perform performance testing using the "
+"benchmark suite built into vLLM."
+msgstr "本节介绍如何使用 vLLM 内置的基准测试套件进行性能测试。"
