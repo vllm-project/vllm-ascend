@@ -63,6 +63,7 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
     from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 # token count limits within bmm_transpose operator
