@@ -262,7 +262,7 @@ class _FakeSingleTypeKVCacheManager:
         kv_cache_spec,
         use_eagle,
         retention_interval=None,
-        num_prompt_tokens=None,
+        reachable_boundaries=(),
     ):
         return None
 
@@ -303,7 +303,7 @@ class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
         kv_cache_spec,
         use_eagle,
         retention_interval=None,
-        num_prompt_tokens=None,
+        reachable_boundaries=(),
     ):
         if alignment_tokens is None:
             return None

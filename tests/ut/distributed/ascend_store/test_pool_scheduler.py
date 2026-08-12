@@ -384,6 +384,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         request.num_computed_tokens = 0
         request.block_hashes = [b"h0", b"h1"]
         request.all_token_ids = list(range(32))
+        request.shared_prefix_boundary = 16
         blocks = MagicMock()
         blocks.get_block_ids.return_value = [[0, 1]]
         scheduler.update_state_after_alloc(request, blocks, 0)
@@ -405,6 +406,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         meta = scheduler.build_connector_meta(sched_output)
         self.assertTrue(len(meta.requests) >= 1)
+        self.assertEqual(meta.requests[0].shared_prefix_boundary, 16)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_reloads_prefix_with_layer_reuse(self, mock_client_cls):

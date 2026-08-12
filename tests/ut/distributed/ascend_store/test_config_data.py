@@ -429,6 +429,8 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
             token_ids=list(range(32)),
+            num_prompt_tokens=31,
+            shared_prefix_boundary=16,
         )
         meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, block_hashes=[b"h1", b"h2"])
         self.assertIsNotNone(meta)
@@ -436,6 +438,8 @@ class TestReqMeta(unittest.TestCase):
         self.assertTrue(meta.can_save)
         self.assertEqual(meta.token_len_chunk, 32)
         self.assertIsNone(meta.load_spec)
+        self.assertEqual(meta.num_prompt_tokens, 31)
+        self.assertEqual(meta.shared_prefix_boundary, 16)
 
     def test_from_request_tracker_skip_save(self):
         tracker = RequestTracker(

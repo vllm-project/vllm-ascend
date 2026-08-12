@@ -178,6 +178,31 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
 
+    def test_store_mask_forwards_reachable_boundaries_and_retention(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
+            scheduler_block_size=512,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+            retention_interval=256,
+        )
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, False, False, True],
+        ) as reachable:
+            masks = coord.store_mask(
+                512,
+                num_prompt_tokens=385,
+                shared_prefix_boundary=256,
+            )
+
+        self.assertEqual(masks, ([False, False, False, True],))
+        self.assertEqual(reachable.call_args.kwargs["reachable_boundaries"], [384, 256])
+        self.assertEqual(reachable.call_args.kwargs["retention_interval"], 256)
+        self.assertNotIn("num_prompt_tokens", reachable.call_args.kwargs)
+
     def test_lookup_mask_uses_reachability_without_retention(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
@@ -195,6 +220,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
         self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
+        self.assertEqual(reachable.call_args.kwargs["reachable_boundaries"], ())
 
     def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
         calls = []

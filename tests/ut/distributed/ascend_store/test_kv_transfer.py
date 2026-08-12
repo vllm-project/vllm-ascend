@@ -78,8 +78,10 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
     def __init__(self, block_size=16, masks=([True],)):
         super().__init__(block_size)
         self.masks = masks
+        self.store_mask_calls = []
 
-    def store_mask(self, token_len, num_prompt_tokens=None):
+    def store_mask(self, token_len, num_prompt_tokens=None, shared_prefix_boundary=0):
+        self.store_mask_calls.append((token_len, num_prompt_tokens, shared_prefix_boundary))
         return self.masks
 
     def load_mask(self, block_hashes, token_len):
@@ -543,12 +545,15 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_ids=[0, 1],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
+            num_prompt_tokens=31,
+            shared_prefix_boundary=16,
         )
         t.add_stored_request("r1")
         t.request_queue.put(req)
         t._handle_request(req)
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
+        self.assertEqual(db.store_mask_calls, [(32, 31, 16)])
 
     def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
         t, store = self._make_thread([0, 0])

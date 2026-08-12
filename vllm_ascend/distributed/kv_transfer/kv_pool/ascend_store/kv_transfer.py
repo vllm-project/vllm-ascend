@@ -719,7 +719,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
         req_id = req_meta.req_id
         current_event = req_meta.current_event
         try:
-            store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
+            store_masks = self.token_database.store_mask(
+                token_len,
+                req_meta.num_prompt_tokens,
+                req_meta.shared_prefix_boundary,
+            )
         except AssertionError as exc:
             logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_id, exc)
             store_masks = None

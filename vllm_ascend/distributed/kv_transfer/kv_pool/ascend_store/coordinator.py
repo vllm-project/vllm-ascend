@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from importlib import import_module
 from typing import Any, cast
@@ -180,7 +181,7 @@ class AscendStoreCoordinator:
         self,
         aligned_token_len: int,
         retention_interval: int | None,
-        num_prompt_tokens: int | None,
+        reachable_boundaries: Sequence[int],
     ) -> list[tuple[int, list[bool] | None]]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
@@ -200,7 +201,7 @@ class AscendStoreCoordinator:
                 kv_cache_spec=spec,
                 use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=retention_interval,
-                num_prompt_tokens=num_prompt_tokens,
+                reachable_boundaries=reachable_boundaries,
             )
             masks.append((num_chunks, mask))
         return masks
@@ -209,15 +210,21 @@ class AscendStoreCoordinator:
         self,
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundary: int = 0,
     ) -> tuple[list[bool], ...]:
-        masks = self._reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
+        reachable_boundaries = []
+        if num_prompt_tokens is not None and num_prompt_tokens > 0:
+            reachable_boundaries.append(num_prompt_tokens - 1)
+        if shared_prefix_boundary:
+            reachable_boundaries.append(shared_prefix_boundary)
+        masks = self._reachable_masks(aligned_token_len, self.retention_interval, reachable_boundaries)
         return tuple([True] * num_chunks if mask is None else mask for num_chunks, mask in masks)
 
     def lookup_mask(
         self,
         aligned_token_len: int,
     ) -> tuple[list[bool] | None, ...]:
-        masks = self._reachable_masks(aligned_token_len, None, None)
+        masks = self._reachable_masks(aligned_token_len, None, ())
         for num_chunks, mask in masks:
             if mask is not None:
                 assert len(mask) == num_chunks
@@ -403,7 +410,7 @@ def _reachable_block_mask(
     try:
         return reachable_block_mask(**kwargs)
     except TypeError as exc:
-        if "retention_interval" not in str(exc) and "num_prompt_tokens" not in str(exc):
+        if "retention_interval" not in str(exc) and "reachable_boundaries" not in str(exc):
             logger.debug("KV cache manager does not support reachable_block_mask kwargs: %s", exc)
             return reachable_block_mask(
                 start_block=kwargs["start_block"],
@@ -413,7 +420,7 @@ def _reachable_block_mask(
                 use_eagle=kwargs["use_eagle"],
             )
         kwargs.pop("retention_interval", None)
-        kwargs.pop("num_prompt_tokens", None)
+        kwargs.pop("reachable_boundaries", None)
         return reachable_block_mask(**kwargs)
 
 
