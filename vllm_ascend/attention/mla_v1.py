@@ -1942,7 +1942,8 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             tuple(gathered_kv.shape),
             tuple(gathered_prefill_slots.shape),
         )
-        # TODO Due to the npu_kv_rmsnorm_rope_cache fusion operator, the RMSNorm rope of the KV layer involves repeated calculations, leaving room for optimization.
+        # TODO Due to the npu_kv_rmsnorm_rope_cache fusion operator, the RMSNorm rope of the KV layer   
+        # involves repeated calculations, leaving room for optimization.
         gathered_k_pe, gathered_k_c_normed = super().exec_kv_prefill(
             gathered_kv,
             gathered_cos,
