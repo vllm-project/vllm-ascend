@@ -108,7 +108,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
                 return_value=gate,
             ),
             patch(
-                "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoE",
+                "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoEFactory",
                 return_value=nn.Identity(),
             ) as fused_moe,
         ):

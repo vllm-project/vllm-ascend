@@ -108,14 +108,15 @@
 #
 # ** 6. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
-#       vllm's FusedMoE is a factory function (not a class). deepseek_v2 and
-#       other models do `from vllm.model_executor.layers.fused_moe import FusedMoE`
+#       vllm's MoE factory function (formerly FusedMoE, now FusedMoEFactory on main).
+#       deepseek_v2 and other models do
+#       `from vllm.model_executor.layers.fused_moe import FusedMoEFactory`
 #       and call it directly, so on Ascend we must redirect it to AscendMoERunner
 #       before any model is imported.
 #    How：
-#       Patch the FusedMoE binding in both the package `__init__` and the layer
+#       Patch the FusedMoEFactory binding in both the package `__init__` and the layer
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
@@ -537,48 +538,6 @@
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
 #
-# ** 22. File: platform/patch_weight_transfer_engine.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
-#    Why:
-#       Upstream vLLM's WeightTransferConfig.backend is a pydantic Literal["nccl", "ipc"]
-#       which does not accept "hccl".  On Ascend NPU, NCCL is unavailable and HCCL must
-#       be used for trainer-to-worker weight broadcasting.
-#    How：
-#       Replace the "nccl" factory entry with a lambda that returns
-#       HCCLWeightTransferEngine.  Users pass the already-accepted "nccl" string
-#       (e.g. --weight-transfer-config '{"backend": "nccl"}') and the factory
-#       resolves it to the HCCL engine at runtime.
-#    Related PR (if no, explain why):
-#       No.  Adding "hccl" to the Literal requires modifying pydantic core schemas,
-#       which is fragile across pydantic versions.
-#    Future Plan:
-#       Remove this patch when upstream vLLM relaxes the Literal type to str or
-#       provides an extension point for out-of-tree weight transfer backends.
-#   2. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["ipc"]`
-#    Why:
-#       The "ipc" backend must resolve to NPUIPCWeightTransferEngine on Ascend NPU.
-#       However, this patch runs during global plugin patching - extremely early in
-#       startup, before any weight transfer backend is selected. Importing the IPC
-#       engine eagerly pulls in vllm.distributed.weight_transfer.ipc_engine, which
-#       does `import ray` at module top level. Since ray is an optional dependency,
-#       its absence aborts the whole vllm_ascend plugin load and crashes every
-#       `vllm serve` invocation - even workloads that never use weight transfer.
-#    How：
-#       Register a lazy loader function (instead of an eager import) that imports
-#       and returns NPUIPCWeightTransferEngine only when create_engine() is invoked
-#       for the "ipc" backend. This matches the factory's zero-arg-callable
-#       lazy-loading contract, so the ray-importing module is loaded only when ipc
-#       is actually requested. (HCCL keeps its eager import - it never imports ray.)
-#    Related PR (if no, explain why):
-#       No.  The eager `import ray` lives in upstream vLLM's ipc_engine module; the
-#       lazy loader is a local workaround until upstream defers that import.
-#    Future Plan:
-#       Remove this workaround once upstream vLLM stops importing ray at module top
-#       level in vllm.distributed.weight_transfer.ipc_engine (e.g. defers it into
-#       the code path that actually needs ray), so importing the IPC engine no
-#       longer requires the optional ray dependency.
-#
 # * Worker Patch:
 # ===============
 # Entries are listed in alphabetical order by file name.
@@ -741,9 +700,9 @@
 #
 # ** 8. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
-#       The worker process re-imports the FusedMoE factory after the platform
+#       The worker process re-imports the MoE factory after the platform
 #       patch has already redirected it to AscendMoERunner. Re-applying the
 #       monkey-patch directly would wrap an already-patched factory.
 #    How：
@@ -1126,6 +1085,19 @@
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
 #
+#   2. `DeepseekV32IndexerCache.get_attn_backend`
+#    Why:
+#       SFA indexer cache layers require the Ascend cache-only backend;
+#       the upstream indexer backend is GPU-specific.
+#    How：
+#       Route SFA indexer cache layers to the existing
+#       `AscendSFAIndexerBackend`.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/13069
+#    Future Plan:
+#       Remove this patch once upstream adds a backend hook for KV cache spec
+#       construction or v2 worker no longer depends on the shared v1 helper.
+#
 # ** 26. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
@@ -1253,4 +1225,24 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
+#
+# ** 34. File: platform/patch_vision.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
+#    Why:
+#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
+#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
+#       which does not distinguish scenarios and requires eps > 0 in all cases.
+#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
+#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
+#       positive".
+#    How：
+#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
+#       The patch is guarded with contextlib.suppress(ImportError) so it does
+#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/50411
+#    Future Plan:
+#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
+#       (which, like upstream, allows eps >= 0 for inference).
 #

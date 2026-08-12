@@ -427,7 +427,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
             local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
             offset = global_end - req_local_end  # request tokens on later ranks
-            local_key_lens = torch.where(num_local_tokens > 0, seq_lens - offset, 0)
+            local_key_lens = torch.where(
+                num_local_tokens > 0,
+                torch.clamp_min(seq_lens - offset, 0),
+                0,
+            )
 
             actual_seq_lengths_query[:num_segs] = local_query_lens
             actual_seq_lengths_key[:num_segs] = local_key_lens
@@ -1941,6 +1945,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
+        # Notify for every layer that wrote the cache, not just indexer layers:
+        # by this point all of the layer's KV (main + indexer) has been
+        # scattered, so the connector can dispatch the PD pull immediately.
+        if kv_cache is not None:
             notify_kv_cache_written(self.layer_name or "")
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:

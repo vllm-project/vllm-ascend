@@ -236,7 +236,7 @@ def pause(url, mode="abort", clear_cache=True):
     return requests.post(
         f"{url}/pause",
         params={"mode": mode, "clear_cache": clear_cache},
-        timeout=15,
+        timeout=60,
     ).status_code
 
 
