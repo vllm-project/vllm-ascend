@@ -310,7 +310,6 @@ def _deepseek_v2_model_init_with_indexshare_pp_validation(self, *args, **kwargs)
     )
 
 
-_deepseek_v2_model_init_with_indexshare_pp_validation._vllm_ascend_indexshare_pp_patched = True  # type: ignore[attr-defined]
 DeepseekV2Model.__init__ = _deepseek_v2_model_init_with_indexshare_pp_validation
 
 
