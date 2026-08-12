@@ -60,29 +60,29 @@
 **示例：**
 
 ```markdown
-    :::::{tab-set}
-    :sync-group: install
+:::::{tab-set}
+:sync-group: install
 
-    ::::{tab-item} A3 series
-    :sync: A3
+::::{tab-item} A3 series
+:sync: A3
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-    docker run ...
-    ```
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run ...
+```
 
-    ::::
+::::
 
-    ::::{tab-item} A2 series
-    :sync: A2
+::::{tab-item} A2 series
+:sync: A2
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-    docker run ...
-    ```
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run ...
+```
 
-    ::::
-    :::::
+::::
+:::::
 ```
 
 **语法说明：**
@@ -201,7 +201,7 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
 
 ```markdown
     ```jinja
-      {% raw %}
+    {% raw %}
       <|im_start|>system
       Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
       <|im_start|>user
@@ -224,7 +224,6 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
           | first
       }}<|im_end|>
       <|im_start|>assistant
-
     {% endraw %}
     ```
 ```
