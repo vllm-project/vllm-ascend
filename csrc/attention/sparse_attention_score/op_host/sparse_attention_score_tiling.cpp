@@ -20,7 +20,7 @@
 #include "graph/types.h"
 #include "graph/tensor.h"
 #include "tiling/platform/platform_ascendc.h"
-#include "op_host/tiling_base.h"
+#include "tiling/tiling_base.h"
 
 using namespace ge;
 using namespace std;
