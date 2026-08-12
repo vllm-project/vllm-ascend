@@ -46,6 +46,8 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
@@ -54,6 +56,13 @@ from vllm_ascend.utils import (
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
 )
+
+
+def _linear_uses_quant_method(linear: torch.nn.Module, method_type: type) -> bool:
+    """Check a linear's concrete scheme, unwrapping AscendLinearMethod."""
+    quant_method = getattr(linear, "quant_method", None)
+    quant_method = getattr(quant_method, "quant_method", quant_method)
+    return isinstance(quant_method, method_type)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -786,17 +795,23 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # checkpoint weights to the single-expert GMM layout. This path
             # reuses those GMM methods with already-quantized activations,
             # avoiding the incompatible QuantMatmul WeightNZ ABI.
+            shared_is_w4a8 = all(
+                _linear_uses_quant_method(proj, AscendW4A8DynamicLinearMethod)
+                for proj in (self._shared_experts.gate_up_proj, self._shared_experts.down_proj)
+            )
+            shared_is_w8a8 = all(
+                _linear_uses_quant_method(proj, AscendW8A8DynamicLinearMethod)
+                for proj in (self._shared_experts.gate_up_proj, self._shared_experts.down_proj)
+            )
             has_per_channel_w4a8_situ_shared = (
-                self.quant_type == QuantType.W4A8
+                shared_is_w4a8
                 and shared_uses_situ
                 and all(
                     hasattr(proj, "weight_scale_fp32")
                     for proj in (self._shared_experts.gate_up_proj, self._shared_experts.down_proj)
                 )
             )
-            if has_quantized_shared and (
-                self.quant_type == QuantType.W8A8 or has_per_channel_w4a8_situ_shared
-            ):
+            if has_quantized_shared and (shared_is_w8a8 or has_per_channel_w4a8_situ_shared):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)

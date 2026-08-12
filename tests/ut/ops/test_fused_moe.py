@@ -16,6 +16,8 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     make_eplb_placement_config,
     use_multistage_eplb_load,
 )
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -438,7 +440,8 @@ def test_unquantized_shared_situ_uses_split_bf16_path(monkeypatch):
     runner._shared_experts_part2.assert_called_once_with(hidden_states, gate_up)
 
 
-def test_per_channel_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
+@pytest.mark.parametrize("routed_quant_type", [QuantType.W8A8, QuantType.W4A8])
+def test_per_channel_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch, routed_quant_type):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
@@ -452,16 +455,24 @@ def test_per_channel_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     gate_up_proj.weight = torch.ones(4, 4, dtype=torch.int8)
     gate_up_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
     gate_up_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
+    gate_up_proj.quant_method = SimpleNamespace(
+        quant_method=MagicMock(spec=AscendW8A8DynamicLinearMethod)
+    )
     down_proj = MagicMock()
     down_proj.weight = torch.ones(2, 4, dtype=torch.int8)
     down_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
     down_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
+    down_proj.quant_method = SimpleNamespace(
+        quant_method=MagicMock(spec=AscendW8A8DynamicLinearMethod)
+    )
     runner._shared_experts = SimpleNamespace(
         gate_up_proj=gate_up_proj,
         down_proj=down_proj,
         act_fn=AscendSituAndMul(beta=4.0, linear_beta=25.0),
     )
-    runner.quant_type = QuantType.W8A8
+    # The routed MoE may remain W4A8 while the shared expert falls back to
+    # W8A8. Dispatch must follow the shared projections' concrete schemes.
+    runner.quant_type = routed_quant_type
     runner.multistream_overlap_shared_expert = False
     stream = MagicMock()
     events = fused_moe_module.FusedMoEEvents(
@@ -528,9 +539,15 @@ def test_per_channel_w4a8_shared_situ_uses_single_expert_gmm_fusion(monkeypatch)
     gate_up_proj = MagicMock(return_value=(gate_up, None))
     gate_up_proj.weight_scale = torch.ones(8, dtype=torch.int64)
     gate_up_proj.weight_scale_fp32 = torch.ones(8, dtype=torch.float32)
+    gate_up_proj.quant_method = SimpleNamespace(
+        quant_method=MagicMock(spec=AscendW4A8DynamicLinearMethod)
+    )
     down_proj = MagicMock(return_value=(down_out, None))
     down_proj.weight_scale = torch.ones(4, dtype=torch.int64)
     down_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
+    down_proj.quant_method = SimpleNamespace(
+        quant_method=MagicMock(spec=AscendW4A8DynamicLinearMethod)
+    )
     runner._shared_experts = SimpleNamespace(
         gate_up_proj=gate_up_proj,
         down_proj=down_proj,
