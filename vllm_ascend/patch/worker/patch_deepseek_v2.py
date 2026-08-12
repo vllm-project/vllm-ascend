@@ -297,7 +297,7 @@ _original_deepseek_v2_model_init = DeepseekV2Model.__init__
 
 
 @wraps(_original_deepseek_v2_model_init)
-def _deepseek_v2_model_init_with_indexshare_pp_validation(self, *args, **kwargs):
+def _deepseek_v2_model_init_with_indexer_pp_validation(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
 
     config = getattr(self, "config", None)
@@ -311,7 +311,7 @@ def _deepseek_v2_model_init_with_indexshare_pp_validation(self, *args, **kwargs)
     )
 
 
-DeepseekV2Model.__init__ = _deepseek_v2_model_init_with_indexshare_pp_validation
+DeepseekV2Model.__init__ = _deepseek_v2_model_init_with_indexer_pp_validation
 
 
 def _patched_forward(
