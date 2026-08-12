@@ -67,7 +67,7 @@ from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
-from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import adapt_patch, vllm_version_is  # noqa E402
 
 adapt_patch(True)
 adapt_patch(False)
@@ -1937,9 +1937,14 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    # vLLM's Hunyuan prompt update adds the image start/end tokens around
-    # this placeholder. Supplying the wrapper here would duplicate it.
-    placeholder = "<｜hy_place▁holder▁no▁102｜>"  # noqa: E501
+    image_token = "<｜hy_place▁holder▁no▁102｜>"
+    if vllm_version_is("0.26.0"):
+        # v0.26.0 matches the bare image token and adds the boundaries in its
+        # prompt replacement. Supplying the wrapper would duplicate them.
+        placeholder = image_token
+    else:
+        # vLLM main PR #49691 matches the complete image placeholder.
+        placeholder = f"<｜hy_place▁holder▁no▁100｜>{image_token}<｜hy_place▁holder▁no▁101｜>"
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 

@@ -228,6 +228,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A5_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   single-node-tests:
     name: single-node
@@ -259,6 +260,8 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+    secrets:
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-0

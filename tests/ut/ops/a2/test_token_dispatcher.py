@@ -24,12 +24,11 @@ import torch
 import torch_npu
 
 from tests.ut.base import TestBase
+from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
     MoEMC2CombineMetadata,
-    MoEQuantParams,
-    MoeRouterInput,
     MoETokenDispatchInput,
 )
 
@@ -41,7 +40,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
-from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)

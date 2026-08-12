@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from vllm.model_executor.layers.fused_moe import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams, build_quant_params
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput

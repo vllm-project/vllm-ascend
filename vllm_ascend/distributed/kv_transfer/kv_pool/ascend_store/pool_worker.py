@@ -155,6 +155,9 @@ class KVPoolWorker:
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        use_eagle_fn = getattr(speculative_config, "use_eagle", None)
+        self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
@@ -516,6 +519,7 @@ class KVPoolWorker:
                     self.get_event,
                     self.layer_load_finished_events,
                     self.layer_save_finished_events,
+                    self.sync_save_events,
                     self.num_layers,
                     self.h2d_stagger_us,
                     self.layerwise_max_transfer_blocks,
@@ -869,6 +873,11 @@ class KVPoolWorker:
         self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
             self.next_layer_to_submit = 0
+            # Transfer threads receive these lists by reference. Give every
+            # step fresh lists so a late clear of a previous step cannot drop
+            # newly prepared loads/saves and leave a reused buffer stale.
+            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
             reset_attention_compute_start_gate()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
@@ -1017,6 +1026,7 @@ class KVPoolWorker:
         # Only the first rank in each put_step group saves to the
         # pool.  Other ranks in the same group share the same KV cache
         # (e.g. MLA latent), so they skip save to avoid redundant writes.
+        # TODO(lf): Distribute KV block writes across ranks in the put_step group.
         if self.tp_rank % self.put_step != 0:
             return
         block_size = self._get_effective_group_block_size(group_id)
@@ -1082,11 +1092,9 @@ class KVPoolWorker:
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
-            cached_tokens = (
-                request.load_spec.kvpool_store_skip_tokens
-                if request.load_spec.kvpool_store_skip_tokens is not None
-                else request.load_spec.kvpool_cached_tokens
-            )
+            cached_tokens = request.load_spec.kvpool_cached_tokens
+            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
+                cached_tokens = request.load_spec.kvpool_store_skip_tokens
             group_block_hashes = get_block_hashes(
                 request.block_hashes,
                 block_size,
@@ -1327,7 +1335,7 @@ class KVPoolWorker:
                     self._allocated_gvas.pop(partial_key, None)
                     request.partial_save_gva_per_group[group_id] = partial_gva
 
-                logger.info(
+                logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
                     "new_keys=%d cached_keys=%d alloc_size=%d",
                     request.req_id,
@@ -1371,11 +1379,9 @@ class KVPoolWorker:
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
-            cached_tokens = (
-                request.load_spec.kvpool_store_skip_tokens
-                if request.load_spec.kvpool_store_skip_tokens is not None
-                else request.load_spec.kvpool_cached_tokens
-            )
+            cached_tokens = request.load_spec.kvpool_cached_tokens
+            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
+                cached_tokens = request.load_spec.kvpool_store_skip_tokens
             block_hashes = request.block_hashes
 
             all_group_load_gvas: list[np.ndarray] = []
@@ -1645,6 +1651,10 @@ class KVPoolWorker:
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
+        # Keep this method safe for direct callers as well as start_load_kv().
+        # Worker threads may still own the lists from the preceding step.
+        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         for physical_layer in range(self.num_layers):
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
@@ -1703,7 +1713,6 @@ class KVPoolWorker:
         while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
             self.kv_recv_thread.raise_if_failed()
             logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
-        logger.debug(">>>>>>>>>>>>>>>>>>>> clear load layer %d", self.current_layer)
         self.layer_load_finished_events[self.current_layer].clear()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
