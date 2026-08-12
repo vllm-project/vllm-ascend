@@ -225,6 +225,16 @@ class AscendRejectionSampler(RejectionSampler):
             # the original raw logits for logprobs computation, since
             # apply_logits_processors modifies the tensor in-place.
             target_logits = target_logits.clone()
+
+        info = torch.finfo(target_logits.dtype)
+        if torch.isinf(target_logits).any():
+            target_logits[target_logits == torch.inf] = info.max
+            target_logits[target_logits == -torch.inf] = info.min
+        nan_mask = torch.isnan(target_logits)
+        if nan_mask.any():
+            target_logits[nan_mask] = 0
+            logger.warning_once("[sample/rejection_sampler] target_logits have NaN.")
+
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
