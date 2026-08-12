@@ -58,6 +58,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     maybe_trans_nz,
     weak_ref_tensors,
+    enable_pcp，
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -81,7 +82,7 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls():
         dcp_enabled = enable_dcp()
-        pcp_enabled = get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
+        pcp_enabled = enable_pcp()
         if dcp_enabled and pcp_enabled:
             raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
         if dcp_enabled:
@@ -105,7 +106,7 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
         dcp_enabled = enable_dcp()
-        pcp_enabled = get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
+        pcp_enabled = enable_pcp()
         if dcp_enabled and pcp_enabled:
             raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
         if dcp_enabled:
