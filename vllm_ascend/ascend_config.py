@@ -152,7 +152,8 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
-        assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        if self.enable_fused_mc2 not in (0, 1, 2):
+            raise ValueError(f"enable_fused_mc2 must be 0, 1, or 2, got {self.enable_fused_mc2}")
         model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
         assert not (
             self.enable_fused_mc2 == 1
@@ -277,6 +278,13 @@ class AscendConfig:
             )
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+
+        self.mega_moe_min_tokens = additional_config.get("mega_moe_min_tokens", 512)
+        if not isinstance(self.mega_moe_min_tokens, int) or not 1 <= self.mega_moe_min_tokens <= 4096:
+            raise ValueError(f"mega_moe_min_tokens must be an integer in [1, 4096], got {self.mega_moe_min_tokens!r}")
+
+        # Optionally synchronize DP metadata through the NPU group.
+        self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
 
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
