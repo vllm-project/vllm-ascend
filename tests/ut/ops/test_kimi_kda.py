@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -32,6 +32,8 @@ from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiGatedDeltaNetAttention,
     _load_a_log,
+    _resolve_kda_qkv_input,
+    _start_kda_qkv_concat,
     _zero_padded_spec_output,
 )
 
@@ -133,6 +135,109 @@ def test_load_a_log_preserves_exact_local_4d_checkpoint():
 def test_load_a_log_rejects_unsupported_layout():
     with pytest.raises(ValueError, match="must be 1-D or 4-D"):
         _load_a_log(torch.empty(1, 1, 2, 1), torch.empty(2, 2), num_heads=4)
+
+
+def test_start_kda_qkv_concat_cpu_packs_without_streams():
+    q = torch.randn(4, 2)
+    k = torch.randn(4, 3)
+    v = torch.randn(4, 5)
+
+    mixed_qkv, main_stream, concat_stream = _start_kda_qkv_concat(q, k, v)
+
+    torch.testing.assert_close(mixed_qkv, torch.cat((q, k, v), dim=-1))
+    assert main_stream is None
+    assert concat_stream is None
+
+
+def test_start_kda_qkv_concat_orders_streams_and_records_lifetimes():
+    q = MagicMock()
+    k = MagicMock()
+    v = MagicMock()
+    q.device = SimpleNamespace(type="npu")
+    main_stream = MagicMock()
+    concat_stream = MagicMock()
+    mixed_qkv = MagicMock()
+
+    with (
+        patch("vllm_ascend.ops.kimi_kda._kda_qkv_concat_stream", return_value=concat_stream),
+        patch.object(torch.npu, "current_stream", return_value=main_stream),
+        patch.object(torch.npu, "stream") as stream_context,
+        patch("vllm_ascend.ops.kimi_kda.torch.cat", return_value=mixed_qkv),
+    ):
+        result = _start_kda_qkv_concat(q, k, v)
+
+    q.record_stream.assert_called_once_with(concat_stream)
+    k.record_stream.assert_called_once_with(concat_stream)
+    v.record_stream.assert_called_once_with(concat_stream)
+    concat_stream.wait_stream.assert_called_once_with(main_stream)
+    stream_context.assert_called_once_with(concat_stream)
+    mixed_qkv.record_stream.assert_called_once_with(main_stream)
+    assert result == (mixed_qkv, main_stream, concat_stream)
+
+
+def test_resolve_kda_qkv_input_supports_packed_and_legacy_inputs():
+    q = torch.randn(4, 2)
+    k = torch.randn(4, 3)
+    v = torch.randn(4, 5)
+    packed = torch.cat((q, k, v), dim=-1)
+    sentinel = packed[:, :0]
+
+    resolved_packed = _resolve_kda_qkv_input(packed, sentinel, sentinel, 3)
+    resolved_legacy = _resolve_kda_qkv_input(q, k, v, 3)
+
+    torch.testing.assert_close(resolved_packed, packed[:3])
+    torch.testing.assert_close(resolved_legacy, packed[:3])
+
+
+def test_forward_passes_packed_qkv_sentinels_to_custom_op(monkeypatch):
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.is_vl_first_layer = False
+    attention.use_full_rank_gate = True
+    attention.local_num_heads = 1
+    attention.head_dim = 2
+    attention.prefix = "model.layers.0.self_attn"
+
+    q = torch.randn(4, 2)
+    k = torch.randn(4, 2)
+    v = torch.randn(4, 2)
+
+    def fake_projection(result):
+        def project(_hidden_states):
+            return (result,)
+
+        return project
+
+    attention.q_proj = fake_projection(q)
+    attention.k_proj = fake_projection(k)
+    attention.v_proj = fake_projection(v)
+    attention.b_proj = fake_projection(torch.randn(4, 1))
+    attention.f_a_proj = fake_projection(torch.randn(4, 2))
+    attention.f_b_proj = fake_projection(torch.randn(4, 2))
+    attention.g_proj = fake_projection(torch.randn(4, 2))
+    attention.o_norm = lambda core_attn_out, output_gate: core_attn_out
+    attention.o_proj = fake_projection(q)
+
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "maybe_all_gather_and_maybe_unpad",
+        lambda hidden_states, enabled: hidden_states,
+    )
+
+    def fake_kda_attention(packed_qkv, k_sentinel, v_sentinel, raw_gate, beta, core_attn_out, prefix):
+        del raw_gate, beta
+        assert prefix == attention.prefix
+        assert packed_qkv.shape == (4, 6)
+        assert k_sentinel.shape == (4, 0)
+        assert v_sentinel.shape == (4, 0)
+        core_attn_out.copy_(packed_qkv[:, :2].reshape(1, 4, 1, 2))
+
+    monkeypatch.setattr(torch.ops.vllm, "kda_attention", fake_kda_attention)
+
+    output = torch.empty_like(q)
+    attention.forward(torch.randn(4, 8), torch.empty(0), output)
+
+    torch.testing.assert_close(output, q)
 
 
 def test_zero_padded_spec_output_clears_uninitialized_tail():
