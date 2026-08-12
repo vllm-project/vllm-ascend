@@ -230,10 +230,11 @@ class AscendRejectionSampler(RejectionSampler):
         if torch.isinf(target_logits).any():
             target_logits[target_logits == torch.inf] = info.max
             target_logits[target_logits == -torch.inf] = info.min
+            logger.warning("[sample/rejection_sampler] target_logits have infinite values.")
         nan_mask = torch.isnan(target_logits)
         if nan_mask.any():
             target_logits[nan_mask] = 0
-            logger.warning_once("[sample/rejection_sampler] target_logits have NaN.")
+            logger.warning("[sample/rejection_sampler] target_logits have NaN.")
 
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
         # [num_tokens, vocab_size]
