@@ -9,7 +9,6 @@
 import importlib
 import importlib.util
 import math
-import os
 import sys
 from math import ceil
 from pathlib import Path
@@ -41,9 +40,7 @@ def _register_sparse_attention_score_op():
     candidate_dirs = [cache_base / "py311_npu" / "npu_sparse_attention_score"]
     if cache_base.is_dir():
         candidate_dirs.extend(
-            sub / "npu_sparse_attention_score"
-            for sub in cache_base.iterdir()
-            if "npu" in sub.name.lower()
+            sub / "npu_sparse_attention_score" for sub in cache_base.iterdir() if "npu" in sub.name.lower()
         )
 
     so_file = None
@@ -57,8 +54,9 @@ def _register_sparse_attention_score_op():
             break
 
     if so_file is None:
-        print("[INFO] Pre-compiled npu_sparse_attention_score .so not found; "
-              "OpBuilder will compile it on first NPU call.")
+        print(
+            "[INFO] Pre-compiled npu_sparse_attention_score .so not found; OpBuilder will compile it on first NPU call."
+        )
         return
 
     ext_spec = importlib.util.spec_from_file_location("npu_sparse_attention_score", so_file)
@@ -74,12 +72,11 @@ def _register_sparse_attention_score_op():
 _register_sparse_attention_score_op()
 
 
-def generate_block_index_with_causal(query_fp32, key_fp32, q_seqlen, kv_seqlen,
-                                     kv_heads, group_size, block_size=128, top_k=16):
+def generate_block_index_with_causal(
+    query_fp32, key_fp32, q_seqlen, kv_seqlen, kv_heads, group_size, block_size=128, top_k=16
+):
     his_seq_len = kv_seqlen - q_seqlen
     total_blocks = ceil(kv_seqlen / block_size)
-    head_dim = query_fp32.shape[-1]
-
     select_idx = torch.full((kv_heads, q_seqlen, top_k), -1, dtype=torch.int32)
     select_num_idx = torch.zeros((kv_heads, q_seqlen), dtype=torch.int32)
 
@@ -124,6 +121,7 @@ def generate_block_table(batch, max_blocks_per_batch, shuffle=True):
     all_physical_ids = list(range(total_physical))
     if shuffle:
         import random
+
         rng = random.Random(137)
         rng.shuffle(all_physical_ids)
     block_table = torch.zeros(batch, max_blocks_per_batch, dtype=torch.int32)
@@ -133,9 +131,9 @@ def generate_block_table(batch, max_blocks_per_batch, shuffle=True):
     return block_table
 
 
-def build_fp8_tensors_and_scales(query_fp32, key_fp32, value_fp32, block_table,
-                                 actual_seq_lengths, actual_seq_lengths_kv,
-                                 block_size):
+def build_fp8_tensors_and_scales(
+    query_fp32, key_fp32, value_fp32, block_table, actual_seq_lengths, actual_seq_lengths_kv, block_size
+):
     query_fp8 = query_fp32.to(FP8_DTYPE)
     key_fp8 = key_fp32.to(FP8_DTYPE)
     value_fp8 = value_fp32.to(FP8_DTYPE)
@@ -155,11 +153,20 @@ def build_fp8_tensors_and_scales(query_fp32, key_fp32, value_fp32, block_table,
 
 
 def cpu_sparse_attention_score_fp32(
-    query_fp8, key_fp8, value_fp8, select_idx, block_table,
-    q_scales, k_scales, v_scales,
-    actual_seq_lengths, actual_seq_lengths_kv,
-    num_key_value_heads, select_num_idx=None,
-    block_size=128, scale_value=1.0,
+    query_fp8,
+    key_fp8,
+    value_fp8,
+    select_idx,
+    block_table,
+    q_scales,
+    k_scales,
+    v_scales,
+    actual_seq_lengths,
+    actual_seq_lengths_kv,
+    num_key_value_heads,
+    select_num_idx=None,
+    block_size=128,
+    scale_value=1.0,
 ):
     select_idx_cpu = select_idx.to(torch.int64)
     block_table_cpu = block_table.to(torch.int64)
@@ -168,8 +175,6 @@ def cpu_sparse_attention_score_fp32(
     kv_heads = num_key_value_heads
     group_size = q_heads // kv_heads
     top_k = select_idx.shape[2]
-    batch = len(actual_seq_lengths)
-
     output = torch.zeros(total_q_tokens, q_heads, head_dim, dtype=torch.float32)
 
     q_offset = 0
@@ -347,26 +352,57 @@ _FP8_MULTI_BATCH_CASES = [
     (2, [1, 4], [512, 512], 8, 2, 4, 100),
     (4, [1, 1, 1, 1], [256, 512, 1024, 300], 16, 4, 3, 42),
     (4, [1, 2, 4, 1], [300, 500, 1000, 700], 8, 2, 4, 7),
-    (8, [1]*8, [256, 512, 1024, 2048, 333, 555, 777, 1500], 16, 4, 5, 999),
+    (8, [1] * 8, [256, 512, 1024, 2048, 333, 555, 777, 1500], 16, 4, 5, 999),
     (2, [1, 1], [256, 384], 4, 4, 2, 42),
     (4, [1, 1, 1, 1], [512, 700, 900, 1024], 32, 4, 4, 13),
     (3, [1, 1, 1], [256, 384, 512], 8, 2, 3, 42),
     (2, [1, 1], [512, 1024], 16, 4, 4, 42),
     (4, [1, 2, 2, 1], [256, 256, 512, 512], 8, 1, 4, 7),
-    (6, [1]*6, [256]*6, 12, 3, 3, 42),
+    (6, [1] * 6, [256] * 6, 12, 3, 3, 42),
 ]
 
 
 def _generate_stress_cases(num_cases=200):
     import random
+
     rng = random.Random(20260718)
 
     q_seqlen_pool = [1, 1, 1, 1, 1, 2, 2, 4, 4, 8]
-    kv_seqlen_pool = [128, 200, 256, 300, 333, 384, 400, 450, 500, 512,
-                     555, 600, 640, 700, 750, 768, 800, 850, 900, 950, 1000]
+    kv_seqlen_pool = [
+        128,
+        200,
+        256,
+        300,
+        333,
+        384,
+        400,
+        450,
+        500,
+        512,
+        555,
+        600,
+        640,
+        700,
+        750,
+        768,
+        800,
+        850,
+        900,
+        950,
+        1000,
+    ]
     head_configs = [
-        (8, 2), (8, 4), (16, 2), (16, 4), (32, 4), (32, 8),
-        (4, 1), (8, 1), (4, 2), (4, 4), (8, 8),
+        (8, 2),
+        (8, 4),
+        (16, 2),
+        (16, 4),
+        (32, 4),
+        (32, 8),
+        (4, 1),
+        (8, 1),
+        (4, 2),
+        (4, 4),
+        (8, 8),
     ]
     cases = []
     for _ in range(num_cases):
@@ -385,18 +421,53 @@ def _generate_stress_cases(num_cases=200):
 
 def _generate_long_seq_cases(num_cases=200):
     import random
+
     rng = random.Random(20260719)
 
     q_seqlen_pool = [1, 1, 1, 2, 4, 8, 16, 32, 64, 128]
     kv_seqlen_pool = [
-        1024, 1500, 2000, 2048, 2500, 3000, 3333, 4000, 4096,
-        5000, 5555, 6000, 7000, 7777, 8000, 8192, 9000, 10000,
-        12000, 14000, 16000, 16384, 20000, 24000, 30000, 32000,
-        32768, 40000, 50000, 60000, 65536,
+        1024,
+        1500,
+        2000,
+        2048,
+        2500,
+        3000,
+        3333,
+        4000,
+        4096,
+        5000,
+        5555,
+        6000,
+        7000,
+        7777,
+        8000,
+        8192,
+        9000,
+        10000,
+        12000,
+        14000,
+        16000,
+        16384,
+        20000,
+        24000,
+        30000,
+        32000,
+        32768,
+        40000,
+        50000,
+        60000,
+        65536,
     ]
     head_configs = [
-        (8, 2), (16, 4), (32, 4), (16, 2), (8, 1),
-        (4, 1), (8, 4), (8, 8), (4, 4),
+        (8, 2),
+        (16, 4),
+        (32, 4),
+        (16, 2),
+        (8, 1),
+        (4, 1),
+        (8, 4),
+        (8, 8),
+        (4, 4),
     ]
     cases = []
     for _ in range(num_cases):
@@ -419,8 +490,9 @@ _FP8_LONGSEQ_CASES = _generate_long_seq_cases(200)
 
 
 class TestNpuSparseAttentionScoreFp8(TestCase):
-    def make_case(self, q_seqlen=1, kv_seqlen=128, q_heads=1, kv_heads=1,
-                  head_dim=128, block_size=128, top_k=1, seed=42):
+    def make_case(
+        self, q_seqlen=1, kv_seqlen=128, q_heads=1, kv_heads=1, head_dim=128, block_size=128, top_k=1, seed=42
+    ):
         batch = 1
         group_size = q_heads // kv_heads
         total_blocks = ceil(kv_seqlen / block_size)
@@ -431,41 +503,60 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         torch.manual_seed(seed)
         query_fp32 = torch.randn(q_seqlen, q_heads, head_dim, dtype=torch.float32)
         total_physical_blocks = total_blocks * batch
-        key_fp32 = torch.randn(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32)
-        value_fp32 = torch.randn(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32)
+        key_fp32 = torch.randn(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32)
+        value_fp32 = torch.randn(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32)
 
         block_table = generate_block_table(batch, max_blocks_per_batch)
         key_logical = torch.zeros(total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
         for logical_id in range(total_blocks):
             physical_id = int(block_table[0, logical_id].item())
-            key_logical[logical_id * block_size:(logical_id + 1) * block_size] = key_fp32[physical_id]
+            key_logical[logical_id * block_size : (logical_id + 1) * block_size] = key_fp32[physical_id]
         key_flat = key_logical[:kv_seqlen, :, :]
         select_idx, select_num_idx = generate_block_index_with_causal(
-            query_fp32, key_flat, q_seqlen, kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            query_fp32, key_flat, q_seqlen, kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
         scale_value = 1.0 / math.sqrt(head_dim)
 
-        query_fp8, key_fp8, value_fp8, q_scales, k_scales, v_scales = (
-            build_fp8_tensors_and_scales(
-                query_fp32, key_fp32, value_fp32, block_table,
-                actual_seq_lengths, actual_seq_lengths_kv, block_size))
+        query_fp8, key_fp8, value_fp8, q_scales, k_scales, v_scales = build_fp8_tensors_and_scales(
+            query_fp32, key_fp32, value_fp32, block_table, actual_seq_lengths, actual_seq_lengths_kv, block_size
+        )
 
         return (
-            query_fp8, key_fp8, value_fp8, select_idx, block_table, select_num_idx,
-            q_scales, k_scales, v_scales,
-            actual_seq_lengths, actual_seq_lengths_kv,
-            kv_heads, block_size, top_k, scale_value,
+            query_fp8,
+            key_fp8,
+            value_fp8,
+            select_idx,
+            block_table,
+            select_num_idx,
+            q_scales,
+            k_scales,
+            v_scales,
+            actual_seq_lengths,
+            actual_seq_lengths_kv,
+            kv_heads,
+            block_size,
+            top_k,
+            scale_value,
         )
 
     def _run_fp8_case(self, **kwargs):
         torch.npu.synchronize()
         (
-            query, key, value, select_idx, block_table, select_num_idx,
-            q_scales, k_scales, v_scales,
-            actual_seq_lengths, actual_seq_lengths_kv,
-            kv_heads, block_size, top_k, scale_value,
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            select_num_idx,
+            q_scales,
+            k_scales,
+            v_scales,
+            actual_seq_lengths,
+            actual_seq_lengths_kv,
+            kv_heads,
+            block_size,
+            top_k,
+            scale_value,
         ) = self.make_case(**kwargs)
 
         print("=" * 60)
@@ -481,9 +572,16 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         print("=" * 60)
 
         cpu_out = cpu_sparse_attention_score_fp32(
-            query, key, value, select_idx, block_table,
-            q_scales, k_scales, v_scales,
-            actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            q_scales,
+            k_scales,
+            v_scales,
+            actual_seq_lengths.tolist(),
+            actual_seq_lengths_kv.tolist(),
             num_key_value_heads=kv_heads,
             select_num_idx=select_num_idx,
             block_size=block_size,
@@ -491,7 +589,11 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         )
 
         npu_out = torch_npu.npu_sparse_attention_score(
-            query.npu(), key.npu(), value.npu(), select_idx.npu(), block_table.npu(),
+            query.npu(),
+            key.npu(),
+            value.npu(),
+            select_idx.npu(),
+            block_table.npu(),
             select_num_idx=select_num_idx.npu(),
             actual_seq_lengths=actual_seq_lengths.npu(),
             actual_seq_lengths_kv=actual_seq_lengths_kv.npu(),
@@ -502,7 +604,7 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
             inner_precise=INNER_PRECISE_FP8,
             # attention_out_dtype=ATTENTION_OUT_DTYPE,
         )
-        
+
         npu_out_cpu = npu_out.cpu()
         print(f"[dtype] npu_out dype: {npu_out_cpu.dtype}")
         npu_out_fp32 = npu_out_cpu.float()
@@ -511,13 +613,23 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         max_diff = diff.max().item()
         mean_diff = diff.mean().item()
         cos_sim = torch.nn.functional.cosine_similarity(
-            npu_out_fp32.flatten().unsqueeze(0), cpu_out_fp32.flatten().unsqueeze(0)).item()
+            npu_out_fp32.flatten().unsqueeze(0), cpu_out_fp32.flatten().unsqueeze(0)
+        ).item()
         print(f"[fp8] max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, cos_sim={cos_sim:.8f}")
         self.assertRtolEqual(cpu_out_fp32.numpy(), npu_out_fp32.numpy(), prec=2e-2)
 
-    def make_case_multi_batch(self, batch=2, q_seqlens=None, kv_seqlens=None,
-                              q_heads=8, kv_heads=2, head_dim=128, block_size=128,
-                              top_k=4, seed=42):
+    def make_case_multi_batch(
+        self,
+        batch=2,
+        q_seqlens=None,
+        kv_seqlens=None,
+        q_heads=8,
+        kv_heads=2,
+        head_dim=128,
+        block_size=128,
+        top_k=4,
+        seed=42,
+    ):
         if q_seqlens is None:
             q_seqlens = [1] * batch
         if kv_seqlens is None:
@@ -532,10 +644,8 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
 
         torch.manual_seed(seed)
         query_fp32 = torch.rand(total_q_tokens, q_heads, head_dim, dtype=torch.float32) * 2 - 1
-        key_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
-        value_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        key_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        value_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
 
         block_table = generate_block_table(batch, max_blocks_per_batch)
 
@@ -548,36 +658,45 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
             kv_seqlen_b = kv_seqlens[b]
             total_blocks_b = ceil(kv_seqlen_b / block_size)
 
-            key_logical_b = torch.zeros(
-                total_blocks_b * block_size, kv_heads, head_dim, dtype=torch.float32)
+            key_logical_b = torch.zeros(total_blocks_b * block_size, kv_heads, head_dim, dtype=torch.float32)
             for logical_id in range(total_blocks_b):
                 physical_id = int(block_table[b, logical_id].item())
-                key_logical_b[logical_id * block_size:(logical_id + 1) * block_size] = key_fp32[physical_id]
+                key_logical_b[logical_id * block_size : (logical_id + 1) * block_size] = key_fp32[physical_id]
             key_flat_b = key_logical_b[:kv_seqlen_b, :, :]
 
-            q_for_batch = query_fp32[q_offset:q_offset + q_seqlen_b, :, :]
+            q_for_batch = query_fp32[q_offset : q_offset + q_seqlen_b, :, :]
             batch_select_idx, batch_select_num = generate_block_index_with_causal(
-                q_for_batch, key_flat_b, q_seqlen_b, kv_seqlen_b,
-                kv_heads, group_size, block_size, top_k)
+                q_for_batch, key_flat_b, q_seqlen_b, kv_seqlen_b, kv_heads, group_size, block_size, top_k
+            )
 
-            select_idx[:, q_offset:q_offset + q_seqlen_b, :] = batch_select_idx
-            select_num_idx[:, q_offset:q_offset + q_seqlen_b] = batch_select_num
+            select_idx[:, q_offset : q_offset + q_seqlen_b, :] = batch_select_idx
+            select_num_idx[:, q_offset : q_offset + q_seqlen_b] = batch_select_num
             q_offset += q_seqlen_b
 
         scale_value = 1.0 / math.sqrt(head_dim)
         actual_seq_lengths = torch.tensor(q_seqlens, dtype=torch.int32)
         actual_seq_lengths_kv = torch.tensor(kv_seqlens, dtype=torch.int32)
 
-        query_fp8, key_fp8, value_fp8, q_scales, k_scales, v_scales = (
-            build_fp8_tensors_and_scales(
-                query_fp32, key_fp32, value_fp32, block_table,
-                actual_seq_lengths, actual_seq_lengths_kv, block_size))
+        query_fp8, key_fp8, value_fp8, q_scales, k_scales, v_scales = build_fp8_tensors_and_scales(
+            query_fp32, key_fp32, value_fp32, block_table, actual_seq_lengths, actual_seq_lengths_kv, block_size
+        )
 
         return (
-            query_fp8, key_fp8, value_fp8, select_idx, block_table, select_num_idx,
-            q_scales, k_scales, v_scales,
-            actual_seq_lengths, actual_seq_lengths_kv,
-            kv_heads, block_size, top_k, scale_value,
+            query_fp8,
+            key_fp8,
+            value_fp8,
+            select_idx,
+            block_table,
+            select_num_idx,
+            q_scales,
+            k_scales,
+            v_scales,
+            actual_seq_lengths,
+            actual_seq_lengths_kv,
+            kv_heads,
+            block_size,
+            top_k,
+            scale_value,
         )
 
     def _run_fp8_multi_batch_case(self, **kwargs):
@@ -585,16 +704,34 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         torch.npu.empty_cache()
         case_data = self.make_case_multi_batch(**kwargs)
         (
-            query, key, value, select_idx, block_table, select_num_idx,
-            q_scales, k_scales, v_scales,
-            actual_seq_lengths, actual_seq_lengths_kv,
-            kv_heads, block_size, top_k, scale_value,
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            select_num_idx,
+            q_scales,
+            k_scales,
+            v_scales,
+            actual_seq_lengths,
+            actual_seq_lengths_kv,
+            kv_heads,
+            block_size,
+            top_k,
+            scale_value,
         ) = case_data
 
         cpu_out = cpu_sparse_attention_score_fp32(
-            query, key, value, select_idx, block_table,
-            q_scales, k_scales, v_scales,
-            actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            q_scales,
+            k_scales,
+            v_scales,
+            actual_seq_lengths.tolist(),
+            actual_seq_lengths_kv.tolist(),
             num_key_value_heads=kv_heads,
             select_num_idx=select_num_idx,
             block_size=block_size,
@@ -602,7 +739,11 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         )
 
         npu_out = torch_npu.npu_sparse_attention_score(
-            query.npu(), key.npu(), value.npu(), select_idx.npu(), block_table.npu(),
+            query.npu(),
+            key.npu(),
+            value.npu(),
+            select_idx.npu(),
+            block_table.npu(),
             select_num_idx=select_num_idx.npu(),
             actual_seq_lengths=actual_seq_lengths.npu(),
             actual_seq_lengths_kv=actual_seq_lengths_kv.npu(),
@@ -622,72 +763,86 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         max_diff = diff.max().item()
         mean_diff = diff.mean().item()
         cos_sim = torch.nn.functional.cosine_similarity(
-            npu_out_cpu_fp32.flatten().unsqueeze(0), cpu_out_fp32.flatten().unsqueeze(0)).item()
+            npu_out_cpu_fp32.flatten().unsqueeze(0), cpu_out_fp32.flatten().unsqueeze(0)
+        ).item()
         print(f"[fp8-multi-batch] max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, cos_sim={cos_sim:.8f}")
         self.assertRtolEqual(cpu_out_fp32.numpy(), npu_out_cpu_fp32.numpy(), prec=2e-2)
 
-    def _run_fp8_prefill_decode_case(self, p_q_seqlen=132, kv_seqlen=0,
-                                     q_heads=64, kv_heads=4, head_dim=128,
-                                     block_size=128, top_k=16, seed=42):
+    def _run_fp8_prefill_decode_case(
+        self, p_q_seqlen=132, kv_seqlen=0, q_heads=64, kv_heads=4, head_dim=128, block_size=128, top_k=16, seed=42
+    ):
         group_size = q_heads // kv_heads
         d_kv_seqlen = kv_seqlen + p_q_seqlen + 1
         total_blocks = ceil(d_kv_seqlen / block_size)
         total_physical_blocks = total_blocks + 5
 
         torch.manual_seed(seed)
-        key_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim,
-            dtype=torch.float32) * 2 - 1
-        value_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim,
-            dtype=torch.float32) * 2 - 1
+        key_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        value_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
 
         import random
+
         rng = random.Random(seed)
         physical_ids = rng.sample(range(total_physical_blocks), total_blocks)
         block_table = torch.tensor([physical_ids], dtype=torch.int32)
 
-        key_logical = torch.zeros(
-            total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
+        key_logical = torch.zeros(total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
         for lid in range(total_blocks):
             pid = int(block_table[0, lid].item())
-            key_logical[lid * block_size:(lid + 1) * block_size] = key_fp32[pid]
+            key_logical[lid * block_size : (lid + 1) * block_size] = key_fp32[pid]
 
         scale_value = 1.0 / math.sqrt(head_dim)
 
         # Prefill
         p_kv_seqlen = kv_seqlen + p_q_seqlen
         torch.manual_seed(seed + 1)
-        p_query_fp32 = torch.rand(p_q_seqlen, q_heads, head_dim,
-                                  dtype=torch.float32) * 2 - 1
+        p_query_fp32 = torch.rand(p_q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
         key_flat_p = key_logical[:p_kv_seqlen, :, :]
         p_select_idx, p_select_num_idx = generate_block_index_with_causal(
-            p_query_fp32, key_flat_p, p_q_seqlen, p_kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            p_query_fp32, key_flat_p, p_q_seqlen, p_kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
 
         p_query_fp8, p_key_fp8, p_value_fp8, _, _, _ = build_fp8_tensors_and_scales(
-            p_query_fp32, key_fp32, value_fp32, block_table,
+            p_query_fp32,
+            key_fp32,
+            value_fp32,
+            block_table,
             torch.tensor([p_q_seqlen], dtype=torch.int32),
-            torch.tensor([p_kv_seqlen], dtype=torch.int32), block_size)
+            torch.tensor([p_kv_seqlen], dtype=torch.int32),
+            block_size,
+        )
 
         p_cpu = cpu_sparse_attention_score_fp32(
-            p_query_fp8, p_key_fp8, p_value_fp8, p_select_idx, block_table,
+            p_query_fp8,
+            p_key_fp8,
+            p_value_fp8,
+            p_select_idx,
+            block_table,
             torch.ones(1, q_heads, ceil(p_q_seqlen / block_size), 1, dtype=torch.float32),
             torch.ones(1, kv_heads, total_blocks, 1, dtype=torch.float32),
             torch.ones(1, kv_heads, total_blocks, 1, dtype=torch.float32),
-            [p_q_seqlen], [p_kv_seqlen],
-            num_key_value_heads=kv_heads, select_num_idx=p_select_num_idx,
-            block_size=block_size, scale_value=scale_value,
+            [p_q_seqlen],
+            [p_kv_seqlen],
+            num_key_value_heads=kv_heads,
+            select_num_idx=p_select_num_idx,
+            block_size=block_size,
+            scale_value=scale_value,
         )
 
         p_npu = torch_npu.npu_sparse_attention_score(
-            p_query_fp8.npu(), p_key_fp8.npu(), p_value_fp8.npu(),
-            p_select_idx.npu(), block_table.npu(),
+            p_query_fp8.npu(),
+            p_key_fp8.npu(),
+            p_value_fp8.npu(),
+            p_select_idx.npu(),
+            block_table.npu(),
             select_num_idx=p_select_num_idx.npu(),
             actual_seq_lengths=torch.tensor([p_q_seqlen], dtype=torch.int32).npu(),
             actual_seq_lengths_kv=torch.tensor([p_kv_seqlen], dtype=torch.int32).npu(),
-            num_key_value_heads=kv_heads, scale_value=scale_value,
-            block_size=block_size, top_k=top_k, inner_precise=INNER_PRECISE_FP8,
+            num_key_value_heads=kv_heads,
+            scale_value=scale_value,
+            block_size=block_size,
+            top_k=top_k,
+            inner_precise=INNER_PRECISE_FP8,
             # attention_out_dtype=ATTENTION_OUT_DTYPE,
         )
         p_npu_cpu = p_npu.cpu()
@@ -695,46 +850,65 @@ class TestNpuSparseAttentionScoreFp8(TestCase):
         # Decode
         d_q_seqlen = 1
         torch.manual_seed(seed + 2)
-        d_query_fp32 = torch.rand(d_q_seqlen, q_heads, head_dim,
-                                  dtype=torch.float32) * 2 - 1
+        d_query_fp32 = torch.rand(d_q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
         key_flat_d = key_logical[:d_kv_seqlen, :, :]
         d_select_idx, d_select_num_idx = generate_block_index_with_causal(
-            d_query_fp32, key_flat_d, d_q_seqlen, d_kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            d_query_fp32, key_flat_d, d_q_seqlen, d_kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
 
         d_query_fp8, d_key_fp8, d_value_fp8, _, _, _ = build_fp8_tensors_and_scales(
-            d_query_fp32, key_fp32, value_fp32, block_table,
+            d_query_fp32,
+            key_fp32,
+            value_fp32,
+            block_table,
             torch.tensor([d_q_seqlen], dtype=torch.int32),
-            torch.tensor([d_kv_seqlen], dtype=torch.int32), block_size)
+            torch.tensor([d_kv_seqlen], dtype=torch.int32),
+            block_size,
+        )
 
         d_cpu = cpu_sparse_attention_score_fp32(
-            d_query_fp8, d_key_fp8, d_value_fp8, d_select_idx, block_table,
+            d_query_fp8,
+            d_key_fp8,
+            d_value_fp8,
+            d_select_idx,
+            block_table,
             torch.ones(1, q_heads, 1, 1, dtype=torch.float32),
             torch.ones(1, kv_heads, total_blocks, 1, dtype=torch.float32),
             torch.ones(1, kv_heads, total_blocks, 1, dtype=torch.float32),
-            [d_q_seqlen], [d_kv_seqlen],
-            num_key_value_heads=kv_heads, select_num_idx=d_select_num_idx,
-            block_size=block_size, scale_value=scale_value,
+            [d_q_seqlen],
+            [d_kv_seqlen],
+            num_key_value_heads=kv_heads,
+            select_num_idx=d_select_num_idx,
+            block_size=block_size,
+            scale_value=scale_value,
         )
 
         d_npu = torch_npu.npu_sparse_attention_score(
-            d_query_fp8.npu(), d_key_fp8.npu(), d_value_fp8.npu(),
-            d_select_idx.npu(), block_table.npu(),
+            d_query_fp8.npu(),
+            d_key_fp8.npu(),
+            d_value_fp8.npu(),
+            d_select_idx.npu(),
+            block_table.npu(),
             select_num_idx=d_select_num_idx.npu(),
             actual_seq_lengths=torch.tensor([d_q_seqlen], dtype=torch.int32).npu(),
             actual_seq_lengths_kv=torch.tensor([d_kv_seqlen], dtype=torch.int32).npu(),
-            num_key_value_heads=kv_heads, scale_value=scale_value,
-            block_size=block_size, top_k=top_k, inner_precise=INNER_PRECISE_FP8,        
-            # attention_out_dtype=ATTENTION_OUT_DTYPE,            
+            num_key_value_heads=kv_heads,
+            scale_value=scale_value,
+            block_size=block_size,
+            top_k=top_k,
+            inner_precise=INNER_PRECISE_FP8,
+            # attention_out_dtype=ATTENTION_OUT_DTYPE,
         )
         d_npu_cpu = d_npu.cpu()
         print(f"[dtype] npu_out dype: {d_npu_cpu.dtype}")
         p_diff = (p_npu_cpu.float() - p_cpu.float()).abs()
         d_diff = (d_npu_cpu.float() - d_cpu.float()).abs()
         p_cos = torch.nn.functional.cosine_similarity(
-            p_npu_cpu.float().flatten().unsqueeze(0), p_cpu.float().flatten().unsqueeze(0)).item()
+            p_npu_cpu.float().flatten().unsqueeze(0), p_cpu.float().flatten().unsqueeze(0)
+        ).item()
         d_cos = torch.nn.functional.cosine_similarity(
-            d_npu_cpu.float().flatten().unsqueeze(0), d_cpu.float().flatten().unsqueeze(0)).item()
+            d_npu_cpu.float().flatten().unsqueeze(0), d_cpu.float().flatten().unsqueeze(0)
+        ).item()
         print(f"  [P] max_diff={p_diff.max().item():.6f}, mean={p_diff.mean().item():.6f}, cos={p_cos:.8f}")
         print(f"  [D] max_diff={d_diff.max().item():.6f}, mean={d_diff.mean().item():.6f}, cos={d_cos:.8f}")
         self.assertRtolEqual(p_cpu.float().numpy(), p_npu_cpu.float().numpy(), prec=2e-2)
@@ -845,59 +1019,62 @@ _FP8_PD_CASES = [
     (1, 1023, 64, 4, 8, 42),
 ]
 
+
 def _make_fp8_test(q_seqlen, kv_seqlen, q_heads, kv_heads, top_k, seed):
     def test_fn(self):
-        self._run_fp8_case(q_seqlen=q_seqlen, kv_seqlen=kv_seqlen,
-                           q_heads=q_heads, kv_heads=kv_heads,
-                           top_k=top_k, seed=seed)
+        self._run_fp8_case(
+            q_seqlen=q_seqlen, kv_seqlen=kv_seqlen, q_heads=q_heads, kv_heads=kv_heads, top_k=top_k, seed=seed
+        )
+
     return test_fn
 
 
 def _make_fp8_mb_test(batch, q_seqlens, kv_seqlens, q_heads, kv_heads, top_k, seed):
     def test_fn(self):
         self._run_fp8_multi_batch_case(
-            batch=batch, q_seqlens=q_seqlens, kv_seqlens=kv_seqlens,
-            q_heads=q_heads, kv_heads=kv_heads,
-            top_k=top_k, seed=seed)
+            batch=batch,
+            q_seqlens=q_seqlens,
+            kv_seqlens=kv_seqlens,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            top_k=top_k,
+            seed=seed,
+        )
+
     return test_fn
 
 
 for _i, (_qs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_FP8_CASES):
     _name = f"test_fp8_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
-    setattr(TestNpuSparseAttentionScoreFp8, _name,
-            _make_fp8_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
+    setattr(TestNpuSparseAttentionScoreFp8, _name, _make_fp8_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
 
 for _i, (_b, _qsl, _kvsl, _qh, _kvh, _tk, _sd) in enumerate(_FP8_MULTI_BATCH_CASES):
     _qsl_str = "_".join(str(x) for x in _qsl)
     _kvsl_str = "_".join(str(x) for x in _kvsl)
     _name = f"test_fp8_mb_{_i:03d}_b{_b}_q{_qsl_str}_kv{_kvsl_str}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
-    setattr(TestNpuSparseAttentionScoreFp8, _name,
-            _make_fp8_mb_test(_b, _qsl, _kvsl, _qh, _kvh, _tk, _sd))
+    setattr(TestNpuSparseAttentionScoreFp8, _name, _make_fp8_mb_test(_b, _qsl, _kvsl, _qh, _kvh, _tk, _sd))
 
 
 def _make_fp8_pd_test(p_q_seqlen, kv_seqlen, q_heads, kv_heads, top_k, seed):
     def test_fn(self):
         self._run_fp8_prefill_decode_case(
-            p_q_seqlen=p_q_seqlen, kv_seqlen=kv_seqlen,
-            q_heads=q_heads, kv_heads=kv_heads,
-            top_k=top_k, seed=seed)
+            p_q_seqlen=p_q_seqlen, kv_seqlen=kv_seqlen, q_heads=q_heads, kv_heads=kv_heads, top_k=top_k, seed=seed
+        )
+
     return test_fn
 
 
 for _i, (_pqs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_FP8_PD_CASES):
     _name = f"test_fp8_pd_{_i:03d}_pq{_pqs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
-    setattr(TestNpuSparseAttentionScoreFp8, _name,
-            _make_fp8_pd_test(_pqs, _kvs, _qh, _kvh, _tk, _sd))
+    setattr(TestNpuSparseAttentionScoreFp8, _name, _make_fp8_pd_test(_pqs, _kvs, _qh, _kvh, _tk, _sd))
 
 for _i, (_qs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_FP8_STRESS_CASES):
     _name = f"test_fp8_stress_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
-    setattr(TestNpuSparseAttentionScoreFp8, _name,
-            _make_fp8_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
+    setattr(TestNpuSparseAttentionScoreFp8, _name, _make_fp8_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
 
 for _i, (_qs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_FP8_LONGSEQ_CASES):
     _name = f"test_fp8_longseq_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
-    setattr(TestNpuSparseAttentionScoreFp8, _name,
-            _make_fp8_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
+    setattr(TestNpuSparseAttentionScoreFp8, _name, _make_fp8_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
 
 if __name__ == "__main__":
     run_tests()

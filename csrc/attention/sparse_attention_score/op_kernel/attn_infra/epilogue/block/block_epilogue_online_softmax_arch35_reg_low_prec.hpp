@@ -141,7 +141,7 @@ public:
     __aicore__ inline
     void SetCrossCoreSync(Arch::CrossCoreFlag &crossCoreFlag)
     {
-        // in mode 4, AIC set for 2 AIVs seperately
+        // in mode 4, AIC set for 2 AIVs separately
         if constexpr (MODE == 4U) {
             Arch::CrossCoreSetFlag<MODE, PIPE>(crossCoreFlag);
         }
@@ -151,7 +151,7 @@ public:
     __aicore__ inline
     void WaitCrossCoreSync(Arch::CrossCoreFlag &crossCoreFlag)
     {
-        // in mode 4, AIC wait for 2 AIVs seperately
+        // in mode 4, AIC wait for 2 AIVs separately
         if constexpr (MODE == 4U) {
             Arch::CrossCoreWaitFlag<MODE, PIPE>(crossCoreFlag);
         }
@@ -191,7 +191,7 @@ public:
         __ubuf__ ElementInput *nowSumAddr = (__ubuf__ ElementInput*) llUbTensor.GetPhyAddr();
         __ubuf__ float *expMaxUbAddr = (__ubuf__ float *)dmUbTensor[l1PBufId * DM_UB_GLOBAL_ELEM_NUM].GetPhyAddr();
 
-        // wait QK Fixpipe finsh
+        // wait QK Fixpipe finish
         WaitCrossCoreSync<4, PIPE_V>(mm1ToSmFlag);
         uint32_t kvBaseTileRegStages = CeilDiv(n, SM_VREG_SIZE);
         if (kvBaseTileRegStages == 1) {

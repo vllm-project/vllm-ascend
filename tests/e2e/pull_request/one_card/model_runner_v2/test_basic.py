@@ -22,7 +22,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
