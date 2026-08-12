@@ -1485,6 +1485,19 @@ class AscendDSAImpl(DSAAttentionImpl):
             False,
         )
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # DSA graph metadata uses persistent tensors and has no extra params to update.
+        pass
+
     def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor) -> None:
         """
         Warmup function for DSA profiling run.
