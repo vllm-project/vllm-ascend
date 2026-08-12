@@ -10,9 +10,13 @@ import torch
 import torch_npu
 
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
+
+
+def _supports_dsv4_compressed_cache() -> bool:
+    return get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
 
 
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
@@ -24,7 +28,7 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     collapsing every non-bfloat16 request to ``auto`` preserves the upstream
     values while keeping the mode recoverable.
     """
-    if get_ascend_device_type() != AscendDeviceType.A5:
+    if not _supports_dsv4_compressed_cache():
         return model_dtype
     return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
 
@@ -36,7 +40,7 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     process-global current config: that context is only set during
     ``load_model()`` and a missing lookup would silently pick the FP8 plan.
     """
-    if get_ascend_device_type() != AscendDeviceType.A5:
+    if not _supports_dsv4_compressed_cache():
         return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None:
@@ -48,7 +52,7 @@ def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
     """Return the attention KV dtype while preserving non-A5 behavior."""
     return (
         torch.bfloat16
-        if get_ascend_device_type() != AscendDeviceType.A5 or is_a5_bf16_kv_enabled(vllm_config)
+        if not _supports_dsv4_compressed_cache() or is_a5_bf16_kv_enabled(vllm_config)
         else torch.float8_e4m3fn
     )
 
@@ -133,7 +137,7 @@ class DsaAttnKvPlan:
 
 def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
     """Return the explicit A5 BF16 or upstream-compatible FP8 DSA plan."""
-    if get_ascend_device_type() != AscendDeviceType.A5:
+    if not _supports_dsv4_compressed_cache():
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=False,
             uses_kv_compress_epilog=False,

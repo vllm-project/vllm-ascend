@@ -133,13 +133,13 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 
     monkeypatch.setattr(
         deepseek_v4_indexer,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
     monkeypatch.setattr(
         attn_utils,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
     monkeypatch.setattr(
         attn_utils,
