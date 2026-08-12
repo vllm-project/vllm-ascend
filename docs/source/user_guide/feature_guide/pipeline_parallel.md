@@ -365,7 +365,7 @@ adjusts chunk sizes using measured execution time to reduce stage idle time.
 - PP cannot be combined with Prefill Context Parallelism (PCP) in the current
   release. See [Context Parallel](context_parallel.md).
 - Xlite graph mode is not compatible with PP.
-- [Sparse KV Cache Offload](sparse_kv_cache_offload.md) does not support PP.
+- Sparse KV Cache Offload does not support PP.
 - `MooncakeConnectorV1` currently requires the Decode-side PP size to be `1`.
 - For cross-node MoE deployments over RoCE, PP and DP cannot currently be
   enabled together because the `MoeDistributeDispatch` communication path does
