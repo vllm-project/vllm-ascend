@@ -215,16 +215,16 @@ Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因
 **基本语法：**
 
 ```markdown
-    :::{note}
-    内容行1
-    内容行2
-    :::
+:::{note}
+内容行1
+内容行2
+:::
 ```
 
 **示例：**
 
 ```markdown
-    :::{note} Atlas 300I DUO
-    Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
-    :::
+:::{note} Atlas 300I DUO
+Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
+:::
 ```
