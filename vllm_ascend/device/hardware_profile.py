@@ -28,7 +28,6 @@ class HardwareCapability(Enum):
     REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
     RUNTIME_CUSTOM_OPS = auto()
     SFA_DCP_REPLICATED_INDEXER = auto()
-    SKIP_REMOTE_H2D_BUFFER_REGISTRATION = auto()
     STANDARD_WORKER_PATCHES = auto()
 
 
@@ -119,7 +118,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.SKIP_REMOTE_H2D_BUFFER_REGISTRATION},
+            capabilities=_STANDARD_CAPABILITIES,
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -185,7 +184,10 @@ def get_hardware_profile(device_type: AscendDeviceType) -> HardwareProfile:
         raise RuntimeError(f"No hardware profile is registered for device type: {device_type}.") from exc
 
 
+_CURRENT_HARDWARE_PROFILE = get_hardware_profile(get_device_config()._device_type)
+
+
 def get_current_hardware_profile() -> HardwareProfile:
     """Return the profile selected by the current device configuration."""
 
-    return get_hardware_profile(get_device_config()._device_type)
+    return _CURRENT_HARDWARE_PROFILE

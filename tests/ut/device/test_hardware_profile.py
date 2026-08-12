@@ -5,8 +5,9 @@
 from typing import cast
 
 import pytest
+import torch
 
-from vllm_ascend.device.device_config import DeviceConfig
+from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
@@ -34,7 +35,7 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.SKIP_REMOTE_H2D_BUFFER_REGISTRATION},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES,
     AscendDeviceType.A3: _STANDARD_CAPABILITIES,
     AscendDeviceType._310P: frozenset(
         {
@@ -145,16 +146,23 @@ def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> No
         assert profile.supports(capability) is (capability in expected_capabilities)
 
 
-def test_current_hardware_profile_uses_device_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    import vllm_ascend.device.hardware_profile as profile_module
+def test_current_hardware_profile_uses_device_config() -> None:
+    expected_profile = get_hardware_profile(get_device_config()._device_type)
 
-    monkeypatch.setattr(
-        profile_module,
-        "get_device_config",
-        lambda: DeviceConfig(_device_type=AscendDeviceType.A5),
-    )
+    assert get_current_hardware_profile() is expected_profile
 
-    assert get_current_hardware_profile() is get_hardware_profile(AscendDeviceType.A5)
+
+def test_current_hardware_profile_is_dynamo_safe() -> None:
+    def use_profile_capability(value: torch.Tensor) -> torch.Tensor:
+        if get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
+            return value + 1
+        return value
+
+    value = torch.ones(1)
+    expected = use_profile_capability(value)
+    compiled = torch.compile(use_profile_capability, backend="eager", fullgraph=True)
+
+    assert torch.equal(compiled(value), expected)
 
 
 def test_unknown_device_type_is_rejected() -> None:
