@@ -1156,6 +1156,9 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
         stacked_params_mapping = [
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            (".qkv_proj", ".q_proj", 0),
+            (".qkv_proj", ".k_proj", 1),
+            (".qkv_proj", ".v_proj", 2),
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
@@ -1224,6 +1227,7 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
 class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "experts": ["experts.0.w1", "experts.0.w3", "experts.0.w2"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     }

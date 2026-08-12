@@ -34,7 +34,10 @@ try:
     from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
 except ModuleNotFoundError:
     from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+)
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
 )
@@ -150,6 +153,23 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
     def __init__(self, config, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(config, vllm_config, prefix)
 
+        # KDA uses three equally-sized, independent projections for q/k/v.
+        # Keep the checkpoint-facing names in KimiK3TextModel.load_weights,
+        # but execute them as one column-parallel GEMM. Apart from reducing
+        # two kernel launches, this also produces the layout consumed by the
+        # packed q/k/v convolution without an extra concatenation.
+        qkv_projection_size = self.num_heads * self.head_dim
+        del self.q_proj
+        del self.k_proj
+        del self.v_proj
+        self.qkv_proj = MergedColumnParallelLinear(
+            self.hidden_size,
+            [qkv_projection_size] * 3,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+
         kda_config = config.linear_attn_config
         assert kda_config is not None, "linear_attn_config must be set"
         self.use_full_rank_gate = bool(kda_config.get("use_full_rank_gate", False))
@@ -230,9 +250,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             not self.is_vl_first_layer,
         )
         num_tokens = hidden_states.size(0)
-        q = self.q_proj(hidden_states)[0]
-        k = self.k_proj(hidden_states)[0]
-        v = self.v_proj(hidden_states)[0]
+        qkv = self.qkv_proj(hidden_states)[0]
+        q, k, v = qkv.split(self.local_num_heads * self.head_dim, dim=-1)
 
         beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
         raw_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
