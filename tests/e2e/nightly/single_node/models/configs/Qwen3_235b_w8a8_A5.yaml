@@ -16,6 +16,10 @@ _server_cmd: &server_cmd
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 _benchmarks_gpqa: &benchmarks_gpqa
   acc:
@@ -81,11 +85,7 @@ test_cases:
       - "40960"
       - "--max-num-batched-tokens"
       - "16384"
-      - "--gpu-memory-utilization"
-      - "0.9"
       - "--enable-prefix-caching"
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
       <<: *benchmarks_gpqa
   - name: "longSeq_pcpdcp_performance_0004"
@@ -99,25 +99,23 @@ test_cases:
       - "--tensor-parallel-size"
       - "4"
       - "--data-parallel-size"
-      - "1"
-      - "--prefill_context_parallel-size"
       - "2"
-      - "--decode_context_parallel-size"
-      - "1"
+      - "--data-parallel-size-local"
+      - "2"
+      - "--data-parallel-start-rank"
+      - "0"
+      - "--data-parallel-address"
+      - "0.0.0.0"
       - "--data-parallel-rpc-port"
       - "2345"
       - "--max-num-seqs"
-      - "8"
+      - "4"
       - "--max-model-len"
-      - "134000"
+      - "16384"
       - "--max-num-batched-tokens"
-      - "40960"
+      - "8192"
       - "--no-enable-prefix-caching"
-      - "--gpu-memory-utilization"
-      - "0.75"
-      - "--additional-config"
-      - '{"ascend_scheduler_config":{"enabled":false}}'
-      - "--hf-overrides"
-      - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.1,"original_max_position_embeddings":32768}}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3_235B_A22B_EAGLE3","enforce_eager":true，"num_speculative_tokens":1}'
     benchmarks:
       <<: *benchmarks_perf1
