@@ -1895,7 +1895,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             q_b_quant, q_b_scale = qr, None
             qr_pertoken_scale = None
 
-
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()
 
