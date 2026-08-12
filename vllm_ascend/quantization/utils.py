@@ -37,6 +37,28 @@ QUANT_DTYPES = (torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8)
 SCALE_DTYPES = (torch_npu.float8_e8m0fnu,)
 
 
+def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
+    """Select the MiniMax M3-specific MX quant scale algorithm."""
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return 0
+
+    if vllm_config is None:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        vllm_config = get_ascend_config().vllm_config
+
+    model_config = vllm_config.model_config
+    architectures = getattr(model_config, "architectures", None) or ()
+    if isinstance(architectures, str):
+        architectures = (architectures,)
+    is_minimax_m3 = any(
+        isinstance(architecture, str) and architecture.startswith("MiniMaxM3") for architecture in architectures
+    )
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    is_minimax_m3 = is_minimax_m3 or getattr(hf_text_config, "model_type", None) == "minimax_m3"
+    return int(is_minimax_m3)
+
+
 def get_model_file(
     model: str | Path,
     filename: str,

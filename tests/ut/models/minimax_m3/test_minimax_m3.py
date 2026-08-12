@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from transformers import PretrainedConfig
 from vllm_ascend.models.minimax_m3 import (
     MiniMaxM3Attention,
     MiniMaxM3MoE,
+    MiniMaxM3SparseAttention,
     _get_rope_parameters,
     _sparse_attention_layer_ids,
 )
@@ -77,6 +79,21 @@ def _make_attention() -> MiniMaxM3Attention:
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+    def test_sparse_index_q_norm_uses_index_head_dim(self) -> None:
+        attention = MiniMaxM3SparseAttention.__new__(MiniMaxM3SparseAttention)
+        nn.Module.__init__(attention)
+        attention.index_q_size = 8
+        attention.idx_head_dim = 4
+        attention.index_q_norm = nn.Identity()
+        attention.index_k_norm = nn.Identity()
+        idx_q = torch.randn(3, 2, 4)
+        idx_k = torch.randn(3, 4)
+
+        normalized_q, normalized_k = attention._index_qk_norm(idx_q, idx_k)
+
+        torch.testing.assert_close(normalized_q, idx_q)
+        torch.testing.assert_close(normalized_k, idx_k)
+
     def test_moe_passes_swigluoai_config_during_construction(self) -> None:
         config = PretrainedConfig(
             hidden_size=64,
@@ -128,6 +145,13 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
 
         self.assertTrue(attention.attn.saw_contiguous_v)
         self.assertEqual(output.shape, (3, 2))
+
+    def test_dense_attention_uses_small_qkv_ops(self) -> None:
+        source = inspect.getsource(MiniMaxM3Attention.forward)
+
+        self.assertIn("qkv.split", source)
+        self.assertIn("self._qk_norm", source)
+        self.assertNotIn("qkv_rmsnorm_rope", source)
 
     def test_sparse_attention_layer_ids_ignores_missing_config(self) -> None:
         self.assertEqual(_sparse_attention_layer_ids(PretrainedConfig()), set())

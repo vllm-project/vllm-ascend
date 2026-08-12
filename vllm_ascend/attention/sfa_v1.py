@@ -1443,6 +1443,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
+        record_attention_compute_start()
         return DeviceOperator.indexer_select_post_process(
             self,
             q_li,

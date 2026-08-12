@@ -75,6 +75,8 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         bias = torch.randn(128, dtype=torch.float16)
         output = self.scheme.apply(layer, x, bias)
         self.assertEqual(output.shape, (32, 1, 128))
+        dynamic_quant_kwargs = mock_torch_npu.npu_dynamic_mx_quant.call_args.kwargs
+        self.assertEqual(dynamic_quant_kwargs["scale_alg"], self.scheme.dynamic_mx_quant_scale_alg)
         call_kwargs = mock_torch_npu.npu_quant_matmul.call_args.kwargs
         self.assertEqual(call_kwargs["bias"].dtype, torch.float32)
         self.assertEqual(call_kwargs["group_sizes"], [1, 1, self.scheme.group_size])

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# MiniMax-M2 on Ascend: MoE all_reduce, fused attention, fp8 load dequant.
+# MiniMax-M2 on Ascend: MoE router logits, fused attention, fp8 load dequant.
 #
 
 from collections.abc import Iterable

@@ -517,11 +517,45 @@ class AscendModelSlimConfig(QuantizationConfig):
     def __init__(self, quant_config: dict[str, Any] | None = None):
         super().__init__()
         self.quant_description = quant_config if quant_config is not None else {}
+        self._is_mxfp8_checkpoint = False
+        self._ignored_layers: list[str] = []
+        self._weight_block_size: list[int] | None = None
+        self._detect_foreign_config()
         self._apply_extra_quant_adaptations()
         self.model_type: str | None = None
         self.hf_to_vllm_mapper: WeightsMapper | None = None
         self._mapper_applied = False
         self._add_kvcache_quant_metadata()
+
+    def _detect_foreign_config(self) -> None:
+        """Detect native HF MXFP8 configs and route them through Ascend."""
+        if not self.quant_description:
+            return
+
+        quant_method = self.quant_description.get("quant_method", "")
+        if quant_method != "mxfp8":
+            return
+
+        self._is_mxfp8_checkpoint = True
+        self._weight_block_size = self.quant_description.get("weight_block_size", [1, 32])
+
+        # Normalise ignored_layers: strip "language_model." and keep
+        # both "model." and bare variants for robust prefix matching.
+        ignored: list[str] = self.quant_description.get("ignored_layers", [])
+        if ignored:
+            normalized: list[str] = []
+            for layer in ignored:
+                clean = layer.replace("language_model.", "")
+                bare = clean.removeprefix("model.")
+                if bare not in normalized:
+                    normalized.append(bare)
+                if f"model.{bare}" not in normalized:
+                    normalized.append(f"model.{bare}")
+            self._ignored_layers = normalized
+
+        # This is not a ModelSlim quant_model_description.json dict. Keep the
+        # metadata above and skip ModelSlim key lookup paths.
+        self.quant_description = {}
 
     def __repr__(self) -> str:
         return "AscendModelSlimConfig:\n" + super().__repr__()
@@ -556,8 +590,21 @@ class AscendModelSlimConfig(QuantizationConfig):
     def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config: Any = None) -> str | None:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
-            if not quant_method and torch.npu.is_available():
-                return ASCEND_QUANTIZATION_METHOD
+            if torch.npu.is_available():
+                if not quant_method:
+                    return ASCEND_QUANTIZATION_METHOD
+
+                from vllm.platforms import current_platform
+
+                supported = current_platform.supported_quantization
+                if supported and quant_method not in supported:
+                    logger.warning(
+                        "Model config specifies quantization '%s', which is "
+                        "not directly supported on NPU. Remapping to '%s'.",
+                        quant_method,
+                        ASCEND_QUANTIZATION_METHOD,
+                    )
+                    return ASCEND_QUANTIZATION_METHOD
         return None
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
@@ -627,6 +674,34 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
         return f"{prefix}.weight" in self.quant_description
 
+    @staticmethod
+    def _minimax_quant_prefix_aliases(prefix: str) -> tuple[str, ...]:
+        aliases = [prefix]
+        replacements = (
+            ("model.language_model.model.", "model."),
+            ("model.language_model.model.", "language_model.model."),
+            ("model.language_model.", ""),
+            ("language_model.model.", "model."),
+            ("language_model.", ""),
+            ("model.", ""),
+        )
+        for old, new in replacements:
+            if prefix.startswith(old):
+                aliases.append(prefix.replace(old, new, 1))
+
+        if prefix.startswith("model.layers."):
+            aliases.append(prefix.replace("model.layers.", "model.language_model.model.layers.", 1))
+            aliases.append(prefix.replace("model.layers.", "language_model.model.layers.", 1))
+        if prefix.startswith("language_model.model.layers."):
+            aliases.append(prefix.replace("language_model.model.layers.", "model.layers.", 1))
+            aliases.append(prefix.replace("language_model.model.layers.", "layers.", 1))
+        if prefix.startswith("layers."):
+            aliases.append(prefix.replace("layers.", "model.layers.", 1))
+            aliases.append(prefix.replace("layers.", "model.language_model.model.layers.", 1))
+            aliases.append(prefix.replace("layers.", "language_model.model.layers.", 1))
+
+        return tuple(dict.fromkeys(aliases))
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
         # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
@@ -660,7 +735,56 @@ class AscendModelSlimConfig(QuantizationConfig):
                 for candidate in (prefix.replace("model.layers.", "language_model.model.layers.", 1),):
                     if self._has_quant_weight(candidate, packed_modules_mapping):
                         return candidate
+        if model_type in ("minimax", "minimax_m2", "minimax_m3", "minimax_m3_vl"):
+            packed_modules_mapping = get_packed_modules_mapping(model_type)
+            arch_candidates = [prefix]
+            if ".mlp." in prefix:
+                arch_candidates.append(prefix.replace(".mlp.", ".block_sparse_moe."))
+
+            for arch_candidate in dict.fromkeys(arch_candidates):
+                for candidate in self._minimax_quant_prefix_aliases(arch_candidate):
+                    if self._has_quant_weight(candidate, packed_modules_mapping):
+                        if candidate != prefix:
+                            logger.debug("Resolved MiniMax quant prefix alias: %s -> %s", prefix, candidate)
+                        return candidate
         return prefix
+
+    @staticmethod
+    def _prefix_is_ignored(vllm_prefix: str, ignored_layers: list[str], model_type: str) -> bool:
+        """Check whether *vllm_prefix* matches any entry in *ignored_layers*.
+
+        The ignored_layers list uses HF-style weight paths (e.g.
+        ``language_model.model.layers.10.block_sparse_moe.gate``) while
+        *vllm_prefix* uses vLLM-internal naming. This method normalises
+        both sides before comparing.
+        """
+        def normalize_prefixes(prefix: str) -> set[str]:
+            prefixes = {prefix}
+            for wrapper in ("model.language_model.", "language_model.", "model."):
+                if prefix.startswith(wrapper):
+                    prefixes.add(prefix[len(wrapper) :])
+            for item in list(prefixes):
+                prefixes.add(item.replace("language_model.", ""))
+                if item.startswith("model."):
+                    prefixes.add(item.removeprefix("model."))
+                else:
+                    prefixes.add(f"model.{item}")
+            if model_type in ("minimax", "minimax_m2", "minimax_m3", "minimax_m3_vl"):
+                prefixes |= {item.replace(".mlp", ".block_sparse_moe") for item in list(prefixes)}
+            return prefixes
+
+        hf_prefixes = normalize_prefixes(vllm_prefix)
+
+        for ignored in ignored_layers:
+            for clean in normalize_prefixes(ignored):
+                if clean in hf_prefixes:
+                    return True
+                for hf_prefix in hf_prefixes:
+                    # prefix match (e.g. "model.layers.10" matches
+                    # everything inside that layer)
+                    if hf_prefix.startswith(clean + ".") or clean.startswith(hf_prefix + "."):
+                        return True
+        return False
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
         from .method_adapters import (
@@ -670,12 +794,51 @@ class AscendModelSlimConfig(QuantizationConfig):
             AscendLinearMethod,
         )
 
+        # When the model checkpoint has a GPU-native quant method
+        # (e.g. mxfp8) that was remapped to ascend, auto-select
+        # W8A8_MXFP8 for all linear and MoE layers.
+        if self._is_mxfp8_checkpoint:
+            # Honour ignored_layers from the original config.json so
+            # that layers explicitly excluded from quantization stay
+            # unquantized (e.g. lm_head, embed_tokens, MoE gates).
+            if self._ignored_layers:
+                vllm_config = get_current_vllm_config()
+                model_type = vllm_config.model_config.hf_config.model_type
+                ignored_match = self._prefix_is_ignored(prefix, self._ignored_layers, model_type)
+                if ignored_match:
+                    if isinstance(layer, LinearBase):
+                        from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+                        return AscendUnquantizedLinearMethod()
+                    if _is_fused_moe_layer(layer):
+                        from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+
+                        return AscendUnquantizedFusedMoEMethod(layer.moe_config)
+                    return None
+
+            if isinstance(layer, LinearBase):
+                from .methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+                return AscendLinearMethod(AscendW8A8MXFP8DynamicLinearMethod())
+            if _is_fused_moe_layer(layer):
+                from .methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod
+
+                return AscendFusedMoEMethod(
+                    AscendW8A8MXFP8DynamicFusedMoEMethod(),
+                    layer.moe_config,
+                    tid2eid,
+                )
+            if isinstance(layer, VocabParallelEmbedding):
+                from .methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+                return AscendEmbeddingMethod(AscendW8A8MXFP8DynamicLinearMethod())
+            # Attention layers: fall through to return None (unquantized)
+            return None
+
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
 
-        if model_type in ["minimax", "minimax_m2"]:
-            # Adapt to Minimax architecture: update layer names to MoE convention
-            prefix = prefix.replace("mlp", "block_sparse_moe")
+        if model_type in ["minimax", "minimax_m2", "minimax_m3", "minimax_m3_vl"]:
             # Normalize the prefix by stripping specific expert indices (e.g., 'experts.0' -> 'experts')
             parts = prefix.split(".")
             if "experts" in parts and len(parts) > 2:
@@ -846,7 +1009,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         # If quant_description is already populated (e.g. from from_config()),
         # there is nothing to do.
-        if self.quant_description:
+        if self.quant_description or self._is_mxfp8_checkpoint:
             return
 
         # Try to get the config file (local or remote)

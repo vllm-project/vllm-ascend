@@ -125,6 +125,77 @@ class TestAscendModelSlimConfig(TestBase):
             method = self.ascend_config.get_quant_method(attention_layer, "layers.1.attn")
             self.assertIs(method, mock_ascend_kvcache.return_value)
 
+    def test_mxfp8_ignored_non_moe_layer_falls_back_without_error(self):
+        config = AscendModelSlimConfig(
+            {
+                "quant_method": "mxfp8",
+                "ignored_layers": ["model.embed_tokens"],
+                "weight_block_size": [1, 32],
+            }
+        )
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "minimax_m3"
+
+        with patch(
+            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config
+        ):
+            method = config.get_quant_method(torch.nn.Module(), "model.embed_tokens")
+
+        self.assertIsNone(method)
+
+    def test_mxfp8_ignored_moe_uses_routed_experts_unquantized_method(self):
+        config = AscendModelSlimConfig(
+            {
+                "quant_method": "mxfp8",
+                "ignored_layers": ["model.layers.0.block_sparse_moe"],
+            }
+        )
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "minimax_m3"
+        layer = torch.nn.Module()
+        layer.moe_config = MagicMock()
+        expected_method = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=mock_config,
+            ),
+            patch("vllm_ascend.quantization.modelslim_config._is_fused_moe_layer", return_value=True),
+            patch(
+                "vllm_ascend.ops.fused_moe.routed_experts.AscendUnquantizedFusedMoEMethod",
+                return_value=expected_method,
+            ) as mock_unquantized_method,
+        ):
+            method = config.get_quant_method(layer, "model.layers.0.block_sparse_moe")
+
+        self.assertIs(method, expected_method)
+        mock_unquantized_method.assert_called_once_with(layer.moe_config)
+
+    def test_mxfp8_moe_uses_current_fused_moe_adapter(self):
+        config = AscendModelSlimConfig({"quant_method": "mxfp8"})
+        layer = torch.nn.Module()
+        layer.moe_config = MagicMock()
+        scheme = MagicMock()
+        expected_method = MagicMock()
+        tid2eid = MagicMock()
+
+        with (
+            patch("vllm_ascend.quantization.modelslim_config._is_fused_moe_layer", return_value=True),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8_mxfp8.AscendW8A8MXFP8DynamicFusedMoEMethod",
+                return_value=scheme,
+            ),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
+                return_value=expected_method,
+            ) as mock_fused_method,
+        ):
+            method = config.get_quant_method(layer, "model.layers.0.block_sparse_moe", tid2eid)
+
+        self.assertIs(method, expected_method)
+        mock_fused_method.assert_called_once_with(scheme, layer.moe_config, tid2eid)
+
     def test_get_quant_method_for_c8_kv_cache_attention(self):
         c8_config = AscendModelSlimConfig(
             {

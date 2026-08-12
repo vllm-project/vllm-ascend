@@ -1014,14 +1014,14 @@ After about several minutes, you can get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
-|--------|-------------|-----|--|--|-------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|16|4|4|~16K|3|
-|High Throughput / Low Latency (16K)|Server / 2-Node DP|8|4|2|~16K|3|
-|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|
-|High Throughput / Low Latency (16K)|Server-D Node|16|1|32|~16K|3|
-|Long Context (128K, low concurrency ≤4)|Server / Single Machine|16|16|1|128K|3|
-|Long Context (128K, high concurrency >4)|Server / Single Machine|16|8|2|128K|3|
+| Scenario                                 |Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
+|------------------------------------------|-------------|-----|--|--|-------------|--------------------|
+| High Throughput / Low Latency (16K)      |Server / Single Machine|16|4|4|~16K|3|
+| High Throughput / Low Latency (16K)      |Server / 2-Node DP|8|4|2|~16K|3|
+| High Throughput / Low Latency (16K)      |Server-P Node|16|8|2|~16K|3|
+| High Throughput / Low Latency (16K)      |Server-D Node|16|1|32|~16K|3|
+| Long Context (128K, low concurrency ≤4)  |Server / Single Machine|16|16|1|128K|3|
+| Long Context (128K, high concurrency >4) |Server / Single Machine|16|8|2|128K|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
