@@ -14,9 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import wraps
 from typing import Any
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.parser.deepseek_v4 import DeepSeekV4Parser
 from vllm.tokenizers import deepseek_v4, deepseek_v4_encoding
 
 REASONING_EFFORT_PROMPTS = {
@@ -47,6 +49,7 @@ DEFAULT_REASONING_EFFORT = "low"
 
 _original_render_message = deepseek_v4_encoding.render_message
 _original_get_deepseek_v4_tokenizer = deepseek_v4.get_deepseek_v4_tokenizer
+_original_deepseek_v4_parser_init = DeepSeekV4Parser.__init__
 
 
 def _patched_render_message(
@@ -139,7 +142,24 @@ def _patched_get_deepseek_v4_tokenizer(tokenizer: deepseek_v4.HfTokenizer):
     return dsv4_tokenizer
 
 
+@wraps(_original_deepseek_v4_parser_init)
+def _patched_deepseek_v4_parser_init(
+    self: DeepSeekV4Parser,
+    tokenizer: Any,
+    tools: list[Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    chat_kwargs = kwargs.get("chat_template_kwargs") or {}
+    if "thinking" not in chat_kwargs and "enable_thinking" not in chat_kwargs:
+        chat_kwargs = dict(chat_kwargs)
+        chat_kwargs["enable_thinking"] = True
+        kwargs["chat_template_kwargs"] = chat_kwargs
+
+    _original_deepseek_v4_parser_init(self, tokenizer, tools, **kwargs)
+
+
 if not hasattr(deepseek_v4_encoding, "REASONING_EFFORT_PROMPTS"):
     deepseek_v4_encoding.REASONING_EFFORT_PROMPTS = REASONING_EFFORT_PROMPTS
     deepseek_v4_encoding.render_message = _patched_render_message
     deepseek_v4.get_deepseek_v4_tokenizer = _patched_get_deepseek_v4_tokenizer
+    DeepSeekV4Parser.__init__ = _patched_deepseek_v4_parser_init

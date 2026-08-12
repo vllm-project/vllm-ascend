@@ -2,6 +2,7 @@
 
 import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.deepseek_v4 import DeepSeekV4Parser
 from vllm.tokenizers import deepseek_v4, deepseek_v4_encoding
 
 
@@ -10,6 +11,9 @@ class FakeTokenizer:
 
     def get_added_vocab(self):
         return {}
+
+    def get_vocab(self):
+        return {"<think>": 1, "</think>": 2}
 
     def encode(self, text, add_special_tokens=False, **kwargs):
         return text
@@ -170,6 +174,52 @@ def test_deepseek_v4_defaults_to_thinking_with_high_effort():
 
     assert prompt.startswith("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum")
     assert prompt.endswith("<｜Assistant｜><think>")
+
+
+@pytest.mark.parametrize(
+    ("chat_template_kwargs", "expected_state"),
+    [
+        ({}, "REASONING"),
+        ({"thinking": True}, "REASONING"),
+        ({"enable_thinking": True}, "REASONING"),
+        ({"reasoning_effort": "high"}, "REASONING"),
+        ({"thinking": False}, "CONTENT"),
+        ({"enable_thinking": False}, "CONTENT"),
+        ({"enable_thinking": True, "reasoning_effort": "none"}, "CONTENT"),
+    ],
+)
+def test_parser_thinking_mode_matches_tokenizer_default(
+    chat_template_kwargs,
+    expected_state,
+):
+    parser = DeepSeekV4Parser(
+        FakeTokenizer(),
+        chat_template_kwargs=chat_template_kwargs,
+    )
+
+    assert parser.parser_engine_config.initial_state.name == expected_state
+
+
+@pytest.mark.parametrize("request_kwargs", [{}, {"reasoning_effort": "high"}])
+def test_parser_splits_implicit_start_reasoning(request_kwargs):
+    request = ChatCompletionRequest(
+        model="deepseek-v4",
+        messages=[{"role": "user", "content": "hi"}],
+        **request_kwargs,
+    )
+    params = request.build_chat_params(None, "auto")
+    parser = DeepSeekV4Parser(
+        FakeTokenizer(),
+        chat_template_kwargs=params.chat_template_kwargs,
+    )
+
+    reasoning, content = parser.extract_reasoning(
+        "reasoning text</think>answer text",
+        request,
+    )
+
+    assert reasoning == "reasoning text"
+    assert content == "answer text"
 
 
 @pytest.mark.parametrize(
