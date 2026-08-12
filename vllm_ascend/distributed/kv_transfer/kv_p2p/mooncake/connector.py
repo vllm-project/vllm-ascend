@@ -29,7 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-logger = init_logger(__name__)
 
 
 class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
