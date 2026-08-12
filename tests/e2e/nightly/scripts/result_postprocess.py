@@ -191,10 +191,7 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
     if completed.stderr:
         print(completed.stderr.rstrip())
     if completed.returncode != 0:
-        print(
-            f"Warning: Postprocess script exited with code {completed.returncode} "
-            f"for {output_path}"
-        )
+        print(f"Warning: Postprocess script exited with code {completed.returncode} for {output_path}")
 
 
 def postprocess_one_benchmark(
