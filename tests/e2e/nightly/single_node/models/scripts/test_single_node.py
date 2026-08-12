@@ -218,6 +218,7 @@ TEST_HANDLERS = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
+    "messages": run_messages_test,
     "check_rank0_process_count": run_check_rank0_process_count,
 }
 
