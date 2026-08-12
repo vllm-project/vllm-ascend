@@ -10,21 +10,21 @@
 
 ### 1.1 版本对应关系
 
-| 框架 | vLLM-Ascend 版本 | 配置文件 | 状态 |
-|------|------------------|----------|------|
-| Sphinx + MyST-Parser | v0.23.0 及更早 | `docs/source/conf.py` | 旧版 |
-| MkDocs + Material | v0.24.0 及之后 | `mkdocs.yml` | 新版（当前使用） |
+| 框架 | 适用分支 | 配置文件 |
+|------|----------|----------|
+| Sphinx + MyST-Parser | `v0.23.0` 及更早版本分支 | `docs/source/conf.py` |
+| MkDocs + Material | `main` 及 `v0.23.0` 之后版本分支 | `mkdocs.yml` |
 
 ## 2 语法差异对照表
 
-|       功能         |         MkDocs + Material            |              Sphinx + MyST-Parser       |
-| ------------------ | ------------------------------------ | --------------------------------------- |
-| **标签页**         | `=== "标签名"`                        | `::::{tab-item} 标签名` + `:::` 闭合    |
-| **标签页组同步**   | 默认同步（同名标签自动联动）            | `:sync-group: 组名` + `:sync: 键名`     |
-| **版本占位符**     | `{{ vllm_ascend_version }}`           | `\|vllm_ascend_version\|`              |
-| **提示框（Note）** | `!!! note "标题"`                     | `:::{note}` ... `:::`                  |
-| **警告框**         | `!!! warning "标题"`                  | `:::{warning}` ... `:::` / `{caution}` |
-| **Jinja 模板转义** | `{% raw %}` ... `{% endraw %}`        | 无需转义                               |
+| 功能 | MkDocs + Material | Sphinx + MyST-Parser |
+|------|-------------------|----------------------|
+| **标签页** | `=== "标签名"` | `::::{tab-item} 标签名` + `:::` 闭合 |
+| **标签页组同步** | 默认同步（同名标签自动联动） | `:sync-group: 组名` + `:sync: 键名` |
+| **版本占位符** | `{{ vllm_ascend_version }}` | `\|vllm_ascend_version\|` |
+| **提示框（Note）** | `!!! note "标题"` | `:::{note}` ... `:::` |
+| **警告框** | `!!! warning "标题"` | `:::{warning}` ... `:::` / `{caution}` |
+| **Jinja 模板转义** | `{% raw %}` ... `{% endraw %}` | 无需转义 |
 
 ## 3 标签页
 
@@ -35,14 +35,14 @@
 **示例：**
 
 ```markdown
-    === "A3 series"
+=== "A3 series"
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run ...
     ```
 
-    === "A2 series"
+=== "A2 series"
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -126,7 +126,7 @@ export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
-## 5 Jinja 语法转义
+## 5 Jinja 模板转义
 
 ### 5.1 问题背景
 
@@ -136,7 +136,7 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
 | 框架 | 对 `{{ }}` 的处理 | 风险 |
 |------|-------------------|------|
 | Sphinx + MyST-Parser | 不解析，原样保留 | 无 |
-| MkDocs + Material |解析为模板变量，尝试替换 | 渲染异常，模板代码被破坏 |
+| MkDocs + Material | 解析为模板变量，尝试替换 | 渲染异常，模板代码被破坏 |
 
 ### 5.2 解决方案
 
@@ -182,11 +182,11 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
 
 Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因此文档正文中的 `{{ }}` 不会被特殊处理，直接原样渲染。
 
-## 5 Note / 提示框
+## 6 Note / 提示框
 
 > **适用场景**：需要突出显示重要说明、警告、注意事项等信息。
 
-### 5.1 MkDocs + Material
+### 6.1 MkDocs + Material
 
 使用 `!!! note "标题"` 语法，内容通过**缩进**控制范围，支持多种类型标识符。
 
@@ -198,6 +198,7 @@ Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因
     提示内容行2
     提示内容行3
 ```
+
 **示例：**
 
 ```markdown
@@ -205,24 +206,25 @@ Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因
     Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
 ```
 
-**关键规则**：内容必须与 !!! 声明行保持 4 个空格 缩进，且内容之间用空行分隔即可（无需额外缩进）。
+**关键规则**：内容必须与 `!!!` 声明行保持 **4 个空格** 缩进，且内容之间用空行分隔即可（无需额外缩进）。
 
-### 5.2 Sphinx + MyST-Parser
+### 6.2 Sphinx + MyST-Parser
 
 使用 `::{note}` 指令语法，内容通过 **冒号层级 + 缩进** 控制范围，需要显式闭合。
 
 **基本语法：**
 
 ```markdown
-:::{note}
-内容行1
-内容行2
-:::
-
-**示例：**
-```markdown
-:::{note} Atlas 300I DUO
-Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
-:::
+    :::{note}
+    内容行1
+    内容行2
+    :::
 ```
 
+**示例：**
+
+```markdown
+    :::{note} Atlas 300I DUO
+    Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
+    :::
+```
