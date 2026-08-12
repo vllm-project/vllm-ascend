@@ -3142,6 +3142,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             local_block_ids=([10],),
             remote_block_ids=([30],),
             num_computed_tokens=0,
+            do_virtual=False,
         )
         metadata = types.SimpleNamespace(reqs_in_batch=["req"], requests={"req": meta})
 

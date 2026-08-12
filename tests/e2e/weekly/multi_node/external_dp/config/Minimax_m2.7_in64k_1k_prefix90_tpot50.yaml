@@ -77,9 +77,9 @@ templates:
       - "minimax"
       - --max-model-len
       - "70000"
-      - -max-num-batched-tokens
+      - --max-num-batched-tokens
       - "16384"
-      - -max-num-seqs
+      - --max-num-seqs
       - "48"
       - --trust-remote-code
       - --gpu-memory-utilization
@@ -130,9 +130,9 @@ templates:
       - "minimax"
       - --max-model-len
       - "70000"
-      - -max-num-batched-tokens
+      - --max-num-batched-tokens
       - "16384"
-      - -max-num-seqs
+      - --max-num-seqs
       - "48"
       - --trust-remote-code
       - --gpu-memory-utilization

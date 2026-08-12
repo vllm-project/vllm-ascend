@@ -29,7 +29,7 @@ export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 # cann and atb environment setup
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-# The CANN install directory varies between release (cann-9.0.1) and daily
+# The CANN install directory varies between release (cann-9.1.0) and daily
 # (e.g. cann-2026.08.03) images, so discover it dynamically instead of
 # hardcoding a version-specific path. The ascendnpu-ir component is optional;
 # a missing component must not abort the script.

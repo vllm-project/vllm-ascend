@@ -25,7 +25,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
@@ -257,9 +257,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 is_per_channel_weight=True,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
             )
         )
 
