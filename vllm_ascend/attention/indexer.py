@@ -87,3 +87,44 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
         fast_build: bool = False,
     ) -> None:
         return None
+
+
+def validate_indexshare_pp_partition(
+    config: Any,
+    start_layer: int,
+    end_layer: int,
+    pp_rank: int,
+    pp_size: int,
+) -> None:
+    """Validate an IndexShare layer range against a PP stage boundary.
+
+    IndexShare configurations describe layers as ``full`` or ``shared``.
+    A ``shared`` layer reuses Top-K indices produced by an earlier ``full``
+    layer. Since those indices are worker-local and are not propagated in PP
+    intermediate tensors, each PP stage must encounter a local ``full`` layer
+    before it encounters a ``shared`` layer.
+
+    Models that do not expose ``indexer_types`` are not IndexShare models from
+    this validator's perspective and are left unchanged.
+    """
+    if pp_size <= 1:
+        return
+
+    indexer_types = getattr(config, "indexer_types", None)
+    if indexer_types is None:
+        return
+
+    has_full_indexer = False
+    for layer_id in range(start_layer, end_layer):
+        indexer_type = indexer_types[layer_id] if layer_id < len(indexer_types) else None
+        normalized_type = indexer_type.lower() if isinstance(indexer_type, str) else None
+        if normalized_type == "full":
+            has_full_indexer = True
+        elif normalized_type == "shared" and not has_full_indexer:
+            raise ValueError(
+                "IndexShare group crosses a pipeline-parallel stage boundary: "
+                f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
+                f"but layer {layer_id} is shared before a full Indexer exists in this stage. "
+                "Cross-PP Top-K index propagation is not supported. "
+                "Please choose a pipeline-parallel partition aligned to an IndexShare group."
+            )

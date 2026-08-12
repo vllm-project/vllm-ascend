@@ -32,6 +32,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
+from vllm_ascend.attention.indexer import validate_indexshare_pp_partition
 
 
 def _should_skip_indexer_init(
@@ -53,42 +54,6 @@ def _should_skip_indexer_init(
     indexer_types = getattr(config, "indexer_types", None)
     indexer_type = indexer_types[layer_id] if indexer_types is not None and layer_id < len(indexer_types) else None
     return isinstance(indexer_type, str) and indexer_type.lower() == "shared"
-
-
-def _validate_indexshare_pp_partition(
-    config: DeepseekV2Config | DeepseekV3Config,
-    start_layer: int,
-    end_layer: int,
-    pp_rank: int,
-    pp_size: int,
-) -> None:
-    """Reject IndexShare groups that cross a PP stage boundary.
-
-    Shared Indexer Top-K indices are kept in a worker-local buffer. They are
-    not carried in PP intermediate tensors, so every PP stage must encounter
-    a ``full`` layer before any ``shared`` layer in its local layer range.
-    """
-    if pp_size <= 1:
-        return
-
-    indexer_types = getattr(config, "indexer_types", None)
-    if indexer_types is None:
-        return
-
-    has_full_indexer = False
-    for layer_id in range(start_layer, end_layer):
-        indexer_type = indexer_types[layer_id] if layer_id < len(indexer_types) else None
-        normalized_type = indexer_type.lower() if isinstance(indexer_type, str) else None
-        if normalized_type == "full":
-            has_full_indexer = True
-        elif normalized_type == "shared" and not has_full_indexer:
-            raise ValueError(
-                "IndexShare group crosses a pipeline-parallel stage boundary: "
-                f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                f"but layer {layer_id} is shared before a full Indexer exists in this stage. "
-                "Cross-PP Top-K index propagation is not supported. "
-                "Please choose a pipeline-parallel partition aligned to an IndexShare group."
-            )
 
 
 def _deepseek_v2_mla_attention_init(
@@ -336,7 +301,7 @@ def _deepseek_v2_model_init_with_indexshare_pp_validation(self, *args, **kwargs)
 
     config = getattr(self, "config", None)
     pp_group = get_pp_group()
-    _validate_indexshare_pp_partition(
+    validate_indexshare_pp_partition(
         config,
         self.start_layer,
         self.end_layer,
