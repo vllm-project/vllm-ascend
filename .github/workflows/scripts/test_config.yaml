@@ -31,6 +31,9 @@
 #                             trigger the tests
 #   exclude_source_file_dependencies: Optional list of source/test directories
 #                                     to exclude from source_file_dependencies
+#   required_pr_labels: Optional list of PR labels that must all be present
+#                       for the module to run (PR CI only; inert when
+#                       select_tests.py is called without --pr-labels)
 #   tests: List of test directories/files to run (directories are expanded
 #          to individual test files before routing).  Supports ``::nodeid``
 #          syntax (e.g. ``test_foo.py::test_bar``) to run a single method.
