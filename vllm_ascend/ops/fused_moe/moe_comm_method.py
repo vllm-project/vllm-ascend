@@ -335,9 +335,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 1,
                 min(
                     get_ascend_config().mega_moe_max_tokens,
-                    chunk_tokens
-                    * int(self.token_dispatcher.ep_world_size)
-                    * min(num_topk, expert_per_rank),
+                    chunk_tokens * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
                 ),
             )
             chunk_out, chunk_expert_tokens = torch.ops._C_ascend.mega_moe(
@@ -360,9 +358,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 activation_beta=self.swiglu_beta,
             )
             outputs.append(chunk_out)
-            expert_tokens = (
-                chunk_expert_tokens if expert_tokens is None else expert_tokens + chunk_expert_tokens
-            )
+            expert_tokens = chunk_expert_tokens if expert_tokens is None else expert_tokens + chunk_expert_tokens
 
         assert expert_tokens is not None, "MegaMoe requires at least one input token."
         out = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)

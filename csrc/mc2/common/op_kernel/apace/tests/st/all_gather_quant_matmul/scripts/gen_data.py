@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# coding=utf-8
 """
 Generate MXFP8 test data for AllGatherQuantMatmul operator.
 
@@ -54,9 +53,9 @@ def float8_e4m3fn_to_float(data_uint8):
     zero_mask = (exp == 0) & (mant == 0)
     fp32[zero_mask] = 0.0
     normal_mask = ~zero_mask
-    fp32[normal_mask] = (1.0 - 2.0 * sign[normal_mask]) * \
-                        np.power(2.0, exp[normal_mask] - 7.0) * \
-                        (1.0 + mant[normal_mask] / 8.0)
+    fp32[normal_mask] = (
+        (1.0 - 2.0 * sign[normal_mask]) * np.power(2.0, exp[normal_mask] - 7.0) * (1.0 + mant[normal_mask] / 8.0)
+    )
     return fp32
 
 
@@ -72,11 +71,11 @@ def float_to_fp8_e4m3fn_vec(fp32_arr):
     sign = (fp32 < 0).astype(np.uint8)
     abs_val = np.abs(fp32)
 
-    MAX_NORMAL = 1.875 * 128.0   # 240.0
-    MIN_NORMAL = 2.0 ** (-6)     # 0.015625
+    MAX_NORMAL = 1.875 * 128.0  # 240.0
+    MIN_NORMAL = 2.0 ** (-6)  # 0.015625
 
     log2_val = np.log2(np.clip(abs_val, 1e-30, None))
-    e = np.floor(log2_val).astype(np.int32) + 7    # bias = 7
+    e = np.floor(log2_val).astype(np.int32) + 7  # bias = 7
     e = np.clip(e, 1, 14)
 
     normalized = abs_val / np.power(2.0, (e - 7).astype(np.float32))
@@ -117,8 +116,8 @@ def dequantize_mxfp8(data_fp8, scale_fp8, divisor=64, c0=2):
     fp32_data = float8_e4m3fn_to_float(data_fp8.astype(np.uint8))
     fp32_scale = float8_e8m0_to_float(scale_fp8.astype(np.uint8))
 
-    is_a_scale = (scale_fp8.ndim == 3 and scale_fp8.shape[-1] == c0 and scale_fp8.shape[-2] > c0)
-    is_b_scale = (scale_fp8.ndim == 3 and scale_fp8.shape[1] == c0)
+    is_a_scale = scale_fp8.ndim == 3 and scale_fp8.shape[-1] == c0 and scale_fp8.shape[-2] > c0
+    is_b_scale = scale_fp8.ndim == 3 and scale_fp8.shape[1] == c0
 
     k_shape = data_fp8.shape[1] if is_a_scale else data_fp8.shape[0]
     n_groups = (k_shape + divisor - 1) // divisor
@@ -134,7 +133,6 @@ def dequantize_mxfp8(data_fp8, scale_fp8, divisor=64, c0=2):
             for k in range(k_shape):
                 scales[i, k] = fp32_scale[i, group_idx[k], sub_idx[k]]
     elif is_b_scale:
-        N = data_fp8.shape[1]
         for k in range(k_shape):
             scales[k, :] = fp32_scale[group_idx[k], sub_idx[k], :]
     else:
@@ -144,6 +142,7 @@ def dequantize_mxfp8(data_fp8, scale_fp8, divisor=64, c0=2):
 
 
 BASE_SEED = 42
+
 
 def gen_golden_data_all_gather_matmul(m, k, n, rank_num):
     """
@@ -202,10 +201,15 @@ def gen_golden_data_all_gather_matmul(m, k, n, rank_num):
             print(f"  [DIAG] a_all_deq.mean={a_all_deq.mean():.3f}, b_deq[0].mean={b_deq.mean():.3f}")
             print(f"  Golden C[0] shape {c_full.shape}, range [{c_full.min():.2f}, {c_full.max():.2f}]")
 
-        write_artifacts(base_dir, rank_id,
-                       a_fp8_list[rank_id], b_fp8_list[rank_id],
-                       a_scale_list[rank_id], b_scale_list[rank_id],
-                       c_bf16)
+        write_artifacts(
+            base_dir,
+            rank_id,
+            a_fp8_list[rank_id],
+            b_fp8_list[rank_id],
+            a_scale_list[rank_id],
+            b_scale_list[rank_id],
+            c_bf16,
+        )
 
 
 if __name__ == "__main__":
@@ -228,10 +232,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if math.ceil(k / 64) % 2 != 0:
-        print(f"Error: ceil(K/64)={math.ceil(k/64)} not even")
+        print(f"Error: ceil(K/64)={math.ceil(k / 64)} not even")
         sys.exit(1)
 
-    print(f"Generating AllGatherQuantMatmul test data:")
+    print("Generating AllGatherQuantMatmul test data:")
     print(f"  M={m}, K={k}, N={n}, rankSize={rank_num}")
 
     gen_golden_data_all_gather_matmul(m, k, n, rank_num)

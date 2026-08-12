@@ -16,50 +16,50 @@
 - Operator function: The MegaMoE operator integrates the complete calculation process of the expert FFN of the MoE layer and the front and rear data communication (i.e. Dispatch + Linear1 + SwiGLU + Linear2 + Combine) into a single operator, realizing the masking of communication and calculation.
 
 - Calculation formula:
-  - Input:
-    - $\mathbf{X} \in \mathbb{R}^{\text{totalNumTokens} \times \text{hidden}}$: activation matrix, corresponding to the input parameter `x`. $\text{totalNumTokens}$ is the global total number of tokens, and $\text{hidden}$ is the hidden layer dimension.
-    - $\mathbf{E} \in \mathbb{Z}^{\text{totalNumTokens} \times \text{topK}}$: Expert number matrix selected by token, corresponding to the input parameter `topkIds`. $\text{topK}$ is the number of experts selected for each token.
-    - $\mathbf{G} \in \mathbb{R}^{\text{totalNumTokens} \times \text{topK}}$: The gating weight matrix of the expert selected by token, corresponding to the input parameter `topkWeights`.
-    - $\mathbf{W}_1^{\mathrm{moe}} \in \mathbb{R}^{\text{localMoeExpertNum} \times \text{hidden} \times (2 \text{intermediateHidden})}$: Linear1 weight of the routing MoE expert, corresponding to the MoE expert part of the input parameter `weight1`.
-    - $\mathbf{W}_2^{\mathrm{moe}} \in \mathbb{R}^{\text{localMoeExpertNum} \times \text{intermediateHidden} \times \text{hidden}}$: Linear2 weight of the routing MoE expert, corresponding to the MoE expert part of the input parameter `weight2`.
-    - $\mathbf{W}_1^{\mathrm{shared}} \in \mathbb{R}^{\text{sharedExpertNumPerRank} \times \text{hidden} \times (2 \text{intermediateHidden})}$: Linear1 weight of shared experts, corresponding to the input parameter `sharedWeight1`.
-    - $\mathbf{W}_2^{\mathrm{shared}} \in \mathbb{R}^{\text{sharedExpertNumPerRank} \times \text{intermediateHidden} \times \text{hidden}}$: Linear2 weight of shared experts, corresponding to the input parameter `sharedWeight2`.
-  - Output:
+    - Input:
+        - $\mathbf{X} \in \mathbb{R}^{\text{totalNumTokens} \times \text{hidden}}$: activation matrix, corresponding to the input parameter `x`. $\text{totalNumTokens}$ is the global total number of tokens, and $\text{hidden}$ is the hidden layer dimension.
+        - $\mathbf{E} \in \mathbb{Z}^{\text{totalNumTokens} \times \text{topK}}$: Expert number matrix selected by token, corresponding to the input parameter `topkIds`. $\text{topK}$ is the number of experts selected for each token.
+        - $\mathbf{G} \in \mathbb{R}^{\text{totalNumTokens} \times \text{topK}}$: The gating weight matrix of the expert selected by token, corresponding to the input parameter `topkWeights`.
+        - $\mathbf{W}_1^{\mathrm{moe}} \in \mathbb{R}^{\text{localMoeExpertNum} \times \text{hidden} \times (2 \text{intermediateHidden})}$: Linear1 weight of the routing MoE expert, corresponding to the MoE expert part of the input parameter `weight1`.
+        - $\mathbf{W}_2^{\mathrm{moe}} \in \mathbb{R}^{\text{localMoeExpertNum} \times \text{intermediateHidden} \times \text{hidden}}$: Linear2 weight of the routing MoE expert, corresponding to the MoE expert part of the input parameter `weight2`.
+        - $\mathbf{W}_1^{\mathrm{shared}} \in \mathbb{R}^{\text{sharedExpertNumPerRank} \times \text{hidden} \times (2 \text{intermediateHidden})}$: Linear1 weight of shared experts, corresponding to the input parameter `sharedWeight1`.
+        - $\mathbf{W}_2^{\mathrm{shared}} \in \mathbb{R}^{\text{sharedExpertNumPerRank} \times \text{intermediateHidden} \times \text{hidden}}$: Linear2 weight of shared experts, corresponding to the input parameter `sharedWeight2`.
+    - Output:
 
-    - $\mathbf{Y} \in \mathbb{R}^{\text{totalNumTokens} \times \text{hidden}}$: The final output matrix corresponds to the output parameter `y`.
-  - Conventions:
-    - $⋅$ represents matrix multiplication, and $⊙$ represents element-wise multiplication.
-    - $\left \lfloor z\right \rceil$ means round $z$ to the nearest whole number, and $\left \lfloor z\right \rfloor$ means round $z$ down.
-    - $|z|$ means taking the absolute value, $\max(z)$ means taking the maximum value.
-    - The set of all tokens is $\{ \text{token}_i \mid i \in \{0, 1, \dots, \text{totalNumTokens} - 1\} \}$.
-    - The token representation (that is, the hidden-state vector) of $\text{token}_i$ is $\mathbf{x}_i \in \mathbb{R}^{1 \times \text{hidden}}$, and $\mathbf{x}_i = \mathbf{X}[i,:]$.
-    - The expert index for $\text{token}_i$ is $e_{i,k} = \mathbf{E}[i,k],\quad k \in \{0,\dots,\text{topK} - 1\},\quad e_{i,k} \in \{0,\dots,\text{moeExpertNum} - 1\}$.
-    - $\mathbb{Z}_4 = \{ x \in \mathbb{Z} \mid -8 \le x \le 7 \}, \quad \mathbb{Z}_8^{\text{sym}} = \{ x \in \mathbb{Z} \mid -127 \le x \le 127 \}, \quad \mathbb{Z}_{32} = \{ x \in \mathbb{Z} \mid -2^{31} \le x \le 2^{31}-1 \}$. The superscript $\text{sym}$ of $\mathbb{Z}_8^{\text{sym}}$ represents the symmetric quantization value range interval: its value range is symmetrically rounded with respect to $-127$ and $127$, which is different from the $[-128, 127]$ value range of standard INT8, so it is $\text{sym}$ superscript distinction.
-    - The tensor slicing operation uses the Python-style `start:stop:step` notation, for example, $[0::2, :]$ represents taking even-numbered rows, and $[1::2, :]$ represents taking odd-numbered rows.
-    - $\mathrm{bitcast}_{T}(\mathbf{Z})$ represents a binary reinterpretation operation, which reinterprets the underlying binary data of tensor $\mathbf{Z}$ according to the target type $T$.
-  - <span id="activation-formulas">Activation formulas:</span>
-    - Note that the gate branch after splitting the Linear1 output is $\mathbf{G}$, the up branch is $\mathbf{U}$, and the activation output is $\mathbf{A}$. The Sigmoid function and SiLU function are defined as:
+        - $\mathbf{Y} \in \mathbb{R}^{\text{totalNumTokens} \times \text{hidden}}$: The final output matrix corresponds to the output parameter `y`.
+    - Conventions:
+        - $⋅$ represents matrix multiplication, and $⊙$ represents element-wise multiplication.
+        - $\left \lfloor z\right \rceil$ means round $z$ to the nearest whole number, and $\left \lfloor z\right \rfloor$ means round $z$ down.
+        - $|z|$ means taking the absolute value, $\max(z)$ means taking the maximum value.
+        - The set of all tokens is $\{ \text{token}_i \mid i \in \{0, 1, \dots, \text{totalNumTokens} - 1\} \}$.
+        - The token representation (that is, the hidden-state vector) of $\text{token}_i$ is $\mathbf{x}_i \in \mathbb{R}^{1 \times \text{hidden}}$, and $\mathbf{x}_i = \mathbf{X}[i,:]$.
+        - The expert index for $\text{token}_i$ is $e_{i,k} = \mathbf{E}[i,k],\quad k \in \{0,\dots,\text{topK} - 1\},\quad e_{i,k} \in \{0,\dots,\text{moeExpertNum} - 1\}$.
+        - $\mathbb{Z}_4 = \{ x \in \mathbb{Z} \mid -8 \le x \le 7 \}, \quad \mathbb{Z}_8^{\text{sym}} = \{ x \in \mathbb{Z} \mid -127 \le x \le 127 \}, \quad \mathbb{Z}_{32} = \{ x \in \mathbb{Z} \mid -2^{31} \le x \le 2^{31}-1 \}$. The superscript $\text{sym}$ of $\mathbb{Z}_8^{\text{sym}}$ represents the symmetric quantization value range interval: its value range is symmetrically rounded with respect to $-127$ and $127$, which is different from the $[-128, 127]$ value range of standard INT8, so it is $\text{sym}$ superscript distinction.
+        - The tensor slicing operation uses the Python-style `start:stop:step` notation, for example, $[0::2, :]$ represents taking even-numbered rows, and $[1::2, :]$ represents taking odd-numbered rows.
+        - $\mathrm{bitcast}_{T}(\mathbf{Z})$ represents a binary reinterpretation operation, which reinterprets the underlying binary data of tensor $\mathbf{Z}$ according to the target type $T$.
+    - <span id="activation-formulas">Activation formulas:</span>
+        - Note that the gate branch after splitting the Linear1 output is $\mathbf{G}$, the up branch is $\mathbf{U}$, and the activation output is $\mathbf{A}$. The Sigmoid function and SiLU function are defined as:
       $$
       \sigma(z)=\frac{1}{1+e^{-z}}, \qquad
       \operatorname{SiLU}(z)=z\cdot\sigma(z)=\frac{z}{1+e^{-z}}.
       $$
       Let the clipping value be $c$. When clipping is disabled (not configured or configured as $0$), mathematically $c=+\infty$. Define
       $\mathbf{G}_c=\min(\mathbf{G},c)$ and $\mathbf{U}_c=\operatorname{clip}(\mathbf{U},-c,c)$.
-    - `swiglu`:
+        - `swiglu`:
       $$
       \mathbf{A}=\operatorname{SwiGLU}(\mathbf{G},\mathbf{U})
       =\operatorname{Swish}_1(\mathbf{G}_c)\odot\mathbf{U}_c
       =\operatorname{SiLU}(\mathbf{G}_c)\odot\mathbf{U}_c.
       $$
-    - `swiglustep`:
+        - `swiglustep`:
       $$
       \mathbf{A}=\operatorname{SwiGLUStep}(\mathbf{G},\mathbf{U})=\min\!\left(\operatorname{SiLU}(\mathbf{G}),c\right)\odot\mathbf{U}_c.
       $$
-    - `swigluoai`:
+        - `swigluoai`:
       $$
       \mathbf{A}=\operatorname{SwiGLUOAI}(\mathbf{G},\mathbf{U})=\mathbf{G}_c\odot\sigma(\alpha\mathbf{G}_c)\odot(\mathbf{U}_c+\beta).
       $$
-    - `situglu`:
+        - `situglu`:
       $$
       \mathbf{A}=\operatorname{SiTUGLU}(\mathbf{G},\mathbf{U})=\beta\tanh\!\left(\frac{\mathbf{G}}{\beta}\right)\odot\sigma(\mathbf{G})\odot L(\mathbf{U};\beta_{\mathrm{linear}}),
       $$
@@ -95,7 +95,7 @@
 
         In the Dispatch phase, each $\text{token}_i$ sends its token representing $\mathbf{x}_i$ to the expert $e_{i,0}, e_{i,1}, \dots, e_{i,\text{topK}-1}$. That is, for each $k$, expert $e_{i,k}$ receives one copy of $\mathbf{x}_i$.
 
-        records $I_e = \{\, i \mid \exists k,\ \mathbf{E}[i,k]=e \,\}$ as the set of token indexes assigned to expert $e$. The size of the set $I_e$ is $N_e = |I_e|$, which is the expert $e$. The total number of tokens that need to be processed is $\mathbf{X}_e \in \mathbb{R}^{N_e \times \text{hidden}}$, which is a matrix composed of all token representations $\mathbf{x}_i$ ** stacked in any fixed order**. This matrix is the representation of all tokens received by expert $e$ after Dispatch.
+        records $I_e = \{\, i \mid \exists k,\ \mathbf{E}[i,k]=e \,\}$ as the set of token indexes assigned to expert $e$. The size of the set $I_e$ is $N_e = |I_e|$, which is the expert $e$. The total number of tokens that need to be processed is $\mathbf{X}_e \in \mathbb{R}^{N_e \times \text{hidden}}$, which is a matrix composed of all token representations $\mathbf{x}_i$ **stacked in any fixed order**. This matrix is the representation of all tokens received by expert $e$ after Dispatch.
 
         For each $\text{token}_i$ and its selected expert $e_{i,k}$, there is a unique row index $\operatorname{row}(i,k) \in \{0,\dots,N_{e_{i,k}}-1\}$ such that $\mathbf{X}_{e_{i,k}}[\operatorname{row}(i,k), :] = \mathbf{x}_i$. This mapping records the position of $\mathbf{x}_i$ in the input matrix $\mathbf{X}_{e_{i,k}}$ of expert $e_{i,k}$.
 
@@ -884,20 +884,20 @@ The second stage of
 ## Constraint description
 
 - **Reserved and non-external parameter description**:
-  - Some parameters and data types in the parameter table are not publicly available yet and are reserved or used for internal implementation. The interface parameters and their constraints are detailed in the [MegaMoE operator interface document](../../torch_extension/cann_ops_transformer/docs/zh/mega_moe.md).
+    - Some parameters and data types in the parameter table are not publicly available yet and are reserved or used for internal implementation. The interface parameters and their constraints are detailed in the [MegaMoE operator interface document](../../torch_extension/cann_ops_transformer/docs/zh/mega_moe.md).
 
 - **Parameter consistency constraints**:
-  - The values of parameters such as `moeExpertNum`, `maxRecvTokenNum`, `dispatchQuantMode`, `dispatchQuantOutDtype`, and `numMaxTokensPerRank` used in the process of calling the operator must be consistent across all cards and across different layers in the network.
+    - The values of parameters such as `moeExpertNum`, `maxRecvTokenNum`, `dispatchQuantMode`, `dispatchQuantOutDtype`, and `numMaxTokensPerRank` used in the process of calling the operator must be consistent across all cards and across different layers in the network.
 
 - **Communication domain and networking constraints**:
-  - The values of `epWorldSize` and `cclBufferSize` parameters of all cards must be consistent.
-  - The driver version of each node in the communication domain should be the same.
-  - <term>Atlas A2 training series products/Atlas A2 inference series products </term>: Multi-machine communication domain requires switch networking and does not support dual-machine direct connection networking.
-  - <term>Atlas A3 training series product/Atlas A3 inference series product </term>: The multi-machine communication domain is required to be within a super node, and dual-machine direct connection networking and cross-super node networking are not supported.
-  - <term>Ascend 950PR/Ascend 950DT</term>: Only supports UB Memory communication protocol.
+    - The values of `epWorldSize` and `cclBufferSize` parameters of all cards must be consistent.
+    - The driver version of each node in the communication domain should be the same.
+    - <term>Atlas A2 training series products/Atlas A2 inference series products </term>: Multi-machine communication domain requires switch networking and does not support dual-machine direct connection networking.
+    - <term>Atlas A3 training series product/Atlas A3 inference series product </term>: The multi-machine communication domain is required to be within a super node, and dual-machine direct connection networking and cross-super node networking are not supported.
+    - <term>Ascend 950PR/Ascend 950DT</term>: Only supports UB Memory communication protocol.
 - **Parameter constraints**:
-  - **<term>Atlas A2 training series products/Atlas A2 inference series products </term>, <term>Atlas A3 training series products/Atlas A3 inference series products </term>**:
-    - Scene matching matrix:
+    - **<term>Atlas A2 training series products/Atlas A2 inference series products </term>, <term>Atlas A3 training series products/Atlas A3 inference series products </term>**:
+        - Scene matching matrix:
 
       | scene | x | weight1 | weight2 | weightScales1 | weightScales2 | bias1 | bias2 | y | dispatchQuantMode | dispatchQuantOutDtype |
       | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -905,43 +905,43 @@ The second stage of
       | A8W8-INT | BF16 | INT8 | INT8 | UINT64 | UINT64 | – | – | BF16 | 2 | 1 (INT8) |
       | A8W4-INT | BF16 | INT4(INT32) | INT4(INT32) | UINT64 | UINT64 | FP32 | FP32 | BF16 | 2 | 1 (INT8) |
 
-  - **<term>Ascend 950PR/Ascend 950DT</term>**:
-    - `activation` only supports "swiglu".
-    - `activation_params` only supports [] or [clamp].
-    - `BS` (`x`.dim0) supports [1, +∞), the actual upper limit is subject to `cclBufferSize`. The operator adopts a batch processing mechanism, the BS is no longer subject to the hard limit of UB capacity, and the dispatch stage is processed in batches according to a fixed granularity.
-    - `H` (`x`.dim1) supports 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192.
-    - `topK` (`topkIds`.dim1) supports [1, 32].
-    - `expertPerRank` Range [1, 1024].
-    - `hiddenDim` (`weight1`.dim1) only supports 1024, 2048, 3072, 4096, 7168.
-    - `epWorldSize` range [2, 1024].
-    - `moeExpertNum` range [`epWorldSize`, 2048], and `moeExpertNum` % `epWorldSize` == 0.
-    - `maxRecvTokenNum` range [0, `BS` × `epWorldSize` × min(`topK`, `localMoeExpertNum`)].
-    - `dispatchQuantOutDtype` only supports 23 (FLOAT8_E5M2) or 24 (FLOAT8_E4M3FN) or 296 (FLOAT4_E2M1).
-    - The current version only supports MXFP quantization mode (`dispatchQuantMode` = 4), the dispatch stage uses MX group-by-group quantization (group size = 32), and the quantization scaling factor type is FLOAT8_E8M0.
-    - `combineQuantMode` takes values 0, 3, 4, 0 represents non-quantization, 3 represents MXFP float8_e5m2 type, 4 represents MXFP float8_e4m3 type
-    - `commAlg` must be the empty string "".
-    - The data type of `y` is the same as `x`.
-    - The dim1 of `weight1` (`hiddenDim`) must be equal to twice the dim2 of `weight2`. This is because SwiGLU activation needs to halve the intermediate dimension from `hiddenDim` to `hiddenDim`/2.
-    - `localMoeExpertNum` = `moeExpertNum` / `epWorldSize`; `sharedExpertNumPerRank` = `sharedWeight1`.dim0 (0 when shared experts are not enabled); `expertPerRank` = `sharedExpertNumPerRank` + `localMoeExpertNum`.
-    - `sharedExpertNumPerRank` range [0, 4].
-    - `topoType` is automatically derived from the communication domain context. 0 indicates MTE topology, and 1 indicates URMA spanning super topology. Currently, the URMA communication method is not supported.
-    - `topkWeightsType` takes the value 0 or 1, 0 means turning off topkWeights forward movement, 1 means turning it on. Currently, the URMA communication method is not supported.
-    - `numMaxTokensPerRank` is automatically calculated when it is 0; when it is not 0, it must be equal to `BS`.
-    - `cclBufferSize` requires >= full card soft synchronization reserved space (fixed 60KB) + mask receiving space + quantized token scaling factor space + combine sending space.
-    - `weightScales1` and `weightScales2` are required inputs, and the data type must be FLOAT8_E8M0.
-    - The data types of `weight1` and `weight2` must be consistent, and only support FLOAT8_E5M2, FLOAT8_E4M3FN, and FLOAT4_E2M1.
-    - `topkWeights` data type only supports BF16 or FP32.
-    - The current versions of `xActiveMask` and `scales` do not support non-null input, and a null pointer needs to be passed in.
+    - **<term>Ascend 950PR/Ascend 950DT</term>**:
+        - `activation` only supports "swiglu".
+        - `activation_params` only supports [] or [clamp].
+        - `BS` (`x`.dim0) supports [1, +∞), the actual upper limit is subject to `cclBufferSize`. The operator adopts a batch processing mechanism, the BS is no longer subject to the hard limit of UB capacity, and the dispatch stage is processed in batches according to a fixed granularity.
+        - `H` (`x`.dim1) supports 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192.
+        - `topK` (`topkIds`.dim1) supports [1, 32].
+        - `expertPerRank` Range [1, 1024].
+        - `hiddenDim` (`weight1`.dim1) only supports 1024, 2048, 3072, 4096, 7168.
+        - `epWorldSize` range [2, 1024].
+        - `moeExpertNum` range [`epWorldSize`, 2048], and `moeExpertNum` % `epWorldSize` == 0.
+        - `maxRecvTokenNum` range [0, `BS` × `epWorldSize` × min(`topK`, `localMoeExpertNum`)].
+        - `dispatchQuantOutDtype` only supports 23 (FLOAT8_E5M2) or 24 (FLOAT8_E4M3FN) or 296 (FLOAT4_E2M1).
+        - The current version only supports MXFP quantization mode (`dispatchQuantMode` = 4), the dispatch stage uses MX group-by-group quantization (group size = 32), and the quantization scaling factor type is FLOAT8_E8M0.
+        - `combineQuantMode` takes values 0, 3, 4, 0 represents non-quantization, 3 represents MXFP float8_e5m2 type, 4 represents MXFP float8_e4m3 type
+        - `commAlg` must be the empty string "".
+        - The data type of `y` is the same as `x`.
+        - The dim1 of `weight1` (`hiddenDim`) must be equal to twice the dim2 of `weight2`. This is because SwiGLU activation needs to halve the intermediate dimension from `hiddenDim` to `hiddenDim`/2.
+        - `localMoeExpertNum` = `moeExpertNum` / `epWorldSize`; `sharedExpertNumPerRank` = `sharedWeight1`.dim0 (0 when shared experts are not enabled); `expertPerRank` = `sharedExpertNumPerRank` + `localMoeExpertNum`.
+        - `sharedExpertNumPerRank` range [0, 4].
+        - `topoType` is automatically derived from the communication domain context. 0 indicates MTE topology, and 1 indicates URMA spanning super topology. Currently, the URMA communication method is not supported.
+        - `topkWeightsType` takes the value 0 or 1, 0 means turning off topkWeights forward movement, 1 means turning it on. Currently, the URMA communication method is not supported.
+        - `numMaxTokensPerRank` is automatically calculated when it is 0; when it is not 0, it must be equal to `BS`.
+        - `cclBufferSize` requires >= full card soft synchronization reserved space (fixed 60KB) + mask receiving space + quantized token scaling factor space + combine sending space.
+        - `weightScales1` and `weightScales2` are required inputs, and the data type must be FLOAT8_E8M0.
+        - The data types of `weight1` and `weight2` must be consistent, and only support FLOAT8_E5M2, FLOAT8_E4M3FN, and FLOAT4_E2M1.
+        - `topkWeights` data type only supports BF16 or FP32.
+        - The current versions of `xActiveMask` and `scales` do not support non-null input, and a null pointer needs to be passed in.
 
-  - **MXFP quantized scene constraints**:
-      - `weight1` shape is (`localMoeExpertNum`, `hiddenDim`, `H`), `weight2` The shape is (`localMoeExpertNum`, `H`, `hiddenDim`/2).
-      - `weightScales1` shape is (`localMoeExpertNum`, `hiddenDim`, CeilDiv(`H`, 64), 2).
-      - `weightScales2` shape is (`localMoeExpertNum`, `H`, CeilDiv(`hiddenDim`/2, 64), 2).
-      - `sharedWeight1` shape is (`sharedExpertNumPerRank`, `hiddenDim`, `H`), `sharedWeight2` The shape is (`sharedExpertNumPerRank`, `H`, `hiddenDim`/2).
-      - `sharedWeightScales1` shape is (`sharedExpertNumPerRank`, `hiddenDim`, CeilDiv(`H`, 64), 2), `sharedWeightScales2` The shape is (`sharedExpertNumPerRank`, `H`, CeilDiv(`hiddenDim`/2, 64), 2).
-      - dim3 of `weightScales1` and dim3 of `weightScales2` must be equal to 2.
-      - In the A8W4-FP scenario, the FLOAT4_E2M1 type `weight1` must use the FORMAT_FRACTAL_NZ_C0_32 format.
-      - In the MXFP scenario, when `dispatchQuantOutDtype`=23, `weight1` and `weight2` must be FLOAT8_E5 M2, it must be FLOAT8_E4M3FN when `dispatchQuantOutDtype`=24, and it must be FLOAT4_E2M1 when `dispatchQuantOutDtype`=296.
+    - **MXFP quantized scene constraints**:
+        - `weight1` shape is (`localMoeExpertNum`, `hiddenDim`, `H`), `weight2` The shape is (`localMoeExpertNum`, `H`, `hiddenDim`/2).
+        - `weightScales1` shape is (`localMoeExpertNum`, `hiddenDim`, CeilDiv(`H`, 64), 2).
+        - `weightScales2` shape is (`localMoeExpertNum`, `H`, CeilDiv(`hiddenDim`/2, 64), 2).
+        - `sharedWeight1` shape is (`sharedExpertNumPerRank`, `hiddenDim`, `H`), `sharedWeight2` The shape is (`sharedExpertNumPerRank`, `H`, `hiddenDim`/2).
+        - `sharedWeightScales1` shape is (`sharedExpertNumPerRank`, `hiddenDim`, CeilDiv(`H`, 64), 2), `sharedWeightScales2` The shape is (`sharedExpertNumPerRank`, `H`, CeilDiv(`hiddenDim`/2, 64), 2).
+        - dim3 of `weightScales1` and dim3 of `weightScales2` must be equal to 2.
+        - In the A8W4-FP scenario, the FLOAT4_E2M1 type `weight1` must use the FORMAT_FRACTAL_NZ_C0_32 format.
+        - In the MXFP scenario, when `dispatchQuantOutDtype`=23, `weight1` and `weight2` must be FLOAT8_E5 M2, it must be FLOAT8_E4M3FN when `dispatchQuantOutDtype`=24, and it must be FLOAT4_E2M1 when `dispatchQuantOutDtype`=296.
 
 ## Calling instructions
 

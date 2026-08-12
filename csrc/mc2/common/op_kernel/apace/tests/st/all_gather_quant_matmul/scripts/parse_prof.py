@@ -11,14 +11,13 @@ import argparse
 import csv
 import glob
 import os
-import re
 import sys
 from datetime import datetime
 from statistics import median
 
-_DEFAULT_PROF = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prof"
-)
+import regex as re
+
+_DEFAULT_PROF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prof")
 KERNEL_SUBSTR = "AllGatherQuantMatmulKernel"
 GROUP_THRESHOLD_S = 5
 
@@ -33,10 +32,7 @@ def parse_ts_from_dir(dirname):
 
 
 def find_csvs(prof_base, prof_dir_name):
-    return glob.glob(
-        os.path.join(prof_base, prof_dir_name,
-                     "mindstudio_profiler_output", "op_summary_*.csv")
-    )
+    return glob.glob(os.path.join(prof_base, prof_dir_name, "mindstudio_profiler_output", "op_summary_*.csv"))
 
 
 def parse_csv(csv_path):
@@ -149,10 +145,7 @@ def report_case(prof_base, case_dirs, case_idx, mkn_str=None):
     avg = sum(medians) / len(medians)
     cube_avg = sum(cube_medians) / len(cube_medians) if cube_medians else 0.0
     print("  " + "-" * 58)
-    print(
-        f"    Overall latency (avg of card medians): "
-        f"{avg:.3f} us  ({len(medians)} cards)"
-    )
+    print(f"    Overall latency (avg of card medians): {avg:.3f} us  ({len(medians)} cards)")
     print(f"    Cube utilization (avg of card medians): {cube_avg:.1f}%")
 
     precision = read_case_precision(prof_base, case_dirs)
@@ -167,7 +160,9 @@ def print_summary(results):
     print("=" * 72)
     print("Summary")
     print("=" * 72)
-    header = f"  {'Case':>4s}  {'M':>5s}  {'K':>5s}  {'N':>5s}  {'Latency(us)':>12s}  {'Cube(%)':>7s}  {'Precision':<8s}"
+    header = (
+        f"  {'Case':>4s}  {'M':>5s}  {'K':>5s}  {'N':>5s}  {'Latency(us)':>12s}  {'Cube(%)':>7s}  {'Precision':<8s}"
+    )
     print(header)
     print("  " + "-" * (len(header) - 2))
     for case_idx, info, avg, precision, cube_avg in results:
@@ -189,22 +184,23 @@ def main():
     parser = argparse.ArgumentParser(description="Parse msprof op_summary CSVs.")
     grp = parser.add_mutually_exclusive_group()
     grp.add_argument("--case", type=int, help="Case index (1-based, sorted by time)")
-    grp.add_argument("--latest", action="store_true", default=True,
-                     help="Analyze the most recent case (default)")
+    grp.add_argument("--latest", action="store_true", default=True, help="Analyze the most recent case (default)")
     grp.add_argument("--all", action="store_true", help="Analyze all cases")
-    grp.add_argument("--check-latest-threshold", type=float, default=None,
-                     help="Check latest case's latency against threshold. Print only the latency number. Exit 0 if <= threshold, exit 2 if > threshold.")
-    parser.add_argument("--mkn", type=str, default=None,
-                        help="M K N string, e.g. '1010 4096 2560'")
-    parser.add_argument("--prof-dir", default=_DEFAULT_PROF,
-                        help="prof/ directory (default: auto-detect)")
+    grp.add_argument(
+        "--check-latest-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Check latest case's latency against threshold. Print only the latency number. "
+            "Exit 0 if <= threshold, exit 2 if > threshold."
+        ),
+    )
+    parser.add_argument("--mkn", type=str, default=None, help="M K N string, e.g. '1010 4096 2560'")
+    parser.add_argument("--prof-dir", default=_DEFAULT_PROF, help="prof/ directory (default: auto-detect)")
     args = parser.parse_args()
     prof_base = os.path.abspath(args.prof_dir)
 
-    prof_dirs = [
-        d for d in os.listdir(prof_base)
-        if re.match(r"PROF_\d+_\d{17}_", d)
-    ]
+    prof_dirs = [d for d in os.listdir(prof_base) if re.match(r"PROF_\d+_\d{17}_", d)]
     if not prof_dirs:
         print(f"No PROF directories found under {prof_base}", file=sys.stderr)
         return 1
@@ -238,8 +234,7 @@ def main():
                 results.append((i, info, avg, precision, cube_avg))
     elif args.case is not None:
         if args.case < 1 or args.case > len(cases):
-            print(f"--case {args.case} out of range (1..{len(cases)})",
-                  file=sys.stderr)
+            print(f"--case {args.case} out of range (1..{len(cases)})", file=sys.stderr)
             return 1
         ret = report_case(prof_base, cases[args.case - 1], args.case, args.mkn)
         if ret:

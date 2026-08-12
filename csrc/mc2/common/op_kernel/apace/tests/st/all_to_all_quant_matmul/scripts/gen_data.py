@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 
 # ----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
@@ -48,9 +47,9 @@ def gen_golden_data_all_to_all_matmul(m, k, n, rank_num):
 
     b_ori = np.random.uniform(1, 8, (N, K)).astype(float8_e4m3fn)
     b_ori_transpose = np.swapaxes(b_ori, -1, -2)
-    
+
     b_scale_ori = np.random.uniform(1, 8, size=(N, math.ceil(K / 64), 2)).astype(float8_e8m0)
-    
+
     b_scale_reshape = b_scale_ori.reshape(N, -1)
     b_scale_broadcast = np.repeat(b_scale_reshape, 32, axis=-1)[..., :K]
     b_scale_broadcast_transpose = np.swapaxes(b_scale_broadcast, -1, -2)
@@ -69,7 +68,7 @@ def gen_golden_data_all_to_all_matmul(m, k, n, rank_num):
     for rank_id in range(rank_num):
         a_local = np.random.uniform(1, 8, (M_total, Ka)).astype(float8_e4m3fn)
         a_scale = np.random.uniform(1, 8, size=(M_total, math.ceil(Ka / 64), 2)).astype(float8_e8m0)
-        
+
         a_local_list.append(a_local)
         a_scale_list.append(a_scale)
 
@@ -89,7 +88,7 @@ def gen_golden_data_all_to_all_matmul(m, k, n, rank_num):
             chunk_row_start = dst_rank * m
             chunk_row_end = chunk_row_start + m
             chunk = a_dequant_list[src_rank][chunk_row_start:chunk_row_end, :]
-            
+
             dst_row_start = src_rank * m
             dst_row_end = dst_row_start + m
             a_after_alltoall[dst_row_start:dst_row_end, :] = chunk
@@ -102,11 +101,11 @@ def gen_golden_data_all_to_all_matmul(m, k, n, rank_num):
             src_row_start = src_rank * m
             src_row_end = src_row_start + m
             src_chunk = a_after_alltoall_list[dst_rank][src_row_start:src_row_end, :]
-            
+
             dst_col_start = src_rank * Ka
             dst_col_end = dst_col_start + Ka
             a_permuted[:, dst_col_start:dst_col_end] = src_chunk
-        
+
         a_cpu = torch.from_numpy(a_permuted)
         b_cpu = torch.from_numpy(b_dequant)
         out = torch.matmul(a_cpu, b_cpu).to(torch.bfloat16)
@@ -119,8 +118,15 @@ def gen_golden_data_all_to_all_matmul(m, k, n, rank_num):
     # golden 计算里仍用 b_ori_transpose (逻辑 B = [K, N])，不动。
     current_dir = os.getcwd()
     for rank_id in range(rank_num):
-        write_artifacts(current_dir, rank_id, a_local_list[rank_id], b_ori,
-                       a_scale_list[rank_id], b_scale_all, out_all_ranks[rank_id])
+        write_artifacts(
+            current_dir,
+            rank_id,
+            a_local_list[rank_id],
+            b_ori,
+            a_scale_list[rank_id],
+            b_scale_all,
+            out_all_ranks[rank_id],
+        )
 
 
 if __name__ == "__main__":

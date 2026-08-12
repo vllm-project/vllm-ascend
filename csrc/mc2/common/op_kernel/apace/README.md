@@ -14,7 +14,7 @@
 
 ## Directory Structure
 
-```
+```text
 apace/
 ├── kernel/               # Fused communication-compute operator implementations
 ├── block/
@@ -73,7 +73,7 @@ Specific fused communication-compute operators under `mc2/`, such as `all_gather
 - The operator's `op_host/op_tiling` layer can use the partitioning algorithms in `apace/tiling` to determine tiling parameters.
 - The operator's `op_kernel` layer can call an `apace/kernel` implementation directly or compose a fused kernel from `apace/block` interfaces.
 
-```
+```text
 mc2/<op>/op_host    ──┐
                       └──▶ apace/tiling       (tiling interfaces and partitioning algorithms)
 mc2/<op>/op_kernel  ──┐

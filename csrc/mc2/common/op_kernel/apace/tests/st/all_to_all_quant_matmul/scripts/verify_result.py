@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 
 # ----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
@@ -26,7 +25,9 @@ CORNER_ROWS = 4
 CORNER_COLS = 4
 
 
-def _print_large_tensor_summary(golden_tensor: torch.Tensor, npu_output_tensor: torch.Tensor, m: int, n: int, rank_id: int = -1) -> None:
+def _print_large_tensor_summary(
+    golden_tensor: torch.Tensor, npu_output_tensor: torch.Tensor, m: int, n: int, rank_id: int = -1
+) -> None:
     g = golden_tensor.float()
     p = npu_output_tensor.float()
     diff = p - g
@@ -56,7 +57,7 @@ def _print_large_tensor_summary(golden_tensor: torch.Tensor, npu_output_tensor: 
 def verify_single_rank(m, n, rank_id, base_dir="./output"):
     output_path = os.path.join(base_dir, str(rank_id), "npu_out.bin")
     golden_path = os.path.join(base_dir, str(rank_id), "cpu_output.bin")
-    
+
     if not os.path.exists(output_path):
         raise FileNotFoundError(f"NPU output file not found: {output_path}")
     if not os.path.exists(golden_path):
@@ -81,21 +82,19 @@ def verify_single_rank(m, n, rank_id, base_dir="./output"):
     else:
         _print_large_tensor_summary(golden_tensor, npu_output_tensor, m, n, rank_id)
 
-    return torch.allclose(
-        golden_tensor, npu_output_tensor, rtol=ERROR_TOL, atol=ERROR_TOL, equal_nan=True
-    )
+    return torch.allclose(golden_tensor, npu_output_tensor, rtol=ERROR_TOL, atol=ERROR_TOL, equal_nan=True)
 
 
 def verify_result(m, n, rank_num, base_dir="./output"):
     all_pass = True
     results = []
-    
-    print(f"\n{'='*60}")
+
+    print(f"\n{'=' * 60}")
     print(f"Verifying outputs for {rank_num} ranks")
     print(f"Matrix shape: M={m}, N={n}")
-    print(f"All ranks should produce the same result after All2All")
-    print(f"{'='*60}")
-    
+    print("All ranks should produce the same result after All2All")
+    print(f"{'=' * 60}")
+
     for rank_id in range(rank_num):
         try:
             res = verify_single_rank(m, n, rank_id, base_dir)
@@ -109,16 +108,16 @@ def verify_result(m, n, rank_num, base_dir="./output"):
             results.append((rank_id, False, str(e)))
             print(f"[FAIL] Rank {rank_id}: {e}")
             all_pass = False
-    
-    print(f"\n{'='*60}")
+
+    print(f"\n{'=' * 60}")
     print("Verification Summary:")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     for rank_id, passed, error in results:
         status = "PASS" if passed else "FAIL"
         print(f"  Rank {rank_id}: {status}")
         if error:
             print(f"    Error: {error}")
-    
+
     return all_pass
 
 
@@ -141,7 +140,7 @@ if __name__ == "__main__":
     n = int(sys.argv[2])
     rank_num = int(sys.argv[3])
     base_dir = sys.argv[4] if len(sys.argv) > 4 else "./output"
-    
+
     try:
         all_pass = verify_result(m, n, rank_num, base_dir)
         if not all_pass:
