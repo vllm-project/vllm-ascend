@@ -14,17 +14,13 @@ from vllm_ascend.attention.attention_v1 import (
 
 
 class TestC8MXFPFullGraph(TestBase):
-    def test_backend_disables_unavailable_hamming_sparse_by_default(self):
-        impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
-
-        with patch.object(AscendAttentionBackendImpl, "__init__", return_value=None):
-            AscendC8MXFPAttentionBackendImpl.__init__(impl)
-
-        self.assertFalse(impl.enable_hamming_sparse)
-
     def test_piecewise_capture_keeps_regular_mxfp_path(self):
         impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
-        impl.enable_hamming_sparse = False
+        # The production path changes an existing backend's __class__, so the
+        # C8 MXFP subclass constructor is not called. forward() must tolerate
+        # instances created without this compatibility attribute.
+        self.assertNotIn("enable_hamming_sparse", impl.__dict__)
+        self.assertFalse(impl.enable_hamming_sparse)
 
         query = torch.zeros(2, 2, 4)
         key = torch.zeros_like(query)

@@ -41,6 +41,9 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
             from vllm_ascend.attention.attention_v1 import AscendC8MXFPAttentionBackendImpl
             layer.impl.__class__ = AscendC8MXFPAttentionBackendImpl
             layer.impl.save_v_scale_flag = False
+            # Changing __class__ does not invoke the new class's __init__.
+            # Hamming sparse/KVComp is unavailable on this baseline.
+            layer.impl.enable_hamming_sparse = False
 
         # Load v_cache static quantization scale
         hidden_size = layer.num_kv_heads * layer.head_size_v

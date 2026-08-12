@@ -2235,11 +2235,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     paged cache, and FIA consumes them from the transposed cache layout.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Hamming sparse/KVComp is unavailable on the a7e05750 baseline.
-        # Initialize the compatibility guard used by forward().
-        self.enable_hamming_sparse = False
+    # This backend is installed by assigning layer.impl.__class__, which does
+    # not call this subclass's constructor. A class-level default is therefore
+    # required for objects that predate the class swap.
+    enable_hamming_sparse: bool = False
 
     def _transpose_kv_cache(
         self, kv_cache: tuple[torch.Tensor]
@@ -2582,7 +2581,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             raise NotImplementedError("fused output quantization is not yet supported for AscendC8MXFPAttentionBackendImpl")
         if attn_metadata is None:
             return output.fill_(0)
-        if self.enable_hamming_sparse:
+        if getattr(self, "enable_hamming_sparse", False):
             raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
 
         query_mxfp8, query_scale = torch_npu.npu_dynamic_mx_quant(
