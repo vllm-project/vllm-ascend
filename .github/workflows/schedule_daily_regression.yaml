@@ -51,7 +51,13 @@ on:
     # 4 runs/day during the PR-merge peak window (09:00-20:00 Beijing), every 3h.
     # The 09:00 Beijing (01:00 UTC) slot uses the overnight nightly-ci image
     # (built at 12:00 UTC = 20:00 Beijing the night before). The 18:00 Beijing
-    # (10:00 UTC) slot ends by ~19:30 Beijing, clear of the 20:00 nightly build.
+    # (10:00 UTC) slot ends by ~19:10 Beijing, clear of the 20:00 nightly build.
+    #
+    # Timing note: the 10:00 UTC slot's worst-case timeout is 85min (ends 11:25
+    # UTC), leaving a 35min gap before the 12:00 UTC nightly image build. In
+    # practice the slot runs ~72min (ends 11:12 UTC, 48min gap). Even if they
+    # overlap, daily tests use NPU runners while nightly_image_build uses ARM
+    # CPU runners -- no resource contention.
     - cron: '0 1,4,7,10 * * *'
   workflow_dispatch:
     inputs:
@@ -303,8 +309,10 @@ jobs:
           TITLE="Daily Regression Failure ($DATE)"
           LABEL="daily-regression-failure"
 
-          # Ensure the label exists (idempotent).
-          gh label create "$LABEL" --color B60205 --description "Daily regression pipeline failure" 2>/dev/null || true
+          # Ensure the label exists (idempotent). Keep stderr visible for
+          # diagnostics (e.g. permission errors) but don't fail the step if the
+          # label already exists.
+          gh label create "$LABEL" --color B60205 --description "Daily regression pipeline failure" || true
 
           # Find an open tracking issue for today (dedup -- one issue per day).
           ISSUE_NUMBER=$(gh issue list \
