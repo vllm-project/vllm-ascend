@@ -455,16 +455,12 @@ def test_per_channel_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch, route
     gate_up_proj.weight = torch.ones(4, 4, dtype=torch.int8)
     gate_up_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
     gate_up_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
-    gate_up_proj.quant_method = SimpleNamespace(
-        quant_method=MagicMock(spec=AscendW8A8DynamicLinearMethod)
-    )
+    gate_up_proj.quant_method = SimpleNamespace(quant_method=MagicMock(spec=AscendW8A8DynamicLinearMethod))
     down_proj = MagicMock()
     down_proj.weight = torch.ones(2, 4, dtype=torch.int8)
     down_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
     down_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
-    down_proj.quant_method = SimpleNamespace(
-        quant_method=MagicMock(spec=AscendW8A8DynamicLinearMethod)
-    )
+    down_proj.quant_method = SimpleNamespace(quant_method=MagicMock(spec=AscendW8A8DynamicLinearMethod))
     runner._shared_experts = SimpleNamespace(
         gate_up_proj=gate_up_proj,
         down_proj=down_proj,
@@ -539,15 +535,11 @@ def test_per_channel_w4a8_shared_situ_uses_single_expert_gmm_fusion(monkeypatch)
     gate_up_proj = MagicMock(return_value=(gate_up, None))
     gate_up_proj.weight_scale = torch.ones(8, dtype=torch.int64)
     gate_up_proj.weight_scale_fp32 = torch.ones(8, dtype=torch.float32)
-    gate_up_proj.quant_method = SimpleNamespace(
-        quant_method=MagicMock(spec=AscendW4A8DynamicLinearMethod)
-    )
+    gate_up_proj.quant_method = SimpleNamespace(quant_method=MagicMock(spec=AscendW4A8DynamicLinearMethod))
     down_proj = MagicMock(return_value=(down_out, None))
     down_proj.weight_scale = torch.ones(4, dtype=torch.int64)
     down_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
-    down_proj.quant_method = SimpleNamespace(
-        quant_method=MagicMock(spec=AscendW4A8DynamicLinearMethod)
-    )
+    down_proj.quant_method = SimpleNamespace(quant_method=MagicMock(spec=AscendW4A8DynamicLinearMethod))
     runner._shared_experts = SimpleNamespace(
         gate_up_proj=gate_up_proj,
         down_proj=down_proj,

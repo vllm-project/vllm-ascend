@@ -140,8 +140,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         num_offline_shards = scale_bias.shape[1]
         if tp_size <= 0 or num_offline_shards % tp_size != 0:
             raise ValueError(
-                f"scale_bias width {num_offline_shards} must be divisible by "
-                f"the projection TP size {tp_size}"
+                f"scale_bias width {num_offline_shards} must be divisible by the projection TP size {tp_size}"
             )
         if rank < 0 or rank >= tp_size:
             raise ValueError(f"tp_rank {rank} exceeds projection TP size {tp_size}")

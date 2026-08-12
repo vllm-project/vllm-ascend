@@ -13,13 +13,13 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
-from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 

@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import regex as re
