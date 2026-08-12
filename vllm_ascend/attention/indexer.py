@@ -89,28 +89,44 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
         return None
 
 
-def validate_indexshare_pp_partition(
+def validate_indexer_pp_partition(
     config: Any,
     start_layer: int,
     end_layer: int,
     pp_rank: int,
     pp_size: int,
 ) -> None:
-    """Validate an IndexShare layer range against a PP stage boundary.
+    """Validate Indexer dependencies against a PP stage boundary.
 
-    IndexShare configurations describe layers as ``full`` or ``shared``.
-    A ``shared`` layer reuses Top-K indices produced by an earlier ``full``
-    layer. Since those indices are worker-local and are not propagated in PP
-    intermediate tensors, each PP stage must encounter a local ``full`` layer
-    before it encounters a ``shared`` layer.
+    This covers explicit IndexShare configurations, where ``shared`` layers
+    reuse Top-K indices from a preceding ``full`` layer, and runtime IndexCache
+    configurations, where a layer skips Top-K computation and reads previously
+    cached indices. Since Top-K indices are worker-local and are not propagated
+    in PP intermediate tensors, each PP stage must begin with a layer that
+    recomputes the indices.
 
-    Models that do not expose ``indexer_types`` are not IndexShare models from
-    this validator's perspective and are left unchanged.
+    Models without either ``indexer_types`` or ``use_index_cache`` are left
+    unchanged.
     """
     if pp_size <= 1:
         return
 
     indexer_types = getattr(config, "indexer_types", None)
+    use_index_cache = getattr(config, "use_index_cache", False)
+    if indexer_types is None and not use_index_cache:
+        return
+
+    index_cache_skip_topk = _get_index_cache_skip_topk(config, start_layer)
+    if index_cache_skip_topk:
+        raise ValueError(
+            "Index cache dependency crosses a pipeline-parallel stage boundary: "
+            f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
+            f"but layer {start_layer} skips Top-K computation. "
+            "Cross-PP Top-K index propagation is not supported. "
+            "Please choose a pipeline-parallel partition whose first layer "
+            "recomputes the Top-K index."
+        )
+
     if indexer_types is None:
         return
 
@@ -128,3 +144,18 @@ def validate_indexshare_pp_partition(
                 "Cross-PP Top-K index propagation is not supported. "
                 "Please choose a pipeline-parallel partition aligned to an IndexShare group."
             )
+
+
+def _get_index_cache_skip_topk(config: Any, layer_id: int) -> bool:
+    """Mirror the existing IndexCache skip decision for PP validation only."""
+    index_topk_freq = getattr(config, "index_topk_freq", 1)
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
+    index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+
+    if index_topk_pattern is None:
+        return (
+            max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+        )
+    if 0 <= layer_id < len(index_topk_pattern):
+        return index_topk_pattern[layer_id] == "S"
+    return False
