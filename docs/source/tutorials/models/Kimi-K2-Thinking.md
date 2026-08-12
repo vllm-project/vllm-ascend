@@ -170,7 +170,7 @@ Expected Status:
 - The command exits successfully.
 - `vllm and vllm_ascend import ok` is printed.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 

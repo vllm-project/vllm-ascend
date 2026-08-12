@@ -118,7 +118,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -319,7 +319,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
@@ -402,7 +401,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
@@ -484,7 +482,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800
@@ -566,7 +563,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800

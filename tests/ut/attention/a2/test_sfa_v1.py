@@ -15,6 +15,11 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.sfa_kv_offload import (
+    AscendSFAKVOffloadImpl,
+    AscendSFAKVOffloadMetadataBuilder,
+)
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFABackend,
     AscendSFAImpl,
@@ -30,7 +35,6 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
@@ -46,36 +50,64 @@ class TestAscendSFABackend(TestBase):
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
+        self.dsa_patcher = patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False)
+        self.dsa_patcher.start()
+
+        self.ascend_config_patcher = patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+        mock_ascend_config = self.ascend_config_patcher.start()
+        mock_ascend_config.return_value.sparse_kv_offload_config.enabled = False
 
     def tearDown(self):
+        self.ascend_config_patcher.stop()
         self.utils_patcher.stop()
+        self.dsa_patcher.stop()
         self.config_context.__exit__(None, None, None)
 
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
-    def test_get_builder_cls(self):
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_builder_cls(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         self.assertEqual(AscendSFABackend.get_builder_cls(), AscendSFAMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
         result = AscendSFABackend.get_kv_cache_shape(2, 4, 8, 128)
         self.assertEqual(result, (2, 4, 8, 128))
 
-    def test_get_impl_cls(self):
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_impl_cls(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
-    def test_get_builder_cls_with_dcp(self, mock_enable_dcp):
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         builder_cls = AscendSFABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
-    def test_get_impl_cls_with_dcp(self, mock_enable_dcp):
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         impl_cls = AscendSFABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_builder_cls_with_sparse_kv_offload(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = True
+        result = AscendSFABackend.get_builder_cls()
+        self.assertEqual(result, AscendSFAKVOffloadMetadataBuilder)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_impl_cls_with_sparse_kv_offload(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = True
+        result = AscendSFABackend.get_impl_cls()
+        self.assertEqual(result, AscendSFAKVOffloadImpl)
 
 
 class TestAscendSFADeviceOperator(TestBase):
@@ -520,9 +552,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
         )
         self.parent_init_patcher.start()
 
-        if hasattr(enable_dsa_cp, "cache_clear"):
-            enable_dsa_cp.cache_clear()
-
     def tearDown(self):
         self.patcher.stop()
         self.ascend_config_patcher.stop()
@@ -554,16 +583,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
     @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build(
         self,
-        mock_enable_dsa_cp,
         mock_get_cos_and_sin_mla,
         mock_get_current_vllm_config,
     ):
-        mock_enable_dsa_cp.return_value = False
-
         cfg = MagicMock()
         cfg.model_config = MagicMock()
         cfg.model_config.hf_text_config = MagicMock()
@@ -616,11 +641,10 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("vllm.distributed.parallel_state.get_tp_group")
     @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(
-        self, mock_get_tp_group, mock_enable_dsa_cp, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
+        self, mock_get_tp_group, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
     ):
         cfg = MagicMock()
         cfg.model_config = MagicMock()
@@ -674,12 +698,10 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
     def test_ascend_sfa_metadata_builder_build_with_c8_reshape_optim(
         self,
         store_kv_block_metadata,
-        mock_enable_dsa_cp,
         mock_get_cos_and_sin_mla,
         mock_get_current_vllm_config,
     ):
@@ -752,16 +774,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
 class TestAscendSFAImpl(TestBase):
     @patch("vllm.distributed.parallel_state._TP", new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp_with_o_proj_tp")
     @patch("vllm_ascend.attention.sfa_v1.enable_sp")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def setUp(
         self,
         mock_get_ascend_config,
-        mock_enable_dsa_cp,
         mock_enable_sp,
-        mock_enable_dsa_cp_with_o_proj_tp,
         mock_get_current_vllm_config,
         mock_tp,
     ):
@@ -769,9 +787,7 @@ class TestAscendSFAImpl(TestBase):
         mock_tp.rank_in_group = 0
         mock_tp.device_group = MagicMock()
 
-        mock_enable_dsa_cp.return_value = False
         mock_enable_sp.return_value = False
-        mock_enable_dsa_cp_with_o_proj_tp.return_value = False
 
         # Default ascend config (non-MLAPO, non-C8)
         mock_ascend_config = MagicMock()
@@ -929,7 +945,6 @@ class TestAscendSFAImpl(TestBase):
         """exec_kv with enable_sparse_sfa_c8 delegates to custom_kv_rmsnorm_rope."""
         self.impl.enable_sparse_sfa_c8 = True
         self.impl.c8_k_cache_dtype = torch.int8
-        self.impl.enable_dsa_cp = False
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5
@@ -1049,9 +1064,9 @@ class TestAscendSFAImpl(TestBase):
 
     def test_reasons_dsa_cp_blocked(self):
         self._setup_prolog_v3_state()
-        self.impl.enable_dsa_cp = True
-
-        reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+        impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+        impl.__dict__.update(self.impl.__dict__)
+        reasons = impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
         self.assertTrue(any("DSA-CP" in r for r in reasons))
 
     def test_reasons_kv_producer_blocked(self):

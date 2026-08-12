@@ -61,6 +61,15 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
+    get_gva_layerwise_config,
+    get_layerwise_physical_layer_index,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_host_device_memory_usage_ratio,
+)
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -244,29 +253,9 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
-        model = self.model_runner.model
-        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
-            for name, param in model.named_parameters():
-                if "w2_weight" in name and param.shape[2] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
-
-                    w2_data = param.transpose(1, 2)
-                    w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
-                    setattr(parent_module, param_name, w2_data)
-                elif "w13_weight" in name and param.shape[1] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
-
-                    w13_data = param.transpose(1, 2)
-                    w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
-                    setattr(parent_module, param_name, w13_data)
-
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
+            model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
@@ -512,6 +501,7 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
+            kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(kv_cache_memory_bytes)
             return kv_cache_memory_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -551,17 +541,87 @@ class NPUWorker(WorkerBase):
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
 
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            memory_info = getattr(self, "_gva_layerwise_memory_info", None)
+            if memory_info is None:
+                num_layers = self.model_config.get_num_layers(self.parallel_config)
+                layout = build_layerwise_cache_layout(num_layers, extra_config)
+                num_buffer_assignments = len(layout.storage_indices)
+                factor = num_layers / num_buffer_assignments if layout.has_layer_reuse else 1.0
+            else:
+                num_layers, num_buffer_assignments, factor = memory_info
+            if factor != 1.0:
+                self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
+                logger.info(
+                    "Layerwise KV cache reuse maps %d layers onto %d buffer assignments; "
+                    "scale logical KV budget by %.3f.",
+                    num_layers,
+                    num_buffer_assignments,
+                    factor,
+                )
+
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
+        self.available_kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(
+            self.available_kv_cache_memory_bytes,
+        )
 
         return int(self.available_kv_cache_memory_bytes)
+
+    def update_available_memory_for_sparse_kv_offload(self, available_memory):
+        """
+        A simple patch for Sparse KV offload: add additional available_memory according to the
+        ratio of host memory (kv) and dev memory (indexer), so we can allocate blocks for indexer cache
+        using all original available device memory without modify original kv_spec or vllm code.
+        For further optimization, consider to merge this logic to vllm kv_cache_utils.py,
+        or reuse hisparse's host pool logic after it's merged to vllm.
+        """
+        GiB = lambda b: b / GiB_bytes
+        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
+        if not sparse_kv_offload_config.enabled:
+            return available_memory
+        keep_device_kv_cache = sparse_kv_offload_config.keep_device_kv_cache
+        if keep_device_kv_cache:
+            needed_dram_size_bytes = available_memory
+        else:
+            kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
+            host_device_memory_usage_ratio = get_host_device_memory_usage_ratio(kv_cache_spec)
+            needed_dram_size_bytes = host_device_memory_usage_ratio * available_memory
+        if needed_dram_size_bytes > sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30):
+            raise ValueError(
+                f"Needed dram size ({GiB(needed_dram_size_bytes)} GB) is larger than "
+                f"user specified dram size ({sparse_kv_offload_config.dram_size_per_dp_GB} GB). "
+                "Please increase sparse_kv_offload_config.dram_size_per_dp_GB if available on your device."
+            )
+        if not keep_device_kv_cache:
+            available_memory += needed_dram_size_bytes
+            logger.info_once(
+                "Sparse KV offload is enabled, enlarge total available memory to %.2f GiB",
+                GiB(available_memory),
+                scope="local",
+            )
+        return int(available_memory)
+
+    def log_memory_stats(self) -> None:
+        """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        self.torch_reserved = torch.npu.memory_reserved()
+        self.torch_allocated = torch.npu.memory_allocated()
+        logger.debug(
+            "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
+            self.torch_reserved / GiB_bytes,
+            self.torch_allocated / GiB_bytes,
+        )
 
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -846,8 +906,50 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
+    def _get_layerwise_kv_cache_memory_info(
+        self,
+        kv_cache_spec: dict[str, KVCacheSpec],
+        extra_config: dict[str, Any],
+    ) -> tuple[int, int, float]:
+        if not kv_cache_spec:
+            return 0, 0, 1.0
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+        num_layers = len(physical_layers)
+        if num_layers < base_layers:
+            return num_layers, num_layers, 1.0
+        reuse_layout = build_layerwise_reuse_layout(
+            kv_cache_spec,
+            base_layers,
+            extra_config,
+        )
+        if not reuse_layout.has_layer_reuse:
+            return num_layers, num_layers, 1.0
+        num_buffer_assignments = len(reuse_layout.buffer_slots)
+
+        logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
+        physical_page_bytes = 0
+        for slot in reuse_layout.buffer_slots:
+            physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
+            for layer in slot:
+                indexer = reuse_layout.layer_cache_specs[layer].indexer
+                if indexer is not None:
+                    physical_page_bytes += indexer.spec.page_size_bytes
+                    break
+        return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
+                kv_cache_spec,
+                extra_config,
+            )
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            # reserve kv_cache_spec for sparse kv offload memory profile usage.
+            self.kv_cache_spec = kv_cache_spec
+        return kv_cache_spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.
@@ -875,25 +977,23 @@ class NPUWorker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-            # Restrict to mamba and full attn hybrid models (e.g. Qwen3.x).
-            #
-            # When eagle3 is enabled with num_speculative_tokens>1, mamba blocks may be reallocated to full blocks if
-            # the target and draft models share the same kv cache tensor (e.g. unaligned full attn layers with
-            # different num_kv_heads and head_size). In addition, for performance reasons, the current mtp/eagle path
-            # does not update seq_lens_cpu with num_rejected_tokens for step>1, since it would require d2h sync. As a
-            # result, seq_lens_cpu can become stale and some blocks will be unintentionally used.
-            #
-            # If an uncleared mamba block is later reused, the stale state combined with the incorrect seq_lens_cpu may
-            # lead to NaNs and reduced acceptance rate.
-            if (
-                kv_cache_config.needs_kv_cache_zeroing
-                and hasattr(self.model_runner, "_init_kv_zero_meta")
-                and self.vllm_config is not None
-                and self.vllm_config.speculative_config is not None
-                and self.vllm_config.speculative_config.method == "eagle3"
-                and self.vllm_config.speculative_config.num_speculative_tokens > 1
-            ):
-                self.model_runner._init_kv_zero_meta()
+        # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
+        # set, so its worker-side consumer must use the same condition. Keep the
+        # narrower Eagle3 condition for MRV1, where zeroing was introduced only
+        # for the multi-step speculative-decode reuse issue.
+        speculative_config = self.vllm_config.speculative_config
+        needs_mrv1_eagle_zeroing = (
+            speculative_config is not None
+            and speculative_config.method == "eagle3"
+            and speculative_config.num_speculative_tokens > 1
+        )
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
+            self.use_v2_model_runner or needs_mrv1_eagle_zeroing
+        )
+        # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
+        # survive sleep/wake cycles.
+        if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
+            self.model_runner._init_kv_zero_meta()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
@@ -941,6 +1041,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 

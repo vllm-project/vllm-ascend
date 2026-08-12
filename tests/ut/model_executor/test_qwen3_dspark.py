@@ -33,12 +33,13 @@ class TestQwen3DSparkWeightLoading:
         """Rotate FC weights and preserve all other weights before delegation."""
         model_cls = qwen3_dspark.AscendQwen3DSparkForCausalLM
 
-        # ``load_weights`` only reads ``rotation_path`` from the model. Bypass the
-        # full model constructor and nn.Module attribute handling to keep this a
-        # focused CPU unit test.
+        # ``load_weights`` only reads ``rotation_path`` / ``enable_confidence_head``
+        # from the model. Bypass the full model constructor and nn.Module
+        # attribute handling to keep this a focused CPU unit test.
         model = model_cls.__new__(model_cls)
         rotation_path = "quarot.safetensors"
         object.__setattr__(model, "rotation_path", rotation_path)
+        object.__setattr__(model, "enable_confidence_head", False)
 
         # Use a non-identity matrix so an unrotated FC weight fails the assertion.
         rotation_matrix = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
@@ -49,12 +50,12 @@ class TestQwen3DSparkWeightLoading:
 
         # Capture the final delegation without invoking the real model loader.
         with (
-            patch.object(
-                qwen3_dspark, "get_rotataion_matrix", return_value=rotation_matrix
-            ) as mock_get_rotation_matrix,
+            patch.object(qwen3_dspark, "get_rotation_matrix", return_value=rotation_matrix) as mock_get_rotation_matrix,
             patch.object(qwen3_dspark.Qwen3DSparkForCausalLM, "load_weights") as mock_parent_load_weights,
         ):
-            model.load_weights(weights_to_load)
+            # DefaultModelLoader passes a one-shot iterator. Exercise that path
+            # so materializing the weights before rotation cannot exhaust them.
+            model.load_weights(iter(weights_to_load))
 
         mock_get_rotation_matrix.assert_called_once_with(rotation_path)
         mock_parent_load_weights.assert_called_once()
