@@ -64,6 +64,7 @@ patch(
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
 patch("torch.npu.set_device").start()
 
+from vllm_ascend import envs as ascend_envs  # noqa: E402
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
@@ -1186,6 +1187,30 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(src_list, [0x1000 + 2 * 128, 0x2000 + 2 * 256])
         self.assertEqual(dst_list, [0x3000 + 3 * 160, 0x4000 + 3 * 512])
         self.assertEqual(length_list, [100, 200])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.enable_custom_op", return_value=True)
+    def test_reformat_honours_additional_config_over_env(self, _mock_custom_op):
+        # additional_config disables the fused op while the deprecated env var
+        # still enables it; the config has to win.
+        req = dict(self.test_req)
+        req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=2, is_group_transfer_end=True)]
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
+        self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1, 1]]}
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024, 1024]]
+
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config,
+            patch.object(ascend_envs, "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", True, create=True),
+            patch.object(self.thread, "reformat_kv_cache") as mock_reformat,
+            patch.object(self.thread, "reformat_kv_cache_with_fused_op") as mock_fused,
+            patch.object(self.thread, "_get_group_kv_caches", return_value={"layer0": (MagicMock(), MagicMock())}),
+        ):
+            mock_config.return_value.enable_kv_nz = False
+            mock_config.return_value.enable_transpose_kv_cache_by_block = False
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        mock_fused.assert_not_called()
+        mock_reformat.assert_called_once()
 
     def test_transfer_kv_cache_failure(self):
         self.engine.batch_transfer_sync_read.return_value = -1
