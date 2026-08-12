@@ -24,6 +24,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
     AscendConfig,
     EplbConfig,
+    PrefillAdmissionConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -532,6 +533,29 @@ class TestShortRequestFirstConfig(TestBase):
         self.assertEqual(cfg.long_max_wait_ms, 0.0)
 
 
+class TestPrefillAdmissionConfig(TestBase):
+    def test_defaults_are_disabled_and_bounded(self):
+        config = PrefillAdmissionConfig()
+
+        self.assertFalse(config.enabled)
+        self.assertEqual(config.prefill_interval, 4)
+        self.assertEqual(config.decode_low_watermark, 0)
+        self.assertEqual(config.max_prefill_wait_ms, 1000.0)
+        self.assertEqual(config.prefill_tokens_per_pp_bubble, 512)
+
+    def test_rejects_unknown_or_non_positive_limits(self):
+        invalid_configs = (
+            {"unknown": True},
+            {"prefill_interval": 0},
+            {"decode_low_watermark": -1},
+            {"max_prefill_wait_ms": 0},
+            {"prefill_tokens_per_pp_bubble": 0},
+        )
+        for user_config in invalid_configs:
+            with self.subTest(user_config=user_config), self.assertRaises(ValueError):
+                PrefillAdmissionConfig(user_config)
+
+
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
         config = SchedulerConfig({}, balance_env_value=False)
@@ -540,6 +564,7 @@ class TestSchedulerConfig(TestBase):
         self.assertFalse(config.recompute_scheduler_enable)
         self.assertFalse(config.short_request_first_config.enabled)
         self.assertFalse(config.profiling_chunk_config.enabled)
+        self.assertFalse(config.prefill_admission_config.enabled)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_none_config_uses_defaults_and_legacy_fallback(self, mock_warning_once):
@@ -570,6 +595,13 @@ class TestSchedulerConfig(TestBase):
                         "long_max_wait_ms": 2000,
                     },
                     "profiling_chunk_config": {"enabled": True, "need_timing": False},
+                    "prefill_admission_config": {
+                        "enabled": True,
+                        "prefill_interval": 8,
+                        "decode_low_watermark": 6,
+                        "max_prefill_wait_ms": 2500,
+                        "prefill_tokens_per_pp_bubble": 256,
+                    },
                 }
             },
             balance_env_value=False,
@@ -582,6 +614,11 @@ class TestSchedulerConfig(TestBase):
         self.assertEqual(config.short_request_first_config.long_max_wait_ms, 2000.0)
         self.assertTrue(config.profiling_chunk_config.enabled)
         self.assertFalse(config.profiling_chunk_config.need_timing)
+        self.assertTrue(config.prefill_admission_config.enabled)
+        self.assertEqual(config.prefill_admission_config.prefill_interval, 8)
+        self.assertEqual(config.prefill_admission_config.decode_low_watermark, 6)
+        self.assertEqual(config.prefill_admission_config.max_prefill_wait_ms, 2500.0)
+        self.assertEqual(config.prefill_admission_config.prefill_tokens_per_pp_bubble, 256)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):
