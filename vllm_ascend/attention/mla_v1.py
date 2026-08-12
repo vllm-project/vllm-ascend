@@ -58,7 +58,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     maybe_trans_nz,
     weak_ref_tensors,
-    enable_pcp，
+    enable_pcp,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
