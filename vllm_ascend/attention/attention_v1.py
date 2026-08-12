@@ -23,7 +23,6 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.distributed.parallel_state import get_pcp_group
 from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
@@ -216,7 +215,6 @@ class AscendMetadata:
 class AscendAttentionPCPMetadata(AscendMetadata):
     """GQA metadata needed to write the complete PCP KV cache."""
 
-    pcp_slot_mapping: torch.Tensor | None = None
     pcp_local_num_input_tokens: int = 0
 
 
@@ -437,14 +435,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
 
 class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
-    """Build rank-local GQA metadata while retaining expanded cache slots."""
+    """Build GQA metadata while retaining expanded cache slots."""
 
     metadata_cls = AscendAttentionPCPMetadata
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_rank = get_pcp_group().rank_in_group
 
     def _split_decodes_and_prefills(
         self,
@@ -482,23 +479,9 @@ class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
-        rank_slot_mappings = expanded_slot_mapping.view(
-            self.pcp_size,
-            local_num_input_tokens,
-        )
-        num_decode_tokens = metadata.num_decode_tokens
-        metadata.slot_mapping = torch.cat(
-            (
-                rank_slot_mappings[0, :num_decode_tokens],
-                rank_slot_mappings[
-                    self.pcp_rank,
-                    num_decode_tokens : metadata.num_actual_tokens,
-                ],
-            )
-        )
-        metadata.pcp_slot_mapping = expanded_slot_mapping
+        metadata.slot_mapping = expanded_slot_mapping
         metadata.pcp_local_num_input_tokens = local_num_input_tokens
-        if metadata.num_prefills > 0 and metadata.attn_state == AscendAttentionState.PrefillNoCache:
+        if metadata.num_prefills > 0:
             metadata.attn_state = AscendAttentionState.ChunkedPrefill
         return metadata
 
@@ -1783,9 +1766,7 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
                 pcp_metadata.reshape_cache_event.record()
             return query, key, value, output
 
-        expanded_slot_mapping = pcp_metadata.pcp_slot_mapping
-        if expanded_slot_mapping is None:
-            raise RuntimeError("GQA PCP metadata is missing the expanded slot mapping.")
+        expanded_slot_mapping = pcp_metadata.slot_mapping
         local_num_input_tokens = pcp_metadata.pcp_local_num_input_tokens
         if key.shape[0] < local_num_input_tokens:
             raise RuntimeError(

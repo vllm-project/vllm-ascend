@@ -27,11 +27,8 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import (
-    AscendPCPManager,
-    maybe_build_ascend_pcp_manager,
-    validate_ascend_pcp_config,
-)
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -164,7 +161,6 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
-        vllm_config=vllm_config,
         req_states=req_states,
         max_num_reqs=1,
         max_num_tokens=18,
@@ -186,6 +182,11 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
             side_effect=_mock_async_copy_to_cpu,
+        ),
+        patch.object(
+            pcp_manager_module,
+            "get_current_vllm_config",
+            return_value=vllm_config,
         ),
         patch.object(pcp_manager_module, "build_attn_state", return_value=attn_state) as build_attn_state,
     ):
@@ -221,48 +222,16 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
 
 
-def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+def test_npu_model_runner_uses_ascend_pcp_manager() -> None:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    assert runner.pcp_manager_cls is AscendPCPManager
+
+
+def test_validate_ascend_gqa_pcp_config():
+    AscendPCPManager.validate_config(
+        _make_gqa_pcp_config(),
+        supports_mm_inputs=False,
     )
-
-    assert (
-        maybe_build_ascend_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=MagicMock(),
-            block_tables=MagicMock(),
-        )
-        is None
-    )
-
-
-def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
-    vllm_config = _make_gqa_pcp_config()
-    pcp_group = SimpleNamespace(rank_in_group=1)
-    req_states = MagicMock()
-
-    with patch.object(
-        pcp_manager_module,
-        "get_pcp_group",
-        return_value=pcp_group,
-    ):
-        manager = maybe_build_ascend_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=req_states,
-            block_tables=None,
-        )
-
-    assert isinstance(manager, AscendPCPManager)
-    assert manager.vllm_config is vllm_config
-    assert manager.pcp_world_size == 2
-    assert manager.pcp_rank == 1
-    assert manager.dcp_world_size == 1
-    assert manager.dcp_rank == 0
-    assert manager.cp_interleave == 1
 
 
 @pytest.mark.parametrize(
@@ -273,13 +242,10 @@ def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
         ("encoder_decoder", "encoder-decoder"),
         ("mm", "MM inputs"),
         ("lora", "LoRA"),
-        ("spec_decode", "speculative decoding"),
-        ("quantization", "quantized models"),
-        ("graph", "eager mode only"),
         ("mha", "num_attention_heads"),
     ],
 )
-def test_validate_ascend_gqa_pcp_rejects_unsupported_modes(case, match):
+def test_validate_ascend_pcp_rejects_unsupported_modes(case, match):
     vllm_config = _make_gqa_pcp_config()
     supports_mm_inputs = case == "mm"
     if case == "dcp":
@@ -290,27 +256,39 @@ def test_validate_ascend_gqa_pcp_rejects_unsupported_modes(case, match):
         vllm_config.model_config.is_encoder_decoder = True
     elif case == "lora":
         vllm_config.lora_config = object()
-    elif case == "spec_decode":
-        vllm_config.speculative_config = object()
-    elif case == "quantization":
-        vllm_config.model_config.quantization = "ascend"
-    elif case == "graph":
-        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
     elif case == "mha":
         vllm_config.model_config.hf_text_config.num_key_value_heads = 32
 
     with pytest.raises(NotImplementedError, match=match):
-        validate_ascend_pcp_config(vllm_config, supports_mm_inputs=supports_mm_inputs)
+        AscendPCPManager.validate_config(
+            vllm_config,
+            supports_mm_inputs=supports_mm_inputs,
+        )
 
 
-def test_validate_ascend_pcp_preserves_upstream_mla_validation():
+@pytest.mark.parametrize("use_mla", [False, True])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "spec_decode",
+        "quantization",
+        "piecewise_graph",
+        "full_graph",
+        "dtype",
+    ],
+)
+def test_validate_ascend_pcp_allows_supported_modes(use_mla, case):
     vllm_config = _make_gqa_pcp_config()
-    vllm_config.model_config.use_mla = True
+    vllm_config.model_config.use_mla = use_mla
+    if case == "spec_decode":
+        vllm_config.speculative_config = object()
+    elif case == "quantization":
+        vllm_config.model_config.quantization = "ascend"
+    elif case == "piecewise_graph":
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+    elif case == "full_graph":
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    elif case == "dtype":
+        vllm_config.model_config.dtype = torch.float16
 
-    with patch.object(
-        pcp_manager_module,
-        "_UPSTREAM_PCP_VALIDATE_CONFIG",
-    ) as validate_upstream:
-        validate_ascend_pcp_config(vllm_config, supports_mm_inputs=False)
-
-    validate_upstream.assert_called_once_with(vllm_config, False)
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
