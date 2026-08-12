@@ -747,18 +747,12 @@ class AscendMLAPCPMetadataBuilder(AscendMLAMetadataBuilder):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
-        local_prefill_capacity = (
-            local_num_input_tokens - metadata.num_decode_tokens
-        )
+        local_prefill_capacity = local_num_input_tokens - metadata.num_decode_tokens
         metadata.slot_mapping = expanded_slot_mapping
         metadata.pcp_local_num_input_tokens = local_num_input_tokens
-        metadata.pcp_local_prefill_start = (
-            self.pcp_rank * local_prefill_capacity
-        )
+        metadata.pcp_local_prefill_start = self.pcp_rank * local_prefill_capacity
         metadata.pcp_local_prefill_end = (
-            metadata.pcp_local_prefill_start
-            + metadata.num_actual_tokens
-            - metadata.num_decode_tokens
+            metadata.pcp_local_prefill_start + metadata.num_actual_tokens - metadata.num_decode_tokens
         )
         # PCP partitions prefill tokens into rank-local chunks, including
         # continued prefills whose uncached suffix contains only one token.
@@ -1942,7 +1936,7 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             tuple(gathered_kv.shape),
             tuple(gathered_prefill_slots.shape),
         )
-        # TODO Due to the npu_kv_rmsnorm_rope_cache fusion operator, the RMSNorm rope of the KV layer   
+        # TODO Due to the npu_kv_rmsnorm_rope_cache fusion operator, the RMSNorm rope of the KV layer
         # involves repeated calculations, leaving room for optimization.
         gathered_k_pe, gathered_k_c_normed = super().exec_kv_prefill(
             gathered_kv,
@@ -1951,9 +1945,7 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             kv_cache,
             gathered_prefill_slots,
         )
-        prefill_k_pe = gathered_k_pe[
-            attn_metadata.pcp_local_prefill_start : attn_metadata.pcp_local_prefill_end
-        ]
+        prefill_k_pe = gathered_k_pe[attn_metadata.pcp_local_prefill_start : attn_metadata.pcp_local_prefill_end]
         prefill_k_c_normed = gathered_k_c_normed[
             attn_metadata.pcp_local_prefill_start : attn_metadata.pcp_local_prefill_end
         ]
