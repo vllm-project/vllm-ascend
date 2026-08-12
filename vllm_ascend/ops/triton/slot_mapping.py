@@ -89,12 +89,10 @@ def compute_slot_mapping_fused_kernel(
     num_reqs_plus_one = tl.num_programs(axis=0)
 
     # ---- load per-group parameters ------------------------------------
-    block_table_ptr = (tl.load(group_block_table_ptrs + group_idx)
-                       .to(tl.pointer_type(tl.int32)))
+    block_table_ptr = tl.load(group_block_table_ptrs + group_idx).to(tl.pointer_type(tl.int32))
     block_table_stride = tl.load(group_block_table_strides + group_idx)
     block_size = tl.load(group_block_sizes + group_idx)
-    slot_mapping_ptr = (tl.load(group_slot_mapping_ptrs + group_idx)
-                        .to(tl.pointer_type(tl.int32)))
+    slot_mapping_ptr = tl.load(group_slot_mapping_ptrs + group_idx).to(tl.pointer_type(tl.int32))
     kv_cache_block_size = tl.load(group_kv_cache_block_sizes + group_idx)
     blocks_per_kv_block = tl.load(group_blocks_per_kv + group_idx)
 
@@ -102,8 +100,7 @@ def compute_slot_mapping_fused_kernel(
     if req_idx == num_reqs_plus_one - 1:
         for p in range(num_tokens, max_num_tokens, TILE_BLOCK_SIZE):
             pad_offs = p + tl.arange(0, TILE_BLOCK_SIZE)
-            tl.store(slot_mapping_ptr + pad_offs, PAD_ID, mask=pad_offs <
-                                                               max_num_tokens)
+            tl.store(slot_mapping_ptr + pad_offs, PAD_ID, mask=pad_offs < max_num_tokens)
         return
 
     # ---- normal request -----------------------------------------------
@@ -130,15 +127,11 @@ def compute_slot_mapping_fused_kernel(
             virtual_block_size = kv_cache_block_size * TOTAL_CP_WORLD_SIZE
             virtual_block_indices = pos // virtual_block_size
             virtual_block_offsets = pos - virtual_block_indices * virtual_block_size
-            is_local = ((virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE) %
-                        TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK)
+            is_local = (virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
             local_block_offsets = (
-                virtual_block_offsets // (TOTAL_CP_WORLD_SIZE *
-                                          CP_KV_CACHE_INTERLEAVE_SIZE)
-            ) * CP_KV_CACHE_INTERLEAVE_SIZE + (virtual_block_offsets %
-                                               CP_KV_CACHE_INTERLEAVE_SIZE)
-            block_indices = (virtual_block_indices * blocks_per_kv_block +
-                             local_block_offsets // block_size)
+                virtual_block_offsets // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+            ) * CP_KV_CACHE_INTERLEAVE_SIZE + (virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE)
+            block_indices = virtual_block_indices * blocks_per_kv_block + local_block_offsets // block_size
             slot_offsets = local_block_offsets % block_size
 
         # Windowed block-table load (fixes non-contiguous access):
@@ -155,10 +148,8 @@ def compute_slot_mapping_fused_kernel(
         if TOTAL_CP_WORLD_SIZE == 1:
             relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
         else:
-            relative_block_indices = tl.where(mask & is_local, block_indices -
-                                              block_idx_base, 0)
-        block_numbers = (tl.gather(block_table_window, relative_block_indices, 0)
-                         .to(tl.int32))
+            relative_block_indices = tl.where(mask & is_local, block_indices - block_idx_base, 0)
+        block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
 
         slot_ids = block_numbers * block_size + slot_offsets
         if TOTAL_CP_WORLD_SIZE != 1:
@@ -240,8 +231,7 @@ def launch_slot_mapping_fused(
 
     tile_block_size = 1024
     min_block_size = min(bt.block_size for bt in block_tables)
-    window_size = _next_power_of_2(((tile_block_size + min_block_size - 1) //
-                                    min_block_size) + 1)
+    window_size = _next_power_of_2(((tile_block_size + min_block_size - 1) // min_block_size) + 1)
 
     # ---- launch -------------------------------------------------------
     compute_slot_mapping_fused_kernel[(num_reqs_plus_one, num_groups)](

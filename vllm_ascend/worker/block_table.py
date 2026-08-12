@@ -438,9 +438,7 @@ class MultiGroupBlockTable:
             ]
 
         # Cache non-mamba block_tables list for fast access.
-        self._non_mamba_tables: list[BlockTable] = [
-            bt for bt in self.block_tables if not bt.is_mamba_group
-        ]
+        self._non_mamba_tables: list[BlockTable] = [bt for bt in self.block_tables if not bt.is_mamba_group]
 
         # Pre-build per-group parameter tensors for the fused kernel.
         # These values are static after construction — data_ptr(),
@@ -455,10 +453,7 @@ class MultiGroupBlockTable:
 
     def _is_cp_enabled(self) -> bool:
         """Check whether context parallelism is active across any group."""
-        for bt in self._non_mamba_tables:
-            if bt.dcp_world_size > 1:
-                return True
-        return False
+        return any(bt.dcp_world_size > 1 for bt in self._non_mamba_tables)
 
     @staticmethod
     def _get_fused_slot_mapping_kernel():
@@ -478,8 +473,7 @@ class MultiGroupBlockTable:
             _compute_slot_mapping_fused_fn = compute_slot_mapping_fused_kernel
         except ImportError as e:
             logger.warning(
-                "Fused slot-mapping Triton kernel not available (%s)."
-                "Falling back to sequential execution.",
+                "Fused slot-mapping Triton kernel not available (%s).Falling back to sequential execution.",
                 e,
             )
             _compute_slot_mapping_fused_fn = None
@@ -558,8 +552,7 @@ class MultiGroupBlockTable:
         # value covers every group (loads are masked by block_table_stride).
         tile_block_size = 1024
         min_block_size = min(bt.block_size for bt in self._non_mamba_tables)
-        window_size = _next_power_of_2(((tile_block_size + min_block_size - 1) //
-                                        min_block_size) + 1)
+        window_size = _next_power_of_2(((tile_block_size + min_block_size - 1) // min_block_size) + 1)
 
         p = self._fused_params
         kernel[(num_reqs_plus_one, num_groups)](
@@ -586,8 +579,7 @@ class MultiGroupBlockTable:
 
         Streams are created once and reused across decode steps.
         """
-        if (MultiGroupBlockTable._stream_pool is None
-                or len(MultiGroupBlockTable._stream_pool) < num_streams):
+        if MultiGroupBlockTable._stream_pool is None or len(MultiGroupBlockTable._stream_pool) < num_streams:
             # Determine stream class: torch.npu.Stream for Ascend,
             # torch.cuda.Stream otherwise.
             try:
@@ -643,14 +635,12 @@ class MultiGroupBlockTable:
             if self._use_fused_slot_mapping and self._fused_params is not None:
                 kernel = self._get_fused_slot_mapping_kernel()
                 if kernel is not None:
-                    self._launch_fused_slot_mapping(num_reqs, query_start_loc,
-                                                    positions)
+                    self._launch_fused_slot_mapping(num_reqs, query_start_loc, positions)
                     return
 
             # Try multi-stream as secondary optimization.
             if self._enable_multistream:
-                self.compute_slot_mapping_multistream(num_reqs, query_start_loc,
-                                                      positions)
+                self.compute_slot_mapping_multistream(num_reqs, query_start_loc, positions)
                 return
 
         # -- fallback: sequential -------------------------------------
@@ -670,8 +660,7 @@ class MultiGroupBlockTable:
         if not self._non_mamba_tables:
             return
         if self._fused_params is None:
-            raise RuntimeError("Fused params not built (num_groups <= 1 or"
-                               " init skipped).")
+            raise RuntimeError("Fused params not built (num_groups <= 1 or init skipped).")
         self._launch_fused_slot_mapping(num_reqs, query_start_loc, positions)
 
     def compute_slot_mapping_multistream(
