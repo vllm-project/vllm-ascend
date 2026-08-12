@@ -210,14 +210,17 @@ class AscendRejectionSampler(RejectionSampler):
             # apply_logits_processors modifies the tensor in-place.
             target_logits = target_logits.clone()
 
+        # Clean NaN/inf without introducing CPU sync.
+        # torch.nan_to_num is a pure element-wise op that replaces
+        # NaN/±inf in a single pass, avoiding the .any()/.item() sync
+        # triggered by `if tensor.any()` branches. No-op when clean.
         info = torch.finfo(target_logits.dtype)
-        if torch.isinf(target_logits).any():
-            target_logits[target_logits == torch.inf] = info.max
-            target_logits[target_logits == -torch.inf] = info.min
-        nan_mask = torch.isnan(target_logits)
-        if nan_mask.any():
-            target_logits[nan_mask] = 0
-            logger.warning_once("[sample/rejection_sampler] target_logits have NaN.")
+        target_logits = torch.nan_to_num(
+            target_logits,
+            nan=0.0,
+            posinf=info.max,
+            neginf=info.min,
+        )
 
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
         # [num_tokens, vocab_size]
