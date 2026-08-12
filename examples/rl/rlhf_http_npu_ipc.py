@@ -14,7 +14,7 @@ Prerequisites:
 
     $ VLLM_SERVER_DEV_MODE=1 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
         vllm serve Qwen/Qwen3-0.6b --enforce-eager \
-        --weight-transfer-config '{"backend": "ipc"}' \
+        --weight-transfer-config '{"backend": "npu_ipc"}' \
         --load-format dummy \
         --gpu-memory-utilization 0.5
 

@@ -88,7 +88,7 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
         "--load-format",
         "dummy",
         "--weight-transfer-config",
-        '{"backend": "ipc"}',
+        '{"backend": "npu_ipc"}',
         "--max-model-len",
         "1024",
         # IPC co-locates the trainer on the same NPU, so leave room for it.
