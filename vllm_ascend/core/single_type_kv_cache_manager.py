@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
-    BlockHashListWithBlockSize,
     KVCacheBlock,
+    resolve_block_hashes,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 
 
 class CompressAttentionManager(FullAttentionManager):
+    # A compressed state covers one complete logical block. It cannot be
+    # copied or resumed from a hash boundary inside that logical block.
+    supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
     def __init__(self, kv_cache_spec: "AscendMLAAttentionSpec", block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.compress_ratio = kv_cache_spec.compress_ratio
@@ -228,7 +232,7 @@ class CompressAttentionManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         # Keep pcp_world_size in this override's signature for compatibility
         # with the upstream manager interface. PCP is rejected by the platform.
         del pcp_world_size
@@ -243,8 +247,13 @@ class CompressAttentionManager(FullAttentionManager):
         if dcp_world_size > 1:
             block_size *= dcp_world_size
         logical_block_size = block_size * kv_cache_spec.compress_ratio
-        hash_block_size = block_pool.hash_block_size
-        logical_block_hashes = BlockHashListWithBlockSize(block_hashes, hash_block_size, logical_block_size)
+        logical_block_hashes = resolve_block_hashes(
+            block_hashes,
+            block_pool.hash_block_size,
+            logical_block_size,
+            supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
+            alignment_tokens=alignment_tokens,
+        )
         max_num_blocks = max_length // logical_block_size
         for block_hash in itertools.islice(logical_block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
