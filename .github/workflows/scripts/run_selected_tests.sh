@@ -2,6 +2,8 @@
 set -euo pipefail
 
 export ASCEND_LAUNCH_BLOCKING=1
+export ASCEND_SLOG_PRINT_TO_STDOUT=1
+export ASCEND_GLOBAL_LOG_LEVEL=0
 
 enable_coverage=false
 if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
