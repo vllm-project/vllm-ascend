@@ -207,9 +207,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
         )
-        # Graph capture appends two request-sized padding regions even when
-        # PCP is disabled in MRV1.
-        slot_mapping_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
+        metadata_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
+        num_mtp_draft_slots = max(self.num_speculative_tokens - 1, 0) * self.runner.max_num_reqs
+        slot_mapping_lens = self.runner.max_num_tokens + num_mtp_draft_slots
         self.slot_mapping_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
@@ -217,11 +217,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # dsv32 needs seq_lens and query_start_loc persistent tensors for full graph mode
         self.seq_lens_group = [
-            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
         self.query_start_loc_group = [
-            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
 
