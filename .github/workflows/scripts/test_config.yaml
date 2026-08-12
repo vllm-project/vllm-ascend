@@ -331,6 +331,7 @@
   source_file_dependencies:
     - vllm_ascend/patch/worker/patch_minimax_m2.py
     - vllm_ascend/patch/worker/patch_minimax_m2_linear_attn.py
+    - tests/e2e/pull_request/four_card/minimax_m2_7_common.py
   tests:
     - tests/e2e/pull_request/four_card/test_minimax_m2_7_16k.py
     - tests/e2e/pull_request/four_card/test_minimax_m2_7_128k.py

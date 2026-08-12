@@ -19,8 +19,8 @@
 
 The scenario is validated on the internal 90-net A3 machine (2026-08-06):
 
-* 16k1k: 80 requests, 20 concurrent, 0% prefix hit (streaming, low latency).
-* 128k1k: 32 requests, 8 concurrent, ~90% shared prefix (high throughput).
+* 16k1k: 400 requests (single 5x round), 20 concurrent, 0% prefix hit (streaming, low latency).
+* 128k1k: 160 requests (single 5x round), 8 concurrent, ~90% shared prefix (high throughput).
 
 The full MiniMax-M2.7-w8a8-QuaRot checkpoint (62 layers) does not fit on
 4x64GB A3 cards, so the model is loaded with a 16-layer config via
