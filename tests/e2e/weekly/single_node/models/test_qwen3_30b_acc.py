@@ -141,3 +141,6 @@ async def test_models(model: str, tp_size: int) -> None:
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
         run_aisbench_cases(model, port, aisbench_cases)
+
+    import time
+    time.sleep(9999999)
