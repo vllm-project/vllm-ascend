@@ -36,9 +36,27 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-        False,
+    # Buffer allocation reads PIN_MEMORY (and CpuGpuBuffer binds it as a class
+    # default). Without a physical NPU, pinning raises "Please register
+    # PrivateUse1HooksInterface first", so force pin_memory off.
+    from vllm.v1.utils import CpuGpuBuffer
+
+    original_init = CpuGpuBuffer.__init__
+
+    def _patched_init(self, *size, dtype, device, pin_memory=True, with_numpy=True):
+        original_init(
+            self,
+            *size,
+            dtype=dtype,
+            device=device,
+            pin_memory=False,
+            with_numpy=with_numpy,
+        )
+
+    with (
+        patch("vllm.utils.torch_utils.PIN_MEMORY", False),
+        patch("vllm.v1.attention.backends.utils.PIN_MEMORY", False),
+        patch.object(CpuGpuBuffer, "__init__", _patched_init),
     ):
         yield
 

@@ -49,14 +49,21 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: upstream vLLM launches a 3D grid
+    # (num_reqs, total_states, TEMPORAL_TILES) that partitions the temporal
+    # copy across CTAs. This Ascend kernel performs the whole copy in one CTA,
+    # so only tile 0 does any work; the constexpr exists to match the upstream
+    # launch signature.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
-    Grid: (num_reqs, num_layers * num_state_types)
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
     - program_id(0) = request index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
+    - program_id(2) = temporal-copy tile index (0 when TEMPORAL_TILES == 1)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
@@ -64,11 +71,18 @@ def postprocess_mamba_fused_kernel(
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
     # Bounds check: num_reqs is the number of active batch rows. With
     # HAS_IDX_MAPPING, req_idx is a (possibly sparse) request-state slot, so it
     # must NOT be checked against num_reqs.
     if batch_idx >= num_reqs:
+        return
+
+    # Upstream partitions the temporal copy body across TEMPORAL_TILES CTAs;
+    # this kernel keeps the single-CTA copy, so higher tiles contribute nothing
+    # beyond the bounds check (and must not duplicate the num_accepted store).
+    if tile_idx > 0:
         return
 
     if HAS_IDX_MAPPING:

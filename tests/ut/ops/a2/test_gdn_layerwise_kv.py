@@ -16,8 +16,15 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
+
+# Importing torch_npu._inductor registers the Inductor wrapper codegen for the
+# npu device (the worker does the same in init_device()). Without it,
+# torch.compile fails with "Device npu not supported".
+import torch_npu._inductor  # noqa: E402,F401
 from torch._inductor import config as inductor_config
+from torch._inductor.codegen.common import get_wrapper_codegen_for_device  # noqa: E402
 from vllm.forward_context import ForwardContext, override_forward_context
 
 from tests.ut.ops.test_gdn_layerwise_kv import (
@@ -28,6 +35,10 @@ from tests.ut.ops.test_gdn_layerwise_kv import (
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
 
+@pytest.mark.skipif(
+    not torch.npu.is_available() or get_wrapper_codegen_for_device("npu") is None,
+    reason="requires torch.compile support for the npu device",
+)
 def test_npu_connector_observes_updated_gdn_state_after_compile():
     device = torch.device("npu")
     model = _GDNForwardWrapper().to(device)

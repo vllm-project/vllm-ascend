@@ -17,6 +17,7 @@ from vllm_ascend.utils import (
     get_ascend_config,
     get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 SFA_QSFA_TILE_SIZE = 128
@@ -163,6 +164,19 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         chunked_prefill_workspace_size,
         scheduler_config.max_num_seqs * cache_config.block_size,
     )
+
+    # Upstream MLADCPManager.init_kv_gather requires the chunked-prefill
+    # workspace to be divisible by the DCP world size. Align it like upstream's
+    # align_mla_chunked_context_workspace_size (a no-op when DCP is disabled);
+    # v0.26.0 has neither the manager nor the alignment helper.
+    if vllm_config.parallel_config.decode_context_parallel_size > 1 and not vllm_version_is("0.26.0"):
+        from vllm.model_executor.layers.attention.mla_attention import (  # type: ignore[import-not-found]
+            align_mla_chunked_context_workspace_size,
+        )
+
+        chunked_prefill_workspace_size = align_mla_chunked_context_workspace_size(
+            vllm_config, chunked_prefill_workspace_size
+        )
 
     return chunked_prefill_workspace_size
 

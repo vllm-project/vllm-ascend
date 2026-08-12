@@ -1948,6 +1948,31 @@ def hunyuan_prompt(questions: list[str]) -> list[str]:
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
+def _ensure_hunyuan_tokenizer_schema(model: str) -> None:
+    """Register the named image-token schema on the cached HunyuanOCR tokenizer.
+
+    The cached ``Tencent-Hunyuan/HunyuanOCR`` snapshot predates the
+    ``extra_special_tokens`` mapping that Transformers' ``HunYuanVLProcessor``
+    requires on the tokenizer. Idempotent; no-op once the schema is present.
+    """
+    model_dir = snapshot_download(model, local_files_only=True)
+    tokenizer_config_path = os.path.join(model_dir, "tokenizer_config.json")
+    with open(tokenizer_config_path) as f:
+        tokenizer_config = json.load(f)
+    extra_special_tokens = tokenizer_config.setdefault("extra_special_tokens", {})
+    if "image_token" in extra_special_tokens:
+        return
+    extra_special_tokens.update(
+        {
+            "image_start_token": "<｜hy_place▁holder▁no▁100｜>",
+            "image_end_token": "<｜hy_place▁holder▁no▁101｜>",
+            "image_token": "<｜hy_place▁holder▁no▁102｜>",
+        }
+    )
+    with open(tokenizer_config_path, "w") as f:
+        json.dump(tokenizer_config, f, ensure_ascii=False, indent=2)
+
+
 PROMPT_CONFIGS = {
     "qwen-vl": {
         "model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -1959,7 +1984,7 @@ PROMPT_CONFIGS = {
         },
     },
     "hunyuan-vl": {
-        "model": "vllm-ascend/HunyuanOCR",
+        "model": "Tencent-Hunyuan/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
     },
@@ -1971,6 +1996,8 @@ def vl_config(request):
     config = PROMPT_CONFIGS[request.param]
     if "skip" in config:
         pytest.skip(config["skip"])
+    if config["model"] == "Tencent-Hunyuan/HunyuanOCR":
+        _ensure_hunyuan_tokenizer_schema(config["model"])
     return config
 
 

@@ -19,6 +19,7 @@ import pytest
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer
+from tests.e2e.nightly.single_node.models.scripts.single_node_config import SingleNodeConfig
 from tools.send_mm_request import send_image_request
 
 MODELS = [
@@ -94,4 +95,9 @@ async def test_models(model: str, tp_size: int) -> None:
     ]
 
     with RemoteEPDServer(vllm_serve_args=vllm_server_args) as _, DisaggEpdProxy(proxy_args=proxy_args) as proxy:
-        send_image_request(model, proxy)
+        mm_config = SingleNodeConfig(
+            name=f"disaggregated_encoder_{model}",
+            model=model,
+            mm_request={"images": [None]},
+        )
+        send_image_request(mm_config, proxy)
