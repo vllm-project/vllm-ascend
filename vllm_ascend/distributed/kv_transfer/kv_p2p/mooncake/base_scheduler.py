@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-logger = init_logger(__name__)
 
 
 class MooncakeBaseConnectorScheduler:

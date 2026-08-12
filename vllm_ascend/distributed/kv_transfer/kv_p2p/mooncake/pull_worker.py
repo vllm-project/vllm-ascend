@@ -11,7 +11,7 @@ import msgspec
 import torch
 import zmq
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
@@ -41,8 +41,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
-
-logger = init_logger(__name__)
 
 
 class MooncakePullRecvingThread(threading.Thread):

@@ -19,7 +19,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 
@@ -50,7 +50,6 @@ from vllm_ascend.distributed.utils import (
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
-logger = init_logger(__name__)
 
 
 class MooncakeBaseConnectorWorker:

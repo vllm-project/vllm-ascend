@@ -15,7 +15,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import zmq
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -26,7 +26,6 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
-logger = init_logger(__name__)
 
 
 @contextlib.contextmanager
