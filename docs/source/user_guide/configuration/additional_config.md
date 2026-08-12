@@ -68,7 +68,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
-| `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, ShortRequestFirst, and dynamic chunked pipeline parallel. |
+| `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
@@ -162,6 +162,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `profiling_chunk_config` | dict | `{}` | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
+| `dyntra_lb_config` | dict | `{}` | Configuration options for DyntraLB load balancing on PD-disaggregated decode nodes. |
 
 **scheduler_config.profiling_chunk_config**
 
@@ -172,6 +173,24 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
+
+**scheduler_config.dyntra_lb_config**
+
+DyntraLB balances decode requests across data-parallel ranks. It is supported only on
+PD-disaggregated decode nodes (`kv_role="kv_consumer"`) with `data_parallel_size > 1`.
+`dyntra_lb_config.enabled` and `recompute_scheduler_enable` are independent sibling
+settings; enabling both selects the combined DyntraLB recompute scheduler.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Enable DyntraLB and select a DyntraLB-aware scheduler. |
+| `mode` | str | `"dynamic"` | Use `"static"` or `"dynamic"` activation. |
+| `start_step` | int | `250` | First completed engine-step snapshot allowed to generate a plan. |
+| `end_step` | int | `-1` | Exclusive final snapshot step; `-1` means no upper bound. |
+| `bubble_threshold` | float | `5.0` | Minimum maximum-to-average rank-load difference required to modify scheduling. Values greater than or equal to `1` are KV-cache blocks; values below `1` are normalized ratios. |
+| `long_req_block_threshold` | int | `700` | In dynamic mode, a newly added request above this block count activates balancing. The default threshold corresponds to approximately 89,600 tokens when `block_size=128`. |
+| `dynamic_max_step` | int | `256` | Stop dynamic balancing after this many active steps without another newly added long request. |
+| `enable_diagnostics` | bool | `False` | Enable verbose logs for feature validation and debugging only. It is disabled by default and should remain disabled in production. |
 
 **rejection_sampler_config**
 
