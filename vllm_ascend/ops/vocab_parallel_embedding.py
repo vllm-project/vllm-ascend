@@ -291,7 +291,7 @@ class AscendParallelLMHead(ParallelLMHead):
             padding_size,
             quant_config,
             prefix,
-            disable_tp=disable_tp
+            disable_tp=disable_tp,
         )
         self.quant_config = quant_config
         if bias:

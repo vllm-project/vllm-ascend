@@ -81,7 +81,7 @@ class DSparkMarkovHead(nn.Module):
             config.dspark_markov_rank,
             org_num_embeddings=config.vocab_size,
             prefix=f"{prefix}.markov_w2",
-            disable_tp=True
+            disable_tp=True,
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 

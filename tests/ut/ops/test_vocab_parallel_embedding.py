@@ -228,9 +228,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         # disable_tp=True should not depend on the TP communication group.
         mock_get_tp_group.assert_not_called()
 
-        layer.quant_method.embedding = MagicMock(
-            return_value=torch.randn(3, layer.embedding_dim)
-        )
+        layer.quant_method.embedding = MagicMock(return_value=torch.randn(3, layer.embedding_dim))
         input_ = torch.tensor([1, 2, 3])
 
         with patch(
