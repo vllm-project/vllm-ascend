@@ -129,7 +129,7 @@ def _extract_step_logprobs(request_output):
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "4"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
