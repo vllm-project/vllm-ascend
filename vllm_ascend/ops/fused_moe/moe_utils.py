@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from functools import lru_cache
 from importlib import import_module
 
 import torch
@@ -154,3 +155,11 @@ def get_moe_num_logical_experts(
         return int(num_logical_experts)
 
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
+
+
+@lru_cache(maxsize=1)
+def enable_fusion_gmmswigluquant():
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    ascend_config = get_ascend_config()
+    return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant

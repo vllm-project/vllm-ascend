@@ -144,7 +144,13 @@ class AscendRejectionSampler(RejectionSampler):
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             if isinstance(processor, MinTokensLogitsProcessor):
                 logits = processor.apply_with_spec_decode(logits, metadata.num_draft_tokens)
-
+        holder = sampling_metadata.thinking_budget_state_holder
+        if holder is not None and holder.has_tracked_requests():
+            logits = holder.apply_to_logits(
+                logits,
+                predict_bonus_token=False,
+                spec_token_ids=sampling_metadata.spec_token_ids,
+            )
         return logits
 
     def forward(

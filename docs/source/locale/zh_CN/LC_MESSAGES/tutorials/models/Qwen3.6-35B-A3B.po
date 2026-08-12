@@ -101,9 +101,6 @@ msgstr ""
 "您也可以从源码构建并安装 `vllm-ascend`。请参考[使用 Python 设置](../../installation.md#set-up-"
 "using-python)。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -498,3 +495,6 @@ msgstr ""
 "    - `--no-enable-prefix-caching`是此Atlas 300I DUO示例的默认建议，以减少内存压力。\n"
 "    - `--quantization ascend`为W8A8模型启用Ascend量化。部署BF16模型时请移除该选项。\n"
 "    - 要启用MTP推测解码，请使用--speculative_config '{\"method\": \"mtp\", \"num_speculative_tokens\": 1}'。我们建议将num_speculative_tokens设置为1。如果您的使用场景涉及少于两个并发请求，建议启用MTP。否则，建议不要启用MTP。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

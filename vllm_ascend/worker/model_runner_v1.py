@@ -150,7 +150,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
-from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -175,6 +174,7 @@ from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
+    enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     enable_sp_by_pass,
@@ -187,6 +187,7 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -370,11 +371,7 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-            vllm_config.model_config.hf_text_config, "index_topk"
-        ) and not hasattr(
-            vllm_config.model_config.hf_text_config, "compress_ratios"
-        )
+        self.use_sparse = enable_sfa(vllm_config)
         # dsa c8
         self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
         self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
@@ -539,6 +536,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
             ),
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
         )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
@@ -1777,8 +1775,8 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if self.vllm_config.model_config.enable_return_routed_experts:
-            if self.routed_experts_initialized:
+        if vllm_version_is("0.26.0"):
+            if self.vllm_config.model_config.enable_return_routed_experts and self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
         if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
@@ -1866,7 +1864,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
                 if has_ec_transfer() and not get_ec_transfer().is_consumer:
-                    self._start_dump_data()
+                    self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
@@ -1906,7 +1904,7 @@ class NPUModelRunner(GPUModelRunner):
                     if not has_kv_transfer_group():
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-                self._start_dump_data()
+                self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 (
@@ -2086,7 +2084,9 @@ class NPUModelRunner(GPUModelRunner):
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
-        if self.calculate_kv_scales:  # type: ignore[has-type]
+        # vLLM 0.26.0 still supports runtime KV scale calculation. Upstream main
+        # removed this state in vllm-project/vllm#49389.
+        if vllm_version_is("0.26.0") and self.calculate_kv_scales:  # type: ignore[has-type]
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
@@ -3013,8 +3013,6 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_gid: int,
             attn_gid: int,
             common_attn_metadata: CommonAttentionMetadata,
-            prefill_ratio_to_sas_metadata: dict,
-            decode_ratio_to_sas_metadata: dict,
             common_ratio_to_sas_metadata: dict,
             ubid: int | None = None,
         ) -> None:
@@ -3034,13 +3032,9 @@ class NPUModelRunner(GPUModelRunner):
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 if for_cudagraph_capture:
-                    prefill_ratio_to_sas_metadata = {}
-                    decode_ratio_to_sas_metadata = {}
                     common_ratio_to_sas_metadata = {}
                 extra_attn_metadata_args = dict(
                     num_reqs_actual=num_reqs,
-                    prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
@@ -3065,8 +3059,6 @@ class NPUModelRunner(GPUModelRunner):
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
             if isinstance(builder, AscendDSAMetadataBuilder):
-                prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
-                decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 
             if ubid is None:
@@ -3081,8 +3073,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
-        decode_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -3121,6 +3111,9 @@ class NPUModelRunner(GPUModelRunner):
                     | AscendDSparkProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
+                elif isinstance(self.drafter, AscendExtractHiddenStatesProposer):
+                    if self.drafter.kv_cache_gid == kv_cache_gid:
+                        spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
@@ -3128,8 +3121,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                     attn_gid,
                     cm,
-                    prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata,
                 )
         if self.is_mm_prefix_lm:
@@ -3559,8 +3550,6 @@ class NPUModelRunner(GPUModelRunner):
                     break
             if self.drafter:
                 logger.info("Loading drafter model...")
-                if self.vllm_config.quant_config is not None:
-                    patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
 
@@ -3630,6 +3619,12 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
+            # Share the main-model update_stream with the draft drafter so that
+            # both main and draft updates are serialized on the same stream.
+            # The drafter created its own update_stream in its load_model (which
+            # runs BEFORE this point), so overwrite it here with the main one.
+            if self.drafter is not None:
+                self.drafter.update_stream = self.update_stream
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
@@ -3640,10 +3635,10 @@ class NPUModelRunner(GPUModelRunner):
             load_model_total_time,
         )
 
-    def _start_dump_data(self) -> None:
+    def _start_dump_data(self, **kwargs) -> None:
         if self.debugger is None or self._debugger_started:
             return
-        self.debugger.start(self.model)
+        self.debugger.start(self.model, **kwargs)
         self._debugger_started = True
 
     def _finalize_dump_data(self, **kwargs) -> None:
@@ -3701,6 +3696,13 @@ class NPUModelRunner(GPUModelRunner):
             block_size = (self.kernel_block_sizes[0] if isinstance(
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+        
+        if (
+            self.speculative_config
+            and self.speculative_config.uses_extract_hidden_states()
+        ):
+            assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
+            self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
         if self.sparse_kv_offload_enabled:
             assert self.sparse_kv_offload_manager is not None
@@ -3710,15 +3712,6 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
-
-    def _bind_routed_experts_capturer(self, capturer=None) -> None:
-        # test_qwen3_moe_routing_replay
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-        for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, AscendMoERunner):
-                module._ascend_routed_experts_capturer = capturer
-                module.routed_experts._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
@@ -3939,7 +3932,18 @@ class NPUModelRunner(GPUModelRunner):
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
                 ) and layer_name not in kv_cache_raw_tensors:
-                    # for mamba linear attention, attn-linear hybrid, or cache_only_layers (extract_hidden_states)
+                    # Check if shared_by contains both MambaSpec and HiddenStateCacheSpec.
+                    # If so, they must use separate physical memory to avoid corruption:
+                    # writing float32 ssm_state data into the shared buffer overwrites
+                    # bfloat16 hidden-states data (same bytes, different interpretation).
+                    has_mamba = any(
+                        isinstance(layer_kv_cache_spec.get(ln), MambaSpec)
+                        for ln in kv_cache_tensor.shared_by
+                    )
+                    has_hidden = any(
+                        is_hidden_state_cache_spec(layer_kv_cache_spec.get(ln))
+                        for ln in kv_cache_tensor.shared_by
+                    )
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     else:
@@ -3947,9 +3951,24 @@ class NPUModelRunner(GPUModelRunner):
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache for all shared layers
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                    if has_mamba and has_hidden:
+                        # Allocate separate tensor for HiddenStateCacheSpec layers
+                        # so ssm_state writes don't corrupt hidden-states data
+                        if self.vllm_config.kv_transfer_config is None:
+                            tensor_hs = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                        else:
+                            cache_size_aligned = kv_cache_tensor.size + alignment
+                            tensor_hs = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                            tensor_hs = self._align_memory(tensor_hs, alignment)[: kv_cache_tensor.size]
+                        for layer_name_inner in kv_cache_tensor.shared_by:
+                            if is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name_inner)):
+                                kv_cache_raw_tensors[layer_name_inner] = tensor_hs
+                            else:
+                                kv_cache_raw_tensors[layer_name_inner] = tensor
+                    else:
+                        for layer_name_inner in kv_cache_tensor.shared_by:
+                            kv_cache_raw_tensors[layer_name_inner] = tensor
+
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size,
@@ -4551,6 +4570,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_num_blocks_per_req=max_num_blocks,
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
             )
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:

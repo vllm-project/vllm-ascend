@@ -207,9 +207,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
         )
-        # Graph capture appends two request-sized padding regions even when
-        # PCP is disabled in MRV1.
-        slot_mapping_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
+        metadata_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
+        num_mtp_draft_slots = max(self.num_speculative_tokens - 1, 0) * self.runner.max_num_reqs
+        slot_mapping_lens = self.runner.max_num_tokens + num_mtp_draft_slots
         self.slot_mapping_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
@@ -217,11 +217,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # dsv32 needs seq_lens and query_start_loc persistent tensors for full graph mode
         self.seq_lens_group = [
-            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
         self.query_start_loc_group = [
-            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
 
@@ -500,7 +500,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.use_eagle,
                 self.enable_enpu,
             )
-            self.update_stream = torch.npu.Stream()
+            self.update_stream = None
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
                 self.vllm_config,
@@ -635,8 +635,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     extra_attn_metadata_args: dict = {}
                     if self.use_compress:
                         extra_attn_metadata_args.update(
-                            prefill_ratio_to_sas_metadata=dict(),
-                            decode_ratio_to_sas_metadata=dict(),
                             common_ratio_to_sas_metadata=dict(),
                             block_size=kv_cache_spec.block_size,
                         )
@@ -1711,8 +1709,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         extra_attn_metadata_args = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
-                prefill_ratio_to_sas_metadata=dict(),
-                decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
@@ -2159,8 +2155,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
                 extra_attn_metadata_args = dict(
-                    prefill_ratio_to_sas_metadata=dict(),
-                    decode_ratio_to_sas_metadata=dict(),
                     common_ratio_to_sas_metadata=dict(),
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
