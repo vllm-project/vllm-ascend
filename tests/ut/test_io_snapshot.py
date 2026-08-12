@@ -27,16 +27,28 @@ def test_append_output_builds_cumulative_and_dedupes_suffix():
     mgr = RequestIoSnapshotManager.get()
     mgr.append_output("r1", [1, 2, -1, 3])
     assert mgr.cumulative_output_ids("r1") == [1, 2, 3]
-    # Same step again (spec + token_logprob) → no double append.
+    # Same wave again (spec + sample) → no double append.
     mgr.append_output("r1", [1, 2, 3])
     assert mgr.cumulative_output_ids("r1") == [1, 2, 3]
-    # New step may legitimately repeat the previous last token.
+    # New chunk in the same wave may legitimately repeat the previous last token.
     mgr.append_output("r1", [3])
     assert mgr.cumulative_output_ids("r1") == [1, 2, 3, 3]
     mgr.append_output("r1", [4, 5])
     assert mgr.cumulative_output_ids("r1") == [1, 2, 3, 3, 4, 5]
     mgr.clear_req("r1")
     assert mgr.cumulative_output_ids("r1") == []
+
+
+def test_append_output_keeps_identical_chunk_across_waves():
+    """Consecutive steps with the same accepted ids must both be recorded."""
+    RequestIoSnapshotManager.reset_for_tests()
+    mgr = RequestIoSnapshotManager.get()
+    mgr.append_output("r1", [9, 9, 9])
+    assert mgr.cumulative_output_ids("r1") == [9, 9, 9]
+    # Next engine wave (sync_for_step → clear_wave_cache) resets dedupe frontier.
+    mgr.clear_wave_cache()
+    mgr.append_output("r1", [9, 9, 9])
+    assert mgr.cumulative_output_ids("r1") == [9, 9, 9, 9, 9, 9]
 
 
 def test_snapshot_prefers_cumulative_over_placeholder_batch():
@@ -79,7 +91,8 @@ def test_clear_wave_cache_resets_snapshot_cache_only():
     # Same wave: cache is served, so the new token is not yet visible.
     mgr.append_output("r1", [3])
     assert mgr.snapshot(runner, "r1", 0, include_token_ids=True).output_token_ids == [1, 2]
-    # clear_wave_cache drops only the snapshot cache, cumulative output persists.
+    # clear_wave_cache drops snapshot cache + same-wave append dedupe frontier;
+    # cumulative output persists.
     mgr.clear_wave_cache()
     assert mgr.cumulative_output_ids("r1") == [1, 2, 3]
     snap = mgr.snapshot(runner, "r1", 0, include_token_ids=True)
@@ -93,7 +106,11 @@ def test_clear_finished_clears_cumulative():
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.detectors = MagicMock()
     proc.dfx_config = MagicMock()
-    proc.dfx_config.report_print_output_on_finish.return_value = False
+    proc.dfx_config.log_print_output_on_finish.return_value = False
+    proc.dfx_config.report_decode_token_ids.return_value = False
+    proc.dumper = MagicMock()
+    proc.dumper.take_dump_finish_meta.return_value = None
+    proc.report_writer = MagicMock()
     proc.clear_finished(["r1"])
     proc.detectors.clear_finished.assert_called_once_with("r1")
     assert mgr.cumulative_output_ids("r1") == []

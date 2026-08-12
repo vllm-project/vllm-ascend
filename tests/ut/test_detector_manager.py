@@ -56,15 +56,19 @@ def test_detector_manager_check_after_sample_aggregates_alerts(tmp_path):
     assert out_det.check_all.call_args.kwargs.get("sampled_token_ids") is None
     assert repeat_det.check_all.call_args.kwargs.get("sampled_token_ids") is None
 
+
 def test_detector_manager_token_logprob_topk_if_enabled(tmp_path):
     cfg = make_dfx_config(tmp_path)
     runner = SimpleNamespace(tp_rank=0)
     mgr = DetectorManager(dfx_config=cfg, runner=runner)
+    # Hot-reload off + disabled → no per-sample refresh; fast None.
     assert mgr.token_logprob_topk_if_enabled() is None
 
     cfg._data["detector"]["token_logprob"]["enabled"] = True
     cfg._data["detector"]["token_logprob"]["topk"] = 17
     with patch.object(mgr._token_det, "_get_ill_detector", return_value=object()):
+        # Simulate config apply (hot-reload off does not auto-refresh each probe).
+        mgr._token_det.refresh_from_config()
         assert mgr.token_logprob_topk_if_enabled() == 17
 
 
@@ -112,7 +116,7 @@ def test_detector_manager_gates_detection(tmp_path):
     RequestIoSnapshotManager.reset_for_tests()
     cfg = make_dfx_config(tmp_path)
     cfg._data["detector"]["token_logprob"]["enabled"] = True
-    cfg._data["report"]["print_output_on_finish"] = False
+    cfg._data["log"]["print_output_on_finish"] = False
     runner = SimpleNamespace(tp_rank=0, input_batch=SimpleNamespace(req_ids=["r1"]), requests={})
     mgr = DetectorManager(dfx_config=cfg, runner=runner, detection_gate=lambda: False)
 
@@ -130,7 +134,7 @@ def test_detector_manager_gated_keeps_io_only_for_finish_print_on_tp0(tmp_path):
     """Gate off: only TP0 with print_output_on_finish appends cumulative IO."""
     RequestIoSnapshotManager.reset_for_tests()
     cfg = make_dfx_config(tmp_path)
-    cfg._data["report"]["print_output_on_finish"] = True
+    cfg._data["log"]["print_output_on_finish"] = True
 
     # TP0 keeps IO for finish-print.
     runner_tp0 = SimpleNamespace(tp_rank=0, input_batch=SimpleNamespace(req_ids=["r1"]), requests={})

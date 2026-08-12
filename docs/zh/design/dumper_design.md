@@ -113,9 +113,9 @@ start → forward → finalize → disable（需 _dump_forward_seen）
 
 1. msprobe 配置：`runner.ascend_config.dump_config_path` / `dump_config`
 2. DFX 运行时配置：`dfx_config_path`（默认 `<cwd>/dfx/config/dfx_config.json`）
-3. 异常短报告：`<dfx_root>/report/anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pidXXXXX.log`（由 `DfxProcessor` 始终写 report；仅当本次事件成功 arm dump 时带 `_dump`；JSON 含 `dump_armed` / `dump_attempted` / `dump_capture_timing` / `dump_count` / `dump_max_times`；`dump_capture_timing=upcoming_forward_window` 表示后续 dump-forward，pending-OR 下相对 detect 可能是下下个窗口）
+3. 异常短报告：`<dfx_root>/report/anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pidXXXXX.log`（由 `DfxProcessor` 始终写 report；仅当本次事件成功 arm dump 时带 `_dump`；JSON 含 `dump_armed` / `dump_attempted` / `dump_arm_wave` / `dump_count` / `dump_max_times`；与结束时的 `dump_finish_*.log` wave 字段对齐）
 4. `set_msprobe_dump_state`：msprobe JSON 旁 `.lock` 持锁写 `dump_enable`
-5. `save_sample_param`：在 ``DfxProcessor``（``report.print_sampling_meta=true`` 且 TP0 && last PP）
+5. `save_sample_param`：在 ``DfxProcessor``（``log.print_sampling_meta=true`` 且 TP0 && last PP）
 
 ## 8. 已知限制
 

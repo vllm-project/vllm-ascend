@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -257,18 +256,15 @@ class DfxReportWriter:
         dump_armed: bool = False,
         dump_count: int | None = None,
         dump_max_times: int | None = None,
+        dump_arm_wave: int | None = None,
     ) -> Path | None:
         """Write one pretty-printed anomaly JSON file. Returns path or None on failure.
 
         ``dump_armed=True`` (msprobe dump successfully armed for this event)
         adds a ``_dump`` marker in the filename so ops can grep dump-linked
         reports without opening each file. The report itself is still written
-        immediately at detect / trigger time.
-
-        ``dump_capture_timing`` is ``upcoming_forward_window`` when armed: capture
-        happens on a later model forward after activate. With pending-OR that is
-        often the window after the *next* ``execute_model`` entry (activate then
-        forward) — i.e. relative to detect it can be the next-next forward.
+        immediately at detect / trigger time. When armed, ``dump_arm_wave``
+        records the real-step wave index at arm (correlate with dump_finish).
         """
         try:
             self.report_dir.mkdir(parents=True, exist_ok=True)
@@ -287,19 +283,15 @@ class DfxReportWriter:
             armed = bool(dump_armed)
             record = {
                 "ts": datetime.now().isoformat(timespec="milliseconds"),
-                "unix_ts": round(time.time(), 3),
                 "anomaly_type": anomaly_type,
                 "req_id": req_id,
                 "rank": rank_tag,
                 "dump_attempted": attempted,
                 "dump_armed": armed,
-                # Not "next" only: pending-OR activates on a later execute_model
-                # entry, then needs a dump-forward — often next-next vs detect.
-                "dump_capture_timing": "upcoming_forward_window" if armed else "none",
+                "dump_arm_wave": int(dump_arm_wave) if dump_arm_wave is not None else None,
                 "dump_count": int(dump_count) if dump_count is not None else None,
                 "dump_max_times": int(dump_max_times) if dump_max_times is not None else None,
                 "detail": safe_detail,
-                "save_sensitive_info": self.save_sensitive_info,
                 "decode_token_ids": self.decode_token_ids and self.save_sensitive_info,
                 "max_prompt_token_ids": self.max_prompt_token_ids,
                 "max_output_token_ids": self.max_output_token_ids,
@@ -326,4 +318,76 @@ class DfxReportWriter:
             return report_path
         except Exception as exc:
             logger.error("[DFX report] write failed dir=%s error=%s", self.report_dir, exc)
+            return None
+
+    def write_dump_finish(
+        self,
+        *,
+        req_id: str,
+        detail: dict[str, Any] | None = None,
+        rank_tag: str | None = None,
+        tokenizer: Any | None = None,
+        anomaly_type: str | None = None,
+        source: str | None = None,
+        dump_arm_wave: int | None = None,
+        dump_activate_wave: int | None = None,
+        dump_waves_after_report: int | None = None,
+        dump_count: int | None = None,
+        finish_wave: int | None = None,
+    ) -> Path | None:
+        """Write dump-linked finish sidecar with output + wave stamps.
+
+        Called from ``clear_finished`` for reqs that successfully activated a
+        dump. Does not rewrite the immediate anomaly report. Token ids follow
+        the same ``save_sensitive_info`` / ``max_*`` / ``decode_token_ids``
+        policy as anomaly reports.
+        """
+        try:
+            self.report_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            safe_req = "".join(c if c.isalnum() or c in "-_" else "_" for c in (req_id or "unknown"))[:64]
+            report_path = self.report_dir / f"dump_finish_{stamp}_{safe_req}_pid{os.getpid()}.log"
+            raw_detail = dict(detail or {})
+            safe_detail = sanitize_report_detail(
+                raw_detail,
+                save_sensitive_info=self.save_sensitive_info,
+                max_prompt_token_ids=self.max_prompt_token_ids,
+                max_output_token_ids=self.max_output_token_ids,
+                decode_token_ids=self.decode_token_ids,
+                tokenizer=tokenizer if self.decode_token_ids and self.save_sensitive_info else None,
+            )
+            record = {
+                "ts": datetime.now().isoformat(timespec="milliseconds"),
+                "kind": "dump_finish",
+                "anomaly_type": anomaly_type,
+                "source": source,
+                "req_id": req_id,
+                "rank": rank_tag,
+                "dump_arm_wave": dump_arm_wave,
+                "dump_activate_wave": dump_activate_wave,
+                "dump_waves_after_report": dump_waves_after_report,
+                "dump_finish_wave": finish_wave,
+                "dump_count": dump_count,
+                "detail": safe_detail,
+                "decode_token_ids": self.decode_token_ids and self.save_sensitive_info,
+                "max_prompt_token_ids": self.max_prompt_token_ids,
+                "max_output_token_ids": self.max_output_token_ids,
+            }
+            text = dumps_report_json(record, indent=2)
+            with report_path.open("w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            logger.info(
+                "[DFX dump_finish] req_id=%s path=%s arm_wave=%s activate_wave=%s "
+                "waves_after_report=%s finish_wave=%s dump_count=%s",
+                req_id,
+                report_path,
+                dump_arm_wave,
+                dump_activate_wave,
+                dump_waves_after_report,
+                finish_wave,
+                dump_count,
+            )
+            return report_path
+        except Exception as exc:
+            logger.error("[DFX dump_finish] write failed dir=%s req_id=%s error=%s", self.report_dir, req_id, exc)
             return None

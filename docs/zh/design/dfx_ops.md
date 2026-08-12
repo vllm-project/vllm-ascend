@@ -16,15 +16,15 @@ vllm serve <model> --additional-config '{
 | 项 | 说明 |
 |----|------|
 | `dfx_config_reload_interval > 0` | **必须**，否则改 JSON / `manual_trigger` 不生效 |
-| `dump_config_path` | msprobe 配置；无则无法落 dump。默认各 DP **共享**同一路径；仅当显式 `dump_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，运行时使用 `<source_dir>/dp<rank>/...` 副本（热更请改副本）。多 DP 同写一份 `dump_path` 可能互相干扰，建议隔离或分 `dump_path`。 |
-| 每 EngineCore 可读 JSON | 多 DP 不互相广播 config；共享盘一份或每节点一份。默认共享同一 `dfx_config`；仅当显式 `dfx_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，使用 `dp<rank>` 副本（热更请改副本）。 |
+| `dump_config_path` | msprobe 配置；无则无法落 dump。默认各 DP **共享**同一路径；仅当显式 `dump_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，`ascend_config` 会物化为 `<source_dir>/dp<rank>/...` 副本（热更请改副本）。多 DP 同写一份 `dump_path` 可能互相干扰，建议隔离或分 `dump_path`。 |
+| 每 EngineCore 可读 JSON | 多 DP **不**用满编 world 做 config sync。默认共享同一 `dfx_config` 路径；仅当显式 `dfx_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，路径拆成 `dp<rank>` 副本（`ascend_config` 物化，与 sync 机制正交）。热更同步：有 `inner_dp_world` 则本 DP 内 broadcast，否则各 rank **file poll**（见 [dfx_design.md](./dfx_design.md) §2.2）。 |
 | **同 EngineCore 内配置一致** | 各 TP/PP 须读**同一份** `dfx_config`（同路径）。尤其 `dump.enabled`：热更关时 pending-OR 有 fast-path，TP 间不一致会挂死（见 §3） |
 
 默认路径（未设 `dfx_config_path`）：`<cwd>/dfx/config/dfx_config.json`，报告在同级 `dfx/report/`。启动时会用默认内容覆盖该路径上的既有文件（手改不跨重启保留）；持久配置请设显式 `dfx_config_path`。
 
-- 当存在 `VLLM_DP_RANK` 且显式 `dfx_config_isolate_by_dp=true` 时，默认路径会拆分为：`<cwd>/dfx/config/dp<rank>/dfx_config.json`。
+- 当存在 `VLLM_DP_RANK` 且显式 `dfx_config_isolate_by_dp=true` 时，默认路径会拆分为：`<cwd>/dfx/config/dp<rank>/dfx_config.json`（路径隔离；热更仍走 per-DP `inner_dp` / file poll，**不是**跨 DP 满编 world）。
 
-**默认全关开销**：`dfx_config_reload_interval=0` 且各 detector / `dump.enabled` 均为关时，无 config 集体通信；检测门控直接跳过。async / TP>1 下 pending-OR 在「热更关 + `dump.enabled=false`」时走 fast-path 跳过 `all_reduce`（同 EngineCore 内 `dump.enabled` 须一致，见 §3）。
+**默认全关开销**：`dfx_config_reload_interval=0` 且各 detector / `dump.enabled` 均为关时，无 config 集体通信；热更关时跳过每步 filter 刷新；检测门控直接跳过。async / TP>1 下 pending-OR 在「热更关 + `dump.enabled=false`」时走 fast-path 跳过 `all_reduce`（同 EngineCore 内 `dump.enabled` 须一致，见 §3）。
 
 ## 2. 常用操作
 
@@ -87,6 +87,42 @@ vllm serve <model> --additional-config '{
 - 截断标记：`output_token_ids_truncated` / `output_token_ids_max`（prompt 同理）。
 - **检测用完整序列，report 可能只存前缀**：`output_substring` 等命中可能在截断窗口外——JSON 里看不到该 id 不等于没命中。核对全量时设 `"max_output_token_ids": 0`。
 
+### 2.2.2 日志开关（`log.*`）与 dump_finish / wave 对齐
+
+配置在 JSON 顶层 `log`（**不是** `report`）：
+
+```json
+"log": {
+  "print_sampling_meta": false,
+  "print_output_on_finish": false
+}
+```
+
+| 开关 | 作用 |
+|------|------|
+| `log.print_sampling_meta` | 写 anomaly / manual report 时，TP0+last-PP 打 `[SamplingMeta]` 日志（不进 JSON） |
+| `log.print_output_on_finish` | **每个**请求结束时 TP0 打 output ids/text 日志（噪声大，默关） |
+
+**文件产物**（默认目录 `<dfx_root>/report/`）：
+
+| 文件 | 何时 | 用途 |
+|------|------|------|
+| `anomaly_*[_dump]_pid*.log` | 检测 / `manual_trigger` 当下 | 即时短报；arm 成功时带 `_dump` 与 `dump_arm_wave` |
+| `dump_finish_*_pid*.log` | **已 arm dump** 的请求在 `clear_finished` 时（含仍 pending 未 activate） | 累计 output（受 `report.save_sensitive_info` / `max_*`）+ wave；未 activate 时 `dump_activate_wave=null` |
+
+**wave 字段怎么对齐**（只计真实 `execute_model` 拍，`allow_arm=True`；dummy 不计）：
+
+| 字段 | 出现位置 | 含义 |
+|------|----------|------|
+| `dump_arm_wave` | anomaly report（armed 时）+ dump_finish | arm / pending 那一拍 |
+| `dump_activate_wave` | dump_finish | 真正 activate 那一拍；若请求在 **pending 未 activate** 时就结束，则为 `null` |
+| `dump_waves_after_report` | dump_finish | `activate − arm`（同拍为 `0`；未 activate / 算不出为 `null`） |
+| `dump_finish_wave` | dump_finish | 请求结束、写 sidecar 时的拍号 |
+
+对齐方式：用同一 `req_id`（+ 可选 `dump_count`）把带 `_dump` 的 anomaly 与 `dump_finish_*` 配对；看 `dump_waves_after_report` 可知 report→activate 隔了几拍。pending-OR 下检测器告警常见差为 `1`；手动触发同 `sync_for_step` 内 arm+activate 常见为 `0`。空 batch 的 manual 可能没有 dump_finish（没有真实 req 可挂）。
+
+`dump_activate_wave=null`：dump 已 arm（open），但请求在 activate 成功前就 `clear_finished`——仍写 dump_finish 落累计 output / `dump_arm_wave`，避免内存孤儿；msprobe 窗口可能尚未打开。
+
 ### 2.3 打印一次输入 token ids（写 filter 用）
 
 1. 热更开启（`dfx_config_reload_interval > 0`）。  
@@ -137,6 +173,9 @@ vllm serve <model> --additional-config '{
 | `[DFX filter]` | InputFilterManager 拒绝 detect |
 | `[DFX print_input]` | `print_input_token_ids_once` 打印 length + prompt token ids |
 | `[DFX manual_trigger]` / `manual_trigger` | `manual_trigger` |
+| `[DFX report]` / `[DFX dump_finish]` | 即时 anomaly report / 请求结束 dump_finish 落盘 |
+| `[DFX print_output]` | `log.print_output_on_finish` |
+| `[SamplingMeta]` | `log.print_sampling_meta` |
 | `[Anomaly spec short]` / `[Anomaly token_logprob` / `[Anomaly output_substring]` / `[Anomaly token_repeat]` | 检测 short |
 | `[Anomaly msprobe]` | dump arm / activate / 配额 |
 

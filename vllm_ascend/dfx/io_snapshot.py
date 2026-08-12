@@ -129,7 +129,9 @@ class RequestIoSnapshotManager:
         self._cache: dict[str, RequestIoSnapshot] = {}
         # Self-built cumulative accepted output ids (detect rank only).
         self._output_by_req: dict[str, list[int]] = {}
-        # Last appended chunk per req (dedupe spec + token_logprob same step).
+        # Last appended chunk per req within the current engine wave only.
+        # Cleared by :meth:`clear_wave_cache` so identical chunks across
+        # consecutive steps are kept (only same-wave double writes are skipped).
         self._last_append: dict[str, tuple[int, ...]] = {}
 
     @classmethod
@@ -143,7 +145,13 @@ class RequestIoSnapshotManager:
         cls._instance = None
 
     def clear_wave_cache(self) -> None:
+        """Drop snapshot cache and same-wave append dedupe state.
+
+        Called at the start of each ``sync_for_step`` / ``refresh_config`` wave
+        so content-identical chunks from a later step are not swallowed.
+        """
         self._cache.clear()
+        self._last_append.clear()
 
     def clear_req(self, req_id: str) -> None:
         """Drop cumulative output + wave cache entries for a finished request."""
@@ -164,8 +172,10 @@ class RequestIoSnapshotManager:
     def append_output(self, req_id: str, token_ids: Any) -> None:
         """Extend cumulative output for ``req_id`` with accepted token ids.
 
-        Drops ``-1`` placeholders. If ``token_ids`` equals the previous append
-        for this req (spec + token_logprob recording the same step), skip.
+        Drops ``-1`` placeholders. Within one engine wave, if ``token_ids``
+        equals the previous append for this req (e.g. spec + sample both
+        recording the same step), skip. Across waves, identical chunks are
+        kept — :meth:`clear_wave_cache` resets the dedupe frontier.
         """
         if not req_id:
             return

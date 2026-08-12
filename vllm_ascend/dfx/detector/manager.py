@@ -113,8 +113,15 @@ class DetectorManager:
             det.clear_finished(req_id)
 
     def token_logprob_topk_if_enabled(self) -> int | None:
-        """Return token-logprob top-k when that detector is enabled; else None."""
-        self._token_det.refresh_from_config()
+        """Return token-logprob top-k when that detector is enabled; else None.
+
+        With hot-reload off, skip per-sample ``refresh_from_config`` when the
+        detector is already known disabled (default service path).
+        """
+        if self._dfx_config is not None and self._dfx_config.hot_reload_enabled:
+            self._token_det.refresh_from_config()
+        elif not self._token_det.enabled:
+            return None
         if not self._token_det.enabled:
             return None
         topk = int(self._token_det.topk)
@@ -158,6 +165,15 @@ class DetectorManager:
     def _stop_after_alert(self) -> bool:
         return bool(self._dfx_config.stop_after_alert())
 
+    def _needs_io_for_dump_finish(self) -> bool:
+        """True when dump_finish sidecars may still need cumulative IO on TP0."""
+        dfx = getattr(self._runner, "dfx", None)
+        dumper = getattr(dfx, "dumper", None) if dfx is not None else None
+        if dumper is None:
+            return False
+        needs = getattr(dumper, "needs_io_for_dump_finish", None)
+        return bool(needs()) if callable(needs) else False
+
     def _mark_alerted(self, alerts: list[AnomalyAlert]) -> None:
         """Stop detecting requests that just produced an anomaly."""
         for alert in alerts:
@@ -190,10 +206,10 @@ class DetectorManager:
         Order: ``token_logprob`` → ``output_substring`` → ``token_repeat``.
 
         ``sampled_token_ids`` is appended to cumulative IO on the detect path.
-        When anomaly detection is gated off, only TP0 with
-        ``report.print_output_on_finish=true`` keeps appending so finish-print
-        can still show full output without requiring all ranks to accumulate.
-        Detection then skips
+        When anomaly detection is gated off, TP0 still appends when
+        ``log.print_output_on_finish=true`` (finish log for every req) or when
+        a dump finish sidecar may still need cumulative output (pending /
+        active dump / already-activated finish meta). Detection then skips
         ``stop_after_alert`` reqs by id — never by row-subsetting — so
         ``req_idx`` stays aligned with ``input_batch`` (filters / dump related).
 
@@ -211,10 +227,12 @@ class DetectorManager:
             input_batch = getattr(self._runner, "input_batch", None)
             resolved_ids = list(getattr(input_batch, "req_ids", None) or [])
 
-        # Keep a single-rank fallback for finish-print when detect gate is off.
-        # Normal detect path appends below after the gate check.
+        # Keep a single-rank fallback for finish-print / dump_finish when detect
+        # gate is off. Normal detect path appends below after the gate check.
         if self._gated("after_sample"):
-            if bool(self._dfx_config.report_print_output_on_finish()) and int(getattr(self._runner, "tp_rank", 0)) == 0:
+            if int(getattr(self._runner, "tp_rank", 0)) == 0 and (
+                bool(self._dfx_config.log_print_output_on_finish()) or self._needs_io_for_dump_finish()
+            ):
                 RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
             return []
 

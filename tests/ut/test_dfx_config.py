@@ -222,10 +222,12 @@ def _valid_dfx_data(**dump_overrides):
             "token_repeat": {},
         },
         "input_filter": {"filters": [], "print_input_token_ids_once": False},
-        "report": {
-            "save_sensitive_info": False,
+        "log": {
             "print_sampling_meta": False,
             "print_output_on_finish": False,
+        },
+        "report": {
+            "save_sensitive_info": False,
             "decode_token_ids": True,
             "max_prompt_token_ids": 1000,
             "max_output_token_ids": 1000,
@@ -301,10 +303,17 @@ def test_token_repeat_validation_rejects_non_int_ignore_token_ids():
         DfxRuntimeConfig._validate(data)
 
 
-def test_report_print_output_on_finish_rejects_non_bool():
+def test_log_print_output_on_finish_rejects_non_bool():
     data = _valid_dfx_data()
-    data["report"]["print_output_on_finish"] = "yes"
-    with pytest.raises(ValueError, match="report.print_output_on_finish must be bool"):
+    data["log"]["print_output_on_finish"] = "yes"
+    with pytest.raises(ValueError, match="log.print_output_on_finish must be bool"):
+        DfxRuntimeConfig._validate(data)
+
+
+def test_report_rejects_legacy_print_keys():
+    data = _valid_dfx_data()
+    data["report"]["print_sampling_meta"] = True
+    with pytest.raises(ValueError, match=r"report has unknown key\(s\) \['print_sampling_meta'\]"):
         DfxRuntimeConfig._validate(data)
 
 

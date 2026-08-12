@@ -128,7 +128,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
     def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
         new_window = max(1, int(getter("window", self._window)))
         if new_window != self._window and self._states:
-            # Shrinking/growing the window invalidates in-flight deques.
+            # Shrinking/growing the window invalidates in-flight sliding windows.
             self._states.clear()
             self._consumed_len.clear()
         self._window = new_window
@@ -257,8 +257,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
         }
         if log_leader:
             logger.error(
-                "[Anomaly token_repeat] req=%s repeat_sum=%s threshold=%s window=%s "
-                "content_seen=%s consecutive=%s",
+                "[Anomaly token_repeat] req=%s repeat_sum=%s threshold=%s window=%s content_seen=%s consecutive=%s",
                 req_id,
                 state.repeat_sum,
                 thresh,
