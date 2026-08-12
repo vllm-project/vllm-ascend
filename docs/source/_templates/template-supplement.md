@@ -60,29 +60,29 @@ Uses the `{tab-set}` and `{tab-item}` directives, requiring explicit declaration
 **Example:**
 
 ```markdown
-:::::{tab-set}
-:sync-group: install
+    :::::{tab-set}
+    :sync-group: install
 
-::::{tab-item} A3 series
-:sync: A3
+    ::::{tab-item} A3 series
+    :sync: A3
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run ...
-```
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
-::::
+    ::::
 
-::::{tab-item} A2 series
-:sync: A2
+    ::::{tab-item} A2 series
+    :sync: A2
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run ...
-```
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
-::::
-:::::
+    ::::
+    :::::
 ```
 
 **Syntax Description:**
