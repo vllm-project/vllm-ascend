@@ -1128,7 +1128,55 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
+        enable_reduce_sample = get_ascend_config().enable_reduce_sample
+        if self.method == "dspark":
+            # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
+            # The MarkovHead performs bias correction on logits.
+            # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
+
+            # `sample_hidden_states` has been all-gathered to full.
+            # `markov_emb` should also be full to match it.
+            # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
+
+            # reduce_sample: compute_logits / markov_bias yield per-rank local
+            # vocab logits (AscendLogitsProcessor skips the all-gather);
+            # greedy_sample reduces the local top-1 across TP. markov_embed is
+            # unchanged (VocabParallelEmbedding already all-reduces).
+            with _disable_flash_comm_v1_context():
+                if enable_reduce_sample:
+                    # lm_head and markov_w2 must shard vocab identically so that
+                    # logits + logits_bias is a per-rank local add over the same
+                    # vocab segment (greedy_sample then reduces to the global top-1).
+                    assert (
+                        self.model.lm_head.num_embeddings_per_partition
+                        == self.model.model.markov_head.markov_w2.num_embeddings_per_partition
+                    ), (
+                        "dspark reduce_sample requires lm_head and markov_w2 to shard "
+                        "vocab identically; otherwise logits + logits_bias is not a "
+                        "valid per-rank local add over the same vocab segment."
+                    )
+                # Per-rank local logits, last dim = vocab/tp (no all-gather).
+                raw_logits = self.model.compute_logits(sample_hidden_states)
+                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                num_blk = logits.shape[0]
+                draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                for idx in range(self.num_speculative_tokens):
+                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                    # Per-rank local bias, last dim = vocab/tp, same shard as logits.
+                    logits_bias = self.model.markov_bias(markov_emb)
+                    logits[:, idx].add_(logits_bias)
+                    if enable_reduce_sample:
+                        draft_token_ids[:, idx + 1].copy_(greedy_sample(logits[:, idx]))
+                    else:
+                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+
+                # Dynamic verify-length path, implemented in AscendDSparkProposer.
+                # Only the dspark method is handled here since it relies on
+                # the DSpark confidence head.
+                if get_ascend_config().dynamic_spec_config.method == "dspark":
+                    self.update_num_verify_tokens(last_hidden_states, draft_token_ids, num_blk)
+        elif enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1155,42 +1203,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 draft_token_ids = logits.argmax(dim=-1)
         else:
-            if self.method == "dspark":
-                # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
-                # The MarkovHead performs bias correction on logits.
-                # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
-
-                # `sample_hidden_states` has been all-gathered to full.
-                # `markov_emb` should also be full to match it.
-                # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
-                with _disable_flash_comm_v1_context():
-                    raw_logits = self.model.compute_logits(sample_hidden_states)
-                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                    num_blk = logits.shape[0]
-                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                    for idx in range(self.num_speculative_tokens):
-                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                        logits_bias = self.model.markov_bias(markov_emb)
-                        logits[:, idx].add_(logits_bias)
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
-
-                    # Dynamic verify-length path, implemented in AscendDSparkProposer.
-                    # Only the dspark method is handled here since it relies on
-                    # the DSpark confidence head.
-                    if get_ascend_config().dynamic_spec_config.method == "dspark":
-                        self.update_num_verify_tokens(last_hidden_states, draft_token_ids, num_blk)
-            else:
-                logits = self.model.compute_logits(sample_hidden_states)
-                if lmhead_tp_enable():
-                    logits, token_indices_to_sample = self._align_tensor_and_indices(
-                        logits,
-                        num_indices,
-                        token_indices_to_sample,
-                        ori_token_indices_to_sample,
-                        is_logits=True,
-                    )
-                draft_token_ids = logits.argmax(dim=-1)
+            logits = self.model.compute_logits(sample_hidden_states)
+            if lmhead_tp_enable():
+                logits, token_indices_to_sample = self._align_tensor_and_indices(
+                    logits,
+                    num_indices,
+                    token_indices_to_sample,
+                    ori_token_indices_to_sample,
+                    is_logits=True,
+                )
+            draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:

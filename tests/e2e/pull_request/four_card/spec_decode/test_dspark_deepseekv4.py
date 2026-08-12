@@ -44,6 +44,17 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
             {"enable_flashcomm1": False, "enable_dsa_cp": False},
             id="dspark",
         ),
+        # reduce_sample swaps the draft's full-vocab all-gather for a per-rank
+        # local top-1 reduced across TP via greedy_sample; token selection is
+        # unchanged (global argmax), so acceptance must stay on par with the
+        # baseline dspark case above. Verified vs /start_dspark.sh on gsm8k:
+        # both paths match within ~0.005 per position.
+        pytest.param(
+            [0.88, 0.74, 0.58, 0.49, 0.40],
+            5,
+            {"enable_flashcomm1": False, "enable_dsa_cp": False, "enable_reduce_sample": True},
+            id="dspark-reduce-sample",
+        ),
         pytest.param(
             [0.88, 0.74, 0.58, 0.49, 0.40, 0.30, 0.18],
             7,
