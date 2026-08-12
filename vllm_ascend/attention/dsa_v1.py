@@ -56,6 +56,9 @@ else:
     triton_q_rms = None  # type: ignore
 
 
+# The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
+DSA_METADATA_BUFFER_SIZE = 1024
+
 _DSV4_DSA_OVERLAP_STREAM = None
 
 
@@ -332,7 +335,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 for _ in range(spec_token_num)
             ]
             self.spec_sas_metadata = [
-                torch.zeros(1024, dtype=torch.int32, device=self.device) for _ in range(spec_token_num)
+                torch.zeros(
+                    DSA_METADATA_BUFFER_SIZE,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                for _ in range(spec_token_num)
             ]
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
@@ -357,8 +365,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.start_pos_prefill: torch.Tensor = torch.zeros(
             scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
         )
-        self.sas_metadata_buffer: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
-        self.qli_metadata_buffer: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
+        self.sas_metadata_buffer: torch.Tensor = torch.zeros(
+            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+        )
+        self.qli_metadata_buffer: torch.Tensor = torch.zeros(
+            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+        )
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -506,6 +518,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             else:
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
+            input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            cos, sin = get_cos_and_sin_dsa(
+                input_positions,
+                use_cache=self.num_prefills == 0,
+            )
+            self.common_ratio_to_sas_metadata["cos"] = cos
+            self.common_ratio_to_sas_metadata["sin"] = sin
         else:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
                 self.common_ratio_to_sas_metadata["num_decodes"],
@@ -515,6 +534,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
             seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
+            cos = self.common_ratio_to_sas_metadata["cos"]
+            sin = self.common_ratio_to_sas_metadata["sin"]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
@@ -524,6 +545,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             common_attn_metadata=common_attn_metadata,
             seq_lens_cpu=seq_lens_cpu,
             num_reqs_actual=num_reqs_actual,
+            cos=cos,
+            sin=sin,
         )
 
         return self.metadata_cls(  # type: ignore
@@ -582,7 +605,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache[layer_name] = sas_metadata
 
-        self.sas_metadata_buffer[:1024] = sas_metadata
+        self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
         return self.sas_metadata_buffer
 
     def _build_qli_metadata(
@@ -617,7 +640,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache["qli"] = qli_metadata
 
-        self.qli_metadata_buffer[:1024] = qli_metadata
+        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
         return self.qli_metadata_buffer
 
     def build_req_metadata(
@@ -625,22 +648,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         seq_lens_cpu: torch.Tensor,
         num_reqs_actual: int | None,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
     ) -> AscendDSAReqMetadata:
         assert self.common_ratio_to_sas_metadata is not None
         assert self.num_actual_tokens is not None
         num_reqs = common_attn_metadata.num_reqs
-        if self.common_ratio_to_sas_metadata.get("input_positions") is None:
-            input_positions = common_attn_metadata.positions[: common_attn_metadata.num_input_tokens].long()
-            self.common_ratio_to_sas_metadata["input_positions"] = input_positions
-            cos, sin = get_cos_and_sin_dsa(
-                input_positions,
-                use_cache=self.num_prefills == 0,
-            )
-            self.common_ratio_to_sas_metadata["cos"] = cos
-            self.common_ratio_to_sas_metadata["sin"] = sin
-        else:
-            cos = self.common_ratio_to_sas_metadata["cos"]
-            sin = self.common_ratio_to_sas_metadata["sin"]
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
@@ -854,7 +867,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         if not has_prefill:
             assert self.spec_sas_metadata is not None
-            self.spec_sas_metadata[draft_index - 1][:1024].copy_(sas_metadata[:1024])
+            self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
+                sas_metadata[:DSA_METADATA_BUFFER_SIZE]
+            )
             sas_metadata = self.spec_sas_metadata[draft_index - 1]
 
         assert self.spec_slot_mapping is not None

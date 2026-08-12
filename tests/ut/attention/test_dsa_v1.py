@@ -25,6 +25,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    DSA_METADATA_BUFFER_SIZE,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 
@@ -51,7 +52,7 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
         speculative_config=None,
         parallel_config=SimpleNamespace(tensor_parallel_size=2),
     )
-    kv_cache_spec = SimpleNamespace(compress_ratio=compressor_ratio)
+    kv_cache_spec = SimpleNamespace(compress_ratio=compressor_ratio, block_size=128)
     builder = AscendDSAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
         layer_names=["model.layers.0.self_attn.attn"],
@@ -107,7 +108,7 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     cu_seqlens_ori_kv = torch.tensor([0, 8, 14], dtype=torch.int32)
     cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
-    generated_metadata = torch.arange(1024, dtype=torch.int32)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
 
     with (
@@ -168,7 +169,7 @@ def test_build_qli_metadata_parameters_cache_and_builder_buffer():
     metadata_cache: dict[str, torch.Tensor] = {}
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens = torch.tensor([8, 6], dtype=torch.int32)
-    generated_metadata = torch.arange(1024, dtype=torch.int32)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
 
     with patch.object(
         torch.ops._C_ascend,
@@ -208,22 +209,26 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
     num_prefills: int,
 ):
     builder = _make_builder()
-    builder.common_ratio_to_sas_metadata = {}
-    builder.num_actual_tokens = 3
-    builder.num_prefills = num_prefills
-    builder.block_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+    metadata_cache: dict[str, Any] = {}
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens_cpu = torch.tensor([8, 6], dtype=torch.int32)
     input_positions = torch.tensor([0, 1, 2], dtype=torch.int64)
     common_attn_metadata = SimpleNamespace(
         num_reqs=2,
+        num_actual_tokens=3,
         num_input_tokens=3,
         positions=input_positions,
+        seq_lens=seq_lens_cpu,
+        _seq_lens_cpu=seq_lens_cpu,
+        seq_lens_cpu=None,
+        slot_mapping=torch.arange(3, dtype=torch.int32),
+        block_table_tensor=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
+        attn_state=MagicMock(),
     )
-    sas_metadata = torch.full((1024,), 1, dtype=torch.int32)
-    qli_metadata = torch.full((1024,), 2, dtype=torch.int32)
+    sas_metadata = torch.full((DSA_METADATA_BUFFER_SIZE,), 1, dtype=torch.int32)
+    qli_metadata = torch.full((DSA_METADATA_BUFFER_SIZE,), 2, dtype=torch.int32)
     builder._build_sas_metadata = MagicMock(return_value=sas_metadata)
     builder._build_qli_metadata = MagicMock(return_value=qli_metadata)
     decode_cu_seqlens_ori_kv = torch.tensor([0, 8, 14], dtype=torch.int32)
@@ -234,6 +239,15 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
     sin = torch.zeros((3, 1, 1, 2))
 
     with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.split_decodes_and_prefills",
+            return_value=(2, 0, 3, 0) if num_prefills == 0 else (1, 1, 1, 2),
+        ),
+        patch.object(
+            DeviceOperator,
+            "format_dsa_slot_mapping",
+            return_value=torch.zeros((3, 2), dtype=torch.int32),
+        ),
         patch.object(
             DeviceOperator,
             "get_dsa_decode_cu_seqlens_ori_kv",
@@ -253,36 +267,36 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
             return_value=(cos, sin),
         ) as rope_op,
     ):
-        metadata = builder.build_req_metadata(
+        metadata = builder.build(
+            common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
-            seq_lens_cpu=seq_lens_cpu,
-            num_reqs_actual=None,
+            common_ratio_to_sas_metadata=metadata_cache,
         )
-        cached_metadata = builder.build_req_metadata(
+        cached_metadata = builder.build(
+            common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
-            seq_lens_cpu=seq_lens_cpu,
-            num_reqs_actual=None,
+            common_ratio_to_sas_metadata=metadata_cache,
         )
 
     rope_op.assert_called_once()
     assert torch.equal(rope_op.call_args.args[0], input_positions)
     assert rope_op.call_args.kwargs["use_cache"] is (num_prefills == 0)
-    assert torch.equal(
-        builder.common_ratio_to_sas_metadata["input_positions"],
-        input_positions,
-    )
-    assert metadata.cos is cos
-    assert metadata.sin is sin
-    assert cached_metadata.cos is cos
-    assert cached_metadata.sin is sin
+    assert metadata_cache["cos"] is cos
+    assert metadata_cache["sin"] is sin
+    req_metadata = cast(AscendDSAReqMetadata, metadata.req_metadata)
+    cached_req_metadata = cast(AscendDSAReqMetadata, cached_metadata.req_metadata)
+    assert req_metadata.cos is cos
+    assert req_metadata.sin is sin
+    assert cached_req_metadata.cos is cos
+    assert cached_req_metadata.sin is sin
     sas_kwargs = builder._build_sas_metadata.call_args.kwargs
     qli_kwargs = builder._build_qli_metadata.call_args.kwargs
-    assert sas_kwargs["metadata_cache"] is builder.common_ratio_to_sas_metadata
+    assert sas_kwargs["metadata_cache"] is metadata_cache
     assert torch.equal(sas_kwargs["query_start_loc"], query_start_loc)
     assert torch.equal(sas_kwargs["seq_lens"], builder.seq_lens)
     assert sas_kwargs["max_seqlen_q"] == 2
     assert sas_kwargs["max_seqlen_kv"] == 8
-    assert qli_kwargs["metadata_cache"] is builder.common_ratio_to_sas_metadata
+    assert qli_kwargs["metadata_cache"] is metadata_cache
     assert torch.equal(qli_kwargs["query_start_loc"], query_start_loc)
     assert torch.equal(qli_kwargs["seq_lens"], builder.seq_lens)
     assert qli_kwargs["max_seqlen_q"] == 2
@@ -294,16 +308,16 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
         assert sas_kwargs["cu_seqlens_ori_kv"] is decode_cu_seqlens_ori_kv
         assert sas_kwargs["cu_seqlens_cmp_kv"] is decode_cu_seqlens_cmp_kv
 
-    assert metadata.sas_metadata is sas_metadata
-    assert metadata.qli_metadata is qli_metadata
-    assert torch.equal(metadata.query_start_loc, query_start_loc)
-    assert torch.equal(metadata.block_table, builder.block_table)
+    assert req_metadata.sas_metadata is sas_metadata
+    assert req_metadata.qli_metadata is qli_metadata
+    assert torch.equal(req_metadata.query_start_loc, query_start_loc)
+    assert torch.equal(req_metadata.block_table, builder.block_table)
     assert torch.equal(
-        metadata.start_pos,
+        req_metadata.start_pos,
         torch.tensor([6, 5], dtype=torch.int32),
     )
-    assert metadata.num_compressed_tokens == 2
-    assert metadata.slot_mapping is None
+    assert req_metadata.num_compressed_tokens == 2
+    assert req_metadata.slot_mapping is None
 
 
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
@@ -321,18 +335,16 @@ def test_build_req_metadata_preserves_zero_max_sequence_lengths():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
     )
-    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
-    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
+    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
 
-    with patch(
-        "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
-        return_value=(torch.empty(0), torch.empty(0)),
-    ):
-        metadata = builder.build_req_metadata(
-            common_attn_metadata=common_attn_metadata,
-            seq_lens_cpu=torch.zeros(2, dtype=torch.int32),
-            num_reqs_actual=None,
-        )
+    metadata = builder.build_req_metadata(
+        common_attn_metadata=common_attn_metadata,
+        seq_lens_cpu=torch.zeros(2, dtype=torch.int32),
+        num_reqs_actual=None,
+        cos=torch.empty(0),
+        sin=torch.empty(0),
+    )
 
     sas_kwargs = builder._build_sas_metadata.call_args.kwargs
     qli_kwargs = builder._build_qli_metadata.call_args.kwargs
@@ -361,18 +373,16 @@ def test_build_req_metadata_clears_graph_padding_rows():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
     )
-    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
-    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(1024, dtype=torch.int32))
+    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
 
-    with patch(
-        "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
-        return_value=(torch.ones(2), torch.zeros(2)),
-    ):
-        metadata = builder.build_req_metadata(
-            common_attn_metadata=common_attn_metadata,
-            seq_lens_cpu=torch.tensor([8, 6, 7], dtype=torch.int32),
-            num_reqs_actual=1,
-        )
+    metadata = builder.build_req_metadata(
+        common_attn_metadata=common_attn_metadata,
+        seq_lens_cpu=torch.tensor([8, 6, 7], dtype=torch.int32),
+        num_reqs_actual=1,
+        cos=torch.ones(2),
+        sin=torch.zeros(2),
+    )
 
     assert metadata.num_reqs_actual == 1
     assert torch.equal(
@@ -390,7 +400,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.block_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
     spec_slot_mapping = [torch.arange(16, dtype=torch.int32).reshape(8, 2)]
-    spec_sas_metadata = [torch.zeros(1024, dtype=torch.int32)]
+    spec_sas_metadata = [torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)]
     builder.spec_slot_mapping = spec_slot_mapping
     builder.spec_sas_metadata = spec_sas_metadata
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
@@ -405,7 +415,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     )
     decode_cu_seqlens_ori_kv = torch.tensor([0, 9, 16], dtype=torch.int32)
     decode_cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
-    generated_metadata = torch.arange(1024, dtype=torch.int32)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
     cos = torch.ones((3, 1, 1, 2))
     sin = torch.zeros((3, 1, 1, 2))
@@ -605,7 +615,7 @@ def test_forward_attention_routes_unified_req_metadata(
     cos = torch.ones((5, 1, 1, 2))
     sin = torch.zeros((5, 1, 1, 2))
     slot_mapping = torch.arange(6, dtype=torch.int32).reshape(3, 2)
-    sas_metadata = torch.arange(1024, dtype=torch.int32)
+    sas_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     req_metadata = AscendDSAReqMetadata(
         block_table=torch.tensor([[1], [2]], dtype=torch.int32),
         seq_lens=torch.tensor([8, 6], dtype=torch.int32),
