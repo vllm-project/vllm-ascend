@@ -163,7 +163,6 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
 
 
 def test_start_weight_update():
-    """post-0.26.0: no-op."""
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
 
@@ -174,7 +173,6 @@ def test_start_weight_update():
 
 
 def test_finish_weight_update():
-    """post-0.26.0: no-op."""
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
