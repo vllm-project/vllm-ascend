@@ -21,13 +21,17 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 
+from vllm_ascend.utils import FP8_METHOD
+
+from vllm_ascend.utils import FP8_METHOD
+
 from .base import QuantType, TPWeightGatherSpec
 from .registry import register_scheme
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
 
-@register_scheme("fp8", "ds_linear")
+@register_scheme(FP8_METHOD, "ds_linear")
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
 
@@ -90,7 +94,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             )
 
 
-@register_scheme("fp8", "ds_w4a8_moe")
+@register_scheme(FP8_METHOD, "ds_w4a8_moe")
 class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod):
     """FusedMoe method for DS original w4a8 mxfp quantization."""
 
