@@ -17,8 +17,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm.config import VllmConfig, get_current_vllm_config
+import torch
+from vllm.config import VllmConfig
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -56,16 +59,44 @@ class AscendPCPManager(PCPManager):
                     "Ascend MRV2 GQA PCP requires num_attention_heads to be greater than num_key_value_heads."
                 )
 
+    def __init__(
+        self,
+        pcp_world_size: int,
+        pcp_rank: int,
+        device: torch.device,
+        vllm_config: VllmConfig | None = None,
+        req_states: RequestState | None = None,
+        max_num_reqs: int | None = None,
+        max_num_tokens: int | None = None,
+        block_tables: BlockTables | None = None,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_interleave: int = 1,
+    ) -> None:
+        super().__init__(
+            pcp_world_size,
+            pcp_rank,
+            device,
+            req_states=req_states,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            block_tables=block_tables,
+            dcp_world_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            cp_interleave=cp_interleave,
+        )
+        self.vllm_config = vllm_config
+
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        vllm_config = get_current_vllm_config()
+        assert self.vllm_config is not None
         local_batch = super().partition_batch(input_batch)
         assert isinstance(local_batch, AscendInputBatch)
 
         local_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         local_batch.seq_lens_np = local_seq_lens_np
         local_batch.attn_state = build_attn_state(
-            vllm_config,
+            self.vllm_config,
             local_seq_lens_np,
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,

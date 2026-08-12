@@ -132,6 +132,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        vllm_config=vllm_config,
         req_states=req_states,
         max_num_reqs=1,
         max_num_tokens=18,
@@ -153,11 +154,6 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
             side_effect=_mock_async_copy_to_cpu,
-        ),
-        patch.object(
-            pcp_manager_module,
-            "get_current_vllm_config",
-            return_value=vllm_config,
         ),
         patch.object(pcp_manager_module, "build_attn_state", return_value=attn_state) as build_attn_state,
     ):
@@ -230,6 +226,7 @@ def test_npu_model_runner_uses_ascend_pcp_manager():
         )
 
     assert isinstance(manager, AscendPCPManager)
+    assert manager.vllm_config is None
     assert manager.pcp_world_size == 2
     assert manager.pcp_rank == 1
     assert manager.dcp_world_size == 2
