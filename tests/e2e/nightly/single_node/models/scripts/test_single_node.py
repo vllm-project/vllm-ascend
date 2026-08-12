@@ -40,7 +40,7 @@ async def run_completion_test(config: SingleNodeConfig, server: "RemoteOpenAISer
 async def run_image_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     from tools.send_mm_request import send_image_request
 
-    send_image_request(config.model, server)
+    send_image_request(config, server)
 
 
 async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
@@ -52,6 +52,76 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
         server=server,
         request_args=config.api_keyword_args,
     )
+
+
+async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
+    import requests
+
+    url = f"http://{server.host}:{server.port}"
+    prompts = config.prompts if config.prompts else ["Hello!"]
+
+    if isinstance(config.api_keyword_args, list):
+        api_args_list = config.api_keyword_args
+        if len(api_args_list) != len(prompts):
+            raise ValueError(f"""
+            api_keyword_args list length ({len(api_args_list)})must match prompts length ({len(prompts)})""")
+    else:
+        api_args_list = [config.api_keyword_args] * len(prompts)
+
+    for prompt, api_args in zip(prompts, api_args_list):
+        max_tokens = api_args.get("max_tokens", 100) if isinstance(api_args, dict) else 100
+        tools = api_args.get("tools") if isinstance(api_args, dict) else None
+        stream = api_args.get("stream", False) if isinstance(api_args, dict) else False
+
+        request_body = {
+            "model": config.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            request_body["tools"] = tools
+        if stream:
+            request_body["stream"] = True
+
+        if stream:
+            with requests.post(
+                f"{url}/v1/messages",
+                headers={"Content-Type": "application/json"},
+                json=request_body,
+                stream=True,
+            ) as response:
+                assert response.status_code == 200, f"Streaming request failed for prompt '{prompt}': {response.text}"
+                events = [line.decode("utf-8") for line in response.iter_lines() if line]
+                assert len(events) > 0, f"No SSE events received for prompt '{prompt}'"
+                assert any("message_start" in e for e in events), f"Missing 'message_start' event for prompt '{prompt}'"
+                assert any("content_block_delta" in e for e in events), f"""Missing 'content_block_delta'
+                event for prompt '{prompt}'"""
+                assert any("message_stop" in e for e in events), f"Missing 'message_stop' event for prompt '{prompt}'"
+                print(f"Messages API streaming test passed for prompt '{prompt}' (events={len(events)})")
+        else:
+            with requests.post(
+                f"{url}/v1/messages",
+                headers={"Content-Type": "application/json"},
+                json=request_body,
+            ) as response:
+                assert response.status_code == 200, f"Request failed for prompt '{prompt}': {response.text}"
+                data = response.json()
+                assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
+                assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
+                assert "content" in data, "Response missing 'content' field"
+                assert isinstance(data["content"], list), "Expected content to be a list"
+                assert len(data["content"]) > 0, f"Expected non-empty content for prompt '{prompt}'"
+
+            if tools:
+                valid_blocks = [block for block in data["content"] if block.get("type") in ["text", "tool_use"]]
+                assert len(valid_blocks) > 0, f"No text or tool_use content found for prompt '{prompt}'"
+            else:
+                text_content = [block for block in data["content"] if block.get("type") == "text"]
+                assert len(text_content) > 0, f"No text content found for prompt '{prompt}'"
+                actual_text = text_content[0].get("text", "")
+                assert actual_text and actual_text.strip(), f"Empty text response for prompt '{prompt}'"
+
+            print(f"Messages API test passed for prompt '{prompt}': {data}")
 
 
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
@@ -148,6 +218,7 @@ TEST_HANDLERS = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
+    "messages": run_messages_test,
     "check_rank0_process_count": run_check_rank0_process_count,
 }
 
