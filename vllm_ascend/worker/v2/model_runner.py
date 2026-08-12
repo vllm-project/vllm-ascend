@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -65,6 +66,20 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+
+def _get_eplb_num_unpadded_tokens(
+    vllm_config: VllmConfig,
+    num_tokens: int,
+) -> int:
+    """Return the number of real tokens seen by this TP rank."""
+    if not enable_sp(vllm_config):
+        return num_tokens
+
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    tp_rank = get_tensor_model_parallel_rank()
+    quotient, remainder = divmod(num_tokens, tp_size)
+    return quotient + int(tp_rank < remainder)
 
 
 # TODO: remove this wrapper when vllm-ascend supports sequence parallel on model runner v2.
@@ -385,6 +400,10 @@ class NPUModelRunner(GPUModelRunner):
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
         batch_has_prefill = bool(np.any(is_prefilling_np))
         self.eplb.set_batch_phase(batch_has_prefill)
+        self.eplb.prepare_forward(
+            self.model_config,
+            _get_eplb_num_unpadded_tokens(self.vllm_config, num_tokens),
+        )
 
         # Get prefill tokens if any.
         if batch_has_prefill:

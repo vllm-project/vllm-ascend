@@ -12,6 +12,47 @@ from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
     is_eplb_load_collection_phase_matched,
 )
+from vllm_ascend.worker.v2.model_runner import _get_eplb_num_unpadded_tokens
+
+
+class TestEplbNumUnpaddedTokens(unittest.TestCase):
+    @staticmethod
+    def _vllm_config(tp_size=2):
+        return SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=tp_size))
+
+    def test_tp_without_sequence_parallel_records_the_full_batch(self):
+        with (
+            patch(
+                "vllm_ascend.worker.v2.model_runner.enable_sp",
+                return_value=False,
+            ),
+            patch("vllm_ascend.worker.v2.model_runner.get_tensor_model_parallel_rank") as get_tp_rank,
+        ):
+            self.assertEqual(
+                _get_eplb_num_unpadded_tokens(self._vllm_config(), 9),
+                9,
+            )
+            get_tp_rank.assert_not_called()
+
+    def test_sequence_parallel_records_only_the_rank_local_tokens(self):
+        with (
+            patch(
+                "vllm_ascend.worker.v2.model_runner.enable_sp",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.worker.v2.model_runner.get_tensor_model_parallel_rank",
+                side_effect=(0, 1),
+            ),
+        ):
+            self.assertEqual(
+                _get_eplb_num_unpadded_tokens(self._vllm_config(), 9),
+                5,
+            )
+            self.assertEqual(
+                _get_eplb_num_unpadded_tokens(self._vllm_config(), 9),
+                4,
+            )
 
 
 class TestEplbLoadCollectionPhase(unittest.TestCase):
@@ -54,7 +95,10 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
     def test_prepare_load_constructs_ascend_state(self):
         controller = self._make_controller()
 
-        with patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent"):
+        with (
+            patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent"),
+            patch("torch.accelerator.current_device_index", return_value=0),
+        ):
             controller.prepare_load()
 
         self.assertIsInstance(controller.state, AscendEplbState)
@@ -68,28 +112,13 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
                 )
                 state = MagicMock()
                 state._should_record_current_step.return_value = True
+                state.model_states = {}
                 controller.state = state
                 controller.set_batch_phase(batch_has_prefill=batch_has_prefill)
 
                 controller.step()
 
                 state.step.assert_called_once_with(expected_dummy, False, log_stats=True)
-
-    def test_closed_upstream_window_discards_recorded_load(self):
-        controller = self._make_controller()
-        expert_load_pass = torch.ones(2, dtype=torch.int32)
-        state = MagicMock()
-        state._should_record_current_step.return_value = False
-        state.model_states = {"model": SimpleNamespace(expert_load_pass=expert_load_pass)}
-        controller.state = state
-
-        controller.step()
-
-        torch.testing.assert_close(
-            expert_load_pass,
-            torch.zeros_like(expert_load_pass),
-        )
-        state.step.assert_called_once_with(False, False, log_stats=False)
 
     def test_suppressed_controller_does_not_touch_state(self):
         controller = self._make_controller()
@@ -101,6 +130,20 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
         state._should_record_current_step.assert_not_called()
         state.step.assert_not_called()
+
+    def test_prepare_forward_combines_window_and_phase_device_gates(self):
+        controller = self._make_controller(load_collection_phase="prefill")
+        state = MagicMock()
+        state.should_record_tensor = torch.tensor(True)
+        state._should_record_current_step.return_value = True
+        controller.state = state
+        controller.set_batch_phase(batch_has_prefill=False)
+
+        controller.prepare_forward(object(), 7)
+
+        state.prepare_forward.assert_called_once()
+        state._should_record_current_step.assert_called_once_with(log_stats=False)
+        assert not bool(state.should_record_tensor)
 
 
 class TestAscendEplbFreshLoadGate(unittest.TestCase):

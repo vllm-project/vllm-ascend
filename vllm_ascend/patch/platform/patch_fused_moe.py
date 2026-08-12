@@ -36,6 +36,7 @@ import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb_state import AscendEplbLayerState
@@ -60,7 +61,16 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
     expert_replica_routing_table = eplb_state.expert_replica_routing_table
     if expert_replica_routing_table is None:
         raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
-    return torch.ops.vllm.ascend_eplb_map_to_physical(topk_ids, expert_replica_routing_table)
+    assert eplb_state.expert_load_view is not None
+    assert eplb_state.should_record_tensor is not None
+    assert eplb_state.num_unpadded_tokens_tensors is not None
+    return torch.ops.vllm.ascend_eplb_map_to_physical_and_record(
+        topk_ids,
+        expert_replica_routing_table,
+        eplb_state.expert_load_view,
+        eplb_state.should_record_tensor,
+        eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()],
+    )
 
 
 def _adapt_eplb_router(router, enable_eplb: bool) -> None:

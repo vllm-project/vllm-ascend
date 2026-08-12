@@ -37,7 +37,7 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
             tensor_parallel_size=2,
             enable_expert_parallel=True,
             enable_eplb=True,
-            eplb_config=EPLBConfig(use_async=False),
+            eplb_config=EPLBConfig(use_async=True),
         )
         vllm_config = VllmConfig(parallel_config=parallel_config)
 
@@ -53,22 +53,22 @@ def test_parallel_config_platform_patch_is_idempotent():
     assert parallel_module.current_platform is proxy
 
 
-def test_communicator_factory_maps_tensor_lists_to_hccl(monkeypatch):
+def test_communicator_factory_maps_gloo_to_staged_on_npu(monkeypatch):
     communicator = object()
-    communicator_cls = MagicMock(return_value=communicator)
-    monkeypatch.setattr(patch_eplb, "HcclEplbCommunicator", communicator_cls)
+    gloo_cls = MagicMock(return_value=communicator)
+    monkeypatch.setattr(patch_eplb, "AscendGlooEplbCommunicator", gloo_cls)
     coordinator = MagicMock()
 
     with _npu_parallel_config_platform():
         result = patch_eplb._eplb_communicator.create_eplb_communicator(
             coordinator,
-            "torch_nccl",
+            "torch_gloo",
             [[object()]],
             [object()],
         )
 
     assert result is communicator
-    communicator_cls.assert_called_once_with(coordinator.device_group)
+    gloo_cls.assert_called_once_with(cpu_group=coordinator.cpu_group)
 
 
 def test_communicator_factory_forwards_other_backends_and_additive_parameters():
@@ -102,7 +102,7 @@ def test_communicator_factory_forwards_other_backends_and_additive_parameters():
     with _npu_parallel_config_platform():
         result = wrapped_factory(
             coordinator,
-            "torch_gloo",
+            "nixl",
             expert_weights,
             expert_buffer,
             transport_options={"mode": "future"},
@@ -112,7 +112,7 @@ def test_communicator_factory_forwards_other_backends_and_additive_parameters():
     assert calls == [
         (
             coordinator,
-            "torch_gloo",
+            "nixl",
             expert_weights,
             expert_buffer,
             {"mode": "future"},
@@ -121,8 +121,13 @@ def test_communicator_factory_forwards_other_backends_and_additive_parameters():
 
 
 def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
-    pending_result = SimpleNamespace(layer_idx=3)
-    model_state = SimpleNamespace(pending_result=pending_result)
+    pending_result = SimpleNamespace(layer_idx=3, transfer_metadata=object())
+    state = SimpleNamespace(commit_policy_layer=MagicMock(), complete_async_cycle=MagicMock())
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        rebalanced=True,
+        _ascend_eplb_state=state,
+    )
     refresh = MagicMock()
     monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", refresh)
 
@@ -137,3 +142,40 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
 
     assert result == "moved"
     refresh.assert_called_once_with(model_state, 3)
+    state.commit_policy_layer.assert_called_once_with(model_state, 3)
+    state.complete_async_cycle.assert_not_called()
+
+
+def test_async_workspace_wrapper_acknowledges_no_transfer_cycle(monkeypatch):
+    consumed_event = MagicMock()
+    pending_result = SimpleNamespace(
+        layer_idx=1,
+        transfer_metadata=patch_eplb.NO_TRANSFER_CYCLE_COMPLETE,
+        consumed_event=consumed_event,
+    )
+    state = SimpleNamespace(complete_async_cycle=MagicMock())
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        rebalanced=True,
+        model=SimpleNamespace(num_moe_layers=2),
+        _ascend_eplb_state=state,
+    )
+    original_move_called = False
+
+    def original_move(model_state, ep_rank):
+        nonlocal original_move_called
+        original_move_called = True
+
+    refresh = MagicMock()
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", refresh)
+
+    wrapped_move = patch_eplb._wrap_move_to_workspace(original_move)
+    result = wrapped_move(model_state, 0)
+
+    assert result is None
+    assert model_state.rebalanced is False
+    assert model_state.pending_result is None
+    consumed_event.record.assert_called_once_with()
+    assert original_move_called is False
+    refresh.assert_not_called()
+    state.complete_async_cycle.assert_called_once_with()

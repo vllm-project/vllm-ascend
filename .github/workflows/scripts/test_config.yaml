@@ -239,10 +239,14 @@
   source_file_dependencies:
     - vllm_ascend/eplb
     - vllm_ascend/distributed/eplb_communicator.py
+    - vllm_ascend/distributed/eplb_async_worker.py
+    - vllm_ascend/distributed/eplb_policy.py
     - vllm_ascend/distributed/eplb_state.py
     - vllm_ascend/ops/fused_moe/eplb.py
-    - vllm_ascend/ops/fused_moe/router.py
+    - vllm_ascend/ops/fused_moe/routed_experts.py
+    - vllm_ascend/ops/triton/eplb.py
     - vllm_ascend/patch/platform/patch_eplb.py
+    - vllm_ascend/patch/platform/patch_fused_moe.py
     - vllm_ascend/worker/v2/eplb.py
   tests:
     - tests/ut/eplb
@@ -869,6 +873,7 @@ estimated_times:
   tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py: 60
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
+  tests/ut/ops/a2/test_eplb.py: 30
   tests/ut/ops/a2/test_gdn_layerwise_kv.py: 80
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50

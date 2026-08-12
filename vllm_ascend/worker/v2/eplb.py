@@ -56,6 +56,22 @@ class AscendEPLBController(EPLBController):
             batch_has_prefill,
         )
 
+    def prepare_forward(
+        self,
+        model_config: Any,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        state = self.state
+        if state is None or not self.parallel_config.enable_eplb:
+            return
+        state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+        if state.should_record_tensor is not None:
+            state.should_record_tensor.fill_(
+                state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
+                and self._load_collection_phase_matched
+            )
+
     def step(
         self,
         is_dummy: bool = False,
@@ -66,17 +82,6 @@ class AscendEPLBController(EPLBController):
             return
 
         discard_current_load = not is_profile and not self._load_collection_phase_matched
-        if (
-            not is_dummy
-            and not is_profile
-            and not discard_current_load
-            and not state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
-        ):
-            # Ascend records local GMM counts after every MoE call. Clear
-            # them once per pass while the upstream window is closed.
-            for model_state in state.model_states.values():
-                model_state.expert_load_pass.zero_()
-
         # Phase selection may change the load submitted by each rank, but all
         # ranks must advance the EPLB state machine and enter collectives in
         # the same order. Treat a non-matching batch as an EPLB dummy step and

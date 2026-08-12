@@ -1,167 +1,70 @@
 # Model Runner V2 EPLB Architecture
 
-Model Runner V2 on Ascend uses the upstream vLLM Expert Parallelism Load
-Balancer (EPLB) control plane and adds a small Ascend-specific integration
-plane. Upstream code owns load windows, policy execution, placement state, and
-the rearrangement transaction. vLLM Ascend owns device routing, executed-load
-recording, quantized expert-weight views, and HCCL communication.
+Model Runner V2 on Ascend uses the vLLM EPLB control plane with an Ascend-specific asynchronous execution layer. vLLM owns the load-window clock, placement state, and commit transaction. vLLM Ascend owns the STAIR placement decision, graph-stable routing, executed-load recording, quantized expert-weight views, and Gloo-staged movement.
 
-This page describes the current synchronous architecture. For the decisions
-behind this ownership model, see
-[RFC #13410](https://github.com/vllm-project/vllm-ascend/issues/13410). For
-user-visible configuration and the supported feature matrix, see the
-[EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
-
-## Mental model
-
-EPLB has a control plane and a data plane:
-
-- The **control plane** decides where each logical expert is placed and when
-  the placement changes. Its source of truth is the upstream `EplbState`.
-- The **data plane** maps each token's logical expert choice to the physical
-  expert installed on the local rank, runs fused MoE, and records the experts
-  that actually executed.
-- The **movement plane** exposes the real quantized expert storage and moves it
-  through the upstream rearrangement transaction using HCCL-backed
-  `torch.distributed` collectives.
-
-The Ascend integration adapts the boundaries between these planes; it does not
-implement a second policy or placement lifecycle.
-
-```mermaid
-flowchart LR
-    A["Upstream EPLB controller"] -->|"committed placement"| B["Ascend EPLB state"]
-    B -->|"refresh in place"| C["Device lookup table"]
-    D["Router logical expert IDs"] --> C
-    C -->|"physical expert IDs"| E["Quantized fused MoE"]
-    E -->|"executed expert counts"| F["Load recorder"]
-    F --> A
-    A -->|"rearrangement plan"| G["Quantization-owned weight views"]
-    G <-->|"torch.distributed over HCCL"| H["Peer EP ranks"]
-    G -->|"commit"| B
-```
+The architectural decision is tracked in [RFC #13410](https://github.com/vllm-project/vllm-ascend/issues/13410). User configuration and the supported execution matrix are documented in the [EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
 
 ## Component boundaries
 
 | Component | Responsibility |
 | --- | --- |
-| Upstream `EPLBController` and `EplbState` | Load windows, policy, placement calculation, and rearrangement ordering |
-| `AscendEPLBController` | Batch load-collection-phase filtering and construction of Ascend state |
-| `AscendEplbState` and `AscendEplbLayerState` | Stable device lookup derived from committed upstream placement |
-| Router adapter | Per-instance logical-to-physical ID mapping without replacing the upstream router class |
-| Fused MoE EPLB helpers | Device lookup and post-compute physical load recording |
-| Quantization method | View of the expert tensors and metadata actually consumed by its kernel |
-| `HcclEplbCommunicator` | Upstream communicator contract implemented through `torch.distributed` on HCCL |
-| Platform patch | Capability adaptation and the narrow construction/commit hooks not exposed by upstream |
+| vLLM `EplbState` | Window clock, distributed load reduction, placement state, and commit ordering |
+| `AscendEplbState` | STAIR ownership, complete load-time-series preservation, freshness gating, and routing refresh |
+| STAIR | Generate a stable candidate and accept only layers with temporal balance improvement |
+| Ascend async worker | Transfer changed layers only and explicitly complete no-transfer cycles |
+| Router adapter | Map logical expert IDs through a graph-stable device routing table |
+| Quantization method | Expose the expert tensors and metadata consumed by its kernel |
+| Gloo staged communicator | Move expert tensors on the background stream without using HCCL from the worker thread |
 
-The platform patch is an entry adapter. Runtime routing, state management, and
-communication live in explicit components so that patching does not become an
-alternative implementation of EPLB.
+```mermaid
+flowchart LR
+    A["Executed expert load"] --> B["vLLM load window"]
+    B --> C["STAIR placement decision"]
+    C --> D{"Changed layer?"}
+    D -->|"No"| E["Complete cycle"]
+    D -->|"Yes"| F["Gloo staged transfer"]
+    F --> G["Main-thread commit"]
+    G --> H["In-place routing-table refresh"]
+    H --> E
+```
 
-## Request and layer flow
+## Routing and load collection
 
-At runner initialization, platform validation checks the Model Runner version,
-EPLB mode, quantization layout, and execution features. Unsupported
-combinations fail before serving. Model Runner V1 keeps its legacy EPLB path;
-Model Runner V2 uses the upstream control plane. V1-only controls and V2 EPLB
-configuration cannot be mixed.
+The upstream router selects logical experts once. The Ascend router adapter maps those IDs to physical replicas using a fixed-shape device tensor. Placement commits update this tensor in place, so compiled graphs and long-lived router instances retain a stable reference.
 
-At the start of a Model Runner V2 batch, the runner tells
-`AscendEPLBController` whether the batch belongs to the configured load
-collection phase. The phase may collect all batches, prefill batches, or decode
-batches. A mixed batch containing prefill work is classified as prefill. This
-decision is made once per batch rather than once per token or MoE layer.
+Load is recorded in physical-expert space by the same device operation that performs the mapping. A shared device scalar gates recording, and another device scalar limits it to unpadded tokens. Non-sampling windows therefore do not execute a host-side recording branch or introduce device-to-host synchronization.
 
-Each MoE layer then follows one routing path:
+`load_collection_phase` classifies a batch as `prefill`, `decode`, or `all`. A mixed batch containing prefill work is classified as prefill. Phase filtering controls only whether load enters the window; every rank still advances the EPLB state machine in the same collective order.
 
-1. The upstream router selects logical experts and produces routing weights.
-2. The instance-bound Ascend router adapter gathers physical expert IDs from
-   the layer's device lookup.
-3. The quantization method receives the routing weights and physical IDs and
-   runs fused MoE. It does not select experts again.
-4. After compute, the local slice of executed physical expert counts is added
-   to the upstream load window when its collection phase is enabled.
+## STAIR placement
 
-Phase selection filters only the load submitted by a rank. Every rank still
-advances the upstream EPLB state machine and participates in its collectives in
-the same order, even when local batches belong to different phases.
+STAIR is the only Model Runner V2 placement policy exposed by vLLM Ascend. It consumes the complete `[window, layer, expert]` load series. A stable placement planner generates a candidate from aggregate load, then a temporal acceptance stage evaluates each changed layer over the complete window. A candidate is accepted only when it improves peak-to-average rank load and passes hysteresis.
 
-The lookup is a fixed-shape device tensor whose object identity remains stable.
-When placement changes, `AscendEplbLayerState` builds the new values and copies
-them into the existing tensor. Long-lived router instances and compiled call
-sites therefore keep a valid reference without reconstructing Python objects
-in the layer hot path.
+Policy state belongs to one `AscendEplbState` instance. Hysteresis is updated only after the main thread commits the corresponding expert weights and placement. If the next cycle observes a different placement, the stale history for that layer is discarded.
 
-## Rearrangement and weight views
+## Asynchronous movement lifecycle
 
-When an upstream load window closes, the controller evaluates the policy and,
-if necessary, starts the upstream rearrangement transaction. The transaction
-uses the communicator to exchange expert tensors between expert-parallel ranks,
-commits the new placement, and then refreshes the device lookup. Routing never
-observes a lookup for an uncommitted placement.
+The worker snapshots the committed placement and computes one complete STAIR plan. It compares the new and old maps before movement and schedules only changed layers. For each changed layer it fills the staging buffer, publishes a pending result, and waits until the main thread consumes it.
 
-Expert storage is quantization-specific. Some kernels consume independent
-per-expert tensors, while others consume packed tensors or associated scale and
-metadata layouts. Each supported quantization method exposes a weight view of
-the exact storage read by compute. Rearrangement operates through that view;
-it does not assume that a canonical model parameter is the active kernel
-storage.
+The main thread installs the staged weights, commits the vLLM maps, refreshes the device routing table, and then acknowledges the result. If no layer changes, or if the final changed layer is not the model's final MoE layer, the worker publishes an explicit cycle-complete marker. This prevents the asynchronous state from remaining permanently active without performing a dummy transfer.
 
-Support therefore requires all of the following for a format:
+The supported movement path is asynchronous Gloo CPU staging. It avoids HCCL operations from the background thread and leaves foreground MoE collectives on their normal device stream.
 
-- the compute tensors and coupled metadata can be identified;
-- the view preserves the ordering expected by the upstream movement contract;
-- movement updates the same storage used by the fused kernel;
-- post-move execution remains valid for repeated rearrangements.
-
-Formats that cannot satisfy these conditions are rejected during validation.
-The current format and execution-mode support table lives in the
-[EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md),
-not in this architecture page.
-
-## Communication and synchronization
-
-`HcclEplbCommunicator` implements the upstream communicator interface through
-the process group's `torch.distributed` operations. HCCL is selected by the NPU
-process group even though the upstream configuration names its generic
-torch-distributed communicator backend. Ascend-specific capability differences,
-such as profiling-buffer reservation, stay inside the communicator.
-
-The supported path is synchronous: weight movement and placement commit finish
-before inference continues. Asynchronous EPLB configuration is rejected at
-startup. The layer-state refresh hook is attached to the commit boundary so a
-future asynchronous implementation can preserve the same reader guarantee,
-but it does not enable asynchronous execution today.
-
-## Invariants
+## Invariants and limits
 
 Changes to this integration must preserve these invariants:
 
-1. Upstream placement state is the only source of truth for Model Runner V2.
-2. Expert selection runs once; quantized compute consumes physical expert IDs.
-3. The device lookup changes only after the corresponding placement commits.
-4. Load is recorded after compute in the physical expert ID space.
-5. Weight movement updates the exact storage used by the active quantized
-   kernel.
-6. Unsupported modes fail during initialization instead of silently degrading.
-7. EPLB-disabled execution and the Model Runner V1 EPLB path remain isolated.
-8. The routing hot path avoids host loops, device-to-host synchronization, and
-   mutable Python mapping work.
+1. The committed vLLM placement is the source of truth.
+2. Routing tables change only after the corresponding weight and map commit.
+3. STAIR history changes only after a real layer commit.
+4. Unchanged layers perform no weight-transfer work.
+5. A cycle with no final-layer transfer still reaches an explicit completed state.
+6. Load recording is device-gated and excludes padded tokens.
+7. Weight movement updates the exact storage used by the active quantized kernel.
+8. Model Runner V1 and EPLB-disabled execution remain isolated.
 
-## Extension and debugging anchors
+Model Runner V2 EPLB on Ascend currently requires asynchronous mode, a fixed EP topology, and the Gloo communicator. Elastic EP and synchronous movement are rejected during initialization. Quantization formats without a complete movement view are also rejected.
 
-When adding a quantization format, begin with its expert-weight view and prove
-that the fused kernel reads the moved tensors. Do not add layout knowledge to
-the controller or router. When adding an execution mode, check its placement
-commit boundary and whether router instances retain the stable lookup.
+## Debugging anchors
 
-For stale or incorrect expert selection after rearrangement, inspect the
-committed `EplbState` and the in-place lookup refresh. For successful movement
-with unchanged model behavior, inspect the quantization-owned weight view. For
-missing or shifted load statistics, verify that counts are recorded after
-fused MoE and use physical IDs. Startup rejections should be checked against
-the user-guide support matrix and
-[additional configuration reference](../../user_guide/configuration/additional_config.md).
-
-Repository test placement and registration rules are documented in the
-[testing guide](../contribution/testing.md).
+For stale routing after movement, compare the committed vLLM map with the in-place device routing table. For a worker that remains active, verify that the last changed layer or the no-transfer marker was consumed. For unexpected movement frequency, inspect STAIR's accepted-layer count and committed hysteresis rather than only the candidate count. For missing load, verify the phase gate and unpadded-token scalar before inspecting distributed reduction.

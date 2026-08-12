@@ -10,12 +10,14 @@ import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.logger import logger
 
+from vllm_ascend.distributed.eplb_policy import StairEplbPolicyAdapter
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 
 class AscendEplbLayerState(_eplb_state.EplbLayerState):
-    """EPLB layer state with a graph-stable expert replica routing table."""
+    """EPLB layer state with a graph-stable replica routing table."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -47,9 +49,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         logical_to_physical_map = self.logical_to_physical_map
         logical_replica_count = self.logical_replica_count
         if logical_to_physical_map is None or logical_replica_count is None:
-            raise RuntimeError(
-                "Cannot build the expert replica routing table before Ascend EPLB layer state is initialized."
-            )
+            raise RuntimeError("Cannot build the replica routing table before EPLB layer state is initialized.")
 
         new_routing_table = _eplb_ops.build_expert_replica_routing_table(
             logical_to_physical_map,
@@ -60,16 +60,13 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             self.expert_replica_routing_table is not None
             and self.expert_replica_routing_table.shape == new_routing_table.shape
         ):
-            self.expert_replica_routing_table.copy_(
-                new_routing_table,
-                non_blocking=True,
-            )
+            self.expert_replica_routing_table.copy_(new_routing_table, non_blocking=True)
         else:
             self.expert_replica_routing_table = new_routing_table
 
 
 def refresh_model_routing_tables(model_state: Any, layer_idx: int | None = None) -> None:
-    """Refresh all routing tables, or one after an async map commit."""
+    """Refresh all routing tables, or one table after an async map commit."""
     layers = list(model_state.model.moe_layers)
     selected_layers = enumerate(layers) if layer_idx is None else ((layer_idx, layers[layer_idx]),)
     for _, layer in selected_layers:
@@ -79,11 +76,46 @@ def refresh_model_routing_tables(model_state: Any, layer_idx: int | None = None)
 
 
 class AscendEplbState(_eplb_state.EplbState):
-    """Own Ascend routing-table refreshes without patching commit helpers."""
+    """STAIR state, load-window preservation, and Ascend async lifecycle."""
+
+    policy: Any
+    cuda_device_index: int | None
+    async_worker: Any
 
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
+        self.stair_policy = StairEplbPolicyAdapter()
+        self.policy = self.stair_policy
         self._has_fresh_recorded_load = False
+        self._preserve_expert_load_time_series = False
+        self.async_policy_cycles = 0
+        self.async_completed_cycles = 0
+        self.async_committed_layers = 0
+        if self.cuda_device_index is None:
+            self.cuda_device_index = torch.accelerator.current_device_index()
+
+    def add_model(self, model, model_config) -> None:
+        super().add_model(model, model_config)
+        # Upstream initializes its configured policy in add_model. Ascend MRv2
+        # intentionally exposes one placement policy so state cannot diverge
+        # between model registrations.
+        self.policy = self.stair_policy
+        model_state = self.model_states[model_config.compute_hash()]
+        model_state_any: Any = model_state
+        model_state_any._ascend_eplb_state = self
+        logger.info("Selected Ascend EPLB placement policy: STAIR")
+
+    def start_async_loop(
+        self,
+        rank_mapping: dict[int, int] | None = None,
+        is_profile: bool = False,
+    ) -> None:
+        del rank_mapping
+        if not self.is_async or self.async_worker is not None:
+            return
+        from vllm_ascend.distributed.eplb_async_worker import start_async_worker
+
+        self.async_worker = start_async_worker(self, is_profile=is_profile)
 
     def step(
         self,
@@ -102,35 +134,58 @@ class AscendEplbState(_eplb_state.EplbState):
         if cpu_group is not None:
             if cpu_group.size() <= 1:
                 return self._has_fresh_recorded_load
-            flag = torch.tensor(
-                (self._has_fresh_recorded_load,),
-                dtype=torch.int32,
-                device="cpu",
-            )
+            flag = torch.tensor((self._has_fresh_recorded_load,), dtype=torch.int32, device="cpu")
             all_reduce(flag, group=cpu_group)
             return bool(flag.item())
 
         device_group = ep_group.device_group
         if device_group.size() <= 1:
             return self._has_fresh_recorded_load
-        flag = torch.tensor(
-            (self._has_fresh_recorded_load,),
-            dtype=torch.int32,
-            device=self.device,
-        )
+        flag = torch.tensor((self._has_fresh_recorded_load,), dtype=torch.int32, device=self.device)
         all_reduce(flag, group=device_group)
         return bool(flag.item())
+
+    def _build_logical_expert_load_time_series(self) -> list[torch.Tensor]:
+        logical_load_windows = []
+        for model_state in self.model_states.values():
+            physical_load_window = model_state.expert_load_window[:, :, : self.num_valid_physical_experts]
+            logical_load_window = torch.zeros(
+                physical_load_window.shape[0],
+                model_state.model.num_moe_layers,
+                model_state.model.num_logical_experts,
+                dtype=physical_load_window.dtype,
+                device=physical_load_window.device,
+            )
+            logical_load_window.scatter_add_(
+                dim=-1,
+                index=model_state.physical_to_logical_map[:, : self.num_valid_physical_experts]
+                .unsqueeze(0)
+                .expand_as(physical_load_window)
+                .long(),
+                src=physical_load_window,
+            )
+            logical_load_windows.append(logical_load_window)
+        return logical_load_windows
+
+    def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Preserve the STAIR window axis across the upstream collective."""
+        if not self._preserve_expert_load_time_series:
+            return super()._allreduce_list(tensor_list)
+        temporal_load_windows = (
+            tensor_list
+            if all(tensor.dim() == 3 for tensor in tensor_list)
+            else self._build_logical_expert_load_time_series()
+        )
+        shapes = [tensor.shape for tensor in temporal_load_windows]
+        flattened = [tensor.reshape(-1, tensor.shape[-1]) for tensor in temporal_load_windows]
+        reduced = super()._allreduce_list(flattened)
+        return [tensor.reshape(shape) for tensor, shape in zip(reduced, shapes)]
 
     def rearrange(
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
-        # Dummy steps keep every rank on the same EPLB clock, but they do not
-        # advance the load window. Avoid repeatedly rearranging from the same
-        # stale window when no rank recorded a fresh sample in this period.
-        # Elastic EP reshuffles are forced lifecycle operations, not scheduled
-        # load-based rearrangements, so they must bypass the freshness gate.
         should_gate = (
             hasattr(self, "_has_fresh_recorded_load")
             and not is_profile
@@ -140,13 +195,34 @@ class AscendEplbState(_eplb_state.EplbState):
         if should_gate and not self._has_global_fresh_recorded_load():
             return None
 
-        result = super().rearrange(is_profile=is_profile, rank_mapping=rank_mapping)
+        self._preserve_expert_load_time_series = True
+        try:
+            result = super().rearrange(is_profile=is_profile, rank_mapping=rank_mapping)
+        finally:
+            self._preserve_expert_load_time_series = False
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)
         if not is_profile:
             self._has_fresh_recorded_load = False
         return result
+
+    def commit_policy_layer(self, model_state: Any, layer_idx: int) -> None:
+        """Commit STAIR hysteresis after upstream commits weights and maps."""
+        load_window = getattr(model_state, "_ascend_eplb_policy_load", None)
+        if load_window is None or model_state.eplb_stats is None:
+            return
+        self.stair_policy.commit_layer(
+            load_window,
+            layer_idx,
+            model_state.physical_to_logical_map[layer_idx].cpu(),
+            model_state.eplb_stats.num_gpus,
+        )
+        self.async_committed_layers += 1
+
+    def complete_async_cycle(self) -> None:
+        """Record a cycle only after its final result is consumed."""
+        self.async_completed_cycles += 1
 
     @classmethod
     def from_mapping(
