@@ -117,6 +117,8 @@ runner_mapping:
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
+  tests/e2e/fault_tolerance:
+    default: a3-4
 
 # === Partition Configuration ===
 # Maps logical test buckets to exact labels from runner_label.json and controls
