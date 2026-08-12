@@ -320,8 +320,8 @@ def _convert_logits_slice_to_local(
 
     Returns (req_indices, local_tok_ids, in_shard_mask).
     """
-    comm_group = _get_reduce_sample_comm_group()
-    tp_rank = comm_group.rank_in_group
+    tp_group = get_tp_group()
+    tp_rank = tp_group.rank_in_group
     vocab_start = tp_rank * V_local
     vocab_end = vocab_start + V_local
 
