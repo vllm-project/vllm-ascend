@@ -8,6 +8,8 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -481,7 +483,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("torch.npu.set_device")
     @patch("torch.npu.empty_cache")
     @patch("torch.npu.mem_get_info")
@@ -497,11 +499,11 @@ class TestNPUWorker(TestBase):
         mock_current_platform,
     ):
         """Test _init_device method"""
-        from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
+        from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock
         mock_mem_get_info.return_value = (1000, 2000)
-        mock_get_device_type.return_value = AscendDeviceType.A2
+        mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
 
         # Mock MemorySnapshot
         mock_snapshot = MagicMock()
@@ -1388,8 +1390,7 @@ class TestNPUWorker(TestBase):
             self.assertIn("Sleep mode can only be", str(cm.exception))
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
-    @patch("vllm_ascend.worker.worker.AscendDeviceType")
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
@@ -1398,7 +1399,6 @@ class TestNPUWorker(TestBase):
         mock_warm_up_atb,
         mock_logger,
         mock_get_ascend_config,
-        mock_ascend_device_type,
         mock_get_ascend_device_type,
         mock_set_random_seed,
     ):
@@ -1408,7 +1408,7 @@ class TestNPUWorker(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.enable_cpu_binding = False
         mock_get_ascend_config.return_value = mock_ascend_config
-        mock_get_ascend_device_type.return_value = mock_ascend_device_type.A9B
+        mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
@@ -1453,8 +1453,7 @@ class TestNPUWorker(TestBase):
             mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
-    @patch("vllm_ascend.worker.worker.AscendDeviceType")
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.worker.worker.CUDAGraphMode")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
@@ -1465,7 +1464,6 @@ class TestNPUWorker(TestBase):
         mock_logger,
         mock_get_ascend_config,
         mock_cudagraph_mode,
-        mock_ascend_device_type,
         mock_get_ascend_device_type,
         mock_set_random_seed,
     ):
@@ -1475,7 +1473,7 @@ class TestNPUWorker(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.enable_cpu_binding = False
         mock_get_ascend_config.return_value = mock_ascend_config
-        mock_get_ascend_device_type.return_value = mock_ascend_device_type.A9B
+        mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
         mock_cudagraph_mode.NONE = mock_cudagraph_mode.NONE
         from vllm_ascend.worker.worker import NPUWorker
 
