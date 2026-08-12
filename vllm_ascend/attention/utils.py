@@ -229,6 +229,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., [1, 1, 1, 128] for 3 decode tokens and 1 prefill with 128 tokens.
     actual_seq_lengths_q: list[int] = field(default_factory=list)
 
+    query_start_loc_list: list[int] = field(default_factory=list)
+    seq_lens_list: list[int] = field(default_factory=list)
+
     # NPU tensor of position indices for rotary embeddings computation.
     # E.g., tensor([0, 1, 2, ...]) indicating token positions in sequence.
     positions: torch.Tensor = None
@@ -277,6 +280,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             slot_mapping=self.slot_mapping,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
+            query_start_loc_list=self.query_start_loc_list[:num_actual_reqs],
+            seq_lens_list=self.seq_lens_list[:num_actual_reqs],
             positions=self.positions,
             positions_cpu=self.positions_cpu,
             attn_state=self.attn_state,

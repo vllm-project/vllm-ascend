@@ -32,10 +32,6 @@ from vllm.v1.attention.backend import (  # type: ignore
     AttentionMetadataBuilder,
     AttentionType,
 )
-from vllm.v1.attention.backends.registry import (  # type: ignore
-    AttentionBackendEnum,
-    register_backend,
-)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -68,7 +64,6 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
-@register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 

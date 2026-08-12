@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.worker.v2.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -90,17 +90,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.model_runner = model_runner
         # Reuse the public update_stream from model_runner (shared with draft).
         self.update_stream = self.model_runner.update_stream
-        # The attention backend keys its per-size graph params by the actual
-        # captured token counts (rounded up to decode_query_len when using
-        # speculative decoding), so derive them from the capture descriptors
-        # instead of the raw config sizes.
-        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-        # vllm-ascend need to update graph params of attention backend.
-        # so we need to set graph params before capture full graph.
-        if super().needs_capture():
-            set_graph_params(self.capture_sizes)
 
-    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+    def run_fullgraph(
+        self, desc: BatchExecutionDescriptor
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
@@ -108,8 +101,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
-        # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
-        # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
         with (
             set_current_vllm_config(self.vllm_config),
@@ -124,16 +115,9 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
-            update_full_graph_params(
-                # FIXME(Ronald1995): support hybrid attn backend
-                attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens,
-                self.vllm_config,
-                self.model_runner.speculative_config,
-            )
+            graph = self.graphs[desc]
+            assert isinstance(graph, UpdatableGraph)
+            graph.update(self.update_stream, forward_context)
         return ret
 
     def capture(
