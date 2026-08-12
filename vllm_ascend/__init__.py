@@ -105,13 +105,7 @@ def register_service_profiling():
 
 
 def register_model():
-    from vllm_ascend.patch.hunyuan_vl_processor_compat import (
-        install_hunyuan_vl_processor_compat,
-    )
-
     from .models import register_model
-
-    install_hunyuan_vl_processor_compat()
 
     register_model()
 
