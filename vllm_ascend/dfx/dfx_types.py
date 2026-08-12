@@ -16,11 +16,13 @@
 """DFX shared types and constants.
 
 - ``DumpPhase``: coarse dump arming / activation phase enum.
+- ``DumpFinishMeta``: per-req wave stamps for dump-finish sidecar files.
 - ``ILL_TYPE_*``: msprobe ILLDetector anomaly category codes.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -34,6 +36,23 @@ class DumpPhase(str, Enum):
     IDLE = "idle"
     PENDING = "pending"
     ACTIVE = "active"
+
+
+@dataclass
+class DumpFinishMeta:
+    """Wave / dump correlation kept until the request finishes.
+
+    Written to a sidecar file on ``clear_finished`` (not by rewriting the
+    immediate anomaly report). ``dump_waves_after_report`` is
+    ``activate_wave - arm_wave`` when both are known, else ``None``.
+    """
+
+    anomaly_type: str | None = None
+    source: str | None = None
+    dump_arm_wave: int | None = None
+    dump_activate_wave: int | None = None
+    dump_waves_after_report: int | None = None
+    dump_count: int | None = None
 
 
 # Align with msprobe response_anomaly ILLDetector ill_type codes.

@@ -96,15 +96,19 @@ _DEFAULTS: dict[str, Any] = {
         # Relative module paths under vllm_ascend forced to DEBUG, e.g. ["dfx"].
         "debug": [],
     },
-    "report": {
-        # Default False: anomaly reports store prompt/output lengths only.
-        # Set true to persist full prompt_token_ids + cumulative output_token_ids.
-        "save_sensitive_info": False,
+    # Ops logging switches (not persisted into anomaly / dump_finish JSON files).
+    "log": {
         # Log [SamplingMeta] for the anomalous req (TP0 + last PP only).
         "print_sampling_meta": False,
         # When a request finishes: log output_token_ids + decoded text (TP0 only).
-        # Default false (can be noisy / sensitive). Independent of save_sensitive_info.
+        # Applies to every finished request. Independent of dump_finish sidecars
+        # (those are dump-activated reqs only, under report/).
         "print_output_on_finish": False,
+    },
+    "report": {
+        # Default False: anomaly / dump_finish reports store lengths only.
+        # Set true to persist prompt_token_ids + cumulative output_token_ids.
+        "save_sensitive_info": False,
         # When save_sensitive_info, decode prompt/output ids to text (lazy tokenizer).
         "decode_token_ids": True,
         # Cap persisted token-id list lengths (0 = unlimited). Counts stay full.
@@ -528,8 +532,7 @@ class DfxRuntimeConfig:
                 can_write,
             )
             if isinstance(disk_ascend, dict) and (
-                str(disk_ascend.get("level", "INFO")).upper() != "INFO"
-                or bool(disk_ascend.get("debug"))
+                str(disk_ascend.get("level", "INFO")).upper() != "INFO" or bool(disk_ascend.get("debug"))
             ):
                 logger.warning(
                     "[DFX runtime_config] default-path file has ascend_log=%s but startup "
@@ -689,6 +692,8 @@ class DfxRuntimeConfig:
     )
     # Allowed keys under ``dump`` (reject typos such as legacy dump_once).
     DUMP_KEYS: frozenset[str] = frozenset(_DEFAULTS["dump"])
+    LOG_KEYS: frozenset[str] = frozenset(_DEFAULTS["log"])
+    REPORT_KEYS: frozenset[str] = frozenset(_DEFAULTS["report"])
 
     @staticmethod
     def detectors_enabled_in(data: dict[str, Any]) -> bool:
@@ -910,7 +915,7 @@ class DfxRuntimeConfig:
         return [str(item).strip() for item in raw if str(item).strip()]
 
     def report_save_sensitive_info(self) -> bool:
-        """Whether anomaly reports persist plaintext token-id lists.
+        """Whether anomaly / dump_finish reports persist plaintext token-id lists.
 
         Default False: only lengths (``*_token_count``). ``true`` keeps full
         ``prompt_token_ids`` and cumulative ``output_token_ids``.
@@ -918,23 +923,24 @@ class DfxRuntimeConfig:
         report = self._data.get("report") or {}
         return bool(report.get("save_sensitive_info", False))
 
-    def report_print_sampling_meta(self) -> bool:
+    def log_print_sampling_meta(self) -> bool:
         """Whether to log ``[SamplingMeta]`` when writing an anomaly report.
 
         Default False. When True, only TP0 + last PP emit the log (detect-only
         or after successful dump arm — wherever ``write_report`` runs).
         """
-        report = self._data.get("report") or {}
-        return bool(report.get("print_sampling_meta", False))
+        log_sec = self._data.get("log") or {}
+        return bool(log_sec.get("print_sampling_meta", False))
 
-    def report_print_output_on_finish(self) -> bool:
-        """Whether to log output token ids + text when a request finishes.
+    def log_print_output_on_finish(self) -> bool:
+        """Whether to log output token ids + text when any request finishes.
 
-        Default False. When True, TP0 logs on ``clear_finished`` (independent of
+        Default False. When True, TP0 logs on ``clear_finished`` for every
+        finished request (independent of dump_finish sidecars and of
         ``save_sensitive_info``). Can be large / sensitive — leave off in prod.
         """
-        report = self._data.get("report") or {}
-        return bool(report.get("print_output_on_finish", False))
+        log_sec = self._data.get("log") or {}
+        return bool(log_sec.get("print_output_on_finish", False))
 
     def report_decode_token_ids(self) -> bool:
         """Whether to decode ``*_token_ids`` into text in reports.
@@ -1335,6 +1341,7 @@ class DfxRuntimeConfig:
         for section in (
             "dump",
             "ascend_log",
+            "log",
             "detector",
             "input_filter",
             "report",
@@ -1353,6 +1360,14 @@ class DfxRuntimeConfig:
         unknown_dump = sorted(set(data["dump"]) - DfxRuntimeConfig.DUMP_KEYS)
         if unknown_dump:
             raise ValueError(f"dump has unknown key(s) {unknown_dump}; allowed={sorted(DfxRuntimeConfig.DUMP_KEYS)}")
+        unknown_log = sorted(set(data["log"]) - DfxRuntimeConfig.LOG_KEYS)
+        if unknown_log:
+            raise ValueError(f"log has unknown key(s) {unknown_log}; allowed={sorted(DfxRuntimeConfig.LOG_KEYS)}")
+        unknown_report = sorted(set(data["report"]) - DfxRuntimeConfig.REPORT_KEYS)
+        if unknown_report:
+            raise ValueError(
+                f"report has unknown key(s) {unknown_report}; allowed={sorted(DfxRuntimeConfig.REPORT_KEYS)}"
+            )
         manual_trigger = data["dump"].get("manual_trigger")
         if manual_trigger is not None and not isinstance(manual_trigger, bool):
             # Accept 0/1 from hand-edited JSON; reject other types.
@@ -1366,24 +1381,19 @@ class DfxRuntimeConfig:
                 data["report"]["save_sensitive_info"] = bool(save_sensitive)
             else:
                 raise ValueError("report.save_sensitive_info must be bool")
-        print_meta = data["report"].get("print_sampling_meta")
-        if print_meta is not None and not isinstance(print_meta, bool):
-            if print_meta in (0, 1):
-                data["report"]["print_sampling_meta"] = bool(print_meta)
-            else:
-                raise ValueError("report.print_sampling_meta must be bool")
+        for log_key in ("print_sampling_meta", "print_output_on_finish"):
+            log_val = data["log"].get(log_key)
+            if log_val is not None and not isinstance(log_val, bool):
+                if log_val in (0, 1):
+                    data["log"][log_key] = bool(log_val)
+                else:
+                    raise ValueError(f"log.{log_key} must be bool")
         decode_ids = data["report"].get("decode_token_ids")
         if decode_ids is not None and not isinstance(decode_ids, bool):
             if decode_ids in (0, 1):
                 data["report"]["decode_token_ids"] = bool(decode_ids)
             else:
                 raise ValueError("report.decode_token_ids must be bool")
-        print_out_finish = data["report"].get("print_output_on_finish")
-        if print_out_finish is not None and not isinstance(print_out_finish, bool):
-            if print_out_finish in (0, 1):
-                data["report"]["print_output_on_finish"] = bool(print_out_finish)
-            else:
-                raise ValueError("report.print_output_on_finish must be bool")
         for max_key in ("max_prompt_token_ids", "max_output_token_ids"):
             max_val = data["report"].get(max_key)
             if max_val is None:
@@ -1487,6 +1497,4 @@ class DfxRuntimeConfig:
         if consecutive_hits < 1:
             raise ValueError("detector.token_repeat.consecutive_hits must be >= 1")
         token_repeat["consecutive_hits"] = consecutive_hits
-        token_repeat["ignore_token_ids"] = normalize_ignore_token_ids(
-            token_repeat.get("ignore_token_ids", [])
-        )
+        token_repeat["ignore_token_ids"] = normalize_ignore_token_ids(token_repeat.get("ignore_token_ids", []))

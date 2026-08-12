@@ -39,12 +39,21 @@
     "debug": []
   },
 
+  "log": {
+    // Log [SamplingMeta] when writing an anomaly report (TP0 + last PP only).
+    "print_sampling_meta": false,
+    // When any request finishes: log output_token_ids + decoded text (TP0 only).
+    // Default false (noisy / may contain sensitive text). Independent of
+    // report.save_sensitive_info. dump_finish files are separate (dump-armed
+    // reqs under report/; pending-not-yet-activate → activate_wave=null).
+    "print_output_on_finish": false
+  },
+
   "report": {
     // false (default): only *_token_count (and non-token metrics); no ids / no text.
     // true: persist token ids (+ optional decode). JSON keeps int arrays on one line.
+    // Applies to anomaly_*.log and dump_finish_*.log.
     "save_sensitive_info": false,
-    // Log [SamplingMeta] when writing an anomaly report (TP0 + last PP only).
-    "print_sampling_meta": false,
     // When save_sensitive_info: decode *_token_ids → *_text / per-step *_texts
     // (prompt, output, window_token_ids, window_sampled/accepted, current_*).
     "decode_token_ids": true,
@@ -54,10 +63,7 @@
     // Cap output / window / current *_token_ids (0 = unlimited). Default 1000.
     // Detection matches the full cumulative output; the report may only store a prefix.
     // If a hit is beyond this cap, ids won't appear in the JSON — set 0 to dump all.
-    "max_output_token_ids": 1000,
-    // When a request finishes: log output_token_ids + decoded text (TP0 only).
-    // Default false (noisy / may contain sensitive text). Independent of save_sensitive_info.
-    "print_output_on_finish": false
+    "max_output_token_ids": 1000
   },
 
   "detector": {

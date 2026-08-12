@@ -41,8 +41,8 @@ Worker: runner.dfx = DfxProcessor(runner)
 
 - `Dumper` 只负责 arm / activate dump，不负责决定是否写 report。
 - `DfxProcessor` 在异常检测命中或 `manual_trigger` 命中后，都会尝试调用 dumper；**无论 dump 是否成功 arm，都会写 report**，避免 dump 配额耗尽、冷却中或相关性校验失败时丢失异常证据。
-- report JSON 含 `dump_armed` / `dump_attempted` / `dump_capture_timing` / `dump_count` / `dump_max_times`；成功 arm 时文件名带 `_dump`。`dump_capture_timing=upcoming_forward_window` 表示 activate 之后的某次 dump-forward 采集（pending-OR 下相对 detect 常是下下个窗口）。
-- `report.print_sampling_meta` 仍只控制采样参数日志打印，不会把 sampling meta 额外写入 report 内容。
+- report JSON 含 `dump_armed` / `dump_attempted` / `dump_arm_wave` / `dump_count` / `dump_max_times`；成功 arm 时文件名带 `_dump`。`dump_arm_wave` 为 arm 时的 real-step wave；与请求结束时的 `dump_finish_*.log`（含 `dump_activate_wave` / `dump_waves_after_report`）对齐。
+- `log.print_sampling_meta` / `log.print_output_on_finish` 只控制日志，不写入 report 文件内容。
 
 ## 2. Runtime Config
 
@@ -115,9 +115,12 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
     "manual_trigger": false
   },
   "ascend_log": { "level": "INFO", "debug": [] },
+  "log": {
+    "print_sampling_meta": false,
+    "print_output_on_finish": false
+  },
   "report": {
     "save_sensitive_info": false,
-    "print_sampling_meta": false,
     "decode_token_ids": true,
     "max_prompt_token_ids": 1000,
     "max_output_token_ids": 1000
@@ -160,7 +163,8 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
 |----|------|
 | `dump` | `enabled`（默认 `false`，dump sink）/ `max_times`（仅 auto-arm）/ `cooldown_seconds`；`manual_trigger` 见运维页。与 detector 正交 |
 | `ascend_log` | `level`：`vllm_ascend` 包根 logger 级别。`debug`：模块白名单（相对路径，如 `["dfx"]` → `vllm_ascend.dfx`）强制 DEBUG。走 Ascend 专用 handler（不受 `VLLM_LOGGING_LEVEL` 的 `vllm` handler 过滤）。无 `enabled` |
-| `report` | `save_sensitive_info`：默认 `false` 只存 `*_token_count`（不写 token ids）；`true` 时落盘 id（受 `max_*` 截断）并可 decode。`decode_token_ids`：默认 `true`，`save_sensitive_info=true` 时把 `*_token_ids` decode 成 `*_text` / 逐步 `*_texts`。`max_prompt_token_ids` / `max_output_token_ids` 默认 1000，`0`=不截断。`print_sampling_meta`：默认 `false` |
+| `log` | `print_sampling_meta`：默认 `false`，写 anomaly report 时打 `[SamplingMeta]` 日志。`print_output_on_finish`：默认 `false`，**每个**请求结束时 TP0 打 output 日志（与 `dump_finish` 文件无关） |
+| `report` | `save_sensitive_info`：默认 `false` 只存 `*_token_count`（不写 token ids）；`true` 时落盘 id（受 `max_*` 截断）并可 decode（anomaly 与 dump_finish 共用）。`decode_token_ids`：默认 `true`，`save_sensitive_info=true` 时把 `*_token_ids` decode 成 `*_text` / 逐步 `*_texts`。`max_prompt_token_ids` / `max_output_token_ids` 默认 1000，`0`=不截断 |
 | `detector` | 共享 `stop_after_alert`（默认 `true`：某请求一旦检出异常即停止检测该请求，防止同一异常反复写 report）+ 各检测器嵌套段（`spec_acceptance` / `token_logprob` / `output_substring`），每段含 `enabled` 与阈值 |
 | `input_filter` | `filters` 见 §2.6；`print_input_token_ids_once` 见运维 §2.3 |
 
@@ -266,7 +270,7 @@ runner.dfx = DfxProcessor(runner)
 ```
 
 > 注意：检测由 **processor → DetectorManager** 调具体 detector，再用 alert 调 dumper；runner **不**直接 `enable_dump` / 不引用具体 detector 类。  
-> `save_sample_param` 由 ``report.print_sampling_meta`` 控制（TP0 && last PP），不属于 dump 生命周期。
+> `save_sample_param` 由 ``log.print_sampling_meta`` 控制（TP0 && last PP），不属于 dump 生命周期。
 
 `AnomalyAlert`（`detector/alert.py`）对齐 msprobe `ILLDetector.detector(...)` 的 `is_ill` / `ill_type`，并带上 dump/report 元数据。
 
@@ -302,29 +306,37 @@ Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `
 
 - 类：`DfxReportWriter`
 - 目录：默认 `<dfx_root>/report/`
-- 文件：`anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pid<pid>.log`（毫秒 + pid；成功 arm dump 时带 `_dump`；**格式化 JSON**，每文件一条；含 `dump_armed` / `dump_attempted` / `dump_capture_timing` / `dump_count` / `dump_max_times`）
-- 何时写：
+- 文件：
+  - `anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pid<pid>.log`（毫秒 + pid；成功 arm dump 时带 `_dump`；**格式化 JSON**，每文件一条；含 `dump_armed` / `dump_attempted` / `dump_arm_wave` / `dump_count` / `dump_max_times`）
+  - `dump_finish_YYYYMMDD_HHMMSS_mmm_<req>_pid<pid>.log`：对 **已 arm dump** 的请求，在 `clear_finished` 时写；含累计 output（受 `save_sensitive_info` / `max_*`）与 `dump_arm_wave` / `dump_activate_wave` / `dump_waves_after_report` / `dump_finish_wave`。若结束时仍 pending（尚未 activate），`dump_activate_wave` / `dump_waves_after_report` 为 `null`
+- 何时写 anomaly：
   - `dump.enabled=false`（detect-only）：检测到异常即写 report（无 `_dump`）
   - `dump.enabled=true`：尝试 arm dump；**无论 arm 成功与否都写 report**（arm 失败——如配额耗尽——不吞掉检测证据；仅成功时文件名带 `_dump`）
-- 默认：`report.save_sensitive_info=false` 时只保留 `prompt_token_count` / `output_token_count`（及非 token 字段），**不**写 `*_token_ids`；`true` 时明文保存（可截断）prompt / 累计 output / window ids，并可 `decode_token_ids` 写出对应 `*_text` / 逐步 `*_texts`
+- 默认：`report.save_sensitive_info=false` 时只保留 `prompt_token_count` / `output_token_count`（及非 token 字段），**不**写 `*_token_ids`；`true` 时明文保存（可截断）prompt / 累计 output / window ids，并可 `decode_token_ids` 写出对应 `*_text` / 逐步 `*_texts`（anomaly 与 dump_finish 共用）
 - `max_prompt_token_ids` / `max_output_token_ids`（默认 1000，`0`=不截断）：只限制**落盘**的 id 列表长度（从**头部**截断）；`*_token_count` 仍是完整长度。截断时 detail 会带 `*_token_ids_truncated=true` 与 `*_token_ids_max`
 - **易踩坑**：检测 / 命中匹配用的是完整累计 output；report 里的 `output_token_ids` 可能被截断。若 `matched_token_ids` 在完整序列中、却在截断窗口之外，JSON 里会看不到该 id——查全量请设 `max_*=0`，或对照 `*_token_count` 与 `*_truncated`
 - JSON 格式化：结构缩进，但 **int 数组（token ids）单行紧凑**，避免「一数字一行」
 - 完整 `prompt_token_ids` / `output_token_ids` 由 **`RequestIoSnapshotManager`**（单例，自建累计 output）在 **写 report 时** 挂一次；detector 只写检测指标 / window 证据，不各自拷贝全量 I/O
-- Detector / dump 日志只打长度，不打印 token ids；完整 I/O 仅走 report
-- `report.print_sampling_meta`：可选 `[SamplingMeta]` 日志（TP0+last-PP）
+- Detector / dump 日志只打长度，不打印 token ids；完整 I/O 仅走 report / dump_finish
+- `log` 段（与 `report` 正交）：
+  - `log.print_sampling_meta`：可选 `[SamplingMeta]` 日志（TP0+last-PP）
+  - `log.print_output_on_finish`：每个请求结束时的 output 日志；`dump_finish_*.log` 对已 arm 的请求落盘（pending 未 activate 时 `dump_activate_wave=null`）
+- wave：真实 `execute_model` 拍自增；用 `req_id` 对齐 anomaly 的 `dump_arm_wave` 与 dump_finish 的 activate / 差值（详见 [dfx_ops.md](./dfx_ops.md) §2.2.2）
 - DFX **不再** arm 上游 `debug_log_full`（vLLM 字段可空转）
 
-示例（pretty JSON，token ids 单行）：
+示例 anomaly（arm 成功）：
 
 ```json
 {
-  "ts": "2026-07-28T11:00:00",
-  "unix_ts": 1753666800.0,
+  "ts": "2026-07-28T11:00:00.123",
   "anomaly_type": "spec_acceptance",
   "req_id": "req-1",
-  "rank": "tp0-pp1",
-  "save_sensitive_info": false,
+  "rank": "dp=0 tp=0 pp=0",
+  "dump_attempted": true,
+  "dump_armed": true,
+  "dump_arm_wave": 12,
+  "dump_count": 1,
+  "dump_max_times": 3,
   "detail": {
     "acceptance_rate": 0.1,
     "prompt_token_count": 128,
@@ -333,7 +345,28 @@ Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `
 }
 ```
 
-检测触发 dump 成功时由 **DfxProcessor** 追加一行（`report_writer`）。
+示例 dump_finish：
+
+```json
+{
+  "ts": "2026-07-28T11:00:01.456",
+  "kind": "dump_finish",
+  "anomaly_type": "spec_acceptance",
+  "source": "anomaly",
+  "req_id": "req-1",
+  "dump_arm_wave": 12,
+  "dump_activate_wave": 13,
+  "dump_waves_after_report": 1,
+  "dump_finish_wave": 20,
+  "dump_count": 1,
+  "detail": {
+    "prompt_token_count": 128,
+    "output_token_count": 200
+  }
+}
+```
+
+检测触发 dump 成功时由 **DfxProcessor** 写 anomaly；请求结束时再写 dump_finish（已 arm；若尚未 activate 则 `dump_activate_wave=null`）。
 
 ## 6. 非 worker 与多 engine
 
@@ -365,6 +398,7 @@ vllm serve <model> --additional-config '{
 ```text
 ./dfx/config/dfx_config.json
 ./dfx/report/anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pidXXXX.log
+./dfx/report/dump_finish_YYYYMMDD_HHMMSS_mmm_<req>_pidXXXX.log
 ```
 
 显式配置 `dfx_config_reload_interval > 0` 后，在线改 `dump.max_times` / detector 阈值约 N 秒内各 worker 生效（broadcast）。
@@ -375,6 +409,6 @@ vllm serve <model> --additional-config '{
 |------|------|
 | [dfx_ops.md](./dfx_ops.md) | 运维操作与排障 |
 | [dumper_design.md](./dumper_design.md) | Dump 生命周期、PP/TP 齐步、调用链 |
-| [anomaly_detection_design.md](./anomaly_detection_design.md) | 异常检测：SpecAcceptance / TokenLogprob(ILLDetector) / OutputSubstring |
+| [anomaly_detection_design.md](./anomaly_detection_design.md) | 异常检测：SpecAcceptance / TokenLogprob(ILLDetector) / OutputSubstring / TokenRepeat |
 | [async_scheduling_design.md](./async_scheduling_design.md) | 异步调度下的时序与 OR（机制真相以 dumper 为准） |
 | 用户配置 | `docs/source/user_guide/configuration/additional_config.md` |

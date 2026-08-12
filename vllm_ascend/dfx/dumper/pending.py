@@ -117,6 +117,8 @@ class PendingDumpMixin:
                 self._msprobe_dumped_req_ids.add(req_id)
             self._msprobe_dump_total_count += 1
             self._msprobe_last_dump_ts = time.time()
+        # Commit arm→activate wave meta for dump_finish sidecars (manual too).
+        self._commit_dump_finish_metas(consume_quota=consume_quota)
 
         logger.info(
             "[Anomaly msprobe] activate ok req_id=%s count=%d/%d consume_quota=%s %s",
@@ -227,6 +229,9 @@ class PendingDumpMixin:
         *,
         skip_related_check: bool = False,
         consume_quota: bool = True,
+        finish_req_ids: list[str] | None = None,
+        anomaly_type: str | None = None,
+        source: str = "anomaly",
     ) -> bool:
         if self._debugger is None:
             logger.error(
@@ -266,10 +271,16 @@ class PendingDumpMixin:
             if elapsed is not None and elapsed < self._dump_cooldown_seconds:
                 return False
 
+        tracked = list(finish_req_ids) if finish_req_ids is not None else ([req_id] if req_id else [])
         # Async: only arm pending; dump_enable + reload, dumped_req_ids, and
         # cooldown timestamp happen in _activate_msprobe_dump after OR sync so
         # a failed activate does not permanently blacklist the request.
         if self._use_pending_dump_sync():
+            self._begin_dump_wave_tracking(
+                tracked,
+                anomaly_type=anomaly_type,
+                source=source,
+            )
             self._pending_dump = True
             self._pending_dump_req_id = req_id if consume_quota else None
             self._pending_dump_skip_quota = not consume_quota
@@ -283,4 +294,9 @@ class PendingDumpMixin:
             )
             return True
 
+        self._begin_dump_wave_tracking(
+            tracked,
+            anomaly_type=anomaly_type,
+            source=source,
+        )
         return self._activate_msprobe_dump(req_id if consume_quota else None, consume_quota=consume_quota)

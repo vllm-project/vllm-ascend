@@ -47,7 +47,7 @@ def test_dfx_report_writer_writes_pretty_json(tmp_path: Path):
     assert record["rank"] == "tp0"
     assert record["dump_attempted"] is False
     assert record["dump_armed"] is False
-    assert record["dump_capture_timing"] == "none"
+    assert record["dump_arm_wave"] is None
     assert record["dump_count"] is None
     assert record["dump_max_times"] is None
     assert record["detail"]["acceptance_rate"] == 0.1
@@ -55,7 +55,9 @@ def test_dfx_report_writer_writes_pretty_json(tmp_path: Path):
     assert "output_token_ids" not in record["detail"]
     assert record["detail"]["window_token_count"] == 3
     assert record["detail"]["output_token_count"] == 4
-    assert record["save_sensitive_info"] is False
+    assert "save_sensitive_info" not in record
+    assert "unix_ts" not in record
+    assert "ts" in record
 
 
 def test_dfx_report_writer_marks_dump_armed_in_filename(tmp_path: Path):
@@ -74,7 +76,7 @@ def test_dfx_report_writer_marks_dump_armed_in_filename(tmp_path: Path):
     record = json.loads(path.read_text(encoding="utf-8"))
     assert record["dump_attempted"] is True
     assert record["dump_armed"] is True
-    assert record["dump_capture_timing"] == "upcoming_forward_window"
+    assert record["dump_arm_wave"] is None
     assert record["dump_count"] == 2
     assert record["dump_max_times"] == 5
 
@@ -92,7 +94,7 @@ def test_dfx_report_writer_can_save_sensitive_info(tmp_path: Path):
     assert record["detail"]["window_token_ids"] == [9, 8]
     assert record["detail"]["prompt_token_ids"] == [1]
     assert record["detail"]["output_token_ids"] == [2, 3]
-    assert record["save_sensitive_info"] is True
+    assert "save_sensitive_info" not in record
     # Token-id arrays stay on one line (not one int per line).
     assert '"output_token_ids": [2, 3]' in text or '"output_token_ids":[2, 3]' in text.replace(" ", "")
 
@@ -212,3 +214,45 @@ def test_dumps_report_json_keeps_int_lists_compact():
     assert '"output_token_ids": [1, 2, 3, 4]' in text
     # Not one integer per line.
     assert "\n    1,\n" not in text
+
+
+def test_write_dump_finish_respects_save_sensitive_info(tmp_path):
+    import json
+
+    writer = DfxReportWriter(tmp_path / "report", save_sensitive_info=False, decode_token_ids=False)
+    path = writer.write_dump_finish(
+        req_id="req/1",
+        detail={"output_token_ids": [7, 8, 9], "output_token_count": 3, "prompt_token_count": 2},
+        rank_tag="dp=0 tp=0 pp=0",
+        anomaly_type="token_repeat",
+        source="anomaly",
+        dump_arm_wave=3,
+        dump_activate_wave=4,
+        dump_waves_after_report=1,
+        dump_count=1,
+        finish_wave=10,
+    )
+    assert path is not None
+    assert path.name.startswith("dump_finish_")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["kind"] == "dump_finish"
+    assert data["req_id"] == "req/1"
+    assert data["dump_arm_wave"] == 3
+    assert data["dump_activate_wave"] == 4
+    assert data["dump_waves_after_report"] == 1
+    assert data["dump_finish_wave"] == 10
+    assert "save_sensitive_info" not in data
+    assert "unix_ts" not in data
+    assert "output_token_ids" not in data["detail"]
+    assert data["detail"]["output_token_count"] == 3
+
+    writer_s = DfxReportWriter(tmp_path / "report2", save_sensitive_info=True, decode_token_ids=False)
+    path2 = writer_s.write_dump_finish(
+        req_id="r2",
+        detail={"output_token_ids": [1, 2], "output_token_count": 2},
+        dump_arm_wave=1,
+        dump_activate_wave=1,
+        dump_waves_after_report=0,
+    )
+    data2 = json.loads(path2.read_text(encoding="utf-8"))
+    assert data2["detail"]["output_token_ids"] == [1, 2]

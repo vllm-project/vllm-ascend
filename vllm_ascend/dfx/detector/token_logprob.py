@@ -343,6 +343,9 @@ class TokenLogprobDetector(ConfigBackedDetector):
                 str(base / "configs" / "mtype_config.json"),
                 str(base / "token2category"),
             )
+            # Intentionally set msprobe stride == window so one detector() call
+            # is a single-window check (no internal multi-window vote). Outer
+            # cadence uses ``self._stride`` (config detector.token_logprob.stride).
             detector.window_size = self._window
             detector.stride = self._window
             detector.garbled_window_thresh = 0
@@ -350,9 +353,11 @@ class TokenLogprobDetector(ConfigBackedDetector):
             detector.multi_window_thresh = 0
             self._ill_detector = detector
             logger.info_once(
-                "[Anomaly token_logprob] ILLDetector ready window=%d stride=%d topk=%d",
+                "[Anomaly token_logprob] ILLDetector ready "
+                "outer_window=%d outer_stride=%d ill_window=stride=%d topk=%d",
                 self._window,
                 self._stride,
+                self._window,
                 self._topk,
             )
             return self._ill_detector

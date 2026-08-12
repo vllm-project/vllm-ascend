@@ -93,7 +93,20 @@ class DfxProcessor:
         JSON flag with no dump when the service is idle or a peer DP is busy).
         """
         logger.debug("[DFX sync] enter stage=refresh_config allow_arm=%s", allow_arm)
+        # Always advance the IO append-wave frontier (same-wave dedupe).
         RequestIoSnapshotManager.get().clear_wave_cache()
+
+        # Hot-reload off: config/filters are static after init. Skip sync +
+        # filter rebuild; still honor startup one-shots (manual_trigger /
+        # print_input) on real waves.
+        if not self.dfx_config.hot_reload_enabled:
+            trigger = self.manual_triggers.consume_once(allow_arm=allow_arm)
+            if trigger is not None:
+                self._handle_manual_trigger(trigger)
+            self.maybe_print_input_token_ids_once(allow_arm=allow_arm)
+            logger.debug("[DFX sync] leave stage=refresh_config changed=False hot_reload=off")
+            return False
+
         changed = self.dfx_config.sync_dfx_config()
         # Always refresh filter chain from live config (broadcast may update
         # without ``changed``); detectors consult InputFilterManager singleton.
@@ -191,6 +204,9 @@ class DfxProcessor:
             pp,
         )
         try:
+            dumper = getattr(self, "dumper", None)
+            if dumper is not None and hasattr(dumper, "advance_wave"):
+                dumper.advance_wave(allow_arm=allow_arm)
             self.refresh_config(allow_arm=allow_arm)
             self.sync_dump_pending_or(allow_arm=allow_arm)
         finally:
@@ -209,12 +225,58 @@ class DfxProcessor:
             return
         io_mgr = RequestIoSnapshotManager.get()
         filt = InputFilterManager.get()
-        if self.dfx_config.report_print_output_on_finish():
+        if self.dfx_config.log_print_output_on_finish():
             self._maybe_print_output_on_finish(finished_req_ids, io_mgr)
+        # Dump-finish sidecars need cumulative IO before clear_req.
+        self._maybe_write_dump_finish(finished_req_ids, io_mgr)
         for req_id in finished_req_ids:
             self.detectors.clear_finished(req_id)
             io_mgr.clear_req(req_id)
             filt.clear_req(req_id)
+
+    def _maybe_write_dump_finish(self, finished_req_ids: Any, io_mgr: RequestIoSnapshotManager) -> None:
+        """Write dump_finish sidecar for dump-linked reqs (activated or still pending)."""
+        dumper = getattr(self, "dumper", None)
+        writer = getattr(self, "report_writer", None)
+        runner = getattr(self, "runner", None)
+        if dumper is None or writer is None or runner is None:
+            return
+        take = getattr(dumper, "take_dump_finish_meta", None)
+        if not callable(take):
+            return
+        try:
+            if int(getattr(runner, "tp_rank", 0)) != 0:
+                return
+        except Exception:
+            return
+        tokenizer = None
+        dfx_cfg = getattr(self, "dfx_config", None)
+        if dfx_cfg is not None and dfx_cfg.report_save_sensitive_info() and dfx_cfg.report_decode_token_ids():
+            tokenizer = self._get_detector_tokenizer()
+        finish_wave = dumper.current_wave() if hasattr(dumper, "current_wave") else None
+        rank_tag = dumper.dump_rank_tag() if hasattr(dumper, "dump_rank_tag") else None
+        for req_id in finished_req_ids:
+            if not req_id:
+                continue
+            # Committed (activated) or still-open pending → sidecar; else skip.
+            meta = take(req_id)
+            if meta is None:
+                continue
+            snap = io_mgr.snapshot(runner, req_id, None, include_token_ids=True, use_cache=False)
+            detail = snap.as_detail_fields()
+            writer.write_dump_finish(
+                req_id=req_id,
+                detail=detail,
+                rank_tag=rank_tag,
+                tokenizer=tokenizer,
+                anomaly_type=meta.anomaly_type,
+                source=meta.source,
+                dump_arm_wave=meta.dump_arm_wave,
+                dump_activate_wave=meta.dump_activate_wave,
+                dump_waves_after_report=meta.dump_waves_after_report,
+                dump_count=meta.dump_count,
+                finish_wave=finish_wave,
+            )
 
     def _maybe_print_output_on_finish(self, finished_req_ids: Any, io_mgr: RequestIoSnapshotManager) -> None:
         """Log output_token_ids + text for finished reqs (TP0 only)."""
@@ -244,8 +306,7 @@ class DfxProcessor:
             elif tokenizer is None:
                 text = "<tokenizer unavailable>"
             logger.info(
-                "[DFX print_output] req_id=%s output_token_count=%d truncated=%s "
-                "output_token_ids=%s output_text=%r",
+                "[DFX print_output] req_id=%s output_token_count=%d truncated=%s output_token_ids=%s output_text=%r",
                 req_id,
                 snap.output_token_count,
                 truncated,
@@ -371,7 +432,7 @@ class DfxProcessor:
         if not write_report:
             return
 
-        if self.dfx_config.report_print_sampling_meta():
+        if self.dfx_config.log_print_sampling_meta():
             self.save_sample_param(alert.req_id)
 
         detail = alert.to_report_detail()
@@ -386,6 +447,13 @@ class DfxProcessor:
         detail = io_mgr.merge_into_detail(detail, snap)
 
         dump_count, dump_max_times = self.dumper.dump_count_snapshot(dump_armed=dump_armed)
+        dump_arm_wave = None
+        if dump_armed:
+            raw_arm = self.dumper.dump_arm_wave_for_report()
+            if isinstance(raw_arm, int):
+                dump_arm_wave = raw_arm
+            else:
+                dump_arm_wave = self.dumper.dump_arm_wave_for_req(alert.req_id)
         self.report_writer.write(
             anomaly_type=alert.anomaly_type,
             req_id=alert.req_id,
@@ -396,6 +464,7 @@ class DfxProcessor:
             dump_armed=dump_armed,
             dump_count=dump_count,
             dump_max_times=dump_max_times,
+            dump_arm_wave=dump_arm_wave,
         )
 
     def _handle_manual_trigger(
@@ -405,13 +474,14 @@ class DfxProcessor:
         write_report: bool = True,
     ) -> None:
         """Arm dump (optional) and write report for control-plane manual trigger."""
+        batch_rows = self._batch_request_io_rows()
+        finish_req_ids = [req_id for req_id, _ in batch_rows]
         dump_attempted = True
-        dump_armed = bool(self.dumper.handle_manual_trigger(trigger))
+        dump_armed = bool(self.dumper.handle_manual_trigger(trigger, finish_req_ids=finish_req_ids))
         if not write_report:
             return
 
-        batch_rows = self._batch_request_io_rows()
-        if self.dfx_config.report_print_sampling_meta():
+        if self.dfx_config.log_print_sampling_meta():
             for req_id, _req_idx in batch_rows:
                 self.save_sample_param(req_id)
 
@@ -434,6 +504,13 @@ class DfxProcessor:
         detail["requests"] = requests_detail
 
         dump_count, dump_max_times = self.dumper.dump_count_snapshot(dump_armed=dump_armed)
+        dump_arm_wave = None
+        if dump_armed:
+            raw_arm = self.dumper.dump_arm_wave_for_report()
+            if isinstance(raw_arm, int):
+                dump_arm_wave = raw_arm
+            elif finish_req_ids:
+                dump_arm_wave = self.dumper.dump_arm_wave_for_req(finish_req_ids[0])
         self.report_writer.write(
             anomaly_type=trigger.trigger_type,
             req_id=trigger.req_id,
@@ -444,6 +521,7 @@ class DfxProcessor:
             dump_armed=dump_armed,
             dump_count=dump_count,
             dump_max_times=dump_max_times,
+            dump_arm_wave=dump_arm_wave,
         )
 
     def _batch_request_io_rows(self) -> list[tuple[str, int]]:
