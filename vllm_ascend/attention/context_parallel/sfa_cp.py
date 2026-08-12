@@ -26,6 +26,14 @@ from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
+# ==== TEMP DEBUG (remove after debugging): limit DCP decode dumps ====
+_SFA_DCP_DEBUG_COUNT = 0
+
+# torch_npu has no FP8 dispatch for index_select or the HCCL collectives.
+# DCP gathers quantized 1-byte payloads through a zero-copy uint8 view and
+# re-interprets the bytes after the all-gather.
+DCP_UINT8_GATHER_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
 
 class DCPGatherContext(NamedTuple):
     """State needed to finish an async fused DCP KV all-gather."""
@@ -484,12 +492,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         block_table = attn_metadata.dcp_context.kv_gather_block_table
         assert valid_block_ids is not None and block_table is not None
         kv_cache_dtype = kv_cache[0].dtype
-        # torch_npu index_select has no FP8 dispatch, so gather quantized 1-byte
-        # payloads (fp8_e4m3fn / fp8_e5m2) through a zero-copy uint8 view and
-        # re-interpret the bytes afterwards. The copy/cat kernels run on uint8,
-        # which keeps the work and the memory footprint identical to a native
-        # FP8 gather.
-        gather_dtype = torch.uint8 if kv_cache_dtype in (torch.float8_e4m3fn, torch.float8_e5m2) else kv_cache_dtype
+        # Gather quantized 1-byte payloads (fp8_e4m3fn / fp8_e5m2) through a
+        # zero-copy uint8 view and re-interpret the bytes after the all-gather.
+        # Both index_select and the HCCL collective run on uint8, which keeps
+        # the work and the memory footprint identical to a native FP8 gather.
+        gather_dtype = torch.uint8 if kv_cache_dtype in DCP_UINT8_GATHER_DTYPES else kv_cache_dtype
         kv = torch.index_select(kv_cache[0].view(gather_dtype), 0, valid_block_ids)
         split_sizes: tuple[int, ...]
         if self.enable_sparse_sfa_c8:
@@ -509,8 +516,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 )
             gather_input = torch.cat([kv, key_rope], dim=-1).contiguous()
             split_sizes = (kv.shape[-1], key_rope.shape[-1])
-        if gather_dtype is torch.uint8:
-            gather_input = gather_input.view(kv_cache_dtype)
         attn_metadata.dcp_context.gather_context = self._start_dcp_gather(
             gather_input,
             dim=0,
@@ -782,6 +787,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 dcp_context.gather_context = None
             assert gather_context is not None
             gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            kv_cache_dtype = kv_cache[0].dtype
+            if kv_cache_dtype in DCP_UINT8_GATHER_DTYPES:
+                gathered_kv_cache = tuple(t.view(kv_cache_dtype) for t in gathered_kv_cache)
             block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
             # The gathered KV cache is complete, so each rank can attend with
@@ -814,7 +822,27 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # the DSA token shards first, then remap for this receiver rank's
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
+        # ==== TEMP DEBUG (experiment B): dump DCP decode inputs on first calls ====
+        global _SFA_DCP_DEBUG_COUNT
+        if _SFA_DCP_DEBUG_COUNT < 5:
+            _SFA_DCP_DEBUG_COUNT += 1
+            print(
+                f"[SFA-DCP-debug rank={self.dcp_rank}] seq_lens={attn_metadata.seq_lens[:4].cpu().tolist()} "
+                f"local_seq_lens={dcp_context.seq_lens[:4].cpu().tolist()} "
+                f"topk_pre_remap[max/min]={int(topk_indices.max().item())}/{int(topk_indices.min().item())} "
+                f"topk_pre_remap[:8]={topk_indices.flatten()[:8].cpu().tolist()} "
+                f"block_table_row0[:8]={dcp_context.block_table[:1, :8].cpu().tolist()}"
+            )
+        # ==== end TEMP DEBUG ====
         topk_indices = self._remap_sparse_indices(topk_indices)
+        if _SFA_DCP_DEBUG_COUNT <= 5:
+            valid_cnt = int((topk_indices >= 0).sum().item())
+            print(
+                f"[SFA-DCP-debug rank={self.dcp_rank}] topk_post_remap[max/min]={int(topk_indices.max().item())}/"
+                f"{int(topk_indices.min().item())} valid={valid_cnt}/{topk_indices.shape[-1]} "
+                f"topk_post_remap[:8]={topk_indices.flatten()[:8].cpu().tolist()}"
+            )
+        # ==== end TEMP DEBUG ====
         ql_nope, q_pe = self._finish_dcp_gather(gather_context)
         sfa_output, softmax_max, softmax_sum = super()._execute_sparse_flash_attention_process(
             ql_nope,
@@ -835,5 +863,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         softmax_lse = softmax_max + torch.log(softmax_sum)
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
+        # ==== TEMP DEBUG (experiment A): skip LSE merge, keep this rank's head slice over its local KV shard ====
+        # Interpretation: meaningful-but-half output => local attention OK, LSE/merge is broken.
+        # Garbage output => problem is before the local attention (remap/seq_lens/block_table).
+        local_heads = self.local_num_heads
+        output = sfa_output[:, self.dcp_rank * local_heads : (self.dcp_rank + 1) * local_heads, :].contiguous()
+        return output.to(output_dtype)
+        # ==== end TEMP DEBUG ====
         output = self._merge_dcp_outputs(sfa_output, softmax_lse, attn_metadata.dsa_cp_context)
         return output.to(output_dtype)
