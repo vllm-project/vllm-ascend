@@ -14,9 +14,9 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
     def setUp(self):
         self.method = AscendW8A8LinearMethod()
 
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8LinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.get_current_vllm_config")
     def test_get_weight_delegates_to_static(self, mock_vllm_config, mock_dynamic_cls, mock_static_cls):
         mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=None)
         mock_dynamic_instance = MagicMock()
@@ -30,9 +30,9 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
             mock_static_instance.get_weight.assert_called_with(input_size, output_size, torch.bfloat16)
             mock_dynamic_instance.get_weight.assert_not_called()
 
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8LinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.get_current_vllm_config")
     def test_get_pertensor_param_delegates_to_static(self, mock_vllm_config, mock_dynamic_cls, mock_static_cls):
         mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=None)
         mock_dynamic_instance = MagicMock()
@@ -45,9 +45,9 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_static_instance.get_pertensor_param.assert_called_once_with(torch.bfloat16)
         mock_dynamic_instance.get_pertensor_param.assert_not_called()
 
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8LinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.get_current_vllm_config")
     def test_get_perchannel_param_delegates_to_static(self, mock_vllm_config, mock_dynamic_cls, mock_static_cls):
         mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=None)
         mock_dynamic_instance = MagicMock()
@@ -60,9 +60,9 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_static_instance.get_perchannel_param.assert_called_once_with(128, torch.bfloat16)
         mock_dynamic_instance.get_perchannel_param.assert_not_called()
 
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8LinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.get_current_vllm_config")
     def test_apply_uses_static_for_kv_consumer(self, mock_vllm_config, mock_dynamic_cls, mock_static_cls):
         mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=None)
         mock_static_instance = MagicMock()
@@ -78,9 +78,9 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_static_instance.apply.assert_called_once()
         mock_dynamic_instance.apply.assert_not_called()
 
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8LinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.get_current_vllm_config")
     def test_apply_uses_dynamic_for_non_kv_consumer(self, mock_vllm_config, mock_dynamic_cls, mock_static_cls):
         mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=None)
         mock_dynamic_instance = MagicMock()
@@ -96,9 +96,9 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_dynamic_instance.apply.assert_called_once()
         mock_static_instance.apply.assert_not_called()
 
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8LinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.get_current_vllm_config")
     def test_process_weights_after_loading_sets_is_kv_consumer(
         self, mock_vllm_config, mock_dynamic_cls, mock_static_cls
     ):
