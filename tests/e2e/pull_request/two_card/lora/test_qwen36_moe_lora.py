@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import pytest
 
+import pytest
 import vllm
 import vllm.config
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 MODEL_PATH = "Qwen/Qwen3.6-35B-A3B"
