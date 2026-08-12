@@ -631,6 +631,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                     ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
                 }
             )
+        if self.enable_mxfp_c8_quant:
+            # MXFP C8 quantizes K dynamically, but V uses the static E8M0
+            # per-channel scale stored in the ModelSlim checkpoint.
+            suffix_map[".v_proj.kv_cache_scale"] = ".attn.v_cache_scale"
         if self.enable_fa_quant:
             suffix_map.update(
                 {
