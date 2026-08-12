@@ -14,6 +14,7 @@ All entries implement the same fused MLA preprocess semantics: down-projection â
 The underlying operator name is **MlaPrologV3**. Weights `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` must be passed in **FRACTAL_NZ** format.
 
 **Platform support**
+
 | Platform | Arch | Notes |
 | --- | --- | --- |
 | Ascend910B / Ascend910_93 (A2/A3) | arch22 (DAV_2201) | `weight_quant_mode âˆˆ {0,1,2}` only; no MXFP8/FP8/HIF8 full-quant; no SplitM |
