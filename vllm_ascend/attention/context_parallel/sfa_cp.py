@@ -826,21 +826,32 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         global _SFA_DCP_DEBUG_COUNT
         if _SFA_DCP_DEBUG_COUNT < 5:
             _SFA_DCP_DEBUG_COUNT += 1
+            num_actual = int(attn_metadata.num_actual_tokens) if hasattr(attn_metadata, "num_actual_tokens") else None
+            flat = topk_indices.flatten(0, 1)  # (T, K)
+            if num_actual is not None and num_actual < flat.shape[0]:
+                flat = flat[:num_actual]
+            valid_rows = int((flat >= 0).any(dim=-1).sum().item())
             print(
-                f"[SFA-DCP-debug rank={self.dcp_rank}] seq_lens={attn_metadata.seq_lens[:4].cpu().tolist()} "
+                f"[SFA-DCP-debug rank={self.dcp_rank}] num_input_tokens={flat.shape[0]} num_actual={num_actual} "
+                f"valid_rows={valid_rows}/{flat.shape[0]} "
+                f"seq_lens={attn_metadata.seq_lens[:4].cpu().tolist()} "
                 f"local_seq_lens={dcp_context.seq_lens[:4].cpu().tolist()} "
-                f"topk_pre_remap[max/min]={int(topk_indices.max().item())}/{int(topk_indices.min().item())} "
-                f"topk_pre_remap[:8]={topk_indices.flatten()[:8].cpu().tolist()} "
+                f"topk_pre_remap[row0]={flat[0].cpu().tolist() if flat.shape[0] else 'n/a'} "
                 f"block_table_row0[:8]={dcp_context.block_table[:1, :8].cpu().tolist()}"
             )
         # ==== end TEMP DEBUG ====
         topk_indices = self._remap_sparse_indices(topk_indices)
         if _SFA_DCP_DEBUG_COUNT <= 5:
-            valid_cnt = int((topk_indices >= 0).sum().item())
+            flat = topk_indices.flatten(0, 1)
+            if num_actual is not None and num_actual < flat.shape[0]:
+                flat = flat[:num_actual]
+            valid_rows = int((flat >= 0).any(dim=-1).sum().item())
+            valid_vals = flat[flat >= 0]
             print(
-                f"[SFA-DCP-debug rank={self.dcp_rank}] topk_post_remap[max/min]={int(topk_indices.max().item())}/"
-                f"{int(topk_indices.min().item())} valid={valid_cnt}/{topk_indices.shape[-1]} "
-                f"topk_post_remap[:8]={topk_indices.flatten()[:8].cpu().tolist()}"
+                f"[SFA-DCP-debug rank={self.dcp_rank}] post_remap valid_rows={valid_rows}/{flat.shape[0]} "
+                f"valid_max={int(valid_vals.max().item()) if valid_vals.numel() else 'n/a'} "
+                f"valid[:8]={valid_vals[:8].cpu().tolist()} "
+                f"row0={flat[0].cpu().tolist() if flat.shape[0] else 'n/a'}"
             )
         # ==== end TEMP DEBUG ====
         ql_nope, q_pe = self._finish_dcp_gather(gather_context)
