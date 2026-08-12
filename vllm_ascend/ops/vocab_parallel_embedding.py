@@ -65,7 +65,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         self.forward_type = None
         self.disable_tp = disable_tp
 
-        if disable_tp :
+        if disable_tp:
             self.comm_group = None
             self.tp_size = 1
             self.tp_rank = 0
@@ -85,7 +85,6 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.comm_group = get_tp_group()
             self.tp_size = self.comm_group.world_size
             self.tp_rank = self.comm_group.rank_in_group
-
 
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
@@ -149,6 +148,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             weight_loader=self.weight_loader,
         )
 
+        self.update_param_tp_status()
+
     def _mask_input_for_vocab_range(
         self,
         input_: torch.Tensor,
@@ -177,7 +178,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
-        if self.forward_type == "embed_tp" and not self.disable_tp:
+        if self.forward_type == "embed_tp":
             return self._forward_embed_tp(input_)
         return self._forward_origin(input_)
 

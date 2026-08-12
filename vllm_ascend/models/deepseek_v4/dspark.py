@@ -26,10 +26,7 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.model_executor.models.utils import (
@@ -72,10 +69,9 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 class DSparkMarkovHead(nn.Module):
     def __init__(self, config: PretrainedConfig, prefix: str) -> None:
         super().__init__()
-        self.markov_w1 = nn.Embendding(
+        self.markov_w1 = nn.Embedding(
             config.vocab_size,
             config.dspark_markov_rank,
-            prefix=f"{prefix}.markov_w1",
         )
         self.markov_w2 = ParallelLMHead(
             config.vocab_size,
