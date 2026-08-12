@@ -18,10 +18,7 @@ import torch
 import torch.nn.functional as F
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,  # noqa: F401
-    MoERunner,
-)
+from vllm.model_executor.layers.fused_moe.layer import MoERunner
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group

@@ -6,7 +6,7 @@ Cross-reference CI test failures with test recommendations.
 
 Pipeline:
   1. Scan each .txt log file for "short test summary info" block
-  2. Extract FAILED lines from that block only (no full-file scan)
+  2. Extract FAILED and ERROR lines from that block only (no full-file scan)
   3. Read recommended_pytest_paths.txt
   4. Match: exact match + file-level match
   5. Generate a Markdown report
@@ -44,11 +44,11 @@ def clean_line(line):
 
 
 # ============================================================
-#  Step 1: Extract FAILED tests from log files
+#  Step 1: Extract FAILED and ERROR tests from log files
 # ============================================================
 
 
-FAILED_PATTERN = re.compile(r"^FAILED\s+(tests/\S+?\.py::\S+?)\s")
+FAILED_PATTERN = re.compile(r"^(?:FAILED|ERROR)\s+(tests/\S+?\.py(?:::\S+?)?)\s")
 SUMMARY_SEPARATOR_PATTERN = re.compile(r"^=+\s")
 CPU_LOG_PATH_PATTERN = re.compile(r"(?:^|-)cpu-\d+card(?:-|$)", re.IGNORECASE)
 CPU_FAILURE_LABEL = "cpu-ut"

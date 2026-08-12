@@ -44,6 +44,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.scheduler_config.async_scheduling = False
         mock_vllm_config.scheduler_config.scheduler_cls = None
         mock_vllm_config.speculative_config = None
+        mock_vllm_config.kv_transfer_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -334,6 +335,11 @@ class TestNPUPlatform(TestBase):
         vllm_config.cache_config.block_size = 1
         vllm_config._set_cudagraph_sizes = MagicMock()
         vllm_config.update_sizes_for_sequence_parallelism = MagicMock(return_value=[])
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
 
         self.platform.check_and_update_config(vllm_config)
 
@@ -708,7 +714,7 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
 
         mock_init_recompute.assert_not_called()
-        self.assertFalse(mock_ascend_config.scheduler_config.recompute_scheduler_enable)
+        self.assertFalse(vllm_config.additional_config["scheduler_config"]["recompute_scheduler_enable"])
         self.assertIs(vllm_config.scheduler_config, scheduler_config)
         mock_warning.assert_called_once()
         self.assertIn(
@@ -893,7 +899,7 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
 
         mock_init_recompute.assert_not_called()
-        self.assertFalse(ascend_config.scheduler_config.recompute_scheduler_enable)
+        self.assertFalse(vllm_config.additional_config["scheduler_config"]["recompute_scheduler_enable"])
         self.assertTrue(ascend_config.scheduler_config.short_request_first_config.enabled)
         self.assertIsNone(vllm_config.scheduler_config.scheduler_cls)
         self.assertIn("recompute_scheduler_enable is ignored", mock_warning.call_args.args[0])

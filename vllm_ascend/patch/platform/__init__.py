@@ -30,7 +30,6 @@ else:
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
-import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
@@ -45,3 +44,4 @@ import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
+import vllm_ascend.patch.platform.patch_vision  # noqa
