@@ -829,7 +829,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # ==== TEMP DEBUG (experiment B): dump DCP decode inputs on first calls ====
         global _SFA_DCP_DEBUG_COUNT
         num_actual = int(attn_metadata.num_actual_tokens) if hasattr(attn_metadata, "num_actual_tokens") else None
-        if _SFA_DCP_DEBUG_COUNT < 50:
+        _SFA_DCP_DEBUG_DO_PRINT = self.dcp_rank in (0, 1) and _SFA_DCP_DEBUG_COUNT < 20
+        if _SFA_DCP_DEBUG_DO_PRINT:
             _SFA_DCP_DEBUG_COUNT += 1
             flat = topk_indices.flatten(0, 1)  # (T, K)
             if num_actual is not None and num_actual < flat.shape[0]:
@@ -849,7 +850,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             )
         # ==== end TEMP DEBUG ====
         topk_indices = self._remap_sparse_indices(topk_indices)
-        if _SFA_DCP_DEBUG_COUNT <= 50:
+        if _SFA_DCP_DEBUG_DO_PRINT:
             flat = topk_indices.flatten(0, 1)
             if num_actual is not None and num_actual < flat.shape[0]:
                 flat = flat[:num_actual]
@@ -883,7 +884,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
         # ==== TEMP DEBUG: dump local shard attention output / LSE stats per rank ====
-        if _SFA_DCP_DEBUG_COUNT <= 50:
+        if _SFA_DCP_DEBUG_DO_PRINT:
             _sm_max = softmax_max.flatten()
             _sm_sum = softmax_sum.flatten()
             _out = sfa_output.flatten()
