@@ -142,6 +142,18 @@ public:
         pipe->InitBuffer(wgtBuf_, kMaxGroup * scoSlots * sizeof(float));
         // ReduceMax/ReduceSum workLocal over padEnd (<= scoSlots); must not alias src/dst
         pipe->InitBuffer(rdxBuf_, scoSlots * sizeof(float));
+        /*
+         * Per-BLOCK norm columns, hoisted out of the per-token inner loop.
+         * kNrm/vNrm are [slot][kv_head] halves, so head kvh's column is strided
+         * by numKvHeads and cannot be loaded contiguously. Building it once per
+         * block costs 2 scalar ops per token; leaving it inline cost
+         * (1 + nq*2) scalar ops per token -- 72 per tile at nq=4, against only
+         * ~36 vector ops per tile. It is invariant across the whole block AND
+         * across every query head in the group, so it is built once and reused.
+         */
+        pipe->InitBuffer(kColBuf_, scoSlots * sizeof(float));
+        pipe->InitBuffer(vColBuf_, scoSlots * sizeof(float));
+        pipe->InitBuffer(wvBuf_, kMaxGroup * scoSlots * sizeof(float));
 
         signs_ = signBuf_.Get<float>();
         DataCopy(signs_, signGm_, d);
@@ -240,6 +252,9 @@ private:
         LocalTensor<float> wgt = wgtBuf_.Get<float>();
         LocalTensor<float> rdx = rdxBuf_.Get<float>();
         LocalTensor<float> qb = qbBuf_.Get<float>();
+        LocalTensor<float> kCol = kColBuf_.Get<float>();
+        LocalTensor<float> vCol = vColBuf_.Get<float>();
+        LocalTensor<float> wv = wvBuf_.Get<float>();
         LocalTensor<half> qh16 = outBuf_.Get<half>();
 
         float runMax[kMaxGroup];
@@ -288,6 +303,20 @@ private:
                 tokEnd = static_cast<uint32_t>(seqLen) - tokBase;
             }
 
+            /*
+             * Hoist the strided norm columns out of the inner loops: 2 scalar
+             * ops per token here, once per BLOCK, replacing (1 + nq*2) per token
+             * per tile. t_->scale is folded into kCol so the score scaling later
+             * is a single vector Mul per query.
+             */
+            for (uint32_t tk = 0; tk < tokEnd; ++tk) {
+                const uint32_t ni = tk * t_->numKvHeads + kvh;
+                kCol.SetValue(tk, static_cast<float>(kNrm.GetValue(ni)) * t_->scale);
+                vCol.SetValue(tk, static_cast<float>(vNrm.GetValue(ni)));
+            }
+            SetFlag<HardEvent::S_V>(EVENT_ID1);
+            WaitFlag<HardEvent::S_V>(EVENT_ID1);
+
             // ---- pass 1: gather K ONCE per tile, dot against every query ----
             for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
                 GatherNzTile(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
@@ -315,21 +344,12 @@ private:
                     WholeReduceSum(sco[g * scoSlots + t0], rsrc, 64, kTile, 1, 1, 8);
                     PipeBarrier<PIPE_V>();
                 }
-                SetFlag<HardEvent::V_S>(EVENT_ID2);
-                WaitFlag<HardEvent::V_S>(EVENT_ID2);
-                for (uint32_t t = 0; t < kTile; ++t) {
-                    const uint32_t tk = t0 + t;
-                    if (tk >= tokEnd) {
-                        break;
-                    }
-                    const float s =
-                        static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh)) * t_->scale;
-                    for (uint32_t g = 0; g < nq; ++g) {
-                        sco.SetValue(g * scoSlots + tk, sco.GetValue(g * scoSlots + tk) * s);
-                    }
-                }
-                SetFlag<HardEvent::S_V>(EVENT_ID1);
-                WaitFlag<HardEvent::S_V>(EVENT_ID1);
+                // raw dots land in sco; the kNorm*scale factor is applied as ONE
+                // vector Mul per query below, not per token here
+            }
+            for (uint32_t g = 0; g < nq; ++g) {
+                Mul(sco[g * scoSlots], sco[g * scoSlots], kCol, tokEnd);
+                PipeBarrier<PIPE_V>();
             }
 
             const uint32_t padEnd = ((tokEnd + 7u) / 8u) * 8u;
@@ -369,6 +389,15 @@ private:
                 runMax[g] = newMax;
             }
 
+            // fold ||v|| into the weights: one vector Mul per query, so pass 3
+            // reads ONE scalar per (token, query) instead of two
+            for (uint32_t g = 0; g < nq; ++g) {
+                Mul(wv[g * scoSlots], wgt[g * scoSlots], vCol, tokEnd);
+                PipeBarrier<PIPE_V>();
+            }
+            SetFlag<HardEvent::V_S>(EVENT_ID2);
+            WaitFlag<HardEvent::V_S>(EVENT_ID2);
+
             // ---- pass 3: gather V ONCE per tile, scatter into every acc ----
             for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
                 GatherNzTile(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
@@ -382,12 +411,10 @@ private:
                     if (tk >= tokEnd) {
                         break;
                     }
-                    const float vNorm =
-                        static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
                     for (uint32_t g = 0; g < nq; ++g) {
-                        const float wv = wgt.GetValue(g * scoSlots + tk) * vNorm;
+                        const float w = wv.GetValue(g * scoSlots + tk);
                         for (uint32_t pl = 0; pl < P::kPlanes; ++pl) {
-                            Axpy(acc[g * d + pl * lpt], kv[pl * lanes + t * lpt], wv, lpt);
+                            Axpy(acc[g * d + pl * lpt], kv[pl * lanes + t * lpt], w, lpt);
                             PipeBarrier<PIPE_V>();
                         }
                     }
@@ -893,7 +920,7 @@ private:
     GlobalTensor<float> signGm_, cbGm_;
     TBuf<TPosition::VECCALC> qBuf_, accBuf_, kvBuf_, tmpBuf_, byteBuf_, codeBuf_, signBuf_, cbBuf_,
         outBuf_, redBuf_, wrkBuf_, dbgBuf_, unpHBuf_, unpF0Buf_, unpF1Buf_, kNrmBuf_, vNrmBuf_,
-        scoBuf_, wgtBuf_, rdxBuf_, qbBuf_, prodBuf_;
+        scoBuf_, wgtBuf_, rdxBuf_, qbBuf_, prodBuf_, kColBuf_, vColBuf_, wvBuf_;
     LocalTensor<float> signs_, cb_;
 };
 
