@@ -32,6 +32,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
+
 from vllm_ascend.attention.indexer import validate_indexshare_pp_partition
 
 
