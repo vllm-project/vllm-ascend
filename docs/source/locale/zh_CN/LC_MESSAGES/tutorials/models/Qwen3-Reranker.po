@@ -89,17 +89,8 @@ msgstr ""
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
-
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
-msgid "=== \"Atlas 300I DUO\""
-msgstr "=== \"Atlas 300I DUO\""
 
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
@@ -126,9 +117,6 @@ msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
 " on each node."
 msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
-
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
 
 msgid "=== \"A3/A2 series\""
 msgstr "=== \"A3/A2 系列\""
@@ -241,3 +229,6 @@ msgid ""
 msgstr ""
 "有关常见的环境、安装和一般参数问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

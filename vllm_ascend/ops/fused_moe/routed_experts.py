@@ -295,7 +295,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         eplb_config = get_ascend_config().eplb_config
 
-        # The upstream FusedMoE factory has already included redundant expert
+        # The upstream FusedMoEFactory factory has already included redundant expert
         # slots in moe_config and allocated RoutedExperts weights accordingly.
         # Ascend's placement builder operates on logical expert IDs, so give it
         # a shallow config view with the logical count.
