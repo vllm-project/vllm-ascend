@@ -290,6 +290,14 @@ class AscendConfig:
         # ValueError on those to avoid silent correctness issues. PD-disaggregated
         # D nodes (kv_role='kv_consumer') are allowed for backward compatibility.
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+        if self.enable_reduce_sample:
+            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+                raise ValueError(
+                    "enable_reduce_sample is incompatible with "
+                    "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()

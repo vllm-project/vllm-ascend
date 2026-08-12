@@ -13,32 +13,12 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-    global_stream,
-    lmhead_tp_enable,
-    npu_stream_switch,
-)
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 _SAMPLING_EPS = 1e-5
-
-
-def _get_reduce_sample_comm_group():
-    """Return the correct communication group for reduce-sample operations.
-
-    When lmhead TP is enabled, logits are partitioned across the lmhead TP
-    group (not the regular TP group), so all-gather and rank calculations
-    must use the lmhead TP group. Otherwise, fall back to the regular TP
-    group.
-    """
-    if lmhead_tp_enable():
-        return get_lmhead_tp_group()
-    return get_tp_group()
 
 
 def random_sample(
@@ -146,15 +126,15 @@ class AscendSampler(Sampler):
                 "[sample/sampler] Using reduce-sample greedy sampling. "
                 "TP all-gather will be performed to find global argmax.",
             )
-            comm_group = _get_reduce_sample_comm_group()
+            tp_group = get_tp_group()
             B, V_local = logits.shape
-            rank = comm_group.rank_in_group
+            rank = tp_group.rank_in_group
 
             local_max_logits, local_max_indices = logits.max(dim=-1)
             local_global_idx = local_max_indices + rank * V_local  # [B]
             # [B, world_size]
-            gathered_logits = comm_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
-            gathered_global_idx = comm_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
+            gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+            gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
             global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
             target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
             return target_argmax
@@ -221,9 +201,9 @@ def _apply_top_k_top_p_pytorch(
     top_k: int | None = None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
-        comm_group = _get_reduce_sample_comm_group()
+        tp_group = get_tp_group()
         B, V_local = logits.shape
-        rank = comm_group.rank_in_group
+        rank = tp_group.rank_in_group
 
         if top_k is None or (p is None and k is None):
             k_for_topk = V_local
@@ -232,8 +212,8 @@ def _apply_top_k_top_p_pytorch(
 
         local_vals, local_idx = torch.topk(logits, k=k_for_topk, dim=-1)
         local_global_idx = local_idx + rank * V_local
-        gathered_vals = comm_group.all_gather(local_vals, dim=-1)
-        gathered_idx = comm_group.all_gather(local_global_idx, dim=-1)
+        gathered_vals = tp_group.all_gather(local_vals, dim=-1)
+        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if p is None and k is None:
             return gathered_vals, gathered_idx
@@ -241,10 +221,10 @@ def _apply_top_k_top_p_pytorch(
         probs = gathered_vals.softmax(dim=-1)
         probs_sort, _ = probs.sort(dim=-1, descending=False)
         if k is not None:
-            kk = k.to(torch.long).clamp(min=1, max=gathered_vals.shape[-1])
+            kk = k.to(torch.long).clamp(min=1, max=V_local)
             top_k_count = (probs_sort.size(1) - kk).unsqueeze(1)  # [B,1]
             top_k_cutoff = probs_sort.gather(-1, top_k_count)
-            no_top_k_mask = (kk == gathered_vals.shape[-1]).unsqueeze(1)
+            no_top_k_mask = (kk == V_local).unsqueeze(1)
             top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
             elements_to_discard = probs < top_k_cutoff
             gathered_vals.masked_fill_(elements_to_discard, -float("inf"))
@@ -296,9 +276,9 @@ def _apply_top_k_top_p_torch_npu(
     top_k: int | None = None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
-        comm_group = _get_reduce_sample_comm_group()
+        tp_group = get_tp_group()
         B, V_local = logits.shape
-        rank = comm_group.rank_in_group
+        rank = tp_group.rank_in_group
 
         if top_k is None or (p is None and k is None):
             k_for_topk = V_local
@@ -307,8 +287,8 @@ def _apply_top_k_top_p_torch_npu(
 
         local_vals, local_idx = torch.topk(logits, k=k_for_topk, dim=-1)
         local_global_idx = local_idx + rank * V_local
-        gathered_vals = comm_group.all_gather(local_vals, dim=-1)
-        gathered_idx = comm_group.all_gather(local_global_idx, dim=-1)
+        gathered_vals = tp_group.all_gather(local_vals, dim=-1)
+        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
             gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)

@@ -25,9 +25,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import lmhead_tp_enable
 
 
 @triton.jit(do_not_specialize=["batch_size", "seq_len"])
@@ -122,10 +120,8 @@ def get_token_bin_counts_and_mask_triton(
     grid_size = min(core_num, total_blocks)
 
     if get_ascend_config().enable_reduce_sample:
-        if lmhead_tp_enable():
-            tp_rank = get_lmhead_tp_group().rank_in_group
-        else:
-            tp_rank = get_tp_group().rank_in_group
+        tp_group = get_tp_group()
+        tp_rank = tp_group.rank_in_group
     else:
         tp_rank = 0
     token_bin_counts_and_mask_kernel[(grid_size,)](
