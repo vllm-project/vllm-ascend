@@ -131,7 +131,8 @@ def merge_postprocess_payload(
         test_env["output_len"] = case_config["max_out_len"]
     if "batch_size" in case_config:
         test_env["Concurrency"] = case_config["batch_size"]
-    test_env["data_num"] = case_config.get("num_prompts", "")
+    if "num_prompts" in case_config:
+        test_env["data_num"] = case_config["num_prompts"]
     test_env["data_set"] = _extract_dataset_name(case_config)
 
     testcase_info["extraTestEnv"] = {}
