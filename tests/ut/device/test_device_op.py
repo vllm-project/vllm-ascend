@@ -50,10 +50,12 @@ def test_a5_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
         mock.patch(
             "vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant",
             return_value=(hidden_states.unsqueeze(1), mock.MagicMock()),
+            create=True,
         ),
         mock.patch(
             "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
             return_value=(query_nope, query_rope, None, None, None),
+            create=True,
         ) as mock_rope_prolog,
         mock.patch(
             "vllm_ascend.device.device_op._npu_mla_prolog_v3_no_rope",
@@ -115,10 +117,11 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights(use_mla_rope
     query_rope = torch.randn(num_tokens, num_heads, rope_dim, dtype=torch.bfloat16)
 
     with (
-        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant") as mock_quant,
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant", create=True) as mock_quant,
         mock.patch(
             "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
             return_value=(query_nope, query_rope, None, None, None),
+            create=True,
         ) as mock_rope_prolog,
         mock.patch(
             "vllm_ascend.device.device_op._npu_mla_prolog_v3_no_rope",
