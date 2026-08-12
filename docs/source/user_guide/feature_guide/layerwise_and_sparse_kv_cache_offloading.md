@@ -88,12 +88,19 @@ supported.
       sequence length and concurrency divided by the number of Prefill ranks.
       Round the result up to a whole GiB.
 
+    > **Note:** The configuration paths below assume Python 3.11.10. If you use
+    > another Python version, replace the Python installation and
+    > `site-packages` directories with those of the active environment. Locate
+    > its `site-packages` directory with:
+    >
+    > `python -c "import site; print(site.getsitepackages())"`
+
     Start MetaService in a separate process:
 
     ```bash
     source /usr/local/memcache_hybrid/set_env.sh
     source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
+    export MMC_META_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-meta.conf
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
     ```
 
@@ -102,7 +109,7 @@ supported.
     ```bash
     source /usr/local/memcache_hybrid/set_env.sh
     source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_LOCAL_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-local.conf
+    export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-local.conf
     export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
     export PYTHONHASHSEED=0
     ```
