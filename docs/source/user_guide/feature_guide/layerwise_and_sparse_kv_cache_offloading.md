@@ -22,120 +22,117 @@ Other sparse-attention models have not been validated.
 
 ## 1. Install Dependencies
 
+The installation steps are grouped by hardware. Only A3 series is currently
+supported.
+
 ### Prefill Build Dependencies
 
-Prefill requires MemFabric Hybrid and Memcache Hybrid. Install them in this
-order.
+=== "A3 series"
 
-#### MemFabric Hybrid
+    Prefill requires MemFabric Hybrid and Memcache Hybrid. Install them in this
+    order.
 
-Install MemFabric Hybrid release 1.2 on every Prefill node. This release
-requires NPU driver `25.5.1` or later.
+    #### MemFabric Hybrid
 
-```bash
-pip uninstall -y memfabric_hybrid
-git clone -b release/1.2 https://gitcode.com/Ascend/memfabric_hybrid.git
-cd memfabric_hybrid
-bash script/build_and_pack_run.sh
-bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
-```
+    Install MemFabric Hybrid release 1.2 on every Prefill node. This release
+    requires NPU driver `25.5.1` or later.
 
-#### Memcache Hybrid
+    ```bash
+    pip uninstall -y memfabric_hybrid
+    git clone -b release/1.2 https://gitcode.com/Ascend/memfabric_hybrid.git
+    cd memfabric_hybrid
+    bash script/build_and_pack_run.sh
+    bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
+    ```
 
-Install Memcache Hybrid after MemFabric Hybrid:
+    #### Memcache Hybrid
 
-```bash
-git clone https://gitcode.com/Ascend/memcache.git
-cd memcache
-git submodule update --recursive --init
-git -c submodule.3rdparty/memfabric_hybrid.branch=release/1.2 \
-    submodule update --remote --recursive 3rdparty/memfabric_hybrid
-bash script/build_and_pack_run.sh --build_mode RELEASE
-bash output/memcache_hybrid-*_linux_aarch64.run
-```
+    Install Memcache Hybrid after MemFabric Hybrid:
 
-Configure `mmc-meta.conf`:
+    ```bash
+    git clone https://gitcode.com/Ascend/memcache.git
+    cd memcache
+    git submodule update --recursive --init
+    git -c submodule.3rdparty/memfabric_hybrid.branch=release/1.2 \
+        submodule update --remote --recursive 3rdparty/memfabric_hybrid
+    bash script/build_and_pack_run.sh --build_mode RELEASE
+    bash output/memcache_hybrid-*_linux_aarch64.run
+    ```
 
-```ini
-ock.mmc.meta_service_url = tcp://<META_HOST>:5000
-ock.mmc.meta_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
-ock.mmc.meta.lease_ttl_ms = 30000
-ock.mmc.log_level = error
-```
+    Configure `mmc-meta.conf`:
 
-Configure `mmc-local.conf` on every Prefill node:
+    ```ini
+    ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+    ock.mmc.meta_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+    ock.mmc.meta.lease_ttl_ms = 30000
+    ock.mmc.log_level = error
+    ```
 
-```ini
-ock.mmc.meta_service_url = tcp://<META_HOST>:5000
-ock.mmc.local_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
-ock.mmc.log_level = error
-ock.mmc.local_service.world_size = 256
-ock.mmc.local_service.protocol = device_sdma
-ock.mmc.local_service.dram.size = 10GB
-```
+    Configure `mmc-local.conf` on every Prefill node:
 
-The two files must use the same MetaService endpoint. The LocalService Config
-Store endpoint must match the MetaService Config Store endpoint.
+    ```ini
+    ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+    ock.mmc.local_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+    ock.mmc.log_level = error
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_sdma
+    ock.mmc.local_service.dram.size = 10GB
+    ```
 
-- Set `world_size` to the maximum supported LocalService rank count.
-- Use `device_sdma` on A3 with HCCS.
-- Use `device_rdma` on A2 or another system with device RoCE.
-- Set `dram.size` to at least the total KV cache size required by the target
-  sequence length and concurrency divided by the number of Prefill ranks.
-  Round the result up to a whole GiB.
+    The two files must use the same MetaService endpoint. The LocalService
+    Config Store endpoint must match the MetaService Config Store endpoint.
 
-Start MetaService in a separate process:
+    - Set `world_size` to the maximum supported LocalService rank count.
+    - Use `device_sdma` with HCCS.
+    - Set `dram.size` to at least the total KV cache size required by the target
+      sequence length and concurrency divided by the number of Prefill ranks.
+      Round the result up to a whole GiB.
 
-```bash
-source /usr/local/memcache_hybrid/set_env.sh
-source /usr/local/memfabric_hybrid/set_env.sh
-export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
-python -c "from memcache_hybrid import MetaService; MetaService.main()"
-```
+    Start MetaService in a separate process:
 
-On A2 with device RoCE, configure Huge Pages according to the DRAM contributed
-by each node. For example:
+    ```bash
+    source /usr/local/memcache_hybrid/set_env.sh
+    source /usr/local/memfabric_hybrid/set_env.sh
+    export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
+    python -c "from memcache_hybrid import MetaService; MetaService.main()"
+    ```
 
-```bash
-echo 200000 > /proc/sys/vm/nr_hugepages
-```
+    Prepare every Prefill node before starting vLLM:
 
-This step is not required on A3 with `device_sdma`.
-
-Prepare every Prefill node before starting vLLM:
-
-```bash
-source /usr/local/memcache_hybrid/set_env.sh
-source /usr/local/memfabric_hybrid/set_env.sh
-export MMC_LOCAL_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-local.conf
-export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-export PYTHONHASHSEED=0
-```
+    ```bash
+    source /usr/local/memcache_hybrid/set_env.sh
+    source /usr/local/memfabric_hybrid/set_env.sh
+    export MMC_LOCAL_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-local.conf
+    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
+    export PYTHONHASHSEED=0
+    ```
 
 ### Decode Build Dependencies
 
-> **Important:** MemFabric Hybrid release 1.2 must be installed on both Prefill
-> and Decode nodes. Memcache Hybrid is required only on Prefill.
+=== "A3 series"
 
-Use the same MemFabric Hybrid build and installation commands shown above.
-Decode also requires Clang and OpenMP. Prepare every Decode node:
+    > **Important:** MemFabric Hybrid release 1.2 must be installed on both
+    > Prefill and Decode nodes. Memcache Hybrid is required only on Prefill.
 
-```bash
-source /usr/local/memfabric_hybrid/set_env.sh
-export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-clang --version
-ls "$(clang --print-resource-dir)/include/omp.h"
-```
+    Use the same MemFabric Hybrid build and installation commands shown above.
+    Decode also requires Clang and OpenMP. Prepare every Decode node:
 
-If Clang or OpenMP is missing:
+    ```bash
+    source /usr/local/memfabric_hybrid/set_env.sh
+    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
+    clang --version
+    ls "$(clang --print-resource-dir)/include/omp.h"
+    ```
 
-```bash
-apt-get update
-apt-get install -y clang libomp-dev
-```
+    If Clang or OpenMP is missing:
 
-If the image provides a specific Clang version, install the matching OpenMP
-package, for example `libomp-17-dev` for Clang 17.
+    ```bash
+    apt-get update
+    apt-get install -y clang libomp-dev
+    ```
+
+    If the image provides a specific Clang version, install the matching OpenMP
+    package, for example `libomp-17-dev` for Clang 17.
 
 ## 2. Layerwise KV Cache Offload on Prefill
 
@@ -145,6 +142,9 @@ Use this mode on a dedicated Prefill node with:
 - the Memcache backend;
 - an MLA, SFA, or DSA attention backend; and
 - eager execution.
+
+For a combined deployment, Prefill TP must be greater than or equal to Decode
+TP and divisible by it.
 
 Add the following options to the Prefill launch command. `MultiConnector` lets
 `AscendStoreConnector` offload layer buffers to Memcache while
@@ -222,6 +222,10 @@ Add the following options to the Decode launch command:
 }'
 ```
 
+On Decode, reserve
+`decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports
+starting from `kv_port`.
+
 | Parameter | Description |
 | :--- | :--- |
 | `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
@@ -229,15 +233,6 @@ Add the following options to the Decode launch command:
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
 
 ## 4. Start the P/D Proxy
-
-Before starting the proxy, verify:
-
-- Set `transfer_backend` to `memfabric` on Prefill and Decode.
-- Prefill TP must be greater than or equal to Decode TP and divisible by it.
-- Reserve `decode_data_parallel_size * decode_tensor_parallel_size`
-  consecutive ports starting from `kv_port` on Decode.
-- Prefill does not bind `kv_port`; Decode advertises the target through request
-  metadata.
 
 Start Prefill and Decode with the configurations above. After both nodes are
 ready, start the proxy:
