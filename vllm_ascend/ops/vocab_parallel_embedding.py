@@ -183,6 +183,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return self._forward_origin(input_)
 
     def _forward_embed_tp(self, input_):
+        assert self.comm_group is not None
         num_tokens = input_.shape[0]
 
         # potential_max_tokens is computed once in the model runner __init__, so
