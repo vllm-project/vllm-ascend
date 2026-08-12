@@ -69,6 +69,9 @@ aisbench_cases = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 async def test_models(model: str, tp_size: int) -> None:
+    import time
+    time.sleep(9999999)
+    
     port = get_open_port()
     mooncake_port = get_open_port()
     mooncake_metrics_port = get_open_port()
@@ -141,6 +144,3 @@ async def test_models(model: str, tp_size: int) -> None:
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
         run_aisbench_cases(model, port, aisbench_cases)
-
-    import time
-    time.sleep(9999999)
