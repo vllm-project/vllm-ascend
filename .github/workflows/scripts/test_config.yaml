@@ -643,7 +643,6 @@
     - vllm_ascend/ops/triton/batch_invariant
   tests:
     - tests/ut/test_batch_invariant.py
-    - tests/e2e/pull_request/one_card/rlhf/consistency/test_batch_invariant.py
     - tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py
 
 # csrc
