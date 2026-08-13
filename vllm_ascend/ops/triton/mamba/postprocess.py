@@ -275,11 +275,7 @@ def postprocess_mamba_fused_kernel(
         src_offset = accept_token_bias.to(tl.int64) * state_inner_size * state_elem_size
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
         dst_addr = state_base_addr + dest_block_id * state_block_stride
-        copy_size = (
-            (conv_width - accept_token_bias).to(tl.int64)
-            * state_inner_size
-            * state_elem_size
-        )
+        copy_size = (conv_width - accept_token_bias).to(tl.int64) * state_inner_size * state_elem_size
         _memcpy_u64_tiled(
             src_addr,
             dst_addr,
