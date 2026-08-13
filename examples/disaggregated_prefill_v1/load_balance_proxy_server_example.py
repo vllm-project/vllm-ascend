@@ -844,17 +844,18 @@ async def send_request_to_service(
 ):
     req_data = build_prefill_request(req_data)
     headers = auth_headers(request_id)
-    for attempt in range(1, max_retries + 1):
+    max_attempts = max(1, max_retries)
+    for attempt in range(1, max_attempts + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 400 or attempt == max_retries:
+            if exc.response.status_code == 400 or attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
-            if attempt == max_retries:
+            if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
         await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -869,7 +870,8 @@ async def stream_service_response(
     base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
-    for attempt in range(1, max_retries + 1):
+    max_attempts = max(1, max_retries)
+    for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
@@ -879,21 +881,21 @@ async def stream_service_response(
                     yield chunk
                 return
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 400 or attempt == max_retries:
+            if exc.response.status_code == 400 or attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
-            if attempt == max_retries:
+            if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
-            if attempt == max_retries:
+            if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
