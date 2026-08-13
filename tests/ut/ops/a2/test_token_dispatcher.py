@@ -35,7 +35,6 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
     AscendDeviceType,
     EXPERT_TOKEN_NUMS_TYPE_COUNT,
-    EXPERT_TOKEN_NUMS_TYPE_CUMSUM,
     TokenDispatcherWithAll2AllV,
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
@@ -264,7 +263,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             )
             output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
             mock_dispatch.assert_called_once()
-            self.assertEqual(output.group_list_type, 0)  # group_list_type == 0
+            self.assertEqual(output.group_list_type, EXPERT_TOKEN_NUMS_TYPE_COUNT)
             self.assertIsInstance(output.combine_metadata, MoEMC2CombineMetadata)
 
     def test_w4a8_per_channel_dispatch_uses_count_group_list(self):
@@ -293,7 +292,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(mock_dispatch.call_args.kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_COUNT)
         self.assertEqual(output.group_list_type, EXPERT_TOKEN_NUMS_TYPE_COUNT)
 
-    def test_w4a8_group_dispatch_keeps_prefix_sum_group_list(self):
+    def test_w4a8_group_dispatch_uses_count_group_list(self):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)
         topk_ids = torch.randint(0, 8, (10, 1))
@@ -309,7 +308,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         )
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
-        self.assertEqual(kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_CUMSUM)
+        self.assertEqual(kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_COUNT)
 
     def test_get_combine_mc_kwargs_with_quant(self):
         hidden_states = torch.randn(10, 128)

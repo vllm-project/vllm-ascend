@@ -56,16 +56,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
 )
 
-EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
 EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
-
-
-def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
-    # grouped_matmul_swiglu_quant_v2 consumes per-expert counts; existing
-    # MC2 grouped-matmul paths consume prefix sums.
-    if token_dispatch_input.quant.use_w4a8_per_channel_gmm_swiglu:
-        return EXPERT_TOKEN_NUMS_TYPE_COUNT
-    return EXPERT_TOKEN_NUMS_TYPE_CUMSUM
 
 
 class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
@@ -185,7 +176,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
-        expert_token_nums_type = _get_expert_token_nums_type(token_dispatch_input)
         kwargs_mc2 = {
             "x": hidden_states,
             "expert_ids": topk_ids,
@@ -193,7 +183,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
-            "expert_token_nums_type": expert_token_nums_type,
+            # Keep the fused MoE contract in per-expert count mode. All
+            # downstream grouped-matmul calls receive group_list_type
+            # explicitly, so producing prefix sums here only adds a
+            # count -> cumsum -> count round trip for fused SwiGLU paths.
+            "expert_token_nums_type": EXPERT_TOKEN_NUMS_TYPE_COUNT,
         }
         if self.global_bs == 0:
             kwargs_mc2["x_active_mask"] = token_dispatch_input.routing.mc2_mask

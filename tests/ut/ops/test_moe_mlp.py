@@ -865,6 +865,121 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         self.assertIs(out, expected)
 
 
+class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
+    def test_fused_paths_pass_expert_counts_to_v2(self):
+        expected_group_list = torch.tensor([1, 2, 0], dtype=torch.int64)
+
+        for group_list_type, group_list in (
+            (0, torch.tensor([1, 3, 3], dtype=torch.int64)),
+            (1, expected_group_list),
+        ):
+            for moe_comm_type in (-1, MoECommType.MC2):
+                with self.subTest(group_list_type=group_list_type, moe_comm_type=moe_comm_type):
+                    self._assert_fused_path_passes_expert_counts_to_v2(
+                        group_list=group_list,
+                        group_list_type=group_list_type,
+                        expected_group_list=expected_group_list,
+                        moe_comm_type=moe_comm_type,
+                    )
+
+    def _assert_fused_path_passes_expert_counts_to_v2(
+        self,
+        *,
+        group_list: torch.Tensor,
+        group_list_type: int,
+        expected_group_list: torch.Tensor,
+        moe_comm_type: int,
+    ):
+        mock_ctx = MagicMock()
+        mock_ctx.moe_comm_type = moe_comm_type
+        fused_output = torch.zeros(3, 4, dtype=torch.int8)
+        fused_scale = torch.ones(3, dtype=torch.float32)
+        final_output = torch.zeros(3, 2)
+        kwargs = self._common_w8a8_kwargs(
+            activation="silu",
+            group_list_type=group_list_type,
+            group_list=group_list,
+            dynamic_scale=torch.ones(3),
+        )
+        kwargs.update(
+            {
+                "hidden_states": torch.zeros(3, 4, dtype=torch.int8),
+                "w1": [torch.zeros(4, 8, dtype=torch.int8) for _ in range(3)],
+                "w1_scale": [torch.ones(8) for _ in range(3)],
+                "w2": [torch.zeros(4, 2, dtype=torch.int8) for _ in range(3)],
+                "w2_scale": [torch.ones(2) for _ in range(3)],
+                "fusion": True,
+                "dynamic_eplb": True,
+            }
+        )
+
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
+            patch(f"{MOE_MLP}._custom_gmm_swiglu_enabled", return_value=True),
+            patch(
+                "torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
+                return_value=(fused_output, fused_scale),
+                create=True,
+            ) as mock_gmm_swiglu,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=final_output),
+            _patch_npu_stream()[0],
+        ):
+            output, _ = quant_apply_mlp(**kwargs)
+
+        call_kwargs = mock_gmm_swiglu.call_args.kwargs
+        torch.testing.assert_close(call_kwargs["group_list"], expected_group_list)
+        self.assertEqual(call_kwargs["group_list_type"], 1)
+        if group_list_type == 1:
+            self.assertIs(call_kwargs["group_list"], group_list)
+        self.assertIs(output, final_output)
+
+    def test_mc2_swiglustep_forwards_count_type_to_both_gmms(self):
+        group_list = torch.tensor([1, 2, 0], dtype=torch.int64)
+        gate_up_output = torch.zeros(3, 8)
+        activated = torch.zeros(3, 4)
+        quantized_activated = torch.zeros(3, 4, dtype=torch.int8)
+        activated_scale = torch.ones(3)
+        final_output = torch.zeros(3, 2)
+        mock_ctx = MagicMock()
+        mock_ctx.moe_comm_type = MoECommType.MC2
+
+        kwargs = self._common_w8a8_kwargs(
+            activation=MoEActivation.SWIGLUSTEP,
+            group_list_type=1,
+            group_list=group_list,
+            dynamic_scale=torch.ones(3),
+        )
+        kwargs.update(
+            {
+                "hidden_states": torch.zeros(3, 4, dtype=torch.int8),
+                "w1": [torch.zeros(4, 8, dtype=torch.int8) for _ in range(3)],
+                "w1_scale": [torch.ones(8) for _ in range(3)],
+                "w2": [torch.zeros(4, 2, dtype=torch.int8) for _ in range(3)],
+                "w2_scale": [torch.ones(2) for _ in range(3)],
+            }
+        )
+
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_output]) as mock_gmm1,
+            patch(f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward", return_value=activated),
+            patch.object(
+                DeviceOperator,
+                "npu_dynamic_quant",
+                return_value=(quantized_activated, activated_scale),
+            ),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=final_output) as mock_gmm2,
+            _patch_npu_stream()[0],
+        ):
+            output, _ = quant_apply_mlp(**kwargs)
+
+        self.assertIs(mock_gmm1.call_args.kwargs["group_list"], group_list)
+        self.assertEqual(mock_gmm1.call_args.kwargs["group_list_type"], 1)
+        self.assertIs(mock_gmm2.call_args.kwargs["group_list"], group_list)
+        self.assertEqual(mock_gmm2.call_args.kwargs["group_list_type"], 1)
+        self.assertIs(output, final_output)
+
+
 class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
     """Non-GELU activations must NOT enter the GELU path (no regression)."""
 

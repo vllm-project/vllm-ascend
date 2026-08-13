@@ -211,6 +211,7 @@ class BaseDeviceAdaptor:
         x: torch.Tensor,
         weight: torch.Tensor,
         group_list: torch.Tensor,
+        group_list_type: int,
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
@@ -230,6 +231,7 @@ class BaseDeviceAdaptor:
             x_scale=x_scale,
             group_list=group_list,
             weight_assist_matrix=[bias] if bias is not None else None,
+            group_list_type=group_list_type,
             swiglu_limit=swiglu_limit,
         )
 
@@ -1168,6 +1170,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         x: torch.Tensor,
         weight: torch.Tensor,
         group_list: torch.Tensor,
+        group_list_type: int,
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
@@ -1185,6 +1188,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     weight_scale=[weight_scale],
                     x_scale=x_scale,
                     group_list=group_list,
+                    group_list_type=group_list_type,
                     quant_dtype=torch.float8_e4m3fn,
                     dequant_dtype=torch.float32,
                 )
@@ -1197,6 +1201,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     weight_scale=weight_scale,
                     x_scale=x_scale,
                     bias=bias,
+                    group_list_type=group_list_type,
                     swiglu_limit=swiglu_limit,
                     use_mxfp_quant=False,
                 )
@@ -1214,6 +1219,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 split_item=2,
                 group_type=0,
                 group_list=group_list,
+                group_list_type=group_list_type,
                 x_dtype=torch.float8_e4m3fn,
                 weight_dtype=torch_npu.float4_e2m1fn_x2,
                 output_dtype=torch.bfloat16,
@@ -1233,6 +1239,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weight=[weight],
                 antiquant_scale=[weight_scale],
                 group_list=group_list,
+                group_list_type=group_list_type,
                 split_item=3,
                 group_type=0,
                 output_dtype=x.dtype,
@@ -1246,6 +1253,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 group_list=group_list,
                 weight_scale=[weight_scale],
                 x_scale=x_scale,
+                group_list_type=group_list_type,
                 dequant_mode=2,
                 quant_mode=2,
                 dequant_dtype=torch.float32,

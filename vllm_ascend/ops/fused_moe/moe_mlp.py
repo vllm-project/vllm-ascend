@@ -253,9 +253,9 @@ def quant_apply_mlp(
                 weight=w1,
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale,
-                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                group_list=cumsum_group_list(group_list, group_list_type, 1),
                 weight_assist_matrix=None,
-                group_list_type=0,
+                group_list_type=1,
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
@@ -263,7 +263,8 @@ def quant_apply_mlp(
             hidden_states, swiglu_out_scale = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
-                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                group_list=cumsum_group_list(group_list, group_list_type, 1),
+                group_list_type=1,
                 weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
                 x_scale=pertoken_scale,
                 bias=None,
@@ -286,6 +287,7 @@ def quant_apply_mlp(
                 "split_item": 2,
                 "group_type": 0,
                 "group_list": group_list,
+                "group_list_type": group_list_type,
                 "output_dtype": torch.bfloat16,
             }
             if use_mxfp_quant:
@@ -462,16 +464,17 @@ def quant_apply_mlp(
                 weight=w1,
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale,
-                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                group_list=cumsum_group_list(group_list, group_list_type, 1),
                 weight_assist_matrix=bias1,
-                group_list_type=0,
+                group_list_type=1,
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP and not is_gelu_activation:
             hidden_states, swiglu_out_scale = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
-                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                group_list=cumsum_group_list(group_list, group_list_type, 1),
+                group_list_type=1,
                 weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
                 x_scale=pertoken_scale,
                 bias=bias1,
