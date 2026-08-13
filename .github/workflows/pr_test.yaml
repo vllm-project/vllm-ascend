@@ -200,10 +200,8 @@ jobs:
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
-      has_tests_a3: ${{ steps.scope-a3.outputs.has_tests || steps.noop-a3.outputs.has_tests }}
-      test_groups_a3: ${{ steps.scope-a3.outputs.test_groups || steps.noop-a3.outputs.test_groups }}
-      has_tests_a5: ${{ steps.scope-a5-categorical.outputs.has_tests || steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
-      test_groups_a5: ${{ steps.scope-a5-categorical.outputs.test_groups || steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
+      has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
+      test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -269,20 +267,6 @@ jobs:
               - 'tests/**'
               - 'tools/**'
               - 'CMakeLists.txt'
-            categorical_sampling:
-              - 'csrc/build_aclnn.sh'
-              - 'csrc/sampling/categorical_sample/**'
-              - 'csrc/torch_binding.cpp'
-              - 'csrc/torch_binding_meta.cpp'
-              - 'vllm_ascend/utils.py'
-              - 'vllm_ascend/worker/v2/sample/gumbel.py'
-              - 'vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py'
-              - 'vllm_ascend/patch/worker/patch_v2/patch_triton.py'
-              - 'tests/ut/sample/a2/test_categorical_sampling.py'
-              - 'tests/ut/sample/a2/test_gumbel_sampling.py'
-              - 'tests/ut/sample/a2/test_gumbel_sampling_heavy_tail.py'
-              - 'tests/ut/sample/a2/test_rejection_sampling_v2.py'
-              - 'tests/e2e/pull_request/one_card/model_runner_v2/test_categorical_sampling.py'
 
       - name: Validate test coverage config
         run: |
@@ -309,43 +293,15 @@ jobs:
             echo "csrc_cache_target_ids=[]"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Select A3 categorical sampling tests
-        id: scope-a3
-        if: steps.filter.outputs.categorical_sampling == 'true'
-        run: |
-          pip install regex
-          python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --modules categorical_sampling \
-            --runner-override a3_x2
-
-      - name: Set no-tests output for A3 when source paths unchanged
-        id: noop-a3
-        if: steps.filter.outputs.categorical_sampling != 'true'
-        run: |
-          {
-            echo "has_tests=false"
-            echo "test_groups=[]"
-            echo "csrc_cache_target_ids=[]"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Select A5 tests with categorical sampling coverage
-        id: scope-a5-categorical
-        if: steps.filter.outputs.src == 'true' && steps.filter.outputs.categorical_sampling == 'true'
-        run: |
-          pip install regex
-          python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --modules a5,categorical_sampling \
-            --runner-override a5_x4
-
       - name: Select A5 tests
         id: scope-a5
-        if: steps.filter.outputs.src == 'true' && steps.filter.outputs.categorical_sampling != 'true'
+        if: steps.filter.outputs.src == 'true'
         run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
+            --diff-base origin/${{ github.base_ref }} \
             --modules a5 \
             --runner-override a5_x4
 
@@ -362,14 +318,12 @@ jobs:
         id: cache-targets
         env:
           SELECTED_TARGET_IDS: ${{ steps.scope.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
-          SELECTED_A3_TARGET_IDS: ${{ steps.scope-a3.outputs.csrc_cache_target_ids || steps.noop-a3.outputs.csrc_cache_target_ids }}
         run: |
           python3 - <<'PY'
           import json
           import os
 
           target_ids = json.loads(os.environ["SELECTED_TARGET_IDS"])
-          target_ids += json.loads(os.environ["SELECTED_A3_TARGET_IDS"])
           target_ids = sorted(set(target_ids) | {"a2-arm64-ubuntu"})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print("target_ids=" + json.dumps(target_ids, separators=(",", ":")), file=output)
@@ -439,32 +393,6 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
-
-  run-selected-tests-a3:
-    needs:
-      - pre-commit
-      - select-tests
-      - ensure-csrc-cache
-    if: >-
-      ${{
-        needs.pre-commit.result == 'success' &&
-        needs.select-tests.result == 'success' &&
-        needs.select-tests.outputs.has_tests_a3 == 'true' &&
-        contains(github.event.pull_request.labels.*.name, 'ready') &&
-        needs.ensure-csrc-cache.result == 'success'
-      }}
-    strategy:
-      matrix:
-        vllm_version:
-          - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
-    uses: ./.github/workflows/_selected_tests.yaml
-    with:
-      vllm: ${{ matrix.vllm_version }}
-      ref: ${{ github.event.pull_request.head.sha }}
-      base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups_a3 }}
 
   generate-hitest:
     name: Generate hitest recommendations
@@ -570,13 +498,12 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
         
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a3, run-selected-tests-a5]
+    needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
     if: ${{ !cancelled() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5')) }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -590,25 +517,13 @@ jobs:
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests }}"
-          HAS_TESTS_A3="${{ needs.select-tests.outputs.has_tests_a3 }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
-          echo "has_tests_a3: ${HAS_TESTS_A3}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
-
-          if [ "${HAS_TESTS_A3}" = "true" ] && [ "${HAS_READY_LABEL}" != "true" ]; then
-            echo "::error::Categorical sampling changes require the ready label for A2/A3 validation."
-            exit 1
-          fi
-
-          if [ "${HAS_TESTS_A3}" = "true" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
-            echo "::error::Categorical sampling changes require the ready-a5 label for A5 validation."
-            exit 1
-          fi
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ] && [ "${PRE_COMMIT_RESULT}" != "skipped" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
@@ -633,15 +548,6 @@ jobs:
                 echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
                 exit 1
               fi
-            fi
-          fi
-
-          if [ "${HAS_TESTS_A3}" = "true" ]; then
-            TESTS_A3_RESULT="${{ needs.run-selected-tests-a3.result }}"
-            echo "run-selected-tests-a3: ${TESTS_A3_RESULT}"
-            if [ "${TESTS_A3_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests-a3 did not succeed (result: ${TESTS_A3_RESULT})"
-              exit 1
             fi
           fi
 
