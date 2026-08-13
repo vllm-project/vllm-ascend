@@ -90,10 +90,9 @@ def test_acquire_read_releases_slot_when_reader_raises():
     )
     reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
     try:
-        # Prepare a written SHM slot directly. This test only verifies slot
-        # cleanup and does not need the ZMQ ready/notification path.
-        with writer.acquire_write(timeout=0.1) as buf:
-            buf[0] = 1
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue({"payload": "first"})
 
         with (
             pytest.raises(RuntimeError, match="reader failed"),
