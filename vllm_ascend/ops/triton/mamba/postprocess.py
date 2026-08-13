@@ -49,6 +49,10 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: upstream launches a 3D grid (reqs, states, tiles) and
+    # partitions the temporal copy across tiles. Ascend keeps the single-CTA
+    # copy, so only tile 0 runs and the rest are bounds-checked no-ops.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
@@ -64,11 +68,17 @@ def postprocess_mamba_fused_kernel(
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
     # Bounds check: num_reqs is the number of active batch rows. With
     # HAS_IDX_MAPPING, req_idx is a (possibly sparse) request-state slot, so it
     # must NOT be checked against num_reqs.
     if batch_idx >= num_reqs:
+        return
+
+    # Only the first temporal tile does the copy; later tiles no-op so the
+    # 3D upstream grid does not launch redundant racing copies.
+    if tile_idx > 0:
         return
 
     if HAS_IDX_MAPPING:

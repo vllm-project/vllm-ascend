@@ -36,9 +36,17 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-        False,
+    from vllm.v1.utils import CpuGpuBuffer
+
+    orig_init = CpuGpuBuffer.__init__
+
+    def _init_no_pin_memory(self, *args, **kwargs):
+        kwargs["pin_memory"] = False
+        return orig_init(self, *args, **kwargs)
+
+    with (
+        patch("vllm.utils.torch_utils.PIN_MEMORY", False),
+        patch("vllm.v1.utils.CpuGpuBuffer.__init__", _init_no_pin_memory),
     ):
         yield
 
