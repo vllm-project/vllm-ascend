@@ -2,7 +2,14 @@
 
 ## 1 Introduction
 
-Cohere Transcribe is a family of automatic speech recognition (ASR) models from Cohere. The model covered in this document is `CohereLabs/cohere-transcribe-arabic-07-2026`, a 2B-parameter Conformer encoder-decoder ASR model that supports 14 languages and is specialized for Arabic speech recognition.
+Cohere Transcribe is a family of automatic speech recognition (ASR) models from Cohere, based on a 2B-parameter Conformer encoder-decoder architecture that supports 14 languages (English, French, German, Italian, Spanish, Portuguese, Greek, Dutch, Polish, Chinese (Mandarin), Japanese, Korean, Vietnamese, and Arabic).
+
+This document covers two model versions verified on Ascend NPUs:
+
+| Version | Description | Verified by |
+| --- | --- | --- |
+| `CohereLabs/cohere-transcribe-03-2026` | Base multilingual model (14 languages) | Colleague verification, results recorded in the internal evaluation report |
+| `CohereLabs/cohere-transcribe-arabic-07-2026` | Arabic fine-tuned model | Internal evaluation report (WER / RTFx measured on Ascend 910B) |
 
 This document describes the supported features, environment preparation, single-node deployment, functional verification, and evaluation workflow for Cohere Transcribe on Ascend NPUs.
 
@@ -18,7 +25,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Ascend 910B 64 GB NPU. Download the model weights from [Hugging Face](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) (or your configured model hub). Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
+The BF16 model can be deployed with one Ascend 910B 64 GB NPU. Download the model weights from any of the following sources:
+
+- GitCode mirror (03-2026): [weixin_62994174/CohereLabs_cohere-transcribe-03-2026](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)
+- Hugging Face: [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) or [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026)
+- ModelScope: `CohereLabs/cohere-transcribe-03-2026`
+
+Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
 
@@ -87,7 +100,7 @@ pip show vllm-ascend
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Replace `your_model_path` with the local model directory.
+Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Replace `your_model_path` with the local model directory. Both model versions (`cohere-transcribe-03-2026` and `cohere-transcribe-arabic-07-2026`) are deployed with the same command.
 
 === "Atlas A2 inference products"
 
@@ -96,7 +109,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
     export HF_HUB_OFFLINE=1
     export TRANSFORMERS_OFFLINE=1
 
-    vllm serve your_model_path \
+    vllm serve /data/llm-workspace/cohere-transcribe-03-2026 \
       --served-model-name cohere-transcribe \
       --trust-remote-code \
       --tensor-parallel-size 1 \
@@ -148,9 +161,22 @@ Replace `localhost`, `8000`, and `cohere-transcribe` with the address, port, and
 
 ## 7 Accuracy Evaluation
 
-Evaluate transcription quality with Word Error Rate (WER) for word-level recognition.
+Evaluate transcription quality with Word Error Rate (WER) for word-level recognition and Character Error Rate (CER) for character-level recognition.
 
-On the Common Voice 18 (CV18) Arabic test set (10,471 samples), the model deployed on Ascend 910B achieves a WER of 5.69%, close to the official result (5.82%). The WER distribution is as follows:
+### 7.1 cohere-transcribe-03-2026 (base multilingual model)
+
+Verified by a colleague on the same benchmark as 07-2026 (see Section 7.2). Results are recorded in the internal evaluation report, which compares the two versions side by side.
+
+| Metric | Result (100 Common Voice Arabic samples) |
+| --- | --- |
+| WER | 9.06% |
+| CER | 2.96% |
+
+### 7.2 cohere-transcribe-arabic-07-2026 (Arabic fine-tuned model)
+
+Measured in the internal evaluation report on Ascend 910B.
+
+On the Common Voice 18 (CV18) Arabic test set (10,471 samples), the model achieves a WER of 5.69%, close to the official result (5.82%). The WER distribution is as follows:
 
 | Metric | Result |
 | --- | --- |
@@ -159,11 +185,28 @@ On the Common Voice 18 (CV18) Arabic test set (10,471 samples), the model deploy
 | WER < 10% | 8,116 / 10,471 (77.5%) |
 | WER < 20% | 9,145 / 10,471 (87.3%) |
 
+On the same 100 Common Voice Arabic samples used for 03-2026, the 07-2026 model achieves:
+
+| Metric | Result (100 Common Voice Arabic samples) |
+| --- | --- |
+| WER | 5.28% |
+| CER | 1.27% |
+
+The 07-2026 Arabic fine-tuned model significantly outperforms the 03-2026 base model on Arabic (WER 5.28% vs 9.06%, CER 1.27% vs 2.96%), confirming that the fine-tuned version is recommended for Arabic production use.
+
 ## 8 Performance Evaluation
 
 Measure ASR serving performance with audio samples that represent the production workload. Record at least the audio duration, request concurrency, end-to-end latency, real-time factor, and throughput. This ensures that audio preprocessing, request construction, API communication, inference, and response parsing are included in the result.
 
-On Ascend 910B, the model achieves a real-time factor (RTF) of 0.100, i.e. an RTFx of 10.0: 1 second of audio is transcribed in about 0.1 seconds, so the service can process audio roughly 10x faster than real time.
+Both models were evaluated on the same 100 Common Voice Arabic samples (440 seconds total audio) with the same inference stack (vLLM 0.23.0 + vllm-ascend). Results from the internal evaluation report:
+
+| Metric | 07-2026 Arabic | 03-2026 (base) |
+| --- | --- | --- |
+| RTF | 0.100 | 0.107 |
+| RTFx | 10.0 | 9.4 |
+| Inference time for 100 samples | 44 s | 47 s |
+
+The 07-2026 Arabic model is slightly faster (RTF 0.100 vs 0.107, about 6.5% faster) while providing significantly better Arabic accuracy.
 
 Actual performance varies with hardware, audio duration, concurrency, and deployment configuration. Evaluate short audio, long audio, and concurrent requests separately before selecting a production configuration.
 
