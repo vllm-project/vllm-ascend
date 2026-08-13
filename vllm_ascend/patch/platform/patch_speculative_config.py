@@ -34,6 +34,7 @@ _orig_update_dspark = speculator_algos.SUPPORTED_SPECULATORS_TYPES["dspark"]
 
 def _update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     _orig_update_dspark(config_dict, pre_trained_config)
+    pre_trained_config.pop("dspark_bonus_anchor", None)
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["dflash_config"] = {
         "mask_token_id": config_dict["mask_token_id"],
