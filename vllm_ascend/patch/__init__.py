@@ -67,6 +67,22 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
+# ** 4. File: platform/patch_shm_broadcast.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue`
+#    Why:
+#       vLLM 0.23.0 local readers can wait indefinitely after a best-effort ZMQ
+#       notification is lost. A caller exception can also leave a read slot
+#       unreleased and block the writer.
+#    How:
+#       Replace timeout_ms and acquire_read with the implementations from the
+#       upstream fix. Idle waits are capped at five seconds, and read-slot cleanup
+#       runs in a finally block.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/45224
+#    Future Plan:
+#       Remove this patch when the supported vLLM release includes PR #45224.
+#
 # ** 5. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
