@@ -59,6 +59,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
         quant_config = vllm_config.quant_config
 
         self.e_proj = ReplicatedLinear(
@@ -130,6 +131,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         # hidden_states = self.hc_head(hidden_states, self.hc_head_fn,
         #                              self.hc_head_scale, self.hc_head_base)
 
+        if self.use_v2_model_runner:
+            return hidden_states.flatten(1)
         return hidden_states
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):

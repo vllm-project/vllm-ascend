@@ -49,6 +49,8 @@ spec:
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
+              - name: OPENLIBING_SECRET
+                value: "{{ openlibing_secret | default("") }}"
             command:
               - sh
               - -c

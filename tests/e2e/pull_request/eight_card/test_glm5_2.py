@@ -116,7 +116,7 @@ def test_glm_5_2_dspark_acceptance_tp8() -> None:
         num_speculative_tokens=DSPARK_NUM_SPECULATIVE_TOKENS,
         compilation_config=CompilationConfig(
             cudagraph_mode="FULL_DECODE_ONLY",
-            cudagraph_capture_sizes=[6, 8, 16, 18],
+            cudagraph_capture_sizes=[8, 16, 24, 32],
         ),
     )
 

@@ -87,7 +87,7 @@ env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
   # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12'
+  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -219,6 +219,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
@@ -233,6 +234,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   remove-taints:
     name: Remove node taints
@@ -288,6 +290,7 @@ jobs:
     secrets:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
 
   generate-accuracy-matrix:

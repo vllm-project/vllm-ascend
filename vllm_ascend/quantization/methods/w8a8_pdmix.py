@@ -29,7 +29,7 @@ from vllm.config import get_current_vllm_config
 
 from .base import AscendLinearScheme
 from .registry import register_scheme
-from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
+from .w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
 
 
@@ -83,19 +83,3 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
         self._static_method.process_weights_after_loading(layer)
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.is_kv_consumer = self._is_kv_consumer
-
-
-@register_scheme("W8A8_MIX", "moe")
-class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
-    def get_dynamic_quant_param(
-        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
-    ) -> dict[str, Any]:
-        param_dict = super().get_dynamic_quant_param(
-            num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
-        )
-        param_dict["w2_deq_scale"] = torch.empty(num_experts, hidden_sizes, dtype=torch.float32)
-        param_dict["w13_deq_scale"] = torch.empty(num_experts, 2 * intermediate_size_per_partition, dtype=torch.float32)
-        param_dict["w2_input_offset"] = torch.empty(num_experts, 1, dtype=torch.int8)
-        param_dict["w13_input_offset"] = torch.empty(num_experts, 1, dtype=torch.int8)
-
-        return param_dict
