@@ -675,6 +675,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefiller-ports", type=int, nargs="+", default=[8001])
     parser.add_argument("--decoder-hosts", type=str, nargs="+", default=["localhost"])
     parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
+    parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
+    parser.add_argument(
+        "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
+    )
     parser.add_argument(
         "--max-waiting-retries", type=int, default=3, help="Maximum number of retries for waiting nodes to be started"
     )
@@ -835,12 +839,25 @@ async def send_request_to_service(
     endpoint: str,
     req_data: dict,
     request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
 ):
     req_data = build_prefill_request(req_data)
     headers = auth_headers(request_id)
-    response = await client.post(endpoint, json=req_data, headers=headers)
-    response.raise_for_status()
-    return response
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await client.post(endpoint, json=req_data, headers=headers)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 or attempt == max_retries:
+                raise
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
+        except httpx.RequestError as exc:
+            if attempt == max_retries:
+                raise
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
 
 
 async def stream_service_response(
@@ -848,12 +865,38 @@ async def stream_service_response(
     endpoint: str,
     req_data: dict,
     request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
-    async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
-        response.raise_for_status()
-        async for chunk in response.aiter_bytes():
-            yield chunk
+    for attempt in range(1, max_retries + 1):
+        first_chunk_sent = False
+        try:
+            async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    first_chunk_sent = True
+                    yield chunk
+                return
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 or attempt == max_retries:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        except httpx.RequestError as exc:
+            if first_chunk_sent:
+                logger.error("Streaming to client interrupted after response started: %s", exc)
+                return
+            if attempt == max_retries:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        except Exception as exc:
+            if first_chunk_sent:
+                logger.error("Streaming to client interrupted after response started: %s", exc)
+                return
+            if attempt == max_retries:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
 
 
 async def _abort_prefill_selection(
@@ -888,6 +931,7 @@ async def assign_instances(
     is_initial_request: bool,
 ) -> InstanceInfo:
     runtime = get_runtime()
+    args = get_global_args()
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
     request_id = next_req_id()
@@ -901,6 +945,8 @@ async def assign_instances(
             api,
             req_data,
             request_id,
+            max_retries=args.max_retries,
+            base_delay=args.retry_delay,
         )
     except Exception:
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
@@ -992,6 +1038,8 @@ async def handle_completions_impl(api: str, request: Request):
                         api,
                         req_data,
                         request_id=instance_info.request_id,
+                        max_retries=args.max_retries,
+                        base_delay=args.retry_delay,
                     ):
                         if not released_kv and chunk:
                             await release_prefill_kv_once()
