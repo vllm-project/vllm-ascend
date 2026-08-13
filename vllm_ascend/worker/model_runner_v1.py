@@ -1780,7 +1780,7 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if vllm_version_is("0.26.0"):
+        if vllm_version_is("0.27.1"):
             if self.vllm_config.model_config.enable_return_routed_experts and self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
@@ -2089,9 +2089,9 @@ class NPUModelRunner(GPUModelRunner):
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
-        # vLLM 0.26.0 still supports runtime KV scale calculation. Upstream main
+        # vLLM v0.27.1 still supports runtime KV scale calculation. Upstream main
         # removed this state in vllm-project/vllm#49389.
-        if vllm_version_is("0.26.0") and self.calculate_kv_scales:  # type: ignore[has-type]
+        if vllm_version_is("0.27.1") and self.calculate_kv_scales:  # type: ignore[has-type]
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
