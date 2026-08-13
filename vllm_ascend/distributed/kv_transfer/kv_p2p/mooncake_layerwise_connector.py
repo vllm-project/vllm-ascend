@@ -32,6 +32,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import MooncakeKVConnectorStats
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
@@ -224,6 +226,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         enable_c8_quant: bool,
         resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
+        xfer_stats: MooncakeKVConnectorStats | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
@@ -262,6 +265,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.enable_c8_quant = enable_c8_quant
         self.ready_event = ready_event
         self.callback_func = callback_func
+        self.xfer_stats = xfer_stats if xfer_stats is not None else MooncakeKVConnectorStats()
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -276,6 +280,9 @@ class KVCacheSendingLayerThread(threading.Thread):
         try:
             self._transfer_kv_cache(send_task)
         except Exception as e:
+            # Counted per failed layer task; engine failures inside
+            # _transfer_kv_cache do not raise, so there is no double count.
+            self.xfer_stats.record_failed_transfer()
             logger.error(
                 "Failed to transfer KV cache. layer_idx=%s, error=%s. Check transfer engine and memory state.",
                 send_task.layer_idx,
@@ -498,6 +505,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                     session_id, transfer_meta.src, transfer_meta.dst, transfer_meta.length
                 )
                 if ret < 0:
+                    self.xfer_stats.record_failed_transfer()
                     logger.error(
                         "Mooncake transfer failed for send requests. req_ids=%s, destination=%s, ret=%d. ",
                         transfer_meta.req_ids,
@@ -507,6 +515,11 @@ class KVCacheSendingLayerThread(threading.Thread):
                     self.failed_reqs.add(req_id)
                 else:
                     req_end_time = time.perf_counter()
+                    self.xfer_stats.record_transfer(
+                        duration_s=req_end_time - req_start_time,
+                        total_bytes=sum(transfer_meta.length),
+                        num_descs=len(transfer_meta.src),
+                    )
                     total_transfer_size = sum(transfer_meta.length) / 1024
                     req_transfer_elapsed = (req_end_time - req_start_time) * 1000
                     logger.debug(
@@ -537,6 +550,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         local_engine_id: str,
         metadata: MooncakeAgentMetadata,
         ready_event: threading.Event,
+        xfer_stats: MooncakeKVConnectorStats | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingLayerThread")
         self.tp_rank = tp_rank
@@ -551,6 +565,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.task_tracker = dict[str, int]()
         self.ready_event = ready_event
         self.metadata = metadata
+        self.xfer_stats = xfer_stats if xfer_stats is not None else MooncakeKVConnectorStats()
 
     def get_and_clear_done_requests(self) -> set[str]:
         """
@@ -585,6 +600,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
                 self.task_tracker[req_id] = set()
             self.task_tracker.pop(req_id, None)
             self.failed_requests.add(req_id)
+        self.xfer_stats.record_failed_recv()
 
     def update_done_task(self, req_id, trans_count, side_channel_path):
         """
@@ -787,6 +803,22 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_save(self):
         """MooncakeLayerwiseConnector does not save explicitly."""
         pass
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return worker-local transfer stats since the last call.
+
+        This connector is P-push (the prefill worker calls
+        batch_transfer_sync_write per layer), so P records transfer
+        latency, bytes, descriptor counts and failed sends, while D only
+        records requests whose KV failed to arrive (FAILED_SENDING_MSG).
+        """
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats | None:
+        return MooncakeKVConnectorStats(data=data or {})
 
 
 class MooncakeLayerwiseConnectorScheduler:
@@ -1178,6 +1210,10 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_recv_layer_thread: KVCacheRecvingLayerThread | None = None
         self.kv_send_layer_thread: KVCacheSendingLayerThread | None = None
 
+        # Transfer stats shared with the sending/receiving thread; drained
+        # periodically via get_kv_connector_stats.
+        self.xfer_stats = MooncakeKVConnectorStats()
+
         self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
         self.kernel_block_size_scale: list[int] = [1 for _ in range(self.num_kv_cache_groups)]
         self.layer_metadata: dict[str, LayerMetadata] = {}
@@ -1382,6 +1418,7 @@ class MooncakeLayerwiseConnectorWorker:
                 enable_c8_quant=self.enable_c8_quant,
                 resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal,
+                xfer_stats=self.xfer_stats,
             )
             self.kv_send_layer_thread.start()
             ready_event.wait()
@@ -1396,6 +1433,7 @@ class MooncakeLayerwiseConnectorWorker:
                 self.engine_id,
                 metadata,
                 ready_event,
+                xfer_stats=self.xfer_stats,
             )
             self.kv_recv_layer_thread.start()
             ready_event.wait()
@@ -1439,6 +1477,13 @@ class MooncakeLayerwiseConnectorWorker:
         result = self._invalid_block_ids
         self._invalid_block_ids = set()
         return result
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return transfer stats collected since the last call, or None
+        if nothing has been recorded in this interval."""
+        if self.xfer_stats.is_empty():
+            return None
+        return self.xfer_stats.clone_and_reset()
 
     # {(ip, port)]: {local_block_ids: [], remote_block_ids: {}}}
     def _get_kv_split_metadata(self, req_meta: ReqMeta, req_idx: int, req_id: str, group_idx: int):

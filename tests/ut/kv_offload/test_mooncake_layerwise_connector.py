@@ -51,6 +51,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     KVConnectorRole,
     LayerMetadata,
     MooncakeAgentMetadata,
+    MooncakeKVConnectorStats,
     MooncakeLayerwiseConnector,
     MooncakeLayerwiseConnectorMetadata,
     MooncakeLayerwiseConnectorScheduler,
@@ -1170,3 +1171,212 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(mla_caches)
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.layer_metadata["encoder.layer.0"].block_len), 2)
+
+
+class TestMooncakeLayerwiseConnectorStats(unittest.TestCase):
+    def _make_send_thread(self, xfer_stats=None, total_layers=2):
+        thread = KVCacheSendingLayerThread(
+            engine=self.engine,
+            vllm_config=self.vllm_config,
+            kv_cache_config=_make_mock_kv_cache_config(),
+            kv_cache_specs=[MagicMock(block_size=16)],
+            attn_resharding_group_idx=set(),
+            total_layers=total_layers,
+            ready_event=self.ready_event,
+            tp_size=1,
+            tp_rank=0,
+            pd_head_ratio=2,
+            num_head_replica=1,
+            layer_metadata={
+                "layer0": _make_layer_metadata(
+                    tensor_group_idx=[0],
+                    kv_caches_base_addr=[1111, 2222],
+                    block_len=[64, 64],
+                    block_size_scale=[1, 1],
+                )
+            },
+            use_mla=False,
+            use_attn_mamba_hybrid=False,
+            k_buffer=MagicMock(),
+            v_buffer=MagicMock(),
+            enable_kv_quant=False,
+            enable_c8_quant=False,
+            resharding_stream=MagicMock(),
+            callback_func=MagicMock(),
+            xfer_stats=xfer_stats,
+        )
+        return thread
+
+    def _make_send_task(self):
+        req_meta = ReqMeta(
+            local_block_ids=[[5, 8]],
+            token_ids=[1, 2, 3],
+            remote_block_ids=[[10, 20]],
+            remote_block_size=[[16]],
+            remote_engine_id="remote_engine",
+            remote_host="127.0.0.1",
+            remote_port=7777,
+            remote_te_rpc_port=6000,
+            remote_layer_metadata={
+                "layer0": _make_layer_metadata(
+                    kv_caches_base_addr=[4000, 8000],
+                    block_len=[64, 64],
+                    block_size_scale=[1, 1],
+                ),
+            },
+            metaserver="http://dummy",
+            remote_tp_size=8,
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            chunk_finish=False,
+        )
+        return SendTask(
+            send_request={"req1": req_meta},
+            wait_event=MagicMock(),
+            k_cache=torch.zeros((1, 8), dtype=torch.float32),
+            v_cache=torch.zeros((1, 8), dtype=torch.float32),
+            layer_idx=0,
+            layer_name="layer0",
+            group_rearrange_block_ids=[[5, 8]],
+        )
+
+    def setUp(self):
+        self.engine = MagicMock()
+        self.engine.batch_transfer_sync_write.return_value = 1
+        self.ready_event = threading.Event()
+        self.vllm_config = MagicMock()
+        self.vllm_config.cache_config.mamba_cache_mode = None
+        self.vllm_config.speculative_config = None
+        self.recv_meta = MooncakeAgentMetadata(
+            te_rpc_port=6000,
+            layer_metadata={"layer0": _make_layer_metadata()},
+        )
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.npu_stream_switch",
+        side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.Tensor.data_ptr",
+        autospec=True,
+        return_value=0x200000,
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.align_memory",
+        side_effect=lambda x, _align: x,
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous")
+    def test_transfer_success_records_stats(self, mock_group, _sync, _align, _dataptr, _stream):
+        mock_group.return_value = ([[10, 11], [20, 21]], [])
+        thread = self._make_send_thread()
+
+        thread._transfer_kv_cache(self._make_send_task())
+
+        _, src_list, _, length_list = self.engine.batch_transfer_sync_write.call_args[0]
+        stats_data = thread.xfer_stats.data
+        self.assertEqual(len(stats_data["transfer_duration"]), 1)
+        self.assertGreaterEqual(stats_data["transfer_duration"][0], 0)
+        self.assertEqual(stats_data["bytes_transferred"], [sum(length_list)])
+        self.assertEqual(stats_data["num_descriptors"], [len(src_list)])
+        self.assertEqual(stats_data["num_failed_transfers"], [])
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.npu_stream_switch",
+        side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.Tensor.data_ptr",
+        autospec=True,
+        return_value=0x200000,
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.align_memory",
+        side_effect=lambda x, _align: x,
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous")
+    def test_transfer_engine_failure_records_failed_transfer(self, mock_group, _sync, _align, _dataptr, _stream):
+        mock_group.return_value = ([[10, 11], [20, 21]], [])
+        self.engine.batch_transfer_sync_write.return_value = -1
+        thread = self._make_send_thread()
+
+        thread._transfer_kv_cache(self._make_send_task())
+
+        stats_data = thread.xfer_stats.data
+        self.assertEqual(stats_data["num_failed_transfers"], [1])
+        self.assertEqual(stats_data["transfer_duration"], [])
+        self.assertIn("req1", thread.failed_reqs)
+
+    def test_handle_request_exception_records_failed_transfer(self):
+        thread = self._make_send_thread()
+        with patch.object(thread, "_transfer_kv_cache", side_effect=RuntimeError("boom")):
+            thread._handle_request(self._make_send_task())
+        self.assertEqual(thread.xfer_stats.data["num_failed_transfers"], [1])
+
+    def test_recv_thread_failed_task_records_failed_recv(self):
+        th = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=1,
+            local_engine_id="engineA",
+            metadata=self.recv_meta,
+            ready_event=self.ready_event,
+        )
+        th.update_failed_task("reqX")
+        self.assertIn("reqX", th.failed_requests)
+        self.assertEqual(th.xfer_stats.data["num_failed_recvs"], [1])
+
+    def test_threads_share_worker_stats(self):
+        shared = MooncakeKVConnectorStats()
+        send_thread = self._make_send_thread(xfer_stats=shared)
+        recv_thread = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=1,
+            local_engine_id="engineA",
+            metadata=self.recv_meta,
+            ready_event=self.ready_event,
+            xfer_stats=shared,
+        )
+        self.assertIs(send_thread.xfer_stats, shared)
+        self.assertIs(recv_thread.xfer_stats, shared)
+
+    def test_worker_get_kv_connector_stats_drains(self):
+        worker = object.__new__(MooncakeLayerwiseConnectorWorker)
+        worker.xfer_stats = MooncakeKVConnectorStats()
+
+        self.assertIsNone(worker.get_kv_connector_stats())
+
+        worker.xfer_stats.record_transfer(duration_s=0.25, total_bytes=2**20, num_descs=8)
+        worker.xfer_stats.record_failed_recv()
+        snapshot = worker.get_kv_connector_stats()
+
+        assert snapshot is not None
+        self.assertEqual(snapshot.data["transfer_duration"], [0.25])
+        self.assertEqual(snapshot.data["num_failed_recvs"], [1])
+        reduced = snapshot.reduce()
+        self.assertEqual(reduced["Num successful transfers"], 1)
+        self.assertEqual(reduced["Num failed recvs"], 1)
+        # A second call in the same interval has nothing new to report.
+        self.assertIsNone(worker.get_kv_connector_stats())
+
+    def test_connector_stats_methods(self):
+        connector = object.__new__(MooncakeLayerwiseConnector)
+        connector.connector_worker = None
+        self.assertIsNone(connector.get_kv_connector_stats())
+
+        worker = MagicMock()
+        sentinel = MooncakeKVConnectorStats()
+        worker.get_kv_connector_stats.return_value = sentinel
+        connector.connector_worker = worker
+        self.assertIs(connector.get_kv_connector_stats(), sentinel)
+
+        built = MooncakeLayerwiseConnector.build_kv_connector_stats()
+        self.assertIsInstance(built, MooncakeKVConnectorStats)
+        self.assertTrue(built.is_empty())
+        rebuilt = MooncakeLayerwiseConnector.build_kv_connector_stats({"transfer_duration": [0.1]})
+        assert rebuilt is not None
+        self.assertEqual(rebuilt.data["transfer_duration"], [0.1])
