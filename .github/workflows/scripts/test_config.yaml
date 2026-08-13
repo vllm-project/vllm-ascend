@@ -245,7 +245,7 @@
     - vllm_ascend/ascend_config.py
     - vllm_ascend/envs.py
   tests:
-    - tests/e2e/fault_tolerance/test_fault_tolerance_e2e.py
+    - tests/e2e/pull_request/four_card/fault_tolerance/test_fault_tolerance_e2e.py
 
 # EPLB
 - name: eplb
@@ -878,7 +878,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
-  tests/e2e/fault_tolerance/test_fault_tolerance_e2e.py: 1200
+  tests/e2e/pull_request/four_card/fault_tolerance/test_fault_tolerance_e2e.py: 1200
   tests/ut/attention/a2/test_attention_cp.py: 30
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
@@ -933,8 +933,6 @@ runner_mapping:
     310p: 310p_x4
   tests/e2e/pull_request/eight_card:
     default: a3_x8
-  tests/e2e/fault_tolerance:
-    default: a3_x4
   tests/ut/.+/a3_2:
     default: a3_x2
   tests/ut/.+/a2:
