@@ -109,7 +109,12 @@ from vllm_ascend.ops.kimi_kda import uses_kimi_k3_global_inputs_embeds
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3Config, KimiK3TextConfig, KimiK3VisionConfig
 from vllm_ascend.transformers_utils.processors.kimi_k3 import KimiK3Processor
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    enable_attn_res_fwd_op,
+    get_ascend_device_type,
+    vllm_version_is,
+)
 
 
 def _routed_latent_quant_config(
@@ -884,16 +889,38 @@ def _apply_attention_residual(
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply K3's learned normalized mixture over residual block starts."""
-    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
-    values_fp32 = values.float()
-    normalized, _ = torch_npu.npu_rms_norm(
-        values_fp32,
-        norm.weight.float(),
-        norm.variance_epsilon,
+    use_fused_attn_residual = (
+        get_ascend_device_type() in (AscendDeviceType.A3, AscendDeviceType.A5)
+        and block_residual.shape[1] > 0
+        and prefix_sum.dtype == torch.bfloat16
+        and block_residual.dtype == torch.bfloat16
+        and projection.weight.dtype == torch.bfloat16
+        and norm.weight.dtype == torch.bfloat16
     )
-    scores = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1)
-    probabilities = scores.softmax(-1).unsqueeze(1)
-    mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+    if use_fused_attn_residual:
+        if not enable_attn_res_fwd_op():
+            raise RuntimeError(
+                "Kimi-K3 AttnResFwd requires the vllm-ascend custom-op extension "
+                "to register torch.ops._C_ascend.attn_res_fwd."
+            )
+        mixed = torch.ops._C_ascend.attn_res_fwd(
+            prefix_sum,
+            block_residual,
+            projection.weight,
+            norm.weight,
+            norm.variance_epsilon,
+        )
+    else:
+        values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
+        values_fp32 = values.float()
+        normalized, _ = torch_npu.npu_rms_norm(
+            values_fp32,
+            norm.weight.float(),
+            norm.variance_epsilon,
+        )
+        scores = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1)
+        probabilities = scores.softmax(-1).unsqueeze(1)
+        mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
     if _EXTRA_CTX.flash_comm_v1_enabled:
         # FlashComm changes the first decoder layer from the global token
         # layout to a TP-local layout.  The learned-residual arithmetic above
