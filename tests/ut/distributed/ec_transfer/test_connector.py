@@ -22,9 +22,7 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.connector import (
 
 def _config(cpu_bytes):
     return SimpleNamespace(
-        ec_transfer_config=SimpleNamespace(
-            ec_connector_extra_config={"ec_cpu_bytes": cpu_bytes}
-        ),
+        ec_transfer_config=SimpleNamespace(ec_connector_extra_config={"ec_cpu_bytes": cpu_bytes}),
         model_config=SimpleNamespace(dtype=torch.float32),
     )
 
@@ -42,15 +40,11 @@ def test_connector_requires_ec_transfer_config():
 @pytest.mark.parametrize("cpu_bytes", [None, "not-an-integer"])
 def test_connector_rejects_invalid_cpu_bytes(cpu_bytes):
     with pytest.raises(ValueError, match="positive integer"):
-        AscendECCPUConnector(
-            _config(cpu_bytes), ECConnectorRole.SCHEDULER
-        )
+        AscendECCPUConnector(_config(cpu_bytes), ECConnectorRole.SCHEDULER)
 
 
 def test_connector_requires_capacity_for_one_block(monkeypatch):
-    monkeypatch.setattr(
-        connector_mod, "_get_encoder_cache_hidden_dim", lambda config: 16
-    )
+    monkeypatch.setattr(connector_mod, "_get_encoder_cache_hidden_dim", lambda config: 16)
 
     with pytest.raises(ValueError, match="at least one encoder-cache block"):
         AscendECCPUConnector(_config(63), ECConnectorRole.SCHEDULER)
@@ -58,9 +52,7 @@ def test_connector_requires_capacity_for_one_block(monkeypatch):
 
 def test_valid_cpu_bytes_delegates_to_upstream_connector(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        connector_mod, "_get_encoder_cache_hidden_dim", lambda config: 16
-    )
+    monkeypatch.setattr(connector_mod, "_get_encoder_cache_hidden_dim", lambda config: 16)
     monkeypatch.setattr(
         ECCPUConnector,
         "__init__",
@@ -79,9 +71,7 @@ def test_build_connector_meta_orders_blocks_for_dma_coalescing():
         loads={"load": [4, 2, 3]},
     )
     connector = AscendECCPUConnector.__new__(AscendECCPUConnector)
-    connector.connector_scheduler = SimpleNamespace(
-        build_connector_meta=lambda output: metadata
-    )
+    connector.connector_scheduler = SimpleNamespace(build_connector_meta=lambda output: metadata)
 
     result = connector.build_connector_meta(None)
 
