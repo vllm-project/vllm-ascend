@@ -79,6 +79,13 @@ BUILD_METADATA_STEP_DECODE = 1
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
+def _npu_mla_prolog_v3_no_rope(**kwargs):
+    """Call the AscendC MLA prolog with optional RoPE inputs omitted."""
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+
+    return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
+
+
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -1726,9 +1733,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 dequant_scale_w_dkv_kr = None
             else:
                 hidden_states = hidden_states.unsqueeze(1)
-                quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-                    hidden_states, dst_type=torch.float8_e4m3fn
-                )
+                quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
                 dequant_scale_x = dynamic_scale.reshape(quantized_x.shape[0] * quantized_x.shape[1], -1).view(
                     torch.float8_e8m0fnu
                 )
@@ -1738,15 +1743,15 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.use_mla_rope:
                 cos_shape = attn_metadata.decode.cos.shape
                 rope_shape = (
-                    (cos_shape[0], 1, cos_shape[-1])
-                    if quantized_x.dim() == 3
-                    else (cos_shape[0], cos_shape[-1])
+                    (cos_shape[0], 1, cos_shape[-1]) if quantized_x.dim() == 3 else (cos_shape[0], cos_shape[-1])
                 )
                 cos = attn_metadata.decode.cos.view(rope_shape)
                 sin = attn_metadata.decode.sin.view(rope_shape)
+                prolog_op = torch_npu.npu_mla_prolog_v3
             else:
-                cos = quantized_x.new_empty((0,), dtype=torch.bfloat16)
-                sin = quantized_x.new_empty((0,), dtype=torch.bfloat16)
+                cos = None
+                sin = None
+                prolog_op = _npu_mla_prolog_v3_no_rope
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
             cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode
@@ -1760,13 +1765,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             dequant_scale_w_dkv_kr = self.dequant_scale_w_dkv_kr
             cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
             sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+            prolog_op = torch_npu.npu_mla_prolog_v3
             cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BSND"
             weight_quant_mode = 2
             # v3 full-quant uses a per-tensor kv scale; quant_kscale is one scalar
             # broadcast to (1, Hckv), so slice out the single per-tensor value.
             quant_scale_ckv = self.quant_kscale[:, :1] if self.fa_quant_layer else None
 
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = prolog_op(
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
             token_x=quantized_x,

@@ -1651,6 +1651,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
         self.impl.q_lora_rank = 32
         self.impl._mlapo_quant_type = object
+        self.impl._mlapo_uses_native_weights = False
 
         from vllm_ascend.attention.mla_v1 import AscendDeviceType
 
