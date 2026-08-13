@@ -616,7 +616,20 @@ def graph_manager_wrapper(model_runner):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
+        # Upstream vLLM main (after #51256) passes varlen_decode to the graph
+        # manager factory; v0.26.0 has no such parameter, so only forward it on
+        # the main lane.
+        if vllm_version_is("0.26.0"):
+            return ModelAclGraphManager(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                model_runner,
+                lora_capture_cases=lora_capture_cases,
+            )
         return ModelAclGraphManager(
             vllm_config,
             device,
@@ -624,6 +637,7 @@ def graph_manager_wrapper(model_runner):
             decode_query_len,
             model_runner,
             lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
         )
 
     try:

@@ -37,6 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -76,14 +77,28 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         decode_query_len: int,
         model_runner: Any,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
-        super().__init__(
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-            lora_capture_cases=lora_capture_cases,
-        )
+        # Upstream vLLM main (after #51256) passes varlen_decode to
+        # ModelCudaGraphManager; v0.26.0 has no such parameter, so only forward
+        # it on the main lane.
+        if vllm_version_is("0.26.0"):
+            super().__init__(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                lora_capture_cases=lora_capture_cases,
+            )
+        else:
+            super().__init__(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                lora_capture_cases=lora_capture_cases,
+                varlen_decode=varlen_decode,
+            )
         # set model runner attribute, so we can access attributes model runner
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
