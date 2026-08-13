@@ -10,10 +10,13 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -37,7 +40,10 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark probabilistic draft sampling is not supported on the v1 "
                 "model runner; use greedy (the default) instead."
             )
-        self.sample_from_anchor = not getattr(self.draft_model_config.hf_config, "dspark_bonus_anchor", False)
+        if vllm_version_is("0.26.0"):
+            self.sample_from_anchor = not getattr(self.draft_model_config.hf_config, "dspark_bonus_anchor", False)
+        else:
+            self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
         else:
@@ -59,6 +65,17 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=self.dtype,
             device=self.device,
         )
+        dynamic_spec_config = get_ascend_config().dynamic_spec_config
+        self.dynamic_spec = None
+
+        if dynamic_spec_config.method == "dspark":
+            self.dynamic_spec = DynamicSpecScheduler(
+                method="dspark",
+                method_params=dynamic_spec_config.method_params,
+                max_batch_size=self.max_batch_size,
+                num_speculative_tokens=self.num_speculative_tokens,
+                device=device,
+            )
         # DSpark runs eager only (Ascend cudagraph unsupported on this path).
         self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
@@ -101,6 +118,25 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+
+    def _compute_confidence_logits(
+        self,
+        last_hidden_states: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+        num_reqs: int,
+    ) -> torch.Tensor:
+        num_tokens = num_reqs * self.num_speculative_tokens
+        flat_hidden = last_hidden_states.reshape(num_tokens, last_hidden_states.shape[-1])
+        # Markov embeddings of the draft input tokens (cheap lookup, so they
+        # are recomputed here instead of being captured in the drafting loop).
+        markov_embs = self.model.markov_embed(draft_token_ids[:, : self.num_speculative_tokens])
+        # The confidence head concatenates both inputs, so their dtypes must
+        # match; it upcasts to float32 internally.
+        flat_markov = markov_embs.reshape(num_tokens, markov_embs.shape[-1]).to(flat_hidden.dtype)
+        conf_raw = self.model.confidence_logits(flat_hidden, flat_markov)
+        confidence_logits = self._dspark_confidence_logits_buffer[:num_reqs]
+        confidence_logits.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
+        return confidence_logits
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
@@ -292,7 +328,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + self.num_query_per_req
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
-        cad.causal = False
+        if hasattr(self.model, "get_draft_attn_causal"):
+            # Currently, attention causality across draft layers are uniform.
+            cad.causal = self.model.get_draft_attn_causal()[0]
+        else:
+            cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 

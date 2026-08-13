@@ -25,15 +25,12 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import comm_utils
+from vllm_ascend.ops.fused_moe import moe_utils
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEFusedExpertsInput,
-    MoEMlpComputeInput,
-    MoEPrepareOutput,
-    build_mlp_compute_input,
-    build_token_dispatch_input,
-)
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
@@ -65,13 +62,6 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
-def set_gmmswigluquant_method():
-    from vllm_ascend.ascend_config import get_ascend_config
-
-    ascend_config = get_ascend_config()
-    return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
-
-
 @dataclass
 class FusedExpertsResult:
     routed_out: torch.Tensor
@@ -84,9 +74,6 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
-    swiglu_limit: float = 0.0
-    swiglu_alpha: float = 1.0
-    swiglu_beta: float = 0.0
 
 
 class MoECommMethod(ABC):
@@ -97,7 +84,6 @@ class MoECommMethod(ABC):
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
-        self.use_fusion_ops = set_gmmswigluquant_method()
         self.lora_context = None
 
     def set_lora_context(self, lora_context) -> None:
@@ -148,20 +134,16 @@ class MoECommMethod(ABC):
         assert moe_comm_method is not None, "Missing communication context"
 
         before_dispatch_evt = torch.npu.current_stream().record_event()
-        routed_topk_ids = fused_experts_input.topk_ids
-        if fused_experts_input.routing.log2phy is not None:
-            routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
-            topk_ids=routed_topk_ids,
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
-            use_fusion_ops=self.use_fusion_ops,
+            moe_config=self.moe_config,
         )
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
@@ -179,9 +161,6 @@ class MoECommMethod(ABC):
             before_combine_evt=before_combine_evt,
             group_list_type=token_dispatch_output.group_list_type,
             expert_tokens=token_dispatch_output.group_list,
-            swiglu_limit=fused_experts_input.swiglu_limit,
-            swiglu_alpha=fused_experts_input.swiglu_alpha,
-            swiglu_beta=fused_experts_input.swiglu_beta,
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
@@ -285,11 +264,15 @@ class FusedMC2CommImpl(MoECommMethod):
         self._mega_moe_symm_buffer = None
         self._mega_moe_weight_type = None
         if _MEGA_MOE_SUPPORTED:
-            self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops()
+            self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
         if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
+
+        self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
+        self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
+        self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
@@ -309,7 +292,7 @@ class FusedMC2CommImpl(MoECommMethod):
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
         dispatch_quant_mode, dispatch_quant_out_dtype, self._mega_moe_weight_type = (
-            comm_utils._get_cann_mega_moe_quant_settings(fused_experts_input.quant.quant_type)
+            moe_utils._get_cann_mega_moe_quant_settings(fused_experts_input.quant.quant_type)
         )
         group = get_mc2_group().device_group
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
@@ -359,7 +342,6 @@ class FusedMC2CommImpl(MoECommMethod):
     def _apply_cann_mega_moe(
         self,
         fused_experts_input: MoEFusedExpertsInput,
-        topk_ids: torch.Tensor,
     ):
         assert fused_experts_input.weights.w1_scale is not None
         assert fused_experts_input.weights.w2_scale is not None
@@ -392,7 +374,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 fused_experts_input,
             )
 
-        activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
+        activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
         if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
             # mc2_mask comes from the reserved bool buffer in
@@ -411,7 +393,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
-            topk_ids.to(torch.int32),
+            fused_experts_input.topk_ids.to(torch.int32),
             fused_experts_input.topk_weights.to(torch.float32),
             weight1,
             weight2,
@@ -444,15 +426,10 @@ class FusedMC2CommImpl(MoECommMethod):
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
 
-        # Apply log2phy if needed
-        topk_ids = fused_experts_input.topk_ids
-        if fused_experts_input.routing.log2phy is not None:
-            topk_ids = fused_experts_input.routing.log2phy[topk_ids]
-
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
             if _MEGA_MOE_SUPPORTED:
-                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
+                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input)
             else:
                 assert not (
                     fused_experts_input.weights.w1_scale_bias is None
@@ -464,7 +441,7 @@ class FusedMC2CommImpl(MoECommMethod):
                     x=fused_experts_input.hidden_states,
                     weight1=fused_experts_input.weights.w1,
                     weight2=fused_experts_input.weights.w2,
-                    expert_idx=topk_ids,
+                    expert_idx=fused_experts_input.topk_ids,
                     scale1=fused_experts_input.weights.w1_scale,
                     scale2=fused_experts_input.weights.w2_scale,
                     bias1=fused_experts_input.weights.w1_scale_bias,
@@ -472,7 +449,7 @@ class FusedMC2CommImpl(MoECommMethod):
                     probs=fused_experts_input.topk_weights.to(torch.float32),
                     group=self.token_dispatcher.moe_all_to_all_group_name,
                     max_output_size=get_ascend_config().mega_moe_max_tokens,
-                    swiglu_limit=fused_experts_input.swiglu_limit,
+                    swiglu_limit=self.swiglu_limit,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
                     out=out,
                     expert_token_nums=self.expert_token_nums,
@@ -483,7 +460,4 @@ class FusedMC2CommImpl(MoECommMethod):
         return FusedExpertsResult(
             routed_out=out,
             expert_tokens=expert_tokens,
-            swiglu_limit=fused_experts_input.swiglu_limit,
-            swiglu_alpha=fused_experts_input.swiglu_alpha,
-            swiglu_beta=fused_experts_input.swiglu_beta,
         )

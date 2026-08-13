@@ -65,7 +65,7 @@ docker run --rm \
 
 ### Single-node Deployment
 
-- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
+- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8).
 
 Run the following script to execute online inference.
 
@@ -151,13 +151,15 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
+## Accuracy Evaluation
+
 ### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result. For reference, Mixtral-8x7B-Instruct-v0.1 typically performs well on various benchmarks including reasoning, comprehension, and instruction following tasks.
 
-## Performance
+## Performance Evaluation
 
 ### Using AISBench
 

@@ -38,6 +38,9 @@ def rejection_greedy_sample_spec_len_1_triton(
     target_argmax_ptr,  # [num_tokens]
     bonus_token_ids_ptr,
     vec_len,
+    uniform_probs_ptr,  # [num_tokens] or None (synthetic only)
+    synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
+    SYNTHETIC_MODE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
@@ -48,9 +51,22 @@ def rejection_greedy_sample_spec_len_1_triton(
     target_argmax_id = tl.load(target_argmax_ptr + offset, mask)
     bonus_token_id = tl.load(bonus_token_ids_ptr + offset, mask)
 
-    tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask)
-
-    accept_mask = (draft_token_id == target_argmax_id) & mask
+    if SYNTHETIC_MODE:
+        # Synthetic: accept the draft token with prob conditional_rates[0],
+        # regardless of target match. Accepted => emit draft token (pos 0) and
+        # the bonus token (pos 1); rejected => emit target_argmax (pos 0).
+        uniform_prob = tl.load(uniform_probs_ptr + offset, mask)
+        # spec_len == 1 => only position 0.
+        rate = tl.load(synthetic_conditional_rates_ptr + 0)
+        accepted = (uniform_prob < rate) & (draft_token_id >= 0) & mask
+        # Cast both arms to int32: draft_token_id is int32, target_argmax_id is
+        # int64 (from argmax); tl.where requires matching dtypes.
+        token_id = tl.where(accepted, draft_token_id.to(tl.int32), target_argmax_id.to(tl.int32))
+        tl.store(output_token_ids_ptr + offset * 2, token_id, mask)
+        accept_mask = accepted
+    else:
+        tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask)
+        accept_mask = (draft_token_id == target_argmax_id) & mask
     tl.store(output_token_ids_ptr + offset * 2 + 1, bonus_token_id, accept_mask)
 
 
@@ -76,6 +92,9 @@ def rejection_greedy_sample_triton(
     is_greedy_ptr,  # [batch_size] or None
     vec_len,
     max_spec_len,
+    uniform_probs_ptr,  # [num_tokens] or None (synthetic only)
+    synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
+    SYNTHETIC_MODE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
@@ -102,13 +121,36 @@ def rejection_greedy_sample_triton(
             if not rejected:
                 draft_token_id = tl.load(draft_token_ids_ptr + start_idx1 + i)
                 target_argmax_id = tl.load(target_argmax_ptr + start_idx1 + i)
-                tl.store(
-                    output_token_ids_ptr + position * (max_spec_len + 1) + i,
-                    target_argmax_id,
-                )
-                if draft_token_id != target_argmax_id:
-                    # Reject.
-                    rejected = True
+                if SYNTHETIC_MODE:
+                    # Synthetic: accept draft token i with prob
+                    # conditional_rates[i], independent of target match. Store
+                    # each arm separately (draft on accept, target_argmax on
+                    # reject) so the int32 (draft) / int64 (target_argmax)
+                    # dtype mismatch is handled by the store's implicit cast --
+                    # no ternary, no explicit cast (matches the random kernel's
+                    # synthetic branch).
+                    uniform_prob = tl.load(uniform_probs_ptr + start_idx1 + i)
+                    rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    accepted = (uniform_prob < rate) & (draft_token_id >= 0)
+                    if accepted:
+                        tl.store(
+                            output_token_ids_ptr + position * (max_spec_len + 1) + i,
+                            draft_token_id,
+                        )
+                    else:
+                        tl.store(
+                            output_token_ids_ptr + position * (max_spec_len + 1) + i,
+                            target_argmax_id,
+                        )
+                        rejected = True
+                else:
+                    tl.store(
+                        output_token_ids_ptr + position * (max_spec_len + 1) + i,
+                        target_argmax_id,
+                    )
+                    if draft_token_id != target_argmax_id:
+                        # Reject.
+                        rejected = True
 
         if not rejected and is_greedy_mask1:
             bonus_renew(
@@ -137,9 +179,11 @@ def rejection_random_sample_kernel(
     global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
     vec_len,
     ori_target_probs_ptr,  # [num_tokens, ori_vocab_size] original probs for entropy
+    synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
     NO_ORI_TARGET_PROBS: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce sampling
+    SYNTHETIC_MODE: tl.constexpr,
     ENTROPY_VERIFY: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
@@ -167,7 +211,28 @@ def rejection_random_sample_kernel(
 
             for pos in range(num_draft_tokens):
                 if not rejected:
-                    if ENABLE_REDUCE_SAMPLING:
+                    if SYNTHETIC_MODE:
+                        # Synthetic: accept draft token with prob
+                        # conditional_rates[pos], bypassing target/draft prob
+                        # comparison. Output may be incorrect - benchmarking only.
+                        token_idx = start_idx + pos
+                        draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+                        uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+                        rate = tl.load(synthetic_conditional_rates_ptr + pos)
+                        accepted = (uniform_prob < rate) & (draft_token_id >= 0)
+                        if accepted:
+                            tl.store(
+                                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                                draft_token_id,
+                            )
+                        else:
+                            rejected = True
+                            recovered = tl.load(recovered_token_ids_ptr + token_idx)
+                            tl.store(
+                                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                                recovered,
+                            )
+                    elif ENABLE_REDUCE_SAMPLING:
                         token_idx = start_idx + pos
                         draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
 
@@ -451,6 +516,9 @@ def rejection_greedy_sample_with_triton(
     max_spec_len,
     grid,
     block_size,
+    uniform_probs=None,
+    synthetic_conditional_rates=None,
+    synthetic_mode=False,
 ):
     vec_len = output_token_ids.shape[0]
 
@@ -461,6 +529,9 @@ def rejection_greedy_sample_with_triton(
             target_argmax,
             bonus_token_ids,
             vec_len,
+            uniform_probs,
+            synthetic_conditional_rates,
+            SYNTHETIC_MODE=synthetic_mode,
             BLOCK_SIZE=block_size,
         )
     else:
@@ -473,6 +544,9 @@ def rejection_greedy_sample_with_triton(
             is_greedy,
             vec_len,
             max_spec_len,
+            uniform_probs,
+            synthetic_conditional_rates,
+            SYNTHETIC_MODE=synthetic_mode,
             BLOCK_SIZE=block_size,
         )
 

@@ -31,6 +31,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.utils import vllm_version_is
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -60,6 +61,7 @@ class _DSparkProposerTestBase:
         num_reqs: int,
         block_size: int,
         hf_config: SimpleNamespace | None = None,
+        draft_attn_causal: bool | None = None,
     ):
         device = torch.device("cpu")
         vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace())
@@ -80,10 +82,14 @@ class _DSparkProposerTestBase:
             proposer.hidden_size = _HIDDEN_SIZE
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
+            proposer.model = (
+                SimpleNamespace(get_draft_attn_causal=lambda: [draft_attn_causal])
+                if draft_attn_causal is not None
+                else SimpleNamespace()
+            )
 
         with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
             proposer = AscendDSparkProposer(vllm_config, device)
-
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer.positions[:num_query_total] = torch.arange(num_query_total, dtype=torch.int32)
@@ -328,7 +334,13 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
         [
             pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
-            pytest.param(SimpleNamespace(dspark_bonus_anchor=True), False, 1 + _NUM_SPECULATIVE_TOKENS),
+            pytest.param(
+                SimpleNamespace(dspark_bonus_anchor=True)
+                if vllm_version_is("0.26.0")
+                else SimpleNamespace(sample_from_anchor=False),
+                False,
+                1 + _NUM_SPECULATIVE_TOKENS,
+            ),
         ],
     )
     def test_configures_anchor_sampling(
@@ -587,6 +599,20 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         # optional attrs the proposer rewrites when present.
         assert cad.actual_seq_lengths_q == [block_size] * num_reqs
         assert cad.decode_token_per_req == block_size
+
+    def test_cad_uses_model_reported_causality(self):
+        num_reqs, block_size, max_num_tokens = 4, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            draft_attn_causal=True,
+        )
+        _, _, cad, _ = self._invoke_set_inputs_first_pass(
+            proposer, num_reqs=num_reqs, block_size=block_size
+        )[:4]
+
+        assert cad.causal is True
 
     def test_cad_query_start_loc_and_seq_lens(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256

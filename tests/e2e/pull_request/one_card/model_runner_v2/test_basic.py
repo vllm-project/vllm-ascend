@@ -24,7 +24,6 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
@@ -35,12 +34,6 @@ DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
 DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
 MTP_MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
-
-# TODO: drop this skip when v0.25.1 maintenance is removed.
-_SKIP_V025_MRV2_SPEC_DECODE = pytest.mark.skipif(
-    vllm_version_is("0.25.1"),
-    reason="MRV2 speculative decoding is only supported on the verified vLLM main commit",
-)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -80,7 +73,6 @@ def test_qwen3_dense_eager_mode(
         runner.generate(prompts, sampling_params)
 
 
-@_SKIP_V025_MRV2_SPEC_DECODE
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -138,7 +130,6 @@ def test_egale_spec_decoding(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@_SKIP_V025_MRV2_SPEC_DECODE
 @pytest.mark.parametrize("model", DFLASH_MAIN_MODEL)
 @pytest.mark.parametrize("dflash_model", DFLASH_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -154,7 +145,6 @@ def test_egale_spec_decoding(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
-@wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dflash_spec_decoding(
     model: str,
     dflash_model: str,
@@ -199,7 +189,6 @@ def test_dflash_spec_decoding(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@_SKIP_V025_MRV2_SPEC_DECODE
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -215,6 +204,7 @@ def test_dflash_spec_decoding(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
     model: str,
     dspark_model: str,
@@ -258,24 +248,30 @@ def test_dspark_spec_decoding(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@_SKIP_V025_MRV2_SPEC_DECODE
 @pytest.mark.parametrize("model", MTP_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            id="full_decode_only",
+        ),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_spec_decoding(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     # The MTP draft head has random weights, so acceptance is ~0 and there is
     # no trained golden to compare against -- this is a smoke test (assert only
-    # that the MTP MLA propose->verify loop produces output). Eager only for
-    # now: graph-mode MTP draft is not yet stabilized, so the cudagraph
-    # compilation_config matrix from the eagle/dflash/dspark tests is omitted.
-    # Remaining differences vs those tests are model-inherent: no separate
-    # draft `model` (MTP is unified), no golden, and `enable_expert_parallel`
-    # for the DeepSeek MoE target.
+    # that the MTP MLA propose->verify loop produces output).
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -294,6 +290,7 @@ def test_mtp_spec_decoding(
             "method": "mtp",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        compilation_config=compilation_config,
     ) as runner:
         outputs = runner.model.generate(prompts, sampling_params)
 
@@ -311,6 +308,7 @@ def test_mtp_spec_decoding(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen3_dense_graph_mode(
     model: str,
     max_tokens: int,

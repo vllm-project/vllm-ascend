@@ -5,10 +5,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ops.triton.compute_slot_mapping import (
+    _compute_slot_mapping_kernel,
+    _next_power_of_2,
+)
 
 
 class BlockTable:
@@ -94,7 +96,13 @@ class BlockTable:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
-        self.slot_mapping = self._make_buffer(self.max_num_batched_tokens + 2 * self.max_num_reqs, dtype=torch.int32)
+        # MTP slot preparation appends up to num_speculative_tokens - 1
+        # draft positions for every request beyond the scheduler token limit.
+        num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
+        self.slot_mapping = self._make_buffer(
+            self.max_num_batched_tokens + num_mtp_draft_slots,
+            dtype=torch.int32,
+        )
 
         self.kernel_sizes = kernel_sizes
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
@@ -156,21 +164,18 @@ class BlockTable:
             )
             self._compute_dcp_slot_mapping(req_indices, positions)
         else:
+            TILE_BLOCK_SIZE = 1024
             kernel_kwargs = {
+                "KV_CACHE_BLOCK_SIZE": self.physical_block_size,
+                "BLOCKS_PER_KV_BLOCK": self.blocks_per_phys_block,
                 "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
                 "TOTAL_CP_RANK": total_cp_rank,
                 "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
                 "PAD_ID": PAD_SLOT_ID,
-                "BLOCK_SIZE": 1024,
+                "TILE_BLOCK_SIZE": TILE_BLOCK_SIZE,
+                "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(TILE_BLOCK_SIZE, self.block_size) + 1),
             }
-            if not vllm_version_is("0.25.1"):
-                # vLLM #40996 split physical KV blocks into kernel blocks in
-                # the slot-mapping kernel. These are required constexprs on
-                # main; the v0.25.1 kernel does not accept them.
-                kernel_kwargs.update(
-                    KV_CACHE_BLOCK_SIZE=self.physical_block_size,
-                    BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
-                )
+
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
                 num_tokens,
                 self.max_num_batched_tokens,

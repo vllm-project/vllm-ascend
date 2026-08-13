@@ -53,7 +53,25 @@ on:
         required: false
         default: false
         type: boolean
-
+      build_type:
+        description: 'Build type: daily or release.'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
+      cann_version:
+        description: 'CANN version for base image tag'
+        required: false
+        default: '2026.08.03'
+      bisect_good_commit:
+        description: 'explicit good commit for bisect (overrides good_table lookup)'
+      bisect_args_json:
+        description: 'JSON object containing optional bisect parameters'
+        required: false
+        default: '{}'
+        type: string
 permissions:
   contents: read
   pull-requests: read
@@ -170,10 +188,16 @@ jobs:
     with:
       target: a3
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
+      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      cann_version: ${{ inputs.cann_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
+      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   multi-node-tests:
     name: multi-node
@@ -184,7 +208,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
@@ -198,9 +222,19 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
@@ -213,6 +247,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   double-node-tests:
     name: double-node
@@ -237,9 +272,19 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
@@ -252,6 +297,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   single-node-tests:
     name: single-node
@@ -269,6 +315,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a3
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
@@ -282,6 +329,17 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ''
+    secrets:
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   multi-card-tests:
     name: single-node
@@ -298,6 +356,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a3
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -312,9 +371,19 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ''
     secrets:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0

@@ -18,9 +18,11 @@
 
 
 import torch
+import vllm.model_executor.models.qwen3_next as qwen3_next_module
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -32,33 +34,30 @@ from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 
-_IS_VLLM_RELEASE = vllm_version_is("0.25.1")
-if not _IS_VLLM_RELEASE:
-    import vllm.model_executor.models.qwen3_next as qwen3_next_module
-    from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
 
-    def _ascend_all_gather_hidden_and_residual(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        full_num_tokens: int,
-        hidden_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # FlashComm maintains its own sequence-parallel communication. Let the
-        # patched linear layers gather the sharded input instead of gathering
-        # it once here and again in the column-parallel projection.
-        if _EXTRA_CTX.flash_comm_v1_enabled:
-            return hidden_states, residual
+def _ascend_all_gather_hidden_and_residual(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    full_num_tokens: int,
+    hidden_size: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    # FlashComm maintains its own sequence-parallel communication. Let the
+    # patched linear layers gather the sharded input instead of gathering
+    # it once here and again in the column-parallel projection.
+    if _EXTRA_CTX.flash_comm_v1_enabled:
+        return hidden_states, residual
 
-        return _all_gather_hidden_and_residual(
-            hidden_states,
-            residual,
-            full_num_tokens,
-            hidden_size,
-        )
+    return _all_gather_hidden_and_residual(
+        hidden_states,
+        residual,
+        full_num_tokens,
+        hidden_size,
+    )
 
-    qwen3_next_module._all_gather_hidden_and_residual = _ascend_all_gather_hidden_and_residual
+
+qwen3_next_module._all_gather_hidden_and_residual = _ascend_all_gather_hidden_and_residual
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
@@ -200,7 +199,7 @@ if Qwen3_5MultiTokenPredictor is not None:
                 }
             )
 
-        if not _IS_VLLM_RELEASE and mtp_layer.use_attn_reduce_scatter_for_moe:
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
             hidden_states, residual = _all_gather_hidden_and_residual(
                 hidden_states,
                 residual,
@@ -213,8 +212,6 @@ if Qwen3_5MultiTokenPredictor is not None:
     Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
 
 
-if _IS_VLLM_RELEASE:
-    Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
