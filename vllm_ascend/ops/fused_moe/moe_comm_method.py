@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.distributed.parallel_state import get_mc2_draft_group, get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
@@ -259,9 +259,13 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
+        self._mega_moe_main_model_symm_buffer = None
+        self._mega_moe_main_model_weight_type = None
+        self._mega_moe_draft_model_symm_buffer = None
+        self._mega_moe_draft_model_weight_type = None
         if _MEGA_MOE_SUPPORTED:
-            self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
+
         if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
@@ -282,14 +286,16 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def _init_mega_moe_symm_buffer(
         self,
-        dispatch_quant_mode: int = 0,
-        dispatch_quant_out_dtype: torch.dtype | None = None,
+        fused_experts_input: MoEFusedExpertsInput,
+        group,
     ):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
-        group = get_mc2_group().device_group
+        dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(
+            fused_experts_input.quant.quant_type
+        )
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
         # especially num_max_tokens_per_rank — MUST be identical on every EP
@@ -329,11 +335,11 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank,
             num_topk,
             hidden=self.moe_config.hidden_dim,
-            intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+            intermediate_hidden=self.moe_config.intermediate_size_per_partition,
             max_recv_token_num=max_recv_token_num,
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
-        )
+        ), weight_type
 
     def _apply_cann_mega_moe(
         self,
@@ -356,18 +362,6 @@ class FusedMC2CommImpl(MoECommMethod):
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
         weight_scales1 = fused_experts_input.weights.w1_scale
         weight_scales2 = fused_experts_input.weights.w2_scale
-        dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(
-            fused_experts_input.quant.quant_type
-        )
-
-        if self.mega_moe_symm_buffer is None:
-            self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
-                dispatch_quant_mode,
-                dispatch_quant_out_dtype,
-            )
-        else:
-            self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
-            self.mega_moe_symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
 
         activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
@@ -386,13 +380,47 @@ class FusedMC2CommImpl(MoECommMethod):
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
 
+        symm_buffer = None
+        weight_type = None
+        if _EXTRA_CTX.is_draft_model:
+            if self._mega_moe_draft_model_symm_buffer is None:
+                # MegaMoe need to used 2 communication group, one is for main model, the other one is for
+                # draft model. This additional group is for draft model. The get_hccl_comm_name function
+                # contains some communicator operations and needs to be called to initialize the
+                # corresponding communication group. This group only initialized when speculative decode
+                # is enabled.
+                draft_device_group = get_mc2_draft_group().device_group
+                draft_local_rank = torch.distributed.get_rank(group=draft_device_group)
+                draft_backend = draft_device_group._get_backend(torch.device("npu"))
+                self.moe_all_to_all_draft_group_name = draft_backend.get_hccl_comm_name(draft_local_rank)
+
+                self._mega_moe_draft_model_symm_buffer, self._mega_moe_draft_model_weight_type = (
+                    self._init_mega_moe_symm_buffer(
+                        fused_experts_input,
+                        draft_device_group,
+                    )
+                )
+            symm_buffer = self._mega_moe_draft_model_symm_buffer
+            weight_type = self._mega_moe_draft_model_weight_type
+        else:
+            if self._mega_moe_main_model_symm_buffer is None:
+                group = get_mc2_group().device_group
+                self._mega_moe_main_model_symm_buffer, self._mega_moe_main_model_weight_type = (
+                    self._init_mega_moe_symm_buffer(
+                        fused_experts_input,
+                        group,
+                    )
+                )
+            symm_buffer = self._mega_moe_main_model_symm_buffer
+            weight_type = self._mega_moe_main_model_weight_type
+
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
             fused_experts_input.topk_weights.to(torch.float32),
             weight1,
             weight2,
-            self.mega_moe_symm_buffer,
+            symm_buffer,
             l1_weights_sf=weight_scales1,
             l2_weights_sf=weight_scales2,
             l1_bias=l1_bias,
