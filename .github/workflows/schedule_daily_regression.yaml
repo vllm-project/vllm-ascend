@@ -152,7 +152,7 @@ jobs:
           python3 -c "import vllm_ascend, vllm; print('import OK ->', vllm_ascend.__file__)"
       - name: Verify custom ops loadable
         run: |
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
           python3 -c "from vllm_ascend import op; print('ops OK ->', [x for x in dir(op) if not x.startswith('_')][:10])"
       - name: Report image build provenance
         run: |
