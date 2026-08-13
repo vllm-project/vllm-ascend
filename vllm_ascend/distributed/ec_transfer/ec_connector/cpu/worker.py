@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 from vllm.platforms import current_platform
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -77,9 +78,7 @@ def _swap_blocks_batch(
     sizes: torch.Tensor,
     direction: int,
 ) -> None:
-    torch.ops._C_ascend.swap_blocks_batch(
-        src_ptrs, dst_ptrs, sizes, direction
-    )
+    torch.ops._C_ascend.swap_blocks_batch(src_ptrs, dst_ptrs, sizes, direction)
 
 
 class AscendECCPUWorker(ECCPUWorker):
@@ -91,16 +90,13 @@ class AscendECCPUWorker(ECCPUWorker):
     upstream-owned while only device-specific transfer behavior is replaced.
     """
 
-    def __init__(self, vllm_config: "VllmConfig") -> None:
+    def __init__(self, vllm_config: VllmConfig) -> None:
         # Do not call ECCPUWorker.__init__: it optionally invokes the CUDA-only
         # ECSharedRegion.pin_memory(). The fields below deliberately mirror the
         # small upstream initialization seam while replacing pinning/streams.
         self._region = create_ec_shared_region(vllm_config)
         self._dtype = vllm_config.model_config.dtype
-        self._is_save_rank = (
-            get_tensor_model_parallel_rank() == 0
-            and get_pcp_group().rank_in_group == 0
-        )
+        self._is_save_rank = get_tensor_model_parallel_rank() == 0 and get_pcp_group().rank_in_group == 0
         self._buf_pool = DescriptorBufferPool()
         self._save_bufs = None
         self._save_count = 0
@@ -109,9 +105,7 @@ class AscendECCPUWorker(ECCPUWorker):
         # the same stream reports that the operation has finished. Returning a
         # triple to the pool before then could let a later batch overwrite
         # descriptors still being consumed by the runtime.
-        self._inflight_descriptor_bufs: list[
-            tuple[torch.npu.Event, DescriptorBuffers]
-        ] = []
+        self._inflight_descriptor_bufs: list[tuple[torch.npu.Event, DescriptorBuffers]] = []
         self._mmap_pinned = False
         try:
             if not _supports_eccpu_offload():
@@ -180,16 +174,11 @@ class AscendECCPUWorker(ECCPUWorker):
         if not block_ids:
             raise RuntimeError(f"EC metadata has no blocks for mm_hash={mm_hash}")
         if len(set(block_ids)) != len(block_ids):
-            raise RuntimeError(
-                f"EC metadata contains duplicate blocks for mm_hash={mm_hash}: "
-                f"{block_ids}"
-            )
+            raise RuntimeError(f"EC metadata contains duplicate blocks for mm_hash={mm_hash}: {block_ids}")
         invalid = [
             block_id
             for block_id in block_ids
-            if not isinstance(block_id, int)
-            or block_id < 0
-            or block_id >= self._region.num_blocks
+            if not isinstance(block_id, int) or block_id < 0 or block_id >= self._region.num_blocks
         ]
         if invalid:
             raise RuntimeError(
@@ -214,20 +203,17 @@ class AscendECCPUWorker(ECCPUWorker):
         src = encoder_cache[mm_hash]
         if not src.is_contiguous():
             raise RuntimeError(
-                f"Non-contiguous EC encoder cache is not supported by the "
-                f"batched D2H copy path: {mm_hash}"
+                f"Non-contiguous EC encoder cache is not supported by the batched D2H copy path: {mm_hash}"
             )
 
         total_bytes = src.numel() * src.element_size()
         block_size = self._region.block_size_bytes
         assert block_size % src.element_size() == 0, (
-            f"EC block size {block_size} is not divisible by source element "
-            f"size {src.element_size()}"
+            f"EC block size {block_size} is not divisible by source element size {src.element_size()}"
         )
         required_blocks = (total_bytes + block_size - 1) // block_size
         assert len(block_ids) == required_blocks, (
-            f"EC allocated block count mismatch for mm_hash={mm_hash}: "
-            f"need {required_blocks}, got {len(block_ids)}"
+            f"EC allocated block count mismatch for mm_hash={mm_hash}: need {required_blocks}, got {len(block_ids)}"
         )
         allocated_bytes = len(block_ids) * block_size
         assert total_bytes <= allocated_bytes, (
@@ -236,24 +222,17 @@ class AscendECCPUWorker(ECCPUWorker):
         )
 
         if self._save_bufs is None:
-            total_blocks = sum(
-                len(ids) for ids in connector_metadata.saves.values()
-            )
+            total_blocks = sum(len(ids) for ids in connector_metadata.saves.values())
             self._reclaim_completed_descriptor_bufs()
             self._save_bufs = self._buf_pool.acquire(total_blocks)
 
-        assert (
-            self._save_count + len(block_ids)
-            <= self._save_bufs.src_ptrs.numel()
-        )
+        assert self._save_count + len(block_ids) <= self._save_bufs.src_ptrs.numel()
         src_ptrs, dst_ptrs, sizes = self._save_bufs
         src_base = src.data_ptr()
         dst_base = self._region.blocks.data_ptr()
         idx = self._save_count
 
-        for block_offset, block_idx, block_count in (
-            _iter_contiguous_block_runs(block_ids)
-        ):
+        for block_offset, block_idx, block_count in _iter_contiguous_block_runs(block_ids):
             start = block_offset * block_size
             src_ptrs[idx] = src_base + start
             dst_ptrs[idx] = dst_base + block_idx * block_size
@@ -272,9 +251,7 @@ class AscendECCPUWorker(ECCPUWorker):
         stream = current_platform.current_stream()
 
         try:
-            _swap_blocks_batch(
-                src_ptrs[:n], dst_ptrs[:n], sizes[:n], _DIRECTION_D2H
-            )
+            _swap_blocks_batch(src_ptrs[:n], dst_ptrs[:n], sizes[:n], _DIRECTION_D2H)
         except Exception:
             stream.synchronize()
             self._buf_pool.release(bufs)
@@ -305,8 +282,7 @@ class AscendECCPUWorker(ECCPUWorker):
         block_size = self._region.block_size_bytes
         element_size = torch.empty((), dtype=self._dtype).element_size()
         assert block_size % element_size == 0, (
-            f"EC block size {block_size} is not divisible by dtype element "
-            f"size {element_size}"
+            f"EC block size {block_size} is not divisible by dtype element size {element_size}"
         )
         elements_per_block = block_size // element_size
         total_blocks = sum(len(block_ids) for block_ids in load_items.values())
@@ -327,16 +303,9 @@ class AscendECCPUWorker(ECCPUWorker):
             descriptor_count = 0
             dst_block_offset = 0
             for block_ids in load_items.values():
-                for logical_offset, block_idx, block_count in (
-                    _iter_contiguous_block_runs(block_ids)
-                ):
-                    src_ptrs[descriptor_count] = (
-                        src_base + block_idx * block_size
-                    )
-                    dst_ptrs[descriptor_count] = (
-                        dst_base
-                        + (dst_block_offset + logical_offset) * block_size
-                    )
+                for logical_offset, block_idx, block_count in _iter_contiguous_block_runs(block_ids):
+                    src_ptrs[descriptor_count] = src_base + block_idx * block_size
+                    dst_ptrs[descriptor_count] = dst_base + (dst_block_offset + logical_offset) * block_size
                     sizes[descriptor_count] = block_count * block_size
                     descriptor_count += 1
                 dst_block_offset += len(block_ids)
