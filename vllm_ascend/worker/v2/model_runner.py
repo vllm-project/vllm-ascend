@@ -51,7 +51,11 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp, set_potential_max_tokens
+from vllm_ascend.utils import (
+    enable_sp,
+    set_potential_max_tokens,
+    vllm_version_is,
+)
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -227,15 +231,22 @@ class NPUModelRunner(GPUModelRunner):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
+        context_len: int = 0,
     ):
+        # Upstream vLLM main (after #51256) passes context_len to execute_model
+        # for dummy-run context setup; v0.26.0's execute_model has no such
+        # parameter, so only forward it on the main lane.
+        execute_kwargs: dict = dict(
+            intermediate_tensors=intermediate_tensors,
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+            is_profile=is_profile,
+        )
+        if not vllm_version_is("0.26.0"):
+            execute_kwargs["context_len"] = context_len
+
         with flashcomm_dispatch_wrapper(self.vllm_config):
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-            )
+            output = super().execute_model(scheduler_output, **execute_kwargs)
 
         state = self.execute_model_state
         if (

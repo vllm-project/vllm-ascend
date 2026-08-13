@@ -371,10 +371,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         return draft_attn_metadatas
 
     def _ascend_update_seq_lens(self, attn_metadata: dict[str, Any] | None) -> None:
-        if attn_metadata is not None:
-            for attn_meta in attn_metadata.values():
-                attn_meta.seq_lens = attn_meta.seq_lens + 1
-                attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
+        if attn_metadata is None:
+            return
+        # DSA metadata (AscendDSAMetadata) owns per-step slot mapping, SAS, and
+        # QLI state in its builder and has no seq_lens/seq_len_list attributes,
+        # mirroring the DSA early-return in _update_decode_attn_metadata.
+        if self.attn_architecture == "DSA":
+            return
+        for attn_meta in attn_metadata.values():
+            attn_meta.seq_lens = attn_meta.seq_lens + 1
+            attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize per-step decode attention metadata for graph mode."""
