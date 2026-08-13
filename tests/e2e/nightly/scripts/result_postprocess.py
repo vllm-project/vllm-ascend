@@ -125,6 +125,7 @@ def merge_postprocess_payload(
         test_env = {}
         testcase_info["testEnv"] = test_env
 
+    test_env["yaml_name"] = testcase_name
     test_env["request_rate"] = case_config.get("request_rate", 0)
     if "max_out_len" in case_config:
         test_env["output_len"] = case_config["max_out_len"]
@@ -185,14 +186,13 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
     except OSError as exc:
         print(f"Warning: Failed to run postprocess script {script_path}: {exc}")
         return
+    # upload_to_openlibing uses logging (stderr); always forward both streams
     if completed.stdout:
         print(completed.stdout.rstrip())
+    if completed.stderr:
+        print(completed.stderr.rstrip())
     if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
-        print(
-            f"Warning: Postprocess script exited with code {completed.returncode} "
-            f"for {output_path}" + (f": {stderr}" if stderr else "")
-        )
+        print(f"Warning: Postprocess script exited with code {completed.returncode} for {output_path}")
 
 
 def postprocess_one_benchmark(

@@ -63,7 +63,7 @@ def test_deepseek_v4_tokenizer_maps_latest_reasoning_effort_values(monkeypatch):
     monkeypatch.setattr(deepseek_v4, "encode_messages", fake_encode_messages)
     tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
 
-    if vllm_version_is("0.26.0"):
+    if vllm_version_is("0.27.1"):
         cases = [
             ("none", "chat", None),
             ("minimal", "thinking", "high"),

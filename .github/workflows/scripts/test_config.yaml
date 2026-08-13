@@ -557,6 +557,8 @@
   base: spec_decode_base
   source_file_dependencies:
     - vllm_ascend/spec_decode/dspark_proposer.py
+    - vllm_ascend/spec_decode/dflash_proposer.py
+    - vllm_ascend/spec_decode/utils.py
     - vllm_ascend/models/qwen3_dspark.py
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py
@@ -771,7 +773,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 690
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 390
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 290
-  tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 190
+  tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 380
   tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 230
   tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 540
   tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 460
