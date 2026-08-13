@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -35,7 +35,12 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.compilation.acl_graph import (
+    reset_graph_param_has_lora,
+    set_graph_param_has_lora,
+    set_graph_params,
+    update_full_graph_params,
+)
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -51,6 +56,18 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     capture descriptors, not the raw config sizes.
     """
     return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
+
+
+def batch_descriptor_from_exec_desc(desc: BatchExecutionDescriptor) -> BatchDescriptor:
+    """Build a LoRA-aware BatchDescriptor for ACL graph param lookup."""
+    num_active_loras = int(getattr(desc, "num_active_loras", 0) or 0)
+    return BatchDescriptor(
+        num_tokens=desc.num_tokens,
+        num_reqs=desc.num_reqs,
+        uniform=desc.uniform_token_count is not None,
+        has_lora=num_active_loras > 0,
+        num_active_loras=num_active_loras,
+    )
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
@@ -99,25 +116,30 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        with set_forward_context(
-            self.model_runner.model_state.attn_metadata,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=desc.cg_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
-            batch_descriptor=None,  # Full graph model don't need batch_descriptor
-            slot_mapping=None,
-        ):
-            forward_context = get_forward_context()
-            update_full_graph_params(
-                # FIXME(Ronald1995): support hybrid attn backend
-                self.model_runner.attn_groups[0][0].backend,
-                self.update_stream,
-                forward_context,
-                num_tokens,
+        batch_descriptor = batch_descriptor_from_exec_desc(desc)
+        lora_token = set_graph_param_has_lora(batch_descriptor.has_lora)
+        try:
+            with set_forward_context(
+                self.model_runner.model_state.attn_metadata,
                 self.vllm_config,
-                self.model_runner.speculative_config,
-            )
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=desc.cg_mode,
+                num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=batch_descriptor,
+                slot_mapping=None,
+            ):
+                forward_context = get_forward_context()
+                update_full_graph_params(
+                    # FIXME(Ronald1995): support hybrid attn backend
+                    self.model_runner.attn_groups[0][0].backend,
+                    self.update_stream,
+                    forward_context,
+                    num_tokens,
+                    self.vllm_config,
+                    self.model_runner.speculative_config,
+                )
+        finally:
+            reset_graph_param_has_lora(lora_token)
         return ret
 
     def capture(
@@ -136,20 +158,31 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
-        with communicator_switch():
-            return super().capture(
-                model,
-                model_state,
-                input_buffers,
-                intermediate_tensors,
-                block_tables,
-                attn_groups,
-                kv_cache_config,
-                has_lora=has_lora,
-                use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                lora_capture_hook=lora_capture_hook,
-                progress_bar_desc=progress_bar_desc,
-            )
+        orig_hook = lora_capture_hook
+
+        def _lora_graph_param_hook(num_active_loras: int, num_reqs: int, num_tokens: int) -> None:
+            # FULL capture uses cg_mode=NONE and batch_descriptor=None.
+            set_graph_param_has_lora(num_active_loras > 0)
+            if orig_hook is not None:
+                orig_hook(num_active_loras, num_reqs, num_tokens)
+
+        try:
+            with communicator_switch():
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=_lora_graph_param_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
+        finally:
+            set_graph_param_has_lora(None)
 
 
 class ModelWithContext(nn.Module):

@@ -73,8 +73,8 @@ class AclGraphSleepWakeupManager:
     def clear_attention_workspaces(params) -> None:
         if params is None:
             return
-        for num_tokens in params.workspaces:
-            params.workspaces[num_tokens] = None
+        for graph_key in list(dict.keys(params.workspaces)):
+            dict.__setitem__(params.workspaces, graph_key, None)
 
     @classmethod
     def clear_all_attention_workspaces(cls) -> None:
