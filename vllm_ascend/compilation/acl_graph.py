@@ -221,12 +221,9 @@ class ACLGraphWrapper:
 
             # here we always use weak ref for the workspaces
             # to save memory
-            global _graph_params
-            global _draft_graph_params
-            global _draft_graph_prefill_params
-            weak_ref_workspaces(_graph_params)
-            weak_ref_workspaces(_draft_graph_params)
-            weak_ref_workspaces(_draft_graph_prefill_params)
+            weak_ref_workspaces(get_graph_params())
+            weak_ref_workspaces(get_draft_graph_params())
+            weak_ref_workspaces(get_draft_graph_prefill_params())
 
             # here we always use weak ref for the output
             # to save memory
@@ -299,81 +296,100 @@ def update_full_graph_params(
 @dataclass
 class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
+    workspaces: dict[int, torch.Tensor | None]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
 
 
-_graph_params: GraphParams | None = None
+GraphParamsByLoRA = dict[bool, GraphParams]
+
+
+def _new_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
+    return GraphParams(
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+    )
+
+
+def _select_graph_params(params: GraphParams | GraphParamsByLoRA | None) -> GraphParams | None:
+    if params is None or not isinstance(params, dict):
+        return params
+    try:
+        forward_context = get_forward_context()
+    except (AssertionError, LookupError, RuntimeError):
+        return params[False]
+    descriptor = forward_context.batch_descriptor
+    has_lora = (
+        forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and descriptor is not None and descriptor.has_lora
+    )
+    return params[has_lora]
+
+
+def iter_graph_params():
+    for params in (_graph_params, _draft_graph_params, _draft_graph_prefill_params):
+        if isinstance(params, dict):
+            yield from params.values()
+        elif params is not None:
+            yield params
+
+
+_graph_params: GraphParamsByLoRA | None = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
-    _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _graph_params = {has_lora: _new_graph_params(aclgraph_capture_sizes) for has_lora in (False, True)}
 
 
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
-    global _graph_params
-    if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
+    graph_params = get_graph_params()
+    if graph_params is not None:
+        graph_params.workspaces[num_tokens] = workspace
 
 
 def get_graph_params():
-    return _graph_params
+    return _select_graph_params(_graph_params)
 
 
-_draft_graph_params: GraphParams | None = None
+_draft_graph_params: GraphParamsByLoRA | None = None
 
 
 def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_params
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
-    _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _draft_graph_params = {has_lora: _new_graph_params(aclgraph_capture_sizes) for has_lora in (False, True)}
 
 
 def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_params
-    if _draft_graph_params is not None:
-        _draft_graph_params.workspaces[num_tokens] = workspace
+    graph_params = get_draft_graph_params()
+    if graph_params is not None:
+        graph_params.workspaces[num_tokens] = workspace
 
 
 def get_draft_graph_params():
-    return _draft_graph_params
+    return _select_graph_params(_draft_graph_params)
 
 
-_draft_graph_prefill_params: GraphParams | None = None
+_draft_graph_prefill_params: GraphParamsByLoRA | None = None
 
 
 def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_prefill_params
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
-    _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _draft_graph_prefill_params = {has_lora: _new_graph_params(aclgraph_capture_sizes) for has_lora in (False, True)}
 
 
 def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_prefill_params
-    if _draft_graph_prefill_params is not None:
-        _draft_graph_prefill_params.workspaces[num_tokens] = workspace
+    graph_params = get_draft_graph_prefill_params()
+    if graph_params is not None:
+        graph_params.workspaces[num_tokens] = workspace
 
 
 def get_draft_graph_prefill_params():
-    return _draft_graph_prefill_params
+    return _select_graph_params(_draft_graph_prefill_params)
