@@ -2049,6 +2049,64 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
     return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
 }
 
+at::Tensor mhc_post(const at::Tensor &x, const at::Tensor &hRes,
+                    const at::Tensor &hOut, const at::Tensor &hPost)
+{
+    at::Tensor out = at::empty_like(x);
+
+    EXEC_NPU_CMD(aclnnMhcPost, x, hRes, hOut, hPost, out);
+    return out;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+mhc_pre_clamp_sinkhorn(const at::Tensor &x, const at::Tensor &phi, const at::Tensor &alpha,
+    const at::Tensor &bias, int64_t hcMult, int64_t numIters,
+    double hcEps, double normEps, bool outFlag,
+    double clamp_min, double clamp_max)
+{
+    int64_t B = x.size(0);
+    int64_t S = x.size(1);
+    int64_t N = x.size(2);
+    int64_t C = x.size(3);
+
+    at::Tensor hin = at::empty({B, S, C}, x.options());
+    at::Tensor hPost = at::empty({B, S, N}, phi.options());
+    at::Tensor hRes = at::empty({B, S, N * N}, phi.options());
+
+    at::Tensor hPre;
+    at::Tensor hcBeforeNorm;
+    at::Tensor invRms;
+    at::Tensor sumOut;
+    at::Tensor normOut;
+    at::Tensor hResLogits;
+
+    int64_t skIterCount = numIters;
+
+    if (outFlag) {
+        hPre = at::empty({B, S, N}, phi.options());
+        hcBeforeNorm = at::empty({B, S, N * N + 2 * N}, phi.options());
+        invRms = at::empty({B, S, 1}, phi.options());
+        sumOut = at::empty({2 * skIterCount, B, S, N}, phi.options());
+        normOut = at::empty({2 * skIterCount, B, S, N, N}, phi.options());
+    } else {
+        hPre = at::empty({0}, phi.options());
+        hcBeforeNorm = at::empty({0}, phi.options());
+        invRms = at::empty({0}, phi.options());
+        sumOut = at::empty({0}, phi.options());
+        normOut = at::empty({0}, phi.options());
+        hResLogits = at::empty({0}, phi.options());
+    }
+
+    EXEC_NPU_CMD(aclnnMhcPreClampSinkhorn, x, phi, alpha, bias, hcMult, numIters,
+              hcEps, normEps, outFlag, clamp_min, clamp_max, hin, hPost, hRes, hPre,
+              hcBeforeNorm, invRms, sumOut, normOut, hResLogits);
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+                      at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+                      at::Tensor>(
+        hin, hPost, hRes, hPre, hcBeforeNorm, invRms, sumOut, normOut, hResLogits);
+}
+
 
 } // namespace vllm_ascend
 
@@ -2749,5 +2807,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
+    // mhc ops
+    ops.def(
+        "mhc_post(Tensor x, Tensor hRes, Tensor hOut, Tensor hPost)->"
+        "         Tensor output"
+    );
+    ops.impl("mhc_post", torch::kPrivateUse1, &vllm_ascend::mhc_post);
+    ops.def(
+        "mhc_pre_clamp_sinkhorn(Tensor x, Tensor phi, Tensor alpha, Tensor bias,"
+        "                       int hcMult, int numIters, float hcEps, float normEps,"
+        "                       bool outFlag, float clamp_min, float clamp_max)->"
+        "                       (Tensor hin, Tensor hPost, Tensor hRes, Tensor hPre,"
+        "                        Tensor hcBeforeNorm, Tensor invRms, Tensor sumOut, Tensor normOut, Tensor hResLogits)"
+    );
+    ops.impl("mhc_pre_clamp_sinkhorn", torch::kPrivateUse1, &vllm_ascend::mhc_pre_clamp_sinkhorn);
 }
 #endif
