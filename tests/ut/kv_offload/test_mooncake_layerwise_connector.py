@@ -1226,7 +1226,6 @@ def test_layerwise_reuse_state_tracks_shared_physical_slots():
     }
     worker._storage_send_errors = {}
     worker._pending_reuse_layers = set()
-    worker._layerwise_reuse_lock = threading.Lock()
     worker.kv_send_layer_thread = MagicMock()
     worker.kv_send_layer_thread.is_alive.return_value = True
 
@@ -1248,7 +1247,6 @@ def test_layerwise_reuse_wait_propagates_mooncake_error():
     }
     worker._storage_send_errors = {}
     worker._pending_reuse_layers = set()
-    worker._layerwise_reuse_lock = threading.Lock()
     worker.kv_send_layer_thread = MagicMock()
     worker.kv_send_layer_thread.is_alive.return_value = True
 

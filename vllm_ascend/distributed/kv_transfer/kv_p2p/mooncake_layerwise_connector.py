@@ -1239,7 +1239,6 @@ class MooncakeLayerwiseConnectorWorker:
         self.storage_send_done_events: list[threading.Event] = []
         self._storage_send_errors: dict[int, str] = {}
         self._pending_reuse_layers: set[int] = set()
-        self._layerwise_reuse_lock = threading.Lock()
         self._cache_write_events: list[torch.npu.Event | None] = [None] * self.total_layers
 
         self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
@@ -1301,23 +1300,21 @@ class MooncakeLayerwiseConnectorWorker:
     def _mark_layer_reuse_pending(self, layer_idx: int) -> None:
         if layer_idx not in self.layer_storage_slots:
             raise RuntimeError(f"Mooncake layerwise reuse mapping is missing layer {layer_idx}")
-        with self._layerwise_reuse_lock:
-            if layer_idx in self._pending_reuse_layers:
-                return
-            self._pending_reuse_layers.add(layer_idx)
-            for slot_id in self.layer_storage_slots[layer_idx]:
-                self._storage_send_errors.pop(slot_id, None)
-                self.storage_send_done_events[slot_id].clear()
+        if layer_idx in self._pending_reuse_layers:
+            return
+        self._pending_reuse_layers.add(layer_idx)
+        for slot_id in self.layer_storage_slots[layer_idx]:
+            self._storage_send_errors.pop(slot_id, None)
+            self.storage_send_done_events[slot_id].clear()
 
     def _complete_layer_reuse(self, layer_idx: int, error: str | None) -> None:
-        with self._layerwise_reuse_lock:
-            if layer_idx not in self._pending_reuse_layers:
-                return
-            self._pending_reuse_layers.remove(layer_idx)
-            for slot_id in self.layer_storage_slots[layer_idx]:
-                if error is not None:
-                    self._storage_send_errors[slot_id] = error
-                self.storage_send_done_events[slot_id].set()
+        if layer_idx not in self._pending_reuse_layers:
+            return
+        self._pending_reuse_layers.remove(layer_idx)
+        for slot_id in self.layer_storage_slots[layer_idx]:
+            if error is not None:
+                self._storage_send_errors[slot_id] = error
+            self.storage_send_done_events[slot_id].set()
 
     def wait_for_layer_reuse(self, layer_idx: int) -> None:
         send_thread = self.kv_send_layer_thread
@@ -1331,8 +1328,7 @@ class MooncakeLayerwiseConnectorWorker:
                 if not send_thread.is_alive():
                     raise RuntimeError("Mooncake send thread stopped while waiting for layerwise buffer reuse")
                 logger.info("Waiting for Mooncake transfer to release physical KV slot %d", slot_id)
-            with self._layerwise_reuse_lock:
-                error = self._storage_send_errors.get(slot_id)
+            error = self._storage_send_errors.get(slot_id)
             if error is not None:
                 raise RuntimeError(f"Mooncake failed to transfer physical KV slot {slot_id}: {error}")
 
