@@ -62,6 +62,43 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.shape, original_scale_shape)
         self.assertFalse(layer._mxfp8_transformed)
 
+    def test_transform_buffer_data_ptr_stable_across_reloads(self):
+        # The transformed buffer is what the ACL graph captures and replays.
+        # It must keep a stable data_ptr across RL weight reloads so graph
+        # replay never reads stale/freed memory and produces garbled output.
+        # The transformed weight/scale must also stay contiguous, since ACL
+        # graph capture expects contiguous weight/scale tensors.
+        layer = nn.Module()
+        layer.weight = nn.Parameter(
+            torch.randint(0, 255, (128, 256), dtype=torch.uint8).to(torch.float8_e4m3fn), requires_grad=False
+        )
+        layer.weight_scale = nn.Parameter(torch.randint(0, 255, (128, 8), dtype=torch.uint8), requires_grad=False)
+        self.scheme.process_weights_after_loading(layer)
+        transform_weight_ptr = layer._mxfp8_weight_buf.data_ptr()
+        transform_scale_ptr = layer._mxfp8_scale_buf.data_ptr()
+        # Buffers and the weight/scale views over them must be contiguous.
+        self.assertTrue(layer._mxfp8_weight_buf.is_contiguous())
+        self.assertTrue(layer._mxfp8_scale_buf.is_contiguous())
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertTrue(layer.weight_scale.data.is_contiguous())
+        for _ in range(3):
+            self.scheme.restore_weights_for_rl_loading(layer)
+            # Simulate model.load_weights() writing new data via copy_.
+            new_w = torch.randint(0, 255, layer.weight.shape, dtype=torch.uint8).to(torch.float8_e4m3fn)
+            new_s = torch.randint(0, 255, layer.weight_scale.shape, dtype=torch.uint8)
+            layer.weight.data.copy_(new_w)
+            layer.weight_scale.data.copy_(new_s)
+            self.scheme.process_weights_after_loading(layer)
+            self.assertEqual(layer._mxfp8_weight_buf.data_ptr(), transform_weight_ptr)
+            self.assertEqual(layer._mxfp8_scale_buf.data_ptr(), transform_scale_ptr)
+            self.assertEqual(layer.weight.data.data_ptr(), transform_weight_ptr)
+            self.assertEqual(layer.weight_scale.data.data_ptr(), transform_scale_ptr)
+            # Contiguity must be preserved across reloads.
+            self.assertTrue(layer._mxfp8_weight_buf.is_contiguous())
+            self.assertTrue(layer._mxfp8_scale_buf.is_contiguous())
+            self.assertTrue(layer.weight.data.is_contiguous())
+            self.assertTrue(layer.weight_scale.data.is_contiguous())
+
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.torch_npu")
     def test_apply(self, mock_torch_npu):
         from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
