@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -196,7 +197,8 @@ def test_manual_trigger_not_consumed_when_dump_disabled(tmp_path: Path):
     # Bootstrap may rewrite; ensure flags.
     cfg._data["dump"]["enabled"] = False
     cfg._data["dump"]["manual_trigger"] = True
-    mgr = ManualTriggerManager(dfx_config=cfg, runner=None)
+    runner = SimpleNamespace(tp_rank=0, input_batch=SimpleNamespace(req_ids=["r1"]))
+    mgr = ManualTriggerManager(dfx_config=cfg, runner=runner)
     assert mgr.consume_once(allow_arm=True) is None
     assert cfg.manual_trigger() is True
 
@@ -253,6 +255,11 @@ def test_dump_rejects_unknown_keys_including_dump_once():
 
     # Known keys still validate.
     DfxRuntimeConfig._validate(_valid_dfx_data(manual_trigger=True, enabled=True))
+    DfxRuntimeConfig._validate(_valid_dfx_data(manual_trigger=3, enabled=True))
+    with pytest.raises(ValueError, match="manual_trigger"):
+        DfxRuntimeConfig._validate(_valid_dfx_data(manual_trigger=-1))
+    with pytest.raises(ValueError, match="manual_trigger"):
+        DfxRuntimeConfig._validate(_valid_dfx_data(manual_trigger="yes"))
 
 
 def test_dump_once_in_json_fails_bootstrap(tmp_path: Path):

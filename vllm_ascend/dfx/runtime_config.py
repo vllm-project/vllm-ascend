@@ -86,9 +86,10 @@ _DEFAULTS: dict[str, Any] = {
         # Auto-arm quota only; 0 = no auto dump. Does not affect detect or manual_trigger.
         "max_times": 0,
         "cooldown_seconds": 5 * 60,
-        # Manual one-shot latch: set true in JSON → next real execute_model arms dump,
-        # then cleared. Needs dump.enabled=true and reload_interval > 0.
-        # Skips max_times / cooldown / input filters.
+        # Remaining manual dump waves: false/0 = off; true = 1 (compat);
+        # positive int N = arm on the next N real execute_model waves (with a
+        # non-empty local batch), decrementing toward 0. Skips max_times /
+        # cooldown / input filters. Needs dump.enabled=true and reload > 0.
         "manual_trigger": False,
     },
     "ascend_log": {
@@ -751,13 +752,24 @@ class DfxRuntimeConfig:
     def dump_cooldown_seconds(self) -> int:
         return int(self.dump.get("cooldown_seconds", 300))
 
-    def manual_trigger(self) -> bool:
-        """Manual one-shot dump latch from JSON (``dump.manual_trigger``).
+    def manual_trigger_count(self) -> int:
+        """Remaining manual dump waves from ``dump.manual_trigger``.
 
+        ``false``/``0`` → 0; ``true`` → 1 (backward compatible); positive int → N.
         Only observed after a successful hot-reload; requires
         ``dfx_config_reload_interval > 0``.
         """
-        return bool(self.dump.get("manual_trigger", False))
+        raw = self.dump.get("manual_trigger", False)
+        if isinstance(raw, bool):
+            return 1 if raw else 0
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    def manual_trigger(self) -> bool:
+        """True when at least one manual dump wave remains."""
+        return self.manual_trigger_count() > 0
 
     def input_filter_configs(self) -> list[dict[str, Any]]:
         """Normalized ``input_filter.filters`` for ``InputFilterManager``."""
@@ -804,30 +816,38 @@ class DfxRuntimeConfig:
         return True
 
     def consume_manual_trigger(self) -> bool:
-        """If ``manual_trigger`` is true, clear it and return True.
+        """If remaining count > 0, decrement by one and return True.
 
-        All ranks clear in-memory; only the JSON writer (leader / single
-        process) persists ``false``.
+        Persists the new value (``false`` when drained, else remaining int).
+        All ranks update in-memory; only the JSON writer persists.
         """
-        if not self.manual_trigger():
+        remaining = self.manual_trigger_count()
+        if remaining <= 0:
             return False
-        self.dump["manual_trigger"] = False
+        new_val: bool | int = False if remaining <= 1 else remaining - 1
+        self.dump["manual_trigger"] = new_val
         if _is_json_writer():
-            if self.save({"dump": {"manual_trigger": False}}):
+            if self.save({"dump": {"manual_trigger": new_val}}):
                 logger.info(
-                    "[DFX runtime_config] manual_trigger consumed → false path=%s %s",
+                    "[DFX runtime_config] manual_trigger consumed → %s (was %d) path=%s %s",
+                    new_val,
+                    remaining,
                     self.config_path,
                     _process_role_tag(),
                 )
             else:
                 logger.warning(
-                    "[DFX runtime_config] manual_trigger cleared in-memory but failed to persist path=%s %s",
+                    "[DFX runtime_config] manual_trigger decremented in-memory but failed "
+                    "to persist path=%s remaining_was=%d %s",
                     self.config_path,
+                    remaining,
                     _process_role_tag(),
                 )
         else:
             logger.info(
-                "[DFX runtime_config] manual_trigger cleared in-memory (non-writer) %s",
+                "[DFX runtime_config] manual_trigger → %s in-memory (non-writer; was %d) %s",
+                new_val,
+                remaining,
                 _process_role_tag(),
             )
         return True
@@ -1370,11 +1390,15 @@ class DfxRuntimeConfig:
             )
         manual_trigger = data["dump"].get("manual_trigger")
         if manual_trigger is not None and not isinstance(manual_trigger, bool):
-            # Accept 0/1 from hand-edited JSON; reject other types.
-            if manual_trigger in (0, 1):
-                data["dump"]["manual_trigger"] = bool(manual_trigger)
+            # bool kept as-is; int N = remaining waves; reject other types.
+            if isinstance(manual_trigger, int) and not isinstance(manual_trigger, bool):
+                if manual_trigger < 0:
+                    raise ValueError("dump.manual_trigger must be >= 0")
+                # 0 → false for compact defaults; keep positive ints as counts.
+                if manual_trigger == 0:
+                    data["dump"]["manual_trigger"] = False
             else:
-                raise ValueError("dump.manual_trigger must be bool")
+                raise ValueError("dump.manual_trigger must be bool or non-negative int")
         save_sensitive = data["report"].get("save_sensitive_info")
         if save_sensitive is not None and not isinstance(save_sensitive, bool):
             if save_sensitive in (0, 1):
