@@ -6,6 +6,7 @@ This section provides tutorials for different models of vLLM Ascend.
 :caption: Model Tutorials
 :maxdepth: 1
 Qwen3-Dense.md
+Qwen3.8-2.4T-A95B.md
 Qwen-VL-Dense.md
 Qwen3-30B-A3B.md
 Qwen3-235B-A22B.md
