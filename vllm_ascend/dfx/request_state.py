@@ -202,13 +202,20 @@ class RequestDfxStore:
             state = self._by_req.pop(rid, None)
             hooks = list(self._on_clear)
             force_waves = int(len(state.sample_waves)) if state is not None else 0
+            max_defer = int(self.max_deferred_waves)
         if state is not None and force_waves:
-            logger.warning(
+            # Small leftover: likely dropped AsyncOutput / stuck get_output on
+            # the consuming rank → WARNING. Large backlog was the old async
+            # non-TP0 pattern (stamp every step, never take); stamping is now
+            # rank-gated, so this should be rare — keep DEBUG for noise.
+            msg = (
                 "[DFX reap] clearing req_id=%s with %d leftover sample_waves "
-                "(async stamp not consumed; deferred-wave cap or idle sweep)",
-                rid,
-                force_waves,
+                "(async stamp not consumed; deferred-wave cap or idle sweep)"
             )
+            if force_waves <= max_defer:
+                logger.warning(msg, rid, force_waves)
+            else:
+                logger.debug(msg, rid, force_waves)
         for hook in hooks:
             try:
                 hook(rid)

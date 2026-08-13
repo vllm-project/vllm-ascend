@@ -766,6 +766,20 @@ def test_sample_wave_queue_fifo_and_clear():
     assert dumper.take_sample_wave("r1") is None
 
 
+def test_async_non_tp0_skips_sample_wave_stamp():
+    """Async non-TP0 must not grow sample_waves (no get_output / take)."""
+    from vllm_ascend.dfx.request_state import RequestDfxStore
+
+    RequestDfxStore.reset_for_tests()
+    dumper = _make_dumper()
+    dumper.runner = SimpleNamespace(tp_rank=2, use_async_scheduling=True)
+    dumper._wave_index = 0
+    dumper.advance_wave(allow_arm=True)
+    assert dumper.record_sample_waves(["r1"]) == 1
+    assert dumper.take_sample_wave("r1") is None
+    assert RequestDfxStore.get().sample_wave_pending("r1") == 0
+
+
 def test_take_dump_finish_meta_from_open_pending_has_null_activate():
     """Finish before activate: still emit meta with activate_wave=None."""
     from vllm_ascend.dfx.dfx_types import DumpFinishMeta

@@ -185,7 +185,7 @@ def test_ready_to_reap_and_empty_guards():
     assert store.ready_to_reap("r1", current_wave=1) is True
 
 
-def test_force_reap_clear_warns_on_leftover_waves(caplog):
+def test_force_reap_clear_warns_on_small_leftover_waves(caplog):
     import logging
 
     RequestDfxStore.reset_for_tests()
@@ -197,6 +197,24 @@ def test_force_reap_clear_warns_on_leftover_waves(caplog):
     with caplog.at_level(logging.WARNING, logger="vllm_ascend.dfx.request_state"):
         store.clear("r1")
     assert any("leftover sample_waves" in r.getMessage() for r in caplog.records)
+
+
+def test_force_reap_clear_debug_on_large_leftover_waves(caplog):
+    """Large FIFO leftover (legacy async non-consumer) must not WARNING-spam."""
+    import logging
+
+    RequestDfxStore.reset_for_tests()
+    store = RequestDfxStore.get()
+    store.max_deferred_waves = 2
+    store.mark_finished(["r1"], wave=1)
+    for w in range(10):
+        store.record_sample_waves(["r1"], w)
+    assert store.list_reapable(current_wave=3) == ["r1"]
+    with caplog.at_level(logging.DEBUG, logger="vllm_ascend.dfx.request_state"):
+        store.clear("r1")
+    leftover = [r for r in caplog.records if "leftover sample_waves" in r.getMessage()]
+    assert leftover
+    assert all(r.levelno < logging.WARNING for r in leftover)
 
 
 def test_processor_check_after_sample_reaps_finished(tmp_path):
