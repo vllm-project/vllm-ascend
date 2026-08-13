@@ -120,6 +120,25 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
+    @staticmethod
+    def _get_multimodal_image_token_index(model_name: str, config: Any) -> int:
+        if model_name in [
+            "Qwen2_5_VLForConditionalGeneration",
+            "Qwen3VLForConditionalGeneration",
+            "Qwen3VLMoeForConditionalGeneration",
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForConditionalGeneration",
+            "Step3p7ForConditionalGeneration",
+            "Gemma4ForConditionalGeneration",
+            "Gemma4UnifiedForConditionalGeneration",
+        ]:
+            return config.image_token_id
+        if model_name == "PixtralForConditionalGeneration":
+            return config.vision_config.image_token_id
+        if model_name == "KimiK25ForConditionalGeneration":
+            return config.media_placeholder_token_id
+        return config.image_token_index
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
 
@@ -332,21 +351,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if supports_multimodal(model):
             # handle multimodality
-            if self.get_model_name(model) in [
-                "Qwen2_5_VLForConditionalGeneration",
-                "Qwen3VLForConditionalGeneration",
-                "Qwen3VLMoeForConditionalGeneration",
-                "Qwen3_5ForConditionalGeneration",
-                "Qwen3_5MoeForConditionalGeneration",
-                "Step3p7ForConditionalGeneration",
-            ]:
-                self.model.config.image_token_index = model.config.image_token_id
-            elif self.get_model_name(model) == "PixtralForConditionalGeneration":
-                self.model.config.image_token_index = model.config.vision_config.image_token_id
-            elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
-                self.model.config.image_token_index = model.config.media_placeholder_token_id
-            else:
-                self.model.config.image_token_index = model.config.image_token_index
+            model_name = self.get_model_name(model)
+            self.model.config.image_token_index = self._get_multimodal_image_token_index(model_name, model.config)
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
@@ -635,8 +641,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     extra_attn_metadata_args: dict = {}
                     if self.use_compress:
                         extra_attn_metadata_args.update(
-                            prefill_ratio_to_sas_metadata=dict(),
-                            decode_ratio_to_sas_metadata=dict(),
                             common_ratio_to_sas_metadata=dict(),
                             block_size=kv_cache_spec.block_size,
                         )
@@ -1711,8 +1715,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         extra_attn_metadata_args = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
-                prefill_ratio_to_sas_metadata=dict(),
-                decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
@@ -2159,8 +2161,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
                 extra_attn_metadata_args = dict(
-                    prefill_ratio_to_sas_metadata=dict(),
-                    decode_ratio_to_sas_metadata=dict(),
                     common_ratio_to_sas_metadata=dict(),
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
