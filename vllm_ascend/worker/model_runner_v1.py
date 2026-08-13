@@ -165,6 +165,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.suffix_proposer_npu import AscendSuffixProposerNPU
 from vllm_ascend.spec_decode.utils import (
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
@@ -229,6 +230,16 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
+def _use_gpu_state_drafter(speculative_config: Any) -> bool:
+    """Support suffix_gpu without breaking older paired vLLM revisions."""
+    use_gpu_state_drafter = getattr(
+        speculative_config, "use_gpu_state_drafter", None
+    )
+    if use_gpu_state_drafter is not None:
+        return use_gpu_state_drafter()
+    return speculative_config.use_ngram_gpu()
 
 
 @dataclass
@@ -601,6 +612,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDflashProposer
             | AscendDSparkProposer
             | AscendSuffixDecodingProposer
+            | AscendSuffixProposerNPU
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
             | None
@@ -1511,6 +1523,41 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
+        elif isinstance(self.drafter, AscendSuffixProposerNPU):
+            self.drafter.ingest_active_requests(
+                self.input_batch, self.token_ids_gpu_tensor
+            )
+            (
+                next_token_ids,
+                valid_sampled_tokens_count,
+                valid_sampled_token_ids_gpu,
+            ) = self.drafter.update_token_ids_ngram(
+                valid_sampled_token_ids,
+                self.input_batch,
+                self.token_ids_gpu_tensor,
+                self.num_tokens_no_spec_gpu,
+                self.discard_request_mask.gpu,
+            )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+            batch_size = next_token_ids.shape[0]
+            draft_token_ids, num_valid_draft_tokens = self.drafter.propose(
+                scheduler_output.num_spec_tokens_to_schedule,
+                self.num_tokens_no_spec_gpu[:batch_size],
+                self.token_ids_gpu_tensor[:batch_size],
+                valid_sampled_token_ids_gpu,
+                valid_sampled_tokens_count,
+            )
+            self._num_valid_draft_tokens = num_valid_draft_tokens
+            copy_num_valid_draft_tokens(
+                self._num_valid_draft_tokens_cpu,
+                self._num_valid_draft_tokens_copy_stream,
+                self._num_valid_draft_tokens_event,
+                self._num_valid_draft_tokens,
+                batch_size,
+            )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 # Dynamic SD: forward the scheduled K (equals the configured
@@ -1797,12 +1844,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
        
-        # If ngram_gpu is used, we need to copy the scheduler_output to avoid
-        # the modification has influence on the scheduler_output in engine core process.
+        # Device-state drafters trim speculative slots on a private copy so
+        # engine-core scheduling metadata is not modified in the worker.
         # The replace is much faster than deepcopy.
         if (
             self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
+            and _use_gpu_state_drafter(self.speculative_config)
         ):
             num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
             spec_decode_tokens_copy = (
@@ -2287,7 +2334,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
-                or self.speculative_config.use_ngram_gpu()
+                or _use_gpu_state_drafter(self.speculative_config)
             ) and not self.speculative_config.disable_padded_drafter_batch
             early_pp_padded_drafter = (
                 use_pp_spec_decode
@@ -2365,6 +2412,11 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
+        if hasattr(model_runner_output, "num_invalid_spec_tokens"):
+            model_runner_output.num_invalid_spec_tokens = getattr(
+                self, "_last_num_invalid_spec_tokens", None
+            )
+            self._last_num_invalid_spec_tokens = None
         if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing and hasattr(
             self, "_execution_start_time"
         ):

@@ -15,6 +15,7 @@ The following speculative decoding methods are supported:
 | ------ | ----------- |
 | `ngram` | Match n-grams from the prompt |
 | `suffix` | Suffix-based pattern matching (requires Arctic Inference) |
+| `suffix_gpu` | Device-state suffix matching using the SuffixGPU PyTorch fallback |
 | `medusa` | Medusa heads embedded in the target model |
 | `eagle` | EAGLE-based draft model |
 | `eagle3` | EAGLE-3 based draft model |
@@ -23,6 +24,11 @@ The following speculative decoding methods are supported:
 | `dspark` | Semi-autoregressive block drafting with a sequential Markov logit-bias head |
 | `draft_model` | Generic external draft LLM |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
+
+`suffix_gpu` requires a vLLM revision that includes
+`vllm-project/vllm#52097` and the optional `suffix-gpu` package. The initial
+Ascend implementation reuses the upstream proposer with eager PyTorch NPU
+operators; fused Triton-Ascend kernels and ACL Graph capture are not enabled.
 
 ## Common Configuration
 

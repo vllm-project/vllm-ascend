@@ -2,9 +2,35 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+
+
+def test_suffix_gpu_async_smoke(model_name: str):
+    pytest.importorskip("suffix_gpu")
+    prompts = [
+        "Complete the repeating sequence: A B C A B C A B",
+        "Continue this pattern: 1 2 3 1 2 3 1 2",
+    ]
+
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix_gpu",
+            "num_speculative_tokens": 3,
+            "suffix_decoding_max_cached_requests": 0,
+            "suffix_gpu_use_cuda_graph": False,
+        },
+        max_model_len=1024,
+        max_num_seqs=8,
+        async_scheduling=True,
+    ) as runner:
+        outputs = runner.model.generate_greedy(prompts, max_tokens=16)
+
+    assert len(outputs) == len(prompts)
+    assert all(token_ids for token_ids, _ in outputs)
 
 
 def test_suffix_acceptance(
