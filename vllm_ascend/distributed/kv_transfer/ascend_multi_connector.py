@@ -7,8 +7,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import MooncakeLayerwiseConnector
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -28,17 +26,84 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
             "HMA should not be enabled unless all sub-connectors support it"
         )
+        self._configure_layerwise_reuse_completion()
+
+    def _configure_layerwise_reuse_completion(self) -> None:
+        self._layerwise_reuse_providers = [
+            connector
+            for connector in self._connectors
+            if getattr(connector, "is_producer", False)
+            and getattr(connector, "connector_worker", None) is not None
+            and getattr(connector, "supports_layerwise_buffer_reuse", False)
+            and callable(getattr(connector, "wait_for_layer_reuse", None))
+        ]
+        self._layerwise_reuse_other_connectors = [
+            connector
+            for connector in self._connectors
+            if all(connector is not provider for provider in self._layerwise_reuse_providers)
+        ]
+        self._layerwise_reuse_sink_configured = False
+        if not self._layerwise_reuse_providers:
+            return
+        for connector in self._connectors:
+            set_waiter = getattr(connector, "set_layerwise_reuse_waiter", None)
+            if callable(set_waiter) and set_waiter(self._wait_for_layer_reuse) is not False:
+                self._layerwise_reuse_sink_configured = True
+
+    def _wait_for_layer_reuse(self, layer_idx: int) -> None:
+        for provider in self._layerwise_reuse_providers:
+            provider.wait_for_layer_reuse(layer_idx)
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        if getattr(self, "_layerwise_reuse_sink_configured", False):
+            # AscendStore owns the layer-entry reuse wait after accepting the
+            # composite waiter, so provider layer-entry waits are redundant.
+            connectors = self._layerwise_reuse_other_connectors
+        else:
+            # Without a sink, preserve the original protection by waiting on
+            # providers before any sibling connector can write shared slots.
+            connectors = [*self._layerwise_reuse_providers, *self._layerwise_reuse_other_connectors]
+        for connector in connectors:
+            connector.wait_for_layer_load(layer_name)
+
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer,
+        attn_metadata: Any,
+        **kwargs,
+    ) -> None:
+        # Phase 1: providers must close any new slot gate before returning.
+        for connector in self._layerwise_reuse_providers:
+            connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
+        # Phase 2: siblings may now publish work that can enable slot reuse.
+        for connector in self._layerwise_reuse_other_connectors:
+            connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
+
+    def on_kv_cache_written(self, layer_name: str = "") -> None:
+        # Phase 1: providers close their gates at the earliest cache-write hook.
+        for connector in self._layerwise_reuse_providers:
+            hook = getattr(connector, "on_kv_cache_written", None)
+            if callable(hook):
+                hook(layer_name)
+        # Phase 2: only then may sibling hooks publish reuse-enabling work.
+        for connector in self._layerwise_reuse_other_connectors:
+            hook = getattr(connector, "on_kv_cache_written", None)
+            if callable(hook):
+                hook(layer_name)
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
-        for i, c in enumerate(self._connectors):
-            if i == chosen_connector or isinstance(c, MooncakeLayerwiseConnector):
-                # Forward call to the chosen connector (if any).
-                c.update_state_after_alloc(request, blocks, num_external_tokens)
-            else:
-                # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+        for i, connector in enumerate(self._connectors):
+            needs_full_blocks = i == chosen_connector or bool(
+                getattr(connector, "requires_full_blocks_on_update_after_alloc", False)
+            )
+            connector.update_state_after_alloc(
+                request,
+                blocks if needs_full_blocks else empty_blocks,
+                num_external_tokens if needs_full_blocks else 0,
+            )
 
     def get_num_new_matched_tokens(
         self,
