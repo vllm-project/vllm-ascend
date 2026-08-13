@@ -61,7 +61,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-
 class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Common facade for the Mooncake scheduler and worker implementations."""
 

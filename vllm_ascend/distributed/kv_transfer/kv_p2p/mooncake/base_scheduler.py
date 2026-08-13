@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-
 class MooncakeBaseConnectorScheduler:
     """Scheduler logic shared by Mooncake transfer modes."""
 

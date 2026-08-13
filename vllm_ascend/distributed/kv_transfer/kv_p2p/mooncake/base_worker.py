@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
-
 class MooncakeBaseConnectorWorker:
     """Worker implementation shared by Mooncake transfer modes."""
 
