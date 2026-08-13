@@ -16,6 +16,7 @@
 
 import os
 
+import vllm_ascend.patch.platform.patch_async_prefill_recompute  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
