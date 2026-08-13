@@ -133,7 +133,8 @@ class AscendTurboQuantTier2AttentionBackendImpl310(
             self.value_cache,
             self._k_norms,
             self._v_norms,
-            attn_metadata.slot_mapping[:n].to(torch.int32),
+            # same rule as the read path: pin the device, never just the dtype
+            attn_metadata.slot_mapping[:n].to(device=key.device, dtype=torch.int32),
             signs,
             cents,
             self.tq_k_bits,
@@ -156,8 +157,20 @@ class AscendTurboQuantTier2AttentionBackendImpl310(
             self.value_cache,
             self._k_norms,
             self._v_norms,
-            attn_metadata.block_tables.to(torch.int32),
-            attn_metadata.seq_lens.to(torch.int32),
+            # device= is load-bearing, not defensive. `seq_lens` arrives on the
+            # HOST in this vLLM version -- the stock 310P impl carries an
+            # explicit `if attn_metadata.seq_lens.device != query.device` fixup,
+            # and Tier 0 spells it `.to(bt.device)`. A bare `.to(torch.int32)`
+            # is a dtype cast that LEAVES IT ON CPU, so the kernel read a host
+            # pointer as device memory: seqLen came back garbage, nBlocks
+            # collapsed to 0, and the block loop never ran -- acc and runSum
+            # stayed 0 and every decode returned EXACTLY zero. That is why
+            # output was bit-identical at bits=2/3/4 and at tp=1/tp=2, and why
+            # the first tokens (dense prefill path) were right and everything
+            # after collapsed. Every device gate built its own tensors on the
+            # NPU, so none of them could see it.
+            attn_metadata.block_tables.to(device=query.device, dtype=torch.int32),
+            attn_metadata.seq_lens.to(device=query.device, dtype=torch.int32),
             signs,
             cents,
             self.tq_k_bits,
