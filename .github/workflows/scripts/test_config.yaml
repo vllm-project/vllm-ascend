@@ -224,7 +224,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/distributed
-    - vllm_ascend/memcache_comm_fence.py
+    - vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
   tests:
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
@@ -557,6 +557,8 @@
   base: spec_decode_base
   source_file_dependencies:
     - vllm_ascend/spec_decode/dspark_proposer.py
+    - vllm_ascend/spec_decode/dflash_proposer.py
+    - vllm_ascend/spec_decode/utils.py
     - vllm_ascend/models/qwen3_dspark.py
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py
@@ -620,6 +622,7 @@
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
     - tests/e2e/pull_request/two_card/model_runner_v2
+    - tests/e2e/pull_request/four_card/model_runner_v2
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
 # XLite
@@ -770,7 +773,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 690
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 390
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 290
-  tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 190
+  tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 380
   tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 230
   tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 540
   tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 460
@@ -832,6 +835,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 400
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 680
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
+  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 840
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 480
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 40
@@ -919,4 +923,3 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
-

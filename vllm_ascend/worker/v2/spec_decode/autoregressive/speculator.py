@@ -35,7 +35,9 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
@@ -67,11 +69,14 @@ def build_draft_attn_metadata_factory(positions, pad):
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
-    GQA and MLA draft decode state share one path, branched on
-    ``self.attn_architecture == "MLA"``:
+    GQA, MLA, and DSA draft decode state share one path. The current MTP path
+    uses the draft attention backend recorded by ``set_attn``.
+
     MLA's per-step state lives in ``.decode`` (cloned per step, written via an
     alias), GQA's is top-level. MLA also rebuilds the base (live ``.decode`` is
-    None/wrong-batch) and forwards rotary ``positions`` into build_attn_metadata.
+    None/wrong-batch) and forwards rotary ``positions`` into
+    build_attn_metadata. DSA manages its draft state in its metadata builder
+    and skips the generic MLA/GQA init and update logic.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -83,10 +88,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         """
         super().__init__(vllm_config, device)
 
-        # Attention architecture of the (draft) model; gates the MLA branches
-        # below. "MLA" for MLA models, None otherwise. Extensible to other
-        # architectures.
-        self.attn_architecture = "MLA" if vllm_config.model_config.is_deepseek_mla else None
+        self.attn_architecture: str | None = None
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -207,6 +209,15 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 attn_backends[layer_name] = attn_backend
 
         self.attn_backends = attn_backends
+        first_attn_backend = list(self.attn_backends.values())[0]
+        if issubclass(first_attn_backend, AscendDSABackend):
+            self.attn_architecture = "DSA"
+        elif issubclass(first_attn_backend, AscendMLABackend):
+            self.attn_architecture = "MLA"
+        elif issubclass(first_attn_backend, AscendAttentionBackend):
+            self.attn_architecture = "GQA"
+        else:
+            raise ValueError(f"Unsupported attention backend: {first_attn_backend}")
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
@@ -421,6 +432,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is None:
             return
 
+        # DSA owns its per-step slot mapping, SAS, and QLI state in the DSA
+        # metadata builder and does not use draft graph metadata updates.
+        if self.attn_architecture == "DSA":
+            return []
+
         # TODO: _build_draft_attn_metadata pulls data (seq_lens, block_table,
         # ...) from input_buffers internally; future may pass these as CPU
         # params directly to build_attn_metadata, decoupling from input_buffers.
@@ -469,7 +485,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is None:
             return
 
-        num_reqs_padded = next(iter(attn_metadata.values())).seq_lens_cpu.shape[0]
+        if self.attn_architecture == "DSA":
+            return
+
+        attn_meta = next(iter(attn_metadata.values()))
+        num_reqs_padded = attn_meta.seq_lens_cpu.shape[0]
         seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs_padded]
         if num_reqs is None:
             num_reqs = num_reqs_padded
@@ -478,9 +498,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
         seq_lens_list = next_seq_lens_cpu.tolist()
         for metadata in attn_metadata.values():
-            decode_metadata = (
-                metadata.decode if self.attn_architecture == "MLA" else metadata
-            )  # .decode (MLA) / top-level (GQA)
+            if self.attn_architecture == "MLA":
+                decode_metadata = metadata.decode
+            else:
+                decode_metadata = metadata
             decode_metadata.seq_lens_list = seq_lens_list
             decode_metadata.actual_seq_lengths_q = query_lens_list
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)

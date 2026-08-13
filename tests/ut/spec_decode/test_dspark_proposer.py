@@ -61,6 +61,7 @@ class _DSparkProposerTestBase:
         num_reqs: int,
         block_size: int,
         hf_config: SimpleNamespace | None = None,
+        draft_attn_causal: bool | None = None,
     ):
         device = torch.device("cpu")
         vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace())
@@ -81,11 +82,14 @@ class _DSparkProposerTestBase:
             proposer.hidden_size = _HIDDEN_SIZE
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
-            proposer.model = SimpleNamespace(get_draft_attn_causal=lambda: [False])
+            proposer.model = (
+                SimpleNamespace(get_draft_attn_causal=lambda: [draft_attn_causal])
+                if draft_attn_causal is not None
+                else SimpleNamespace()
+            )
 
         with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
             proposer = AscendDSparkProposer(vllm_config, device)
-
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer.positions[:num_query_total] = torch.arange(num_query_total, dtype=torch.int32)
@@ -595,6 +599,20 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         # optional attrs the proposer rewrites when present.
         assert cad.actual_seq_lengths_q == [block_size] * num_reqs
         assert cad.decode_token_per_req == block_size
+
+    def test_cad_uses_model_reported_causality(self):
+        num_reqs, block_size, max_num_tokens = 4, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            draft_attn_causal=True,
+        )
+        _, _, cad, _ = self._invoke_set_inputs_first_pass(
+            proposer, num_reqs=num_reqs, block_size=block_size
+        )[:4]
+
+        assert cad.causal is True
 
     def test_cad_query_start_loc_and_seq_lens(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
