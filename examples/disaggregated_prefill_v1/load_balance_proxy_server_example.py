@@ -1019,6 +1019,7 @@ async def handle_completions_impl(api: str, request: Request):
             retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+            non_stream_buffer = b""
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1042,29 +1043,51 @@ async def handle_completions_impl(api: str, request: Request):
                     ):
                         if not released_kv and chunk:
                             await release_prefill_kv_once()
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        if is_sse:
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
+
+                        if not stream_flag:
+                            # Non-streaming: accumulate chunks until we have
+                            # a complete JSON response that can be parsed.
+                            non_stream_buffer += chunk
+                            try:
+                                chunk_str = non_stream_buffer.decode("utf-8").strip()
+                            except UnicodeDecodeError:
+                                continue
+                            if not chunk_str:
+                                continue
+                            is_sse = chunk_str.startswith("data: ")
+                            if is_sse:
+                                chunk_str = chunk_str[len("data: ") :]
+                            try:
+                                chunk_json = json.loads(chunk_str)
+                            except json.JSONDecodeError:
+                                continue  # Incomplete JSON, keep accumulating
+                            # Complete JSON parsed; reset buffer for potential retry
+                            non_stream_buffer = b""
+                        else:
+                            # Streaming: parse each chunk individually
+                            try:
+                                chunk_str = chunk.decode("utf-8").strip()
+                            except UnicodeDecodeError:
+                                logger.debug("Skipping chunk: %s", chunk)
+                                yield chunk
+                                continue
+                            if not chunk_str:
+                                continue
+                            is_sse = chunk_str.startswith("data: ")
+                            if is_sse:
+                                chunk_str = chunk_str[len("data: ") :]
+                            try:
+                                chunk_json = json.loads(chunk_str)
+                            except json.JSONDecodeError:
+                                logger.debug("Skipping chunk: %s", chunk_str)
+                                yield chunk
+                                continue
+
                         choices = chunk_json.get("choices", [])
                         if not choices or not stream_flag:
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                chunk = encode_response_chunk(chunk_json, is_sse)
                                 if not choices:
-                                    yield chunk
+                                    yield encode_response_chunk(chunk_json, is_sse if stream_flag else False)
                                     continue
 
                         choice = choices[0]
@@ -1097,8 +1120,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
-                            chunk = encode_response_chunk(chunk_json, is_sse)
-                        yield chunk
+                        yield encode_response_chunk(chunk_json, is_sse if stream_flag else False)
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
@@ -1120,8 +1142,19 @@ async def handle_completions_impl(api: str, request: Request):
                 released_kv = True
                 request_released = True
 
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        if stream_flag:
+            return StreamingResponse(
+                generate_stream(), media_type="text/event-stream; charset=utf-8"
+            )
+        else:
+            # Non-streaming: collect all chunks and return as a single JSON
+            # response with Content-Length, instead of chunked StreamingResponse.
+            full_response = b""
+            async for chunk in generate_stream():
+                full_response += chunk
+            return Response(
+                content=full_response, media_type="application/json"
+            )
     except Exception as e:
         import traceback
 
