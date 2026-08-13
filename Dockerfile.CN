@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-#
 # ARM64 vLLM-Ascend v0.25.1rc build using mainland-accessible sources.
 
 ARG CANN_IMAGE="swr.tzytcloud-fs-1.tz-cbncloud.com/gcable-ai/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12"
