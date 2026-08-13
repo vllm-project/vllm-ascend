@@ -231,6 +231,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
+        # Reuse this graph-stable key-length buffer for global seq_lens in the
+        # non-DSA-CP path and for local key lengths in the DSA-CP path.
+        self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
+        self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
+        self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
@@ -239,7 +246,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
             )
-
+            self.spec_actual_seq_lengths_query = [
+                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
+            self.spec_actual_seq_lengths_key = [
+                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
         self.reorder_batch_threshold = self.decode_threshold
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
@@ -339,7 +353,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         block_size = self.kernel_block_size
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
-        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        runtime_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        self.actual_seq_lengths_key.zero_()
+        self.actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
+        seq_lens = self.actual_seq_lengths_key[:num_reqs]
 
         # Prefer _seq_lens_cpu (always available, updated during draft
         # iterations) over seq_lens_cpu (None in async spec decode mode).
@@ -571,7 +588,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        # sfa does not need to update graph params
+        # seq_lens reuses the builder-owned actual_seq_lengths_key buffer and
+        # is refreshed in AscendSFAMetadataBuilder._build before graph replay.
         pass
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
