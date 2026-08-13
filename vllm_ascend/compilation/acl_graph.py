@@ -116,6 +116,19 @@ class ACLGraphWrapper:
                 self.fa3_graph_pool = torch.npu.graph_pool_handle()
             except (AttributeError, RuntimeError):
                 self.fa3_graph_pool = None
+        # E54 diagnostic: capture decode (FA3) graphs on a SEPARATE capture
+        # STREAM (and a fresh pool), so the FA3 decode captures do not corrupt
+        # the task-group session state of the prefill CANN V1 graphs on the main
+        # capture stream.  Set VLLM_ASCEND_DEBUG_FA3_SEPARATE_SESSION=1 to
+        # enable.
+        self.fa3_capture_stream = None
+        if os.environ.get("VLLM_ASCEND_DEBUG_FA3_SEPARATE_SESSION") == "1":
+            try:
+                self.fa3_capture_stream = torch.npu.Stream()
+                self.fa3_graph_pool = torch.npu.graph_pool_handle()
+            except (AttributeError, RuntimeError):
+                self.fa3_capture_stream = None
+                self.fa3_graph_pool = None
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -195,18 +208,24 @@ class ACLGraphWrapper:
                 get_offloader().sync_prev_onload()
                 forward_context.capturing = True
                 try:
-                    # E31 diagnostic: use a separate graph pool for decode
-                    # (uniform) graphs when enabled, so FA3 decode captures do
-                    # not share the pool / capture session with the prefill
-                    # CANN V1 graphs.
-                    pool = self.graph_pool
-                    if self.fa3_graph_pool is not None and getattr(
-                        batch_descriptor, "uniform", False
-                    ):
-                        pool = self.fa3_graph_pool
-                    with torch.npu.graph(aclgraph, pool=pool):
+                    # E31/E54 diagnostic: for decode (uniform) graphs, use a
+                    # separate graph pool (E31) and, when enabled, capture on a
+                    # separate STREAM (E54) so the FA3 decode captures do not
+                    # corrupt the task-group session state of the prefill CANN
+                    # V1 graphs captured on the main capture stream.
+                    is_decode_capture = bool(
+                        getattr(batch_descriptor, "uniform", False)
+                    )
+                    use_separate_session = (
+                        self.fa3_capture_stream is not None and is_decode_capture
+                    )
+                    pool = (
+                        self.fa3_graph_pool if use_separate_session else self.graph_pool
+                    )
+
+                    def _capture_body():
                         # `output` is managed by pytorch's aclgraph pool
-                        output = self.runnable(*args, **kwargs)
+                        out = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
                         # forks copy_stream, but wait_prefetch only happens in
@@ -219,7 +238,24 @@ class ACLGraphWrapper:
                             # the last graph in piecewise aclgraph mode, because
                             # the output of the last graph will not be used by
                             # any other acl graph.
-                            output = weak_ref_tensors(output)
+                            out = weak_ref_tensors(out)
+                        return out
+
+                    if use_separate_session:
+                        # Order: main stream (warmup) -> FA3 stream (capture)
+                        # -> main stream.
+                        self.fa3_capture_stream.wait_stream(
+                            torch_npu.npu.current_stream()
+                        )
+                        with torch.npu.stream(self.fa3_capture_stream):
+                            with torch.npu.graph(aclgraph, pool=pool):
+                                output = _capture_body()
+                        torch_npu.npu.current_stream().wait_stream(
+                            self.fa3_capture_stream
+                        )
+                    else:
+                        with torch.npu.graph(aclgraph, pool=pool):
+                            output = _capture_body()
                 except RuntimeError as exc:
                     if _is_old_hdk_capture_error(exc):
                         raise RuntimeError(
