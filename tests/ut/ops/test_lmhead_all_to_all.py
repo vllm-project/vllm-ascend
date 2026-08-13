@@ -29,7 +29,7 @@ def _make_comm_group(world_size):
     return group
 
 
-def _fake_all_to_all_single(full, world_size):
+class _FakeAllToAllSingle:
     """Fake dist.all_to_all_single with real equal-split send/recv semantics.
 
     all_to_all_single splits dim 0 into ``world_size`` equal chunks, routes
@@ -41,21 +41,23 @@ def _fake_all_to_all_single(full, world_size):
     helper's reordering at all, so it must not be used here.
     """
 
-    def fake(output, input_, group=None, **kwargs):
-        rank = fake.call_count
-        fake.call_count += 1
-        n, v = full.shape
-        np_, vp = n // world_size, v // world_size
+    def __init__(self, full: torch.Tensor, world_size: int):
+        self.full = full
+        self.world_size = world_size
+        self.call_count = 0
+
+    def __call__(self, output, input_, group=None, **kwargs):
+        rank = self.call_count
+        self.call_count += 1
+        n, v = self.full.shape
+        np_, vp = n // self.world_size, v // self.world_size
         received = torch.cat(
-            [full[:, i * vp : (i + 1) * vp].view(world_size, np_, vp)[rank] for i in range(world_size)],
+            [self.full[:, i * vp : (i + 1) * vp].view(self.world_size, np_, vp)[rank] for i in range(self.world_size)],
             dim=0,
         )
         # `received` is [P*N/P, V/P]; the output buffer is [P, N/P, V/P],
         # so reshape before copy_.
-        output.copy_(received.view(world_size, np_, vp))
-
-    fake.call_count = 0
-    return fake
+        output.copy_(received.view(self.world_size, np_, vp))
 
 
 class TestLmheadAllToAll(unittest.TestCase):
@@ -76,7 +78,7 @@ class TestLmheadAllToAll(unittest.TestCase):
         # Per-rank local input: all tokens x this rank's vocab shard.
         inputs = [full[:, r * vp : (r + 1) * vp].clone() for r in range(world_size)]
         group = _make_comm_group(world_size)
-        fake = _fake_all_to_all_single(full, world_size)
+        fake = _FakeAllToAllSingle(full, world_size)
         with mock.patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_to_all_single", fake):
             for r in range(world_size):
                 output = lmhead_all_to_all(inputs[r], group)
