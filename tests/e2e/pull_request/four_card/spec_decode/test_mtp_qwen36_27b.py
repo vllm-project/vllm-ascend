@@ -27,7 +27,8 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
+os.environ["HCCL_DETERMINISTIC"] = "true"
+os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
 MODELS = ["Qwen/Qwen3.6-27B"]
 
 
