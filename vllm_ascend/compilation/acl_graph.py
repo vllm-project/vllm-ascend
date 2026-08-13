@@ -5,6 +5,7 @@ import dataclasses
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -32,6 +33,13 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
 )
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 
+# Capture-time override so FULL-graph capture (which often sets
+# batch_descriptor=None) can still isolate Base vs LoRA graph params.
+# True/False while capturing a LoRA/Base graph; None means "do not specialize".
+_GRAPH_PARAM_HAS_LORA: ContextVar[bool | None] = ContextVar("_GRAPH_PARAM_HAS_LORA", default=None)
+
+GraphParamKey = int | tuple[int, bool]
+
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
     message = str(exc)
@@ -44,6 +52,65 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
 def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
+
+
+def set_graph_param_has_lora(has_lora: bool | None):
+    """Pin Base/LoRA isolation for the current capture or replay."""
+    return _GRAPH_PARAM_HAS_LORA.set(has_lora)
+
+
+def reset_graph_param_has_lora(token) -> None:
+    _GRAPH_PARAM_HAS_LORA.reset(token)
+
+
+def _lora_graph_param_key(num_tokens: int) -> GraphParamKey:
+    """Map a token-count lookup onto (num_tokens, has_lora) when possible."""
+    batch_descriptor = None
+    try:
+        forward_context = get_forward_context()
+        batch_descriptor = getattr(forward_context, "batch_descriptor", None)
+    except (AssertionError, LookupError, RuntimeError):
+        batch_descriptor = None
+
+    if (
+        batch_descriptor is not None
+        and getattr(batch_descriptor, "num_tokens", None) == num_tokens
+    ):
+        return (num_tokens, bool(batch_descriptor.has_lora))
+
+    has_lora = _GRAPH_PARAM_HAS_LORA.get()
+    if has_lora is not None:
+        return (num_tokens, bool(has_lora))
+    return num_tokens
+
+
+class _GraphParamStore(dict):
+    """Isolate graph resources by (num_tokens, has_lora) while keeping int keys."""
+
+    def __init__(self, capture_sizes: list[int], default_factory: Callable[[], Any]):
+        super().__init__((size, default_factory()) for size in capture_sizes)
+        self.default_factory = default_factory
+
+    def _resolve_key(self, key):
+        if isinstance(key, int):
+            return _lora_graph_param_key(key)
+        return key
+
+    def __contains__(self, key):
+        return dict.__contains__(self, self._resolve_key(key))
+
+    def __getitem__(self, key):
+        resolved_key = self._resolve_key(key)
+        if not dict.__contains__(self, resolved_key):
+            dict.__setitem__(self, resolved_key, self.default_factory())
+        return dict.__getitem__(self, resolved_key)
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, self._resolve_key(key), value)
+
+    def get(self, key, default=None):
+        resolved_key = self._resolve_key(key)
+        return dict.get(self, resolved_key, default)
 
 
 @dataclasses.dataclass
@@ -270,10 +337,10 @@ class ACLGraphWrapper:
 def weak_ref_workspaces(params):
     if params is None:
         return
-    for num_tokens in params.workspaces:
-        if params.workspaces[num_tokens] is None:
+    for graph_key, workspace in list(dict.items(params.workspaces)):
+        if workspace is None:
             continue
-        params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
+        dict.__setitem__(params.workspaces, graph_key, weak_ref_tensors(workspace))
 
 
 def update_full_graph_params(
@@ -298,10 +365,20 @@ def update_full_graph_params(
 
 @dataclass
 class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
+    events: dict[Any, list[torch.npu.ExternalEvent]]
+    workspaces: dict[Any, torch.Tensor | None]
+    handles: dict[Any, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[Any, list[tuple]]
+
+
+def _make_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
+    capture_sizes = list(aclgraph_capture_sizes)
+    return GraphParams(
+        _GraphParamStore(capture_sizes, list),
+        _GraphParamStore(capture_sizes, lambda: None),
+        _GraphParamStore(capture_sizes, list),
+        _GraphParamStore(capture_sizes, list),
+    )
 
 
 _graph_params: GraphParams | None = None
@@ -311,12 +388,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
-    _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _graph_params = _make_graph_params(aclgraph_capture_sizes)
 
 
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
@@ -336,12 +408,7 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_params
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
-    _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _draft_graph_params = _make_graph_params(aclgraph_capture_sizes)
 
 
 def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
@@ -361,12 +428,7 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_prefill_params
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
-    _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _draft_graph_prefill_params = _make_graph_params(aclgraph_capture_sizes)
 
 
 def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any):
