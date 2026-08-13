@@ -590,7 +590,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        # sfa does not need to update graph params
+        # seq_lens reuses the builder-owned actual_seq_lengths_key buffer and
+        # is refreshed in AscendSFAMetadataBuilder._build before graph replay.
         pass
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
