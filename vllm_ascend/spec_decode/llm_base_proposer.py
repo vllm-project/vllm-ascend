@@ -1181,11 +1181,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         logits[:, idx].add_(logits_bias)
                         draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
 
-                    # Dynamic verify-length path, implemented in AscendDSparkProposer.
+                    # Dynamic verify-length path, implemented in DynamicSpecScheduler
                     # Only the dspark method is handled here since it relies on
                     # the DSpark confidence head.
-                    if get_ascend_config().dynamic_spec_config.method == "dspark":
-                        self.update_num_verify_tokens(last_hidden_states, draft_token_ids, num_blk)
+                    if self.dynamic_spec is not None:
+                        self.dynamic_spec.update(
+                            model=self.model,
+                            last_hidden_states=last_hidden_states,
+                            draft_token_ids=draft_token_ids,
+                            num_reqs=num_blk,
+                        )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1197,6 +1202,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         is_logits=True,
                     )
                 draft_token_ids = logits.argmax(dim=-1)
+
+                # Dynamic verify-length path for head-free DFlash only.
+                if hasattr(self, "dynamic_spec") and self.dynamic_spec is not None:
+                    self.dynamic_spec.update(
+                        logits=logits,
+                    )
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
