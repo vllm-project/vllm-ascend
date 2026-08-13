@@ -653,20 +653,15 @@ class TestGumbelSampling:
         not vllm_version_is("0.26.0"),
         reason="The post-v0.26 vLLM main logits-cache contract requires a separate main2main adaptation.",
     )
-    def test_speculator_cache_drives_rejection_sampling(self):
-        """The speculator wrapper fills draft logits consumed by rejection sampling."""
-        from vllm.v1.worker.gpu.spec_decode import rejection_sampler_utils
+    def test_speculator_uses_wrapper_and_writes_cache(self):
+        """The speculator patch points at the AscendC-backed wrapper."""
         from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
         from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 
         import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa: F401
-        from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
-            rejection_sample as ascend_rejection_sample,
-        )
 
         assert base_speculator.gumbel_sample is gumbel_sample
         assert dspark_speculator.gumbel_sample is gumbel_sample
-        assert rejection_sampler_utils.rejection_sample is ascend_rejection_sample
 
         class FakeDraftModel:
             @staticmethod
@@ -712,26 +707,3 @@ class TestGumbelSampling:
         torch.npu.synchronize()
         torch.testing.assert_close(draft_cache[0, 0], draft_input[0], rtol=0, atol=0)
         assert draft_token.item() == 0
-
-        # The target makes the drafted token impossible, forcing rejection and
-        # a deterministic residual resample to token 1.
-        target_logits = torch.full((2, vocab_size), -float("inf"), dtype=torch.float32, device=DEVICE)
-        target_logits[0, 1] = 0.0
-        target_logits[1, 2] = 0.0
-        draft_sampled = torch.tensor([0, draft_token.item()], dtype=torch.int64, device=DEVICE)
-        sampled, num_sampled = rejection_sampler_utils.rejection_sample(
-            target_logits,
-            draft_cache,
-            draft_sampled,
-            torch.tensor([0, 2], dtype=torch.int32, device=DEVICE),
-            torch.tensor([10, 11], dtype=torch.int64, device=DEVICE),
-            torch.tensor([0], dtype=torch.int32, device=DEVICE),
-            torch.tensor([0, 0], dtype=torch.int32, device=DEVICE),
-            torch.tensor([0, 1], dtype=torch.int32, device=DEVICE),
-            temperature,
-            seed,
-            num_speculative_steps=1,
-        )
-        torch.npu.synchronize()
-        assert num_sampled.item() == 1
-        assert sampled[0, 0].item() == 1

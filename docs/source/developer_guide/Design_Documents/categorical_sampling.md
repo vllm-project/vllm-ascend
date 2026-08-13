@@ -1,10 +1,10 @@
 # MRV2 categorical sampling on Ascend
 
-NPU Model Runner V2 uses an AscendC categorical operator for ordinary random sampling and high-precision residual sampling after speculative rejection. The operator preserves the sampler's request-level seed and position model while avoiding a full-vocabulary random tensor, host synchronization, and a hidden runtime fallback.
+NPU Model Runner V2 uses an AscendC categorical operator for ordinary random sampling. The operator preserves the sampler's request-level seed and position model while avoiding a full-vocabulary random tensor, host synchronization, and a hidden runtime fallback.
 
-This page describes the current implementation and its contributor-facing contracts. For the design rationale and acceptance criteria, see [RFC #14130](https://github.com/vllm-project/vllm-ascend/issues/14130).
+This page describes the first integration stage and its contributor-facing contracts. The broader design in [RFC #14130](https://github.com/vllm-project/vllm-ascend/issues/14130) also proposes routing speculative rejection resampling through this operator in a follow-up change.
 
-The integration targets the vLLM v0.26 sampler contract used by the matching vLLM Ascend release. A newer vLLM main revision renamed the processed-logits outputs to a logits cache and changed both its dtype and temperature ordering. That main2main migration is a semantic change rather than a keyword-only rename and must update the producer, native cache contract, and rejection consumer together before probabilistic speculative decoding uses this operator with that revision.
+The integration targets the vLLM v0.26 sampler contract used by the matching vLLM Ascend release. A newer vLLM main revision renamed the processed-logits outputs to a logits cache and changed both its dtype and temperature ordering. That main2main migration is a semantic change rather than a keyword-only rename and must update the producer and native cache contract together.
 
 ## Mental model
 
@@ -24,7 +24,6 @@ flowchart LR
     C --> D["AscendC row sampler"]
     D --> E["Sampled token IDs"]
     D --> F["Optional processed-logits cache"]
-    G["Speculative rejection path"] -->|"FP64 residual row"| B
 ```
 
 ## Sampling flow
@@ -33,9 +32,9 @@ Each logits row maps to request state through `expanded_idx_mapping`. A mapping 
 
 Temperature zero is the greedy sentinel and selects the first maximum. For a nonzero temperature, the operator optionally applies temperature scaling, finds the row maximum, computes stable weights `exp(logit - max)`, and selects the first token whose cumulative weight crosses a stateless uniform draw. Logits may be FP16, BF16, or FP32; reductions and the optional cache use FP32.
 
-The default path uses a 32-bit random draw and FP32 weight accumulation. `use_fp64=True` selects a higher-precision path based on a 64-bit Philox-derived draw and 64-bit fixed-point masses. It does not change input or output dtypes and does not imply FP64 vector arithmetic on the NPU. The purpose of this mode is to preserve tail resolution for precision-sensitive sampling and speculative residual distributions.
+The default path uses a 32-bit random draw and FP32 weight accumulation. `use_fp64=True` selects a higher-precision path based on a 64-bit Philox-derived draw and 64-bit fixed-point masses. It does not change input or output dtypes and does not imply FP64 vector arithmetic on the NPU. The purpose of this mode is to preserve tail resolution for precision-sensitive categorical distributions.
 
-Ordinary MRV2 sampling invokes the wrapper after logits processing. Speculators use the same wrapper and may write request-indexed processed logits into a two-dimensional cache or into a selected scalar/per-token column of a three-dimensional cache. When high-precision speculative rejection needs a replacement or bonus token, the rejection path materializes one residual row per request and delegates the final draw to the same operator.
+Ordinary MRV2 sampling invokes the wrapper after logits processing. Speculators use the same wrapper when producing draft tokens and may write request-indexed processed logits into a two-dimensional cache or into a selected scalar/per-token column of a three-dimensional cache. Rejection and bonus-token resampling remain in the existing Ascend rejection-sampler implementation and do not call this operator in this integration stage.
 
 ## Validation and exceptional values
 
@@ -76,15 +75,14 @@ Changes to this path must preserve these invariants:
 1. A request's sample depends on its logits, mapped temperature and seed, and logical position, not unrelated batch rows or ACLGraph padding.
 2. Greedy and padding rows do not advance mutable random state.
 3. Invalid row data fails before sampled-token, LSE, or cache writes for that row.
-4. Ordinary sampling and speculative resampling use the same native categorical semantics.
-5. The production path contains no host `.item()`, full-vocabulary random tensor, or silent algorithm fallback.
-6. A2, A3, and A5 expose the same public behavior despite different registration paths.
+4. The production path contains no host `.item()`, full-vocabulary random tensor, or silent algorithm fallback.
+5. A2, A3, and A5 expose the same public behavior despite different registration paths.
 
-Synthetic rejection sampling is not implemented and fails explicitly. Block verification is not implemented by the Ascend-specific rejection kernel; requesting it emits one warning and uses standard token-by-token verification.
+FP64 speculative rejection resampling is outside this integration stage and remains unsupported by the existing Ascend rejection sampler. Non-FP64 rejection resampling continues to use its existing Triton implementation.
 
 ## Extension and debugging anchors
 
-When changing the upstream sampler contract, update the Python wrapper, cache semantics, rejection consumer, native schema, and cross-version tests together. In particular, the post-v0.26 logits-cache migration changes whether values are stored before or after temperature and which dtype owns the cache; treating it as a keyword-only migration is unsafe.
+When changing the upstream sampler contract, update the Python wrapper, cache semantics, native schema, and cross-version tests together. In particular, the post-v0.26 logits-cache migration changes whether values are stored before or after temperature and which dtype owns the cache; treating it as a keyword-only migration is unsafe.
 
 For registration failures, first distinguish the A2/A3 general initializer from the A5 packaged custom OPP path, then verify that the native extension, operator package, and Torch schema come from the same build. For numerical errors, separate logits processing, request mapping, random key construction, and categorical selection before comparing distributions.
 
