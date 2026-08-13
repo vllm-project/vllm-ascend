@@ -293,6 +293,9 @@ public:
                     subBlockIdx * fdLseSubStride + rowOffsetLoop;
                 AscendC::DataCopyPad(gPartialLse[lseOffset], lse32_ubuf_tensor[rowOffsetLoop],
                     AscendC::DataCopyExtParams(1, curRowNum * sizeof(float), 0, 0, 0));
+                // Wait for partial writes before reusing the Vector UB.
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
             } else {
                 // *** go = castfp32to16(go)
                 if (std::is_same<ElementOutput, bfloat16_t>::value) {
@@ -553,6 +556,8 @@ public:
             subBlockIdx * fdLseSubStride;
         AscendC::DataCopyPad(gPartialLse[lseOffset], lse32_ubuf_tensor,
             AscendC::DataCopyExtParams(1, rowNum * sizeof(float), 0, 0, 0));
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
     }
 
 private:
