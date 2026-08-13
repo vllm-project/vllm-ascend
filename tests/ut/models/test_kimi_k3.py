@@ -493,6 +493,33 @@ def test_text_model_captures_materialized_dspark_aux_stream(monkeypatch: pytest.
     assert [layer_idx for layer_idx, _ in residual_calls] == [1, 0]
 
 
+def test_kimi_k3_attention_residual_uses_fused_kernel(monkeypatch: pytest.MonkeyPatch):
+    prefix_sum = torch.randn(2, 4)
+    block_residual = torch.randn(2, 3, 4)
+    projection = SimpleNamespace(weight=torch.randn(1, 4))
+    norm = SimpleNamespace(weight=torch.randn(4), variance_epsilon=1e-5)
+    expected = torch.randn_like(prefix_sum)
+    captured: dict[str, object] = {}
+
+    def fake_fused_attention_residual(*args):
+        captured["args"] = args
+        return expected
+
+    monkeypatch.setattr(kimi_k3, "fused_attention_residual", fake_fused_attention_residual)
+    monkeypatch.setattr(kimi_k3._EXTRA_CTX, "flash_comm_v1_enabled", False)
+
+    actual = kimi_k3._apply_attention_residual(prefix_sum, block_residual, projection, norm)
+
+    assert actual is expected
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert args[0] is prefix_sum
+    assert args[1] is block_residual
+    torch.testing.assert_close(args[2], projection.weight.squeeze(0))
+    assert args[3] is norm.weight
+    assert args[4] == norm.variance_epsilon
+
+
 def test_kimi_k3_dspark_aux_capture_mode_is_forwarded():
     causal_model = AscendKimiK3ForCausalLM.__new__(AscendKimiK3ForCausalLM)
     nn.Module.__init__(causal_model)

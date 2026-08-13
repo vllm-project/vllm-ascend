@@ -23,7 +23,6 @@ from typing import Annotated, Any, Literal, cast
 
 import numpy as np
 import torch
-import torch_npu
 from torch import nn
 from transformers import BatchFeature
 from vllm.compilation.decorators import support_torch_compile
@@ -107,6 +106,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
 from vllm_ascend.ops.kimi_kda import uses_kimi_k3_global_inputs_embeds
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
+from vllm_ascend.ops.triton.kimi_k3 import fused_attention_residual
 from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3Config, KimiK3TextConfig, KimiK3VisionConfig
 from vllm_ascend.transformers_utils.processors.kimi_k3 import KimiK3Processor
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
@@ -884,16 +884,13 @@ def _apply_attention_residual(
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply K3's learned normalized mixture over residual block starts."""
-    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
-    values_fp32 = values.float()
-    normalized, _ = torch_npu.npu_rms_norm(
-        values_fp32,
-        norm.weight.float(),
+    mixed = fused_attention_residual(
+        prefix_sum,
+        block_residual,
+        projection.weight.squeeze(0),
+        norm.weight,
         norm.variance_epsilon,
     )
-    scores = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1)
-    probabilities = scores.softmax(-1).unsqueeze(1)
-    mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
     if _EXTRA_CTX.flash_comm_v1_enabled:
         # FlashComm changes the first decoder layer from the global token
         # layout to a TP-local layout.  The learned-residual arithmetic above
