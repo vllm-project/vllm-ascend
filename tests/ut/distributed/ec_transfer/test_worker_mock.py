@@ -418,7 +418,7 @@ def test_save_descriptor_buffer_capacity_uses_block_count():
 def test_save_early_exits_without_reading_encoder_cache(monkeypatch, is_save_rank, cache_hash, metadata):
     worker = make_worker(dtype=torch.int8)
     worker._is_save_rank = is_save_rank
-    calls = []
+    calls: list[object] = []
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", calls.append)
 
     worker.save_caches({}, cache_hash, metadata)
@@ -494,7 +494,7 @@ def test_load_coalesces_contiguous_blocks_into_one_descriptor(monkeypatch):
     worker, platform, _ = make_worker_env(monkeypatch)
     calls = patch_copy_capture(monkeypatch)
 
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
     metadata = ECCPUConnectorMetadata(loads={"loaded": [2, 3, 4]})
     worker.start_load_caches(encoder_cache, metadata)
 
@@ -514,7 +514,7 @@ def test_load_coalesces_each_cache_item_without_changing_output_offsets(
     worker, _, _ = make_worker_env(monkeypatch)
     calls = patch_copy_capture(monkeypatch)
 
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
     metadata = ECCPUConnectorMetadata(loads={"first": [0, 1], "second": [4, 5]})
     worker.start_load_caches(encoder_cache, metadata)
 
@@ -534,7 +534,7 @@ def test_load_coalesces_each_cache_item_without_changing_output_offsets(
 def test_load_descriptor_buffer_capacity_uses_block_count(monkeypatch):
     worker, _, _ = make_worker_env(monkeypatch)
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
     metadata = ECCPUConnectorMetadata(loads={"first": [0, 1, 4], "second": [6, 7]})
 
     worker.start_load_caches(encoder_cache, metadata)
@@ -550,7 +550,7 @@ def test_load_is_noop_when_all_hashes_are_already_cached(monkeypatch):
     worker = make_worker()
     platform = FakePlatform()
     monkeypatch.setattr(worker_mod, "current_platform", platform)
-    calls = []
+    calls: list[object] = []
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", calls.append)
     existing = torch.zeros((1, 4), dtype=torch.float32)
     encoder_cache = {"cached": existing}
@@ -567,7 +567,7 @@ def test_load_releases_descriptors_when_dma_submission_fails(monkeypatch):
     worker, platform, _ = make_worker_env(monkeypatch)
 
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("H2D submission failed"))
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
     metadata = ECCPUConnectorMetadata(loads={"hash": [1]})
 
     with pytest.raises(RuntimeError, match="H2D submission failed"):
@@ -613,7 +613,7 @@ def test_event_record_failure_falls_back_to_synchronous_h2d_release(
     worker, platform, npu = make_worker_env(monkeypatch, record_error=True)
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
 
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
     worker.start_load_caches(encoder_cache, ECCPUConnectorMetadata(loads={"hash": [1]}))
 
     assert worker._load_stream.synchronize_calls == 1
@@ -656,7 +656,7 @@ def test_shutdown_synchronizes_releases_and_unregisters_before_cleanup(
     monkeypatch,
 ):
     worker, _, npu = make_worker_env(monkeypatch, dtype=torch.int8)
-    order = []
+    order: list[str | tuple[str, object]] = []
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
     worker._region.cleanup = lambda: order.append("cleanup")
 
@@ -690,7 +690,7 @@ def test_shutdown_synchronizes_releases_and_unregisters_before_cleanup(
 
 def test_shutdown_preserves_mmap_when_device_synchronize_fails(monkeypatch):
     worker = make_worker()
-    order = []
+    order: list[str | tuple[str, object]] = []
     worker._region.cleanup = lambda: order.append("cleanup")
     monkeypatch.setattr(
         worker_mod,
