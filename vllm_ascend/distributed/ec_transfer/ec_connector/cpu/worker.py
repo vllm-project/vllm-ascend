@@ -98,7 +98,7 @@ class AscendECCPUWorker(ECCPUWorker):
         self._dtype = vllm_config.model_config.dtype
         self._is_save_rank = get_tensor_model_parallel_rank() == 0 and get_pcp_group().rank_in_group == 0
         self._buf_pool = DescriptorBufferPool()
-        self._save_bufs = None
+        self._save_bufs: DescriptorBuffers | None = None
         self._save_count = 0
         # Descriptor arrays are passed to an asynchronous CANN DMA operation.
         # Keep each submitted triple alive until a completion event recorded on
@@ -221,13 +221,15 @@ class AscendECCPUWorker(ECCPUWorker):
             f"{total_bytes} bytes but only {allocated_bytes} allocated"
         )
 
-        if self._save_bufs is None:
+        save_bufs = self._save_bufs
+        if save_bufs is None:
             total_blocks = sum(len(ids) for ids in connector_metadata.saves.values())
             self._reclaim_completed_descriptor_bufs()
-            self._save_bufs = self._buf_pool.acquire(total_blocks)
+            save_bufs = self._buf_pool.acquire(total_blocks)
+            self._save_bufs = save_bufs
 
-        assert self._save_count + len(block_ids) <= self._save_bufs.src_ptrs.numel()
-        src_ptrs, dst_ptrs, sizes = self._save_bufs
+        assert self._save_count + len(block_ids) <= save_bufs.src_ptrs.numel()
+        src_ptrs, dst_ptrs, sizes = save_bufs
         src_base = src.data_ptr()
         dst_base = self._region.blocks.data_ptr()
         idx = self._save_count
