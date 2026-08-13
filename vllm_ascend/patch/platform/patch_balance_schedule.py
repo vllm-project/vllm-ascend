@@ -46,6 +46,13 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     return bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0")))
 
 
+def _disable_preemption_on_prefill_node(vllm_config) -> bool:
+    if not vllm_version_is("0.23.0"):
+        return False
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    return getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
+
+
 class BalanceScheduler(Scheduler):
     def __init__(
         self,
@@ -69,6 +76,9 @@ class BalanceScheduler(Scheduler):
             log_stats,
         )
         self._balance_enabled = _balance_scheduling_enabled(vllm_config)
+        self._disable_preemption = _disable_preemption_on_prefill_node(vllm_config)
+        if self._disable_preemption:
+            logger.warning("Automatic scheduler preemption is disabled on this PD-disaggregated prefill node.")
         if self._balance_enabled:
             self.balance_queue = [
                 torch.tensor([0], dtype=torch.int, device="cpu")
@@ -81,8 +91,21 @@ class BalanceScheduler(Scheduler):
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=dp_group)
 
+    def reset_prefix_cache(
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+    ) -> bool:
+        if self._disable_preemption and reset_running_requests and self.running:
+            raise RuntimeError(
+                "Cannot reset the prefix cache with running requests on a "
+                "PD-disaggregated prefill node because scheduler preemption "
+                "is disabled; drain or abort the requests first."
+            )
+        return super().reset_prefix_cache(reset_running_requests, reset_connector)
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
-        if not self._balance_enabled:
+        if not self._balance_enabled and not self._disable_preemption:
             if vllm_version_is("0.23.0"):
                 return super().schedule()
             return super().schedule(throttle_prefills)
@@ -204,6 +227,9 @@ class BalanceScheduler(Scheduler):
                         # The request can be scheduled.
                         break
 
+                    if self._disable_preemption:
+                        break
+
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -294,9 +320,10 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                balance_flag = max(t.item() for t in self.balance_queue) == self.max_num_running_reqs
-                if balance_flag:
-                    break
+                if self._balance_enabled:
+                    balance_flag = max(t.item() for t in self.balance_queue) == self.max_num_running_reqs
+                    if balance_flag:
+                        break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 if request_queue is None:

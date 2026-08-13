@@ -360,6 +360,9 @@ class ProfilingChunkScheduler(Scheduler):
                     if new_blocks is not None:
                         break
 
+                    if self._disable_preemption:
+                        break
+
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,

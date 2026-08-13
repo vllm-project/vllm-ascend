@@ -83,6 +83,23 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+#   2. Disable automatic scheduler preemption on vLLM 0.23.0 PD-disaggregated
+#      prefill nodes.
+#    Why:
+#       Async scheduling can finish the one-token prefill request while memory
+#       pressure preempts it, releasing delayed KV blocks before their block IDs
+#       are sent to the decode node.
+#    How:
+#       When a pure KV producer cannot allocate slots, the default, async, and
+#       profiling-chunk schedulers stop the current step without preempting a
+#       running request; forced prefix-cache reset is rejected until requests
+#       drain.
+#    Related PR (if no, explain why):
+#       No, this is a temporary vLLM 0.23.0 compatibility fix.
+#    Future Plan:
+#       Remove this patch after the upstream scheduler and KV connector handle
+#       async prefill completion and delayed block release atomically.
+#
 # ** 6. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
