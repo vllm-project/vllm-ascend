@@ -1,8 +1,17 @@
-rank1]:[W813 20:34:33.628640959 CopyKernelOpApi.cpp:58] Warning: EZ9999: Inner Error!
-EZ9999[PID: 79714] 2026-08-13-20:34:33.458.468 (EZ9999):  The error from device(chipId:1, dieId:0), serial number is 1, there is an exception of fftsplus aicore error, core id is 0, error code = 0, dump info: pc start: 0x12c09d894f34, current: 0x12c09d898380, vec error info: 0, mte error info: 0x39030000c8, ifu error info: 0x1000000000000, ccu error info: 0xde3ed28900000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c140082080, aic cond: 0.
-The extend info: errcode:(0, 0x8000, 0) errorStr: The scalar instruction accesses an invalid GM address or the cross-device memory access times out. fixp_error0 info: 0x30000c8, fixp_error1 info: 0x39, fsmId:0, tslot:3, thread:0, ctxid:0, blk:15, sublk:0, subErrType:4.
-For details, see the troubleshooting document on the Ascend official website. Search for the keyword "AI Core Error".[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:1117]
-TraceBack (most recent call last):
-       An error occurred in the kernel task, retCode=0x26, [aicore exception].[FUNC:PreCheckTaskErr][FILE:davinci_kernel_task.cc][LINE:1262]
-       rtStreamSynchronize execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
- (function copy_between_host_and_device_opapi)
+python tests/standalone/fa3/test_fa3_corrupts_cann.py 
+[W813 22:05:07.293807085 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[import] FA3 loaded from flash_attn_npu_3
+========================================================================
+prefill_seqlen=8192  decode_kv_seqlen=8192  n_replays=3
+========================================================================
+[W813 22:05:13.526332508 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[0] prefill self-consistency max_abs_diff = 0.000000 (should be ~0)
+[1] baseline prefill captured (shape=(8192, 32, 128))
+[2] after FA3 EAGER        : prefill diff = 0.000000 (should be ~0)
+[3] after FA3 CAPTURE      : prefill diff = 0.000000
+[4] after FA3 REPLAY x3  : prefill diff = 0.000000 (mean 0.000000)
+------------------------------------------------------------------------
+VERDICT: NOT reproduced.
+  Try a larger PREILL_SEQLEN / DECODE_KV_SEQLEN so the kernels
+  actually split KV across cores (and thus use FFTS).
+------------------------------------------------------------------------
