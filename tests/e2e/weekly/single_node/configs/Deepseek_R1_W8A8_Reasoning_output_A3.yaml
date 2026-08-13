@@ -18,9 +18,9 @@ _server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
   - "--data-parallel-size"
-  - "4"
+  - "8"
   - "--data-parallel-size-local"
-  - "4"
+  - "8"
   - "--tensor-parallel-size"
   - "2"
   - "--seed"
@@ -29,13 +29,11 @@ _server_cmd: &server_cmd
   - "--max-num-seqs"
   - "32"
   - "--max-num-batched-tokens"
-  - "4096"
+  - "6000"
   - "--max-num-seqs"
-  - "6000"
-  - "--max-num-batched-tokens"
-  - "6000"
+  - "32"
   - "--trust-remote-code"
-  - "enforce-eager"
+  - "--enforce-eager"
   - "--gpu-memory-utilization"
   - "0.92"
   - "--quantization"
@@ -45,7 +43,6 @@ _server_cmd: &server_cmd
   - "deepseek_r1"
   - "--additional-config"
   - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false}}'
-
 
 _benchmarks: &benchmarks
   acc:
@@ -65,9 +62,10 @@ _benchmarks: &benchmarks
 
 test_cases:
   - name: "Deepseek_R1_W8A8_reasoning_output_012"
-    model: "vllm-ascend/DeepSeek-R1-W8A8_vllm"
+    model: "vllm-ascend/DeepSeek-R1-W8A8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
     benchmarks:
       <<: *benchmarks
+

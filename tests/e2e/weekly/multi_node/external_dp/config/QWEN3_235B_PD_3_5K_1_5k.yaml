@@ -38,6 +38,7 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_RPC_TIMEOUT: "3600000"
@@ -53,7 +54,6 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V1: "1"
-  ASCEND_BUFFER_POOL: "4:8"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
   ASCEND_A3_ENABLE: "1"
   ACL_OP_INIT_MODE: "1"
@@ -195,7 +195,7 @@ templates:
 benchmarks:
   perf_1:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800-qwen3
+    dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 760
@@ -204,4 +204,3 @@ benchmarks:
     request_rate: 0
     baseline: 3583.8747
     threshold: 0.97
-

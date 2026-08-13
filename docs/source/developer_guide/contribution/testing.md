@@ -28,7 +28,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
-    # For torch-npu dev version or x86 machine
+    # For TorchNPU dev version or x86 machine
     export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
     # src path

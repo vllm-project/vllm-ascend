@@ -85,8 +85,6 @@ templates:
       - --no-disable-hybrid-kv-cache-manager
       - --model-loader-extra-config
       - '{"enable_multithread_load": true, "num_threads": 128}'
-      - --safetensors-load-strategy
-      - "prefetch"
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
       - --trust-remote-code
@@ -141,8 +139,6 @@ templates:
       - "32"
       - --no-enable-prefix-caching
       - --no-disable-hybrid-kv-cache-manager
-      - --safetensors-load-strategy
-      - "prefetch"
       - --model-loader-extra-config
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
@@ -167,18 +163,6 @@ templates:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
 benchmarks:
-  acc_aime2025:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 65536
-    temperature: 1.0
-    top_p: 1.0
-    thinking: "true"
-    batch_size: 32
-    baseline: 90
-    threshold: 10
   perf_TPOT50_3_5_1_5:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
@@ -195,6 +179,20 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 400
+    max_out_len: 1500
+    batch_size: 100
+    request_rate: 12
+    baseline: 4071.471
+    threshold: 0.95
+  perf_TPOT20_3_5_1_5_top_k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    temperature: 0.6
+    top_k: -1
+    top_p: 0.95
     num_prompts: 400
     max_out_len: 1500
     batch_size: 100

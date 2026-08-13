@@ -51,9 +51,10 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, set_potential_max_tokens
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 from vllm_ascend.worker.v2.sp_utils import (
@@ -119,10 +120,14 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        # FusedMoE can be constructed by the parent initializer and reads this
+        # capacity while setting up MC2 communication.
+        set_potential_max_tokens(vllm_config)
         # The following features are not yet supported in Ascend NPU model runner v2:
-        # - Dynamic EPLB
-        if self.ascend_config.eplb_config.dynamic_eplb:
-            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
+        # - Context parallelism (prefill or decode)
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -132,6 +137,16 @@ class NPUModelRunner(GPUModelRunner):
             and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.model_config.enforce_eager
         )
+        load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
+        self.eplb = AscendEPLBController(
+            parallel_config,
+            device,
+            load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
+        )
+
+        self.update_stream = None
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
 
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
@@ -145,6 +160,9 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
+            # Shared update_stream: main model (ModelAclGraphManager) and draft
+            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
+            self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -185,6 +203,7 @@ class NPUModelRunner(GPUModelRunner):
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
+        set_potential_max_tokens(vllm_config)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -259,7 +278,7 @@ class NPUModelRunner(GPUModelRunner):
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
-                self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
+                self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
     def prepare_inputs(
@@ -364,9 +383,11 @@ class NPUModelRunner(GPUModelRunner):
         prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
         num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        batch_has_prefill = bool(np.any(is_prefilling_np))
+        self.eplb.set_batch_phase(batch_has_prefill)
 
         # Get prefill tokens if any.
-        if np.any(is_prefilling_np):
+        if batch_has_prefill:
             prepare_prefill_inputs(
                 self.input_buffers.input_ids,
                 self.req_states.next_prefill_tokens,
@@ -490,7 +511,10 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        self._copy_num_computed_tokens_to_cpu()
+        # Skip D2H copy without MTP: num_computed_tokens_cpu is synced
+        # from num_computed_tokens_np in _update_seq_lens_cpu instead.
+        if self.speculator is not None:
+            self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
@@ -512,24 +536,24 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        # wait for num_computed_tokens copy to cpu stream to finish.
-        self.num_computed_tokens_event.synchronize()
-        for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-            req_index = self.req_states.req_id_to_index[req_id]
-            # num_computed_tokens_cpu has reverted by num_rejected_tokens already.
-            # in super postprocess method.
-            self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+
+        # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
+        # Without MTP, num_computed_tokens_np is already correct from update_requests.
+        if self.speculator is not None:
+            self.num_computed_tokens_event.synchronize()
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+        else:
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.req_states.num_computed_tokens_np[req_index]
 
         # update seq_lens_cpu
         for i, req_id in enumerate(req_ids):  # type: ignore
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
             self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
-
-    def eplb_warmup(self):
-        # TODO(Ronald1995): just define the method in case calling error in
-        # worker, implement it in the future.
-        pass
 
     def _pad_query_start_loc_for_fia(
         self,

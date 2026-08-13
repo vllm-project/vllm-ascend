@@ -81,7 +81,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
   
 ### 4.1 Docker镜像安装
 
-**示例：（适用于 v0.24.0rc 及更高版本（MkDocs 语法），如维护 v0.23.0 及更早版本（Sphinx 框架），请参考 [Sphinx 官方文档](https://www.sphinx-doc.org/) 了解更多语法细节。）**
+**示例：（关于 MkDocs + Material 标签语法（`=== "label"`）和 Sphinx + MyST-Parser 标签语法（`::::{tab-item}`），请参阅[语法补充](template-supplement.md#3-tabs)。**
 
 === "A3 series"
 
@@ -111,7 +111,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 - 提供启动命令模板和关键参数说明
 - 提供服务验证方法（如 curl 命令）及预期结果，说明成功特征（如 200 OK）。
 - 在启动命令下方提供常见问题指引，如公共FAQ中已有描述可直接链接呈现。
-- 当涉及多硬件系列（如 A3/A2 系列）时，须使用标签页语法将它们分开展示，并按新机型优先的顺序排列。
+- 当涉及多硬件系列（如 A3/A2 系列）时，须使用标签页语法将它们分开展示，并按新机型优先的顺序排列；关于 MkDocs 与 Sphinx 框架在标签页语法上的具体差异，请参阅 [语法补充](template-supplement.md#3-tabs)。
 
 **示例：**
 

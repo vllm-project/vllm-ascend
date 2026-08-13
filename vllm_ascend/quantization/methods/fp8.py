@@ -21,7 +21,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 
-from .base import QuantType
+from .base import QuantType, TPWeightGatherSpec
 from .registry import register_scheme
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
@@ -35,6 +35,15 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """
 
     model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self, quant_config):
         super().__init__()
@@ -58,8 +67,11 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         return params_dict
 
     def process_weights_after_loading(self, layer):
-        layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
-        layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
+        if layer.weight_scale.data.dtype == torch.float8_e8m0fnu:
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.uint8)
+        else:
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
+            layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
         layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(4, dim=1).repeat_interleave(128, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)

@@ -10,7 +10,7 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 
 def _is_device_sdma() -> bool:
@@ -165,7 +165,11 @@ class MemcacheBackend(Backend):
 
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         assert self.store is not None
-        return self.store.batch_write_finish(keys, results)
+        finish = getattr(self.store, "batch_write_finish", None)
+        if finish is None:
+            # Older MemCache releases publish writes directly in batch_copy.
+            return [0] * len(keys)
+        return finish(keys, results)
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:

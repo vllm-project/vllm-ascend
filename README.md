@@ -63,8 +63,8 @@ For detailed information on supported models and features, please refer to the [
 - OS: Linux
 - Software:
     - Python >= 3.10, < 3.13
-    - CANN == 9.0.1 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
-    - PyTorch == 2.10.0, torch-npu == 2.10.0.post2
+    - CANN == 9.1.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md))
+    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post4
     - vLLM (the same version as vllm-ascend)
 
 ## Accessing Ascend NPU
@@ -91,7 +91,7 @@ Below are the maintained branches:
 
 | Branch           | Status       | Note                                 |
 |------------------|--------------|--------------------------------------|
-| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.26.0 tag |
+| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.27.1 tag |
 | releases/v0.13.0 | Maintained   | Only bug fixes are allowed, and no new release tags anymore. |
 | releases/v0.18.0 | Maintained   | CI commitment for vLLM 0.18.0 version |
 | releases/v0.23.0 | Maintained   | CI commitment for vLLM 0.23.0 version |

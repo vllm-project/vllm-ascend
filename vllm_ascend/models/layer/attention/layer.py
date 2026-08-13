@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
-import vllm.envs as envs
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention.attention import _init_kv_cache_quant
@@ -20,7 +19,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import (
@@ -119,7 +117,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         ):
             cache_config.enable_prefix_caching = False
 
-        impl_cls = cast(type[DSAAttentionImpl], self.attn_backend.get_impl_cls())
+        impl_cls = cast(type[Any], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
             dim=self.dim,
             n_heads=self.n_heads,
@@ -151,11 +149,6 @@ class DSAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = True
 
-        # Initialize q/k/v range constants.
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-
     def forward(
         self,
         q: torch.Tensor,
@@ -183,8 +176,9 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         cached_head_size = (
             (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
         )
+        block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
+            block_size=block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=kv_cache_dtype,

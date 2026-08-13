@@ -18,13 +18,11 @@ import unittest
 
 import torch
 
-import vllm_ascend.ops.fused_moe.moe_runtime_args as runtime_args
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoETokenDispatchOutput,
-    MoEWeights,
-    build_fused_experts_input,
-    build_mlp_compute_input,
     build_token_dispatch_input,
 )
 from vllm_ascend.quantization.quant_type import QuantType
@@ -43,30 +41,6 @@ def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
 
 
 class TestMoERuntimeArgs(unittest.TestCase):
-    def test_runtime_args_facade_exports_public_contracts_and_builders(self):
-        expected_symbols = [
-            "MoEAllGatherCombineMetadata",
-            "MoEAllToAllCombineMetadata",
-            "MoEFusedExpertsInput",
-            "MoEMC2CombineMetadata",
-            "MoEMlpComputeInput",
-            "MoEPrepareOutput",
-            "MoEQuantParams",
-            "MoERoutingParams",
-            "MoETokenDispatchInput",
-            "MoETokenDispatchOutput",
-            "MoEWeights",
-            "TMoECombineMetadata",
-            "build_fused_experts_input",
-            "build_mlp_compute_input",
-            "build_token_dispatch_input",
-        ]
-
-        for symbol in expected_symbols:
-            with self.subTest(symbol=symbol):
-                self.assertTrue(hasattr(runtime_args, symbol))
-        self.assertFalse(hasattr(runtime_args, "MoEMxfpParams"))
-
     def test_build_fused_experts_input_preserves_runtime_semantics(self):
         for quant_type in (
             QuantType.NONE,
@@ -93,7 +67,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     global_redundant_expert_num=2,
                     mc2_mask=torch.tensor([True, False, True, False]),
                     apply_router_weight_on_input=True,
-                    log2phy=torch.tensor([3, 2, 1, 0], dtype=torch.int32),
                     pertoken_scale=torch.randn(4),
                     activation="gelu",
                     mxfp_act_quant_type=_get_test_mxfp_dtype(quant_type),
@@ -154,18 +127,15 @@ class TestMoERuntimeArgs(unittest.TestCase):
             quant_type=QuantType.NONE,
             dynamic_eplb=False,
         )
-        routed_topk_ids = torch.tensor([[3], [2]], dtype=torch.int32)
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
-            topk_ids=routed_topk_ids,
         )
 
         self.assertIs(token_dispatch_input.hidden_states, fused_experts_input.hidden_states)
         self.assertIs(token_dispatch_input.topk_weights, fused_experts_input.topk_weights)
         self.assertIs(token_dispatch_input.routing, fused_experts_input.routing)
         self.assertIs(token_dispatch_input.quant, fused_experts_input.quant)
-        self.assertIs(token_dispatch_input.topk_ids, routed_topk_ids)
 
     def test_build_fused_experts_input_requires_primitive_mxfp_params_for_mxfp_quant(self):
         for quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP):

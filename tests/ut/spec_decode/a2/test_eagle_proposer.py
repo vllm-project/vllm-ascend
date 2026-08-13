@@ -1090,6 +1090,16 @@ class TestEagleProposerPropose:
         set_current_vllm_config(None)
         clear_ascend_config()
 
+    def test_slot_mapping_group_reserves_mtp_draft_slots(self):
+        self.vllm_config.speculative_config.num_speculative_tokens = 5
+        self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(6)])
+
+        proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+
+        expected_capacity = self.runner.max_num_tokens + 4 * self.runner.max_num_reqs
+        assert len(proposer.slot_mapping_group) == 5
+        assert all(slot_mapping.shape == torch.Size([expected_capacity]) for slot_mapping in proposer.slot_mapping_group)
+
     # config: prefill and decode, Qwen3-8B, tp1, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
     @pytest.mark.parametrize(
         'flag_prefill_decode, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,' \
@@ -1337,7 +1347,8 @@ class TestEagleProposerPropose:
             patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
             set_current_vllm_config(self.vllm_config),
         ):
-            self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
+            self.proposer._propose(self.proposer.num_speculative_tokens,
+                                target_token_ids, target_positions, target_hidden_states, next_token_ids,
                                 token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
                                 mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
@@ -1639,7 +1650,8 @@ class TestEagleProposerPropose:
         assert 'self.kernel_block_size' in src
         sig = inspect.signature(RunnerCls._propose)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'target_token_ids', 'target_positions', 'target_hidden_states', 'next_token_ids',
+        assert sig_name == ['self', 'num_speculative_tokens', 'target_token_ids', 'target_positions',
+                            'target_hidden_states', 'next_token_ids',
                             'token_indices_to_sample', 'common_attn_metadata', 'target_model_batch_desc',
                             'sampling_metadata', 'mm_embed_inputs', 'req_scheduled_tokens', 'long_seq_metadata',
                             'num_prefill_reqs', 'num_decode_reqs', 'scheduler_output', 'num_scheduled_tokens',
