@@ -53,14 +53,10 @@ def _prepare_pcp_inputs_to_capture(
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
     """Build graph inputs with the same PCP-local layout used on replay."""
-    input_batch = cudagraph_utils.InputBatch.make_dummy(
-        num_reqs, num_tokens, input_buffers
-    )
+    input_batch = cudagraph_utils.InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_batch = pcp_manager.partition_batch(input_batch)
     input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
-    slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(
-        slot_mappings, kv_cache_config
-    )
+    slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
     if block_tables.cp_size > 1:
         cudagraph_utils.prepare_dcp_local_seq_lens(
@@ -71,9 +67,7 @@ def _prepare_pcp_inputs_to_capture(
             block_tables.cp_rank,
             block_tables.cp_interleave,
         )
-        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[
-            :input_batch.num_reqs
-        ]
+        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[: input_batch.num_reqs]
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
@@ -109,10 +103,7 @@ def _get_graph_update_backend(
             backend = group.backend
             if backend.get_impl_cls() is not None:
                 return backend
-    raise RuntimeError(
-        "No executable attention backend is available for "
-        "full-graph parameter updates."
-    )
+    raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
@@ -209,8 +200,14 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             pcp_manager = getattr(self.model_runner, "pcp_manager", None)
             if pcp_manager is None:
                 return super().capture(
-                    model, model_state, input_buffers, intermediate_tensors,
-                    block_tables, attn_groups, kv_cache_config, has_lora=has_lora,
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    has_lora=has_lora,
                     use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
@@ -229,16 +226,28 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 full_cudagraph: bool,
             ) -> cudagraph_utils.AttentionState:
                 return _prepare_pcp_inputs_to_capture(
-                    num_reqs, num_tokens, model_state, input_buffers,
-                    block_tables, attn_groups, kv_cache_config, full_cudagraph,
+                    num_reqs,
+                    num_tokens,
+                    model_state,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    full_cudagraph,
                     pcp_manager,
                 )
 
             cudagraph_utils.prepare_inputs_to_capture = prepare_inputs_to_capture
             try:
                 return super().capture(
-                    model, model_state, input_buffers, intermediate_tensors,
-                    block_tables, attn_groups, kv_cache_config, has_lora=has_lora,
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    has_lora=has_lora,
                     use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
