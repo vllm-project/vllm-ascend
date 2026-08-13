@@ -12,6 +12,7 @@ import torch
 
 from tests.ut.sample.custom_op_utils import require_categorical_sampling_operator
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.sample import gumbel as gumbel_module
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 
 DEVICE = "npu"
@@ -39,6 +40,23 @@ def _ref_apply_temperature(
 
 
 class TestGumbelSampling:
+    def test_gumbel_sample_falls_back_when_categorical_op_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(gumbel_module, "enable_categorical_sample_op", lambda: False)
+
+        vocab_size = 2048
+        logits = torch.arange(vocab_size, dtype=torch.float32, device=DEVICE).view(1, -1)
+        sampled = gumbel_sample(
+            logits,
+            torch.tensor([0], dtype=torch.int32, device=DEVICE),
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            torch.tensor([17], dtype=torch.int64, device=DEVICE),
+            torch.tensor([3], dtype=torch.int64, device=DEVICE),
+            apply_temperature=False,
+        )
+        torch.npu.synchronize()
+
+        assert sampled.item() == vocab_size - 1
+
     @pytest.mark.parametrize(
         "num_tokens,vocab_size",
         [
