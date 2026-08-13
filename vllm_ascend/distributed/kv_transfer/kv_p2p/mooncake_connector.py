@@ -798,16 +798,15 @@ class KVCacheRecvingThread(threading.Thread):
                 local_block_ids_replicate_k[0],
             )
 
-        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
+        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int, group_spec: dict[str, Any]) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
             if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index += self.num_draft_layers
+            is_index_cache_plane = any(".index_cache" in name for name in group_spec.get("layer_names", []))
 
             def in_partition(metadata_layer_idx: int) -> bool:
                 transformer_layer = (
-                    metadata_layer_idx - self.index_cache_plane_base
-                    if metadata_layer_idx >= self.index_cache_plane_base
-                    else metadata_layer_idx
+                    metadata_layer_idx - self.index_cache_plane_base if is_index_cache_plane else metadata_layer_idx
                 )
                 return first_layer_index <= transformer_layer < end_layer_index
 
@@ -839,7 +838,7 @@ class KVCacheRecvingThread(threading.Thread):
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
             kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
             raw_layer_indices = layer_indices
-            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
+            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank, group_spec)
 
             if not layer_indices:
                 continue

@@ -34,6 +34,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
         mock_vllm_config.parallel_config.context_parallel_size = 1
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.use_v2_model_runner = False
         mock_vllm_config.parallel_config.enable_eplb = False
         mock_vllm_config.parallel_config.eplb_config = MagicMock(use_async=False, communicator=None)
@@ -66,6 +67,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
         mock_ascend_config.scheduler_config.profiling_chunk_config.enabled = False
+        mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
 
@@ -162,6 +164,44 @@ class TestNPUPlatform(TestBase):
             _validate_eplb_config(vllm_config)
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
+
+    def test_get_recompute_scheduler_cls(self):
+        from vllm_ascend import platform
+
+        cases = (
+            (
+                False,
+                False,
+                "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
+            ),
+            (
+                True,
+                False,
+                "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler",
+            ),
+            (
+                False,
+                True,
+                "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler",
+            ),
+            (
+                True,
+                True,
+                "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler",
+            ),
+        )
+        for async_scheduling, dyntra_lb_enabled, expected_scheduler_cls in cases:
+            with self.subTest(
+                async_scheduling=async_scheduling,
+                dyntra_lb_enabled=dyntra_lb_enabled,
+            ):
+                self.assertEqual(
+                    platform._get_recompute_scheduler_cls(
+                        async_scheduling=async_scheduling,
+                        dyntra_lb_enabled=dyntra_lb_enabled,
+                    ),
+                    expected_scheduler_cls,
+                )
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
@@ -745,6 +785,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
         vllm_config.cache_config.block_size = 1
         vllm_config.scheduler_config = MagicMock()
+        vllm_config.scheduler_config.async_scheduling = False
 
         from vllm_ascend import platform
 
@@ -759,6 +800,68 @@ class TestNPUPlatform(TestBase):
 
         mock_init_recompute.assert_called_once_with(vllm_config)
         self.assertIs(vllm_config.scheduler_config, recompute_scheduler_config)
+        self.assertEqual(
+            recompute_scheduler_config.scheduler_cls,
+            "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
+        )
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_selects_dyntra_lb_recompute_scheduler(
+        self,
+        mock_init_recompute,
+        mock_init_ascend,
+        mock_soc_version,
+        mock_auto_detect,
+    ):
+        cases = (
+            (
+                False,
+                "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler",
+            ),
+            (
+                True,
+                "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler",
+            ),
+        )
+        for async_scheduling, expected_scheduler_cls in cases:
+            with self.subTest(async_scheduling=async_scheduling):
+                mock_init_recompute.reset_mock()
+                mock_init_ascend.reset_mock()
+
+                mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+                mock_ascend_config.scheduler_config.recompute_scheduler_enable = True
+                mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = True
+                mock_init_ascend.return_value = mock_ascend_config
+
+                recompute_scheduler_config = MagicMock()
+                mock_init_recompute.return_value = recompute_scheduler_config
+
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.scheduler_config.async_scheduling = async_scheduling
+                vllm_config.kv_transfer_config = MagicMock(kv_role="kv_consumer", engine_id="engine0")
+                vllm_config.parallel_config.data_parallel_size = 2
+                vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+                vllm_config.cache_config.block_size = 1
+
+                from vllm_ascend import platform
+
+                importlib.reload(platform)
+                self.platform = platform.NPUPlatform()
+
+                with (
+                    patch.object(platform, "_fix_incompatible_config"),
+                    patch.object(platform, "check_kv_extra_config"),
+                ):
+                    self.platform.check_and_update_config(vllm_config)
+
+                mock_init_recompute.assert_called_once_with(vllm_config)
+                self.assertIs(vllm_config.scheduler_config, recompute_scheduler_config)
+                self.assertEqual(recompute_scheduler_config.scheduler_cls, expected_scheduler_cls)
+                self.assertTrue(mock_ascend_config.scheduler_config.recompute_scheduler_enable)
+                self.assertTrue(mock_ascend_config.scheduler_config.dyntra_lb_config.enabled)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -913,6 +1016,135 @@ class TestNPUPlatform(TestBase):
             from vllm_ascend import platform
 
             platform._validate_kv_load_failure_policy(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_selects_dyntra_lb_scheduler(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = True
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(kv_role="kv_consumer", engine_id="engine0")
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config.scheduler_config = MagicMock()
+        vllm_config.scheduler_config.async_scheduling = False
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+            patch("vllm_ascend.logger.configure_ascend_file_logging"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.scheduler_config.scheduler_cls,
+            "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler",
+        )
+
+    def test_get_dyntra_lb_scheduler_cls(self):
+        from vllm_ascend import platform
+
+        cases = (
+            (
+                False,
+                "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler",
+            ),
+            (
+                True,
+                "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler",
+            ),
+        )
+        for async_scheduling, expected_scheduler_cls in cases:
+            with self.subTest(async_scheduling=async_scheduling):
+                self.assertEqual(
+                    platform._get_dyntra_lb_scheduler_cls(async_scheduling=async_scheduling),
+                    expected_scheduler_cls,
+                )
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_rejects_dyntra_lb_outside_disaggregated_d_node(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        for kv_role in (None, "kv_both", "kv_producer"):
+            with self.subTest(kv_role=kv_role):
+                mock_init_ascend.reset_mock()
+
+                mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+                mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = True
+                mock_init_ascend.return_value = mock_ascend_config
+
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.kv_transfer_config = (
+                    None if kv_role is None else MagicMock(kv_role=kv_role, engine_id="engine0")
+                )
+                vllm_config.parallel_config.data_parallel_size = 2
+                vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+                vllm_config.cache_config.block_size = 1
+                vllm_config.scheduler_config = MagicMock()
+
+                from vllm_ascend import platform
+
+                importlib.reload(platform)
+                self.platform = platform.NPUPlatform()
+
+                with (
+                    pytest.raises(
+                        ValueError,
+                        match=r"DyntraLB is only supported on PD-disaggregated D nodes",
+                    ),
+                    patch.object(platform, "_fix_incompatible_config"),
+                    patch.object(platform, "check_kv_extra_config"),
+                ):
+                    self.platform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_rejects_multinode_dyntra_lb_decoder(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = True
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(kv_role="kv_consumer", engine_id="engine0")
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.nnodes_within_dp = 2
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config.scheduler_config = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            pytest.raises(
+                ValueError,
+                match=r"DyntraLB only supports decoder instances.*single node",
+            ),
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
