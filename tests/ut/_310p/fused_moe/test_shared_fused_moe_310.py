@@ -15,7 +15,7 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
 )
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
 
 
 def _build_runner() -> AscendMoERunner310:
@@ -229,15 +229,15 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
     ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
-    routed_result = SimpleNamespace(
-        routed_out=routed_out,
-        before_dispatch_evt=None,
-        before_gmm2_evt=None,
-        before_combine_evt=None,
-        swiglu_limit=0.0,
+    routed_events = FusedMoEEvents(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
     )
     runner.routed_experts = SimpleNamespace(
-        forward_impl=MagicMock(return_value=routed_result if has_shared_experts else routed_out)
+        forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
     )
     runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
@@ -252,6 +252,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            input_ids=None,
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
@@ -260,6 +261,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            input_ids=None,
         )
         assert result is routed_out
         ascend_shared_experts.forward.assert_not_called()

@@ -46,6 +46,9 @@ class AscendConfig:
         finegrained_tp_config = additional_config.get("finegrained_tp_config", {})
         self.finegrained_tp_config = FinegrainedTPConfig(finegrained_tp_config, vllm_config)
 
+        dynamic_spec_config = additional_config.get("dynamic_spec_config", {})
+        self.dynamic_spec_config = DynamicSpecConfig(dynamic_spec_config)
+
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
@@ -460,6 +463,45 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+
+class DynamicSpecConfig:
+    """
+    Configuration Object for dynamic_spec_config from additional_config
+    """
+
+    # Dynamic speculative-length methods. "dspark" relies on the DSpark
+    # confidence head; models without such a head need another method.
+    SUPPORTED_METHODS = (
+        "dspark",
+        "dflash",
+    )
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+
+        # None disables the dynamic speculative-length path.
+        self.method: str | None = config.get("method")
+        # Custom parameters of the selected dynamic method; the expected keys
+        # depend on `method` (e.g. dspark accepts
+        # initial_verify_budget_per_req, budget_update_interval and
+        # budget_threshold). Empty by default, in which case each method
+        # falls back to its own built-in defaults.
+        self.method_params: dict = config.get("method_params", {})
+        self._validate()
+
+    def _validate(self) -> None:
+        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
+            raise ValueError(
+                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
+            )
+        if not isinstance(self.method_params, dict):
+            raise TypeError(
+                "dynamic_spec_config.method_params must be a dict, "
+                f"got {type(self.method_params).__name__}: "
+                f"{self.method_params}"
+            )
 
 
 class FinegrainedTPConfig:
@@ -906,6 +948,87 @@ class ShortRequestFirstConfig:
             raise ValueError(f"short_request_first_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
 
 
+class DyntraLBConfig:
+    """Configuration object for ``additional_config["scheduler_config"]["dyntra_lb_config"]``."""
+
+    _defaults = {
+        "enabled": False,
+        "enable_diagnostics": False,
+        "mode": "dynamic",
+        "start_step": 250,
+        "end_step": -1,
+        "bubble_threshold": 5.0,
+        "long_req_block_threshold": 700,
+        "dynamic_max_step": 256,
+    }
+    _valid_modes = {"static", "dynamic"}
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        elif not isinstance(user_config, dict):
+            raise ValueError(f"dyntra_lb_config must be a dict, got {type(user_config).__name__}.")
+
+        unknown = set(user_config) - set(self._defaults)
+        if unknown:
+            raise ValueError(f"Unknown dyntra_lb_config keys: {sorted(unknown)}")
+
+        self.enabled = user_config.get("enabled", self._defaults["enabled"])
+        self.enable_diagnostics = user_config.get(
+            "enable_diagnostics",
+            self._defaults["enable_diagnostics"],
+        )
+        self.mode = user_config.get("mode", self._defaults["mode"])
+        self.start_step = user_config.get("start_step", self._defaults["start_step"])
+        self.end_step = user_config.get("end_step", self._defaults["end_step"])
+        self.bubble_threshold = user_config.get("bubble_threshold", self._defaults["bubble_threshold"])
+        self.long_req_block_threshold = user_config.get(
+            "long_req_block_threshold",
+            self._defaults["long_req_block_threshold"],
+        )
+        self.dynamic_max_step = user_config.get("dynamic_max_step", self._defaults["dynamic_max_step"])
+        self._validate_config()
+
+    def _validate_config(self):
+        if not isinstance(self.enabled, bool):
+            raise ValueError(f"dyntra_lb_config.enabled must be a bool, got {type(self.enabled).__name__}.")
+        if not isinstance(self.enable_diagnostics, bool):
+            raise ValueError(
+                f"dyntra_lb_config.enable_diagnostics must be a bool, got {type(self.enable_diagnostics).__name__}."
+            )
+        if not isinstance(self.mode, str) or self.mode not in self._valid_modes:
+            raise ValueError(f"dyntra_lb_config.mode must be one of {sorted(self._valid_modes)}, got {self.mode!r}.")
+
+        for key in ("start_step", "end_step", "long_req_block_threshold", "dynamic_max_step"):
+            value = getattr(self, key)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"dyntra_lb_config.{key} must be an int, got {type(value).__name__}.")
+
+        if not isinstance(self.bubble_threshold, (int, float)) or isinstance(self.bubble_threshold, bool):
+            raise ValueError(
+                f"dyntra_lb_config.bubble_threshold must be a number, got {type(self.bubble_threshold).__name__}."
+            )
+        self.bubble_threshold = float(self.bubble_threshold)
+
+        if self.start_step < 0:
+            raise ValueError(f"dyntra_lb_config.start_step must be >= 0, got {self.start_step}.")
+        if self.end_step < -1:
+            raise ValueError(f"dyntra_lb_config.end_step must be -1 or >= 0, got {self.end_step}.")
+        if self.end_step != -1 and self.end_step <= self.start_step:
+            raise ValueError(
+                "dyntra_lb_config.end_step must be greater than start_step when it is set, "
+                f"got start_step={self.start_step}, end_step={self.end_step}."
+            )
+        if self.bubble_threshold <= 0:
+            raise ValueError(f"dyntra_lb_config.bubble_threshold must be > 0, got {self.bubble_threshold}.")
+        if self.long_req_block_threshold <= 0:
+            raise ValueError(
+                f"dyntra_lb_config.long_req_block_threshold must be > 0, got {self.long_req_block_threshold}."
+            )
+        if self.dynamic_max_step <= 0:
+            raise ValueError(f"dyntra_lb_config.dynamic_max_step must be > 0, got {self.dynamic_max_step}.")
+
+
 class SchedulerConfig:
     """Configuration object for ``additional_config[\"scheduler_config\"]``."""
 
@@ -939,6 +1062,7 @@ class SchedulerConfig:
         self.batch_job_sched_config = BatchJobSchedConfig(
             self._get_config_value(scheduler_config, additional_config, "batch_job_sched_config", {})
         )
+        self.dyntra_lb_config = DyntraLBConfig(scheduler_config.get("dyntra_lb_config"))
 
     @staticmethod
     def _get_config_value(

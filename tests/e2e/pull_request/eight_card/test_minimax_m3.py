@@ -27,7 +27,7 @@ import regex as re
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
-MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8")
+MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8-0626")
 GSM8K_QUESTION = "Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
 GSM8K_ANSWER = "71"
 MAX_TOKENS = 512

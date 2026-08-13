@@ -22,6 +22,7 @@ from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     get_vllm_version,
     write_results_json,
 )
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,6 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
         "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
-        "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "context_parallel",
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
     }
     for env_key, feature_name in feature_envs.items():
@@ -233,4 +233,10 @@ def write_benchmark_results_json(
 ) -> Path:
     output = build_benchmark_results(config=config, ranks=ranks, commands=commands, results=results)
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "") or config.test_name.replace(" ", "-")
-    return write_results_json(output, job_name=job_name, output_dir=output_dir)
+    path = write_results_json(output, job_name=job_name, output_dir=output_dir)
+    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
+    postprocess_benchmark_results(
+        [(key, case, result) for (key, case), result in zip(valid_items, results)],
+        job_name=job_name,
+    )
+    return path

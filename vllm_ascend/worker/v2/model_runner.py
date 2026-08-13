@@ -51,7 +51,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, set_potential_max_tokens
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -120,6 +120,9 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        # FusedMoE can be constructed by the parent initializer and reads this
+        # capacity while setting up MC2 communication.
+        set_potential_max_tokens(vllm_config)
         # The following features are not yet supported in Ascend NPU model runner v2:
         # - Context parallelism (prefill or decode)
         parallel_config = vllm_config.parallel_config
@@ -141,6 +144,10 @@ class NPUModelRunner(GPUModelRunner):
             load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
         )
 
+        self.update_stream = None
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.req_states
@@ -153,6 +160,9 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
+            # Shared update_stream: main model (ModelAclGraphManager) and draft
+            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
+            self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -193,6 +203,7 @@ class NPUModelRunner(GPUModelRunner):
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
+        set_potential_max_tokens(vllm_config)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
