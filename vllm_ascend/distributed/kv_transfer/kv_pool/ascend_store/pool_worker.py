@@ -332,7 +332,7 @@ class KVPoolWorker:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
         self._transfer_threads_started = False
-        self.layerwise_reuse_waiter: Callable[[int], None] | None = None
+        self.external_slot_release_waiter: Callable[[int], None] | None = None
         # Per-rank GVA cache: maps per-rank store key to its allocated GVA.
         # batch_alloc is non-idempotent (returns MMC_DUPLICATED_OBJECT for an
         # existing key without registering the blob), so the worker must track
@@ -454,8 +454,8 @@ class KVPoolWorker:
             )
         return builders
 
-    def set_layerwise_reuse_waiter(self, waiter: Callable[[int], None]) -> None:
-        self.layerwise_reuse_waiter = waiter
+    def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> None:
+        self.external_slot_release_waiter = waiter
 
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
@@ -529,7 +529,7 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
                     group_builders=self._build_group_layer_builders(),
-                    layerwise_reuse_waiter=self.layerwise_reuse_waiter,
+                    external_slot_release_waiter=self.external_slot_release_waiter,
                     save_failure_checker=(
                         self.kv_send_thread.raise_if_failed if self.kv_send_thread is not None else None
                     ),
@@ -1717,8 +1717,8 @@ class KVPoolWorker:
         should_wait = bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
         if not should_wait:
             self.layer_load_finished_events[self.current_layer].clear()
-            if self.layerwise_reuse_waiter is not None:
-                self.layerwise_reuse_waiter(self.current_layer)
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(self.current_layer)
             return
         while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
             self.kv_recv_thread.raise_if_failed()

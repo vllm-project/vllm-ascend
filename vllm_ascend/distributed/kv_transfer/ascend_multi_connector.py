@@ -29,7 +29,8 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._configure_layerwise_reuse_completion()
 
     def _configure_layerwise_reuse_completion(self) -> None:
-        self._layerwise_reuse_providers = [
+        # Producers that report when a shared physical KV slot is safe to reuse.
+        self._layerwise_slot_release_providers = [
             connector
             for connector in self._connectors
             if getattr(connector, "is_producer", False)
@@ -37,32 +38,33 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             and getattr(connector, "supports_layerwise_buffer_reuse", False)
             and callable(getattr(connector, "wait_for_layer_reuse", None))
         ]
-        self._layerwise_reuse_other_connectors = [
+        # All remaining connectors, which run after the slot-release providers.
+        self._non_slot_release_connectors = [
             connector
             for connector in self._connectors
-            if all(connector is not provider for provider in self._layerwise_reuse_providers)
+            if all(connector is not provider for provider in self._layerwise_slot_release_providers)
         ]
-        self._layerwise_reuse_sink_configured = False
-        if not self._layerwise_reuse_providers:
+        self._external_slot_release_sink_configured = False
+        if not self._layerwise_slot_release_providers:
             return
         for connector in self._connectors:
-            set_waiter = getattr(connector, "set_layerwise_reuse_waiter", None)
-            if callable(set_waiter) and set_waiter(self._wait_for_layer_reuse) is not False:
-                self._layerwise_reuse_sink_configured = True
+            set_waiter = getattr(connector, "set_external_slot_release_waiter", None)
+            if callable(set_waiter) and set_waiter(self._wait_for_external_slot_release) is not False:
+                self._external_slot_release_sink_configured = True
 
-    def _wait_for_layer_reuse(self, layer_idx: int) -> None:
-        for provider in self._layerwise_reuse_providers:
+    def _wait_for_external_slot_release(self, layer_idx: int) -> None:
+        for provider in self._layerwise_slot_release_providers:
             provider.wait_for_layer_reuse(layer_idx)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        if getattr(self, "_layerwise_reuse_sink_configured", False):
+        if getattr(self, "_external_slot_release_sink_configured", False):
             # AscendStore owns the layer-entry reuse wait after accepting the
             # composite waiter, so provider layer-entry waits are redundant.
-            connectors = self._layerwise_reuse_other_connectors
+            connectors = self._non_slot_release_connectors
         else:
             # Without a sink, preserve the original protection by waiting on
             # providers before any sibling connector can write shared slots.
-            connectors = [*self._layerwise_reuse_providers, *self._layerwise_reuse_other_connectors]
+            connectors = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
         for connector in connectors:
             connector.wait_for_layer_load(layer_name)
 
@@ -74,20 +76,20 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         **kwargs,
     ) -> None:
         # Phase 1: providers must close any new slot gate before returning.
-        for connector in self._layerwise_reuse_providers:
+        for connector in self._layerwise_slot_release_providers:
             connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
         # Phase 2: siblings may now publish work that can enable slot reuse.
-        for connector in self._layerwise_reuse_other_connectors:
+        for connector in self._non_slot_release_connectors:
             connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
     def on_kv_cache_written(self, layer_name: str = "") -> None:
         # Phase 1: providers close their gates at the earliest cache-write hook.
-        for connector in self._layerwise_reuse_providers:
+        for connector in self._layerwise_slot_release_providers:
             hook = getattr(connector, "on_kv_cache_written", None)
             if callable(hook):
                 hook(layer_name)
         # Phase 2: only then may sibling hooks publish reuse-enabling work.
-        for connector in self._layerwise_reuse_other_connectors:
+        for connector in self._non_slot_release_connectors:
             hook = getattr(connector, "on_kv_cache_written", None)
             if callable(hook):
                 hook(layer_name)

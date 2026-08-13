@@ -203,10 +203,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def set_layerwise_reuse_waiter(self, waiter: Callable[[int], None]) -> bool:
+    def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
             return False
-        self.connector_worker.set_layerwise_reuse_waiter(waiter)
+        self.connector_worker.set_external_slot_release_waiter(waiter)
         return True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):

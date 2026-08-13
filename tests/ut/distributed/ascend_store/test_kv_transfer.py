@@ -295,7 +295,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(self, layerwise_reuse_waiter=None, save_failure_checker=None):
+    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
         store = MagicMock()
         store.store.batch_copy.return_value = 0
         load_finished = [threading.Event(), threading.Event()]
@@ -327,7 +327,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             sync_save_events=sync_events,
             num_layers=2,
             group_builders=[builder],
-            layerwise_reuse_waiter=layerwise_reuse_waiter,
+            external_slot_release_waiter=external_slot_release_waiter,
             save_failure_checker=save_failure_checker,
         )
         return thread, load_finished, save_finished, sync_events
@@ -391,7 +391,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
     def test_h2d_waits_for_source_save_then_target_layer_reuse(self):
         call_order: list[tuple[str, int]] = []
         thread, _, save_finished, sync_events = self._make_thread(
-            layerwise_reuse_waiter=lambda layer_id: call_order.append(("reuse", layer_id))
+            external_slot_release_waiter=lambda layer_id: call_order.append(("reuse", layer_id))
         )
         save_finished[0].set()
         sync_events[0].synchronize.side_effect = lambda: call_order.append(("save", 0))
@@ -426,7 +426,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             assert thread is not None
             load_finished_observed.append(thread.layer_load_finished_events[layer_id].is_set())
 
-        thread, load_finished, _, _ = self._make_thread(layerwise_reuse_waiter=wait_for_reuse)
+        thread, load_finished, _, _ = self._make_thread(external_slot_release_waiter=wait_for_reuse)
         load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[], layer_id=1)
         thread.request_queue.put(load_task)
 

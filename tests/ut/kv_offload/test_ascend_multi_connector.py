@@ -78,7 +78,7 @@ def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
         on_kv_cache_written=MagicMock(side_effect=lambda *_: call_order.append("pd-written")),
     )
     store = SimpleNamespace(
-        set_layerwise_reuse_waiter=MagicMock(return_value=True),
+        set_external_slot_release_waiter=MagicMock(return_value=True),
         wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("store-load")),
         save_kv_layer=MagicMock(side_effect=lambda *_args, **_kwargs: call_order.append("store-save")),
         on_kv_cache_written=MagicMock(side_effect=lambda *_: call_order.append("store-written")),
@@ -89,7 +89,7 @@ def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
 
     connector._configure_layerwise_reuse_completion()
 
-    waiter = store.set_layerwise_reuse_waiter.call_args.args[0]
+    waiter = store.set_external_slot_release_waiter.call_args.args[0]
     waiter(7)
     provider.wait_for_layer_reuse.assert_called_once_with(7)
 
