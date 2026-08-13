@@ -3013,8 +3013,6 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_gid: int,
             attn_gid: int,
             common_attn_metadata: CommonAttentionMetadata,
-            prefill_ratio_to_sas_metadata: dict,
-            decode_ratio_to_sas_metadata: dict,
             common_ratio_to_sas_metadata: dict,
             ubid: int | None = None,
         ) -> None:
@@ -3034,13 +3032,9 @@ class NPUModelRunner(GPUModelRunner):
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 if for_cudagraph_capture:
-                    prefill_ratio_to_sas_metadata = {}
-                    decode_ratio_to_sas_metadata = {}
                     common_ratio_to_sas_metadata = {}
                 extra_attn_metadata_args = dict(
                     num_reqs_actual=num_reqs,
-                    prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
@@ -3065,8 +3059,6 @@ class NPUModelRunner(GPUModelRunner):
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
             if isinstance(builder, AscendDSAMetadataBuilder):
-                prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
-                decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 
             if ubid is None:
@@ -3081,8 +3073,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
-        decode_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -3131,8 +3121,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                     attn_gid,
                     cm,
-                    prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata,
                 )
         if self.is_mm_prefix_lm:

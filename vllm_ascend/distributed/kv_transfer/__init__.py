@@ -55,13 +55,9 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
-        "UCMConnector", "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector", "UCMConnectorV1"
-    )
-
-    KVConnectorFactory.register_connector(
-        "LMCacheAscendConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
-        "LMCacheConnectorV1",
+        "UCMConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector",
+        "UCMConnectorV1",
     )
 
     # Override the upstream SimpleCPUOffloadConnector with the NPU
