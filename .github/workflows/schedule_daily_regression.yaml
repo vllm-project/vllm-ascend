@@ -46,6 +46,16 @@
 name: Daily
 
 on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   schedule:
     # 01:00, 04:00, 07:00, 10:00 UTC = 09:00, 12:00, 15:00, 18:00 Beijing.
     # 4 runs/day during the PR-merge peak window (09:00-20:00 Beijing), every 3h.
