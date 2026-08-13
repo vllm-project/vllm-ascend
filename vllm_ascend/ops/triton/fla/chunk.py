@@ -23,7 +23,7 @@ from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
-from .utils import input_guard, prepare_final_chunk_indices
+from .utils import input_guard, prepare_chunk_indices, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
 
 
@@ -91,7 +91,15 @@ def chunk_gated_delta_rule_fwd(
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
-    cu_seqlens = cu_seqlens.to(torch.int64)
+    # When prebuilt_meta is absent but cu_seqlens is provided, generate
+    # chunk_indices_chunk64 on-the-fly. The chunk_fwd_o AscendC kernel
+    # requires chunk_indices to index into h when isVariedLen=true;
+    # passing None causes MPU address access invalid (gmChunkOffsets
+    # reads from nullptr).
+    if chunk_indices_chunk64 is None and cu_seqlens is not None:
+        chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens, chunk_size=chunk_size)
+
+    cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
     chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
