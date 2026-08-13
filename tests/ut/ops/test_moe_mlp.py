@@ -961,7 +961,7 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
 
         with (
             patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
-            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_output]) as mock_gmm1,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_output], create=True) as mock_gmm1,
             patch(f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward", return_value=activated),
             patch.object(
                 DeviceOperator,
