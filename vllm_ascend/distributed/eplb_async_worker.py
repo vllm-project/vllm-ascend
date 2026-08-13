@@ -72,7 +72,9 @@ def _run_rebalance_experts(
         physical_to_logical_map_cpu,
     )
     if new_mapping.device != torch.device("cpu"):
-        raise RuntimeError("STAIR must return a CPU physical-to-logical map.")
+        raise RuntimeError(
+            "Statistical Temporal-Aware Incremental Rebalancing (STAIR) must return a CPU physical-to-logical map."
+        )
     model_state._ascend_eplb_policy_load = load_window_cpu
     return new_mapping
 

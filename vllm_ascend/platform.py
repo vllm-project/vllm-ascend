@@ -801,7 +801,8 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 logger.warning(
                     "Configurable EPLB policies are not supported by Model "
                     "Runner V2 on Ascend; parameter=eplb_config.policy, "
-                    "value=%s, action: selecting STAIR.",
+                    "value=%s, action: selecting Statistical Temporal-Aware "
+                    "Incremental Rebalancing (STAIR).",
                     upstream_eplb_config.policy,
                 )
                 upstream_eplb_config.policy = "default"

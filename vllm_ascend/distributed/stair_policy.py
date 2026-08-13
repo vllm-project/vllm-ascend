@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Self-contained STAIR placement policy for Model Runner V2 EPLB."""
+"""Statistical Temporal-Aware Incremental Rebalancing (STAIR) policy."""
 
 import time
 from collections import defaultdict

@@ -4,8 +4,9 @@ Model Runner V2 on Ascend uses the upstream vLLM Expert Parallelism Load
 Balancer (EPLB) control plane and adds a small Ascend-specific integration
 plane. Upstream code owns load windows, policy execution, placement state, and
 the rearrangement transaction. vLLM Ascend owns device routing, executed-load
-recording, the STAIR placement policy, quantized expert-weight views, and
-asynchronous Gloo-staged movement.
+recording, the Statistical Temporal-Aware Incremental Rebalancing (STAIR)
+placement policy, quantized expert-weight views, and asynchronous Gloo-staged
+movement.
 
 This page describes the current asynchronous architecture. For the decisions
 behind this ownership model, see

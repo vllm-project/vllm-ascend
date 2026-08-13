@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Ascend-owned EPLB state extensions."""
+"""Ascend EPLB state for Statistical Temporal-Aware Incremental Rebalancing (STAIR)."""
 
 from dataclasses import fields
 from typing import Any
@@ -101,7 +101,7 @@ class AscendEplbState(_eplb_state.EplbState):
         model_state = self.model_states[model_config.compute_hash()]
         model_state_any: Any = model_state
         model_state_any._ascend_eplb_state = self
-        logger.info("Selected Ascend EPLB placement policy: STAIR")
+        logger.info("Selected Ascend EPLB placement policy: Statistical Temporal-Aware Incremental Rebalancing (STAIR)")
 
     def start_async_loop(
         self,
