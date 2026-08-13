@@ -2308,7 +2308,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
-            q, qr, _ = self._mla_prolog_multistream(
+            q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
                 hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
         elif need_prefill_gather:
@@ -2500,6 +2500,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     weights_proj_output = self.weights_proj(hidden_states)
                 # Main stream: q_quant (between compressed_kv and kv_scatter)
                 q_quant, q_scale = DeviceOperator.indexer_quantize_query(indexer_q)
+                compress_topk_idxs = indexer_q
 
             DeviceOperator.dsa_kv_compress_scatter(
                 compress_kv_cache, compressed_kv, compressor_prefill_metadata.slot_mapping
