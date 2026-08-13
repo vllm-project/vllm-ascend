@@ -159,9 +159,6 @@ class AscendConfig:
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
-        # MiniMax-M3 W8A8 is handled by the local MegaMoe path.  The forward
-        # selector performs the quantization and shape checks, so BF16 keeps
-        # using the established AllToAllV/MC2 implementations.
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(

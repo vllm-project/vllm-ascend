@@ -33,7 +33,6 @@ const std::array<const aclTensor *, 2> SparseAttentionScore(
     int64_t blockSize,
     int64_t topK,
     int64_t innerPrecise,
-    const aclTensor *attentionOut,
     aclOpExecutor *executor);
 
 } // namespace l0op
