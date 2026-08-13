@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
-"""Single-NPU ECCPUConnector correctness test for A2/A3."""
+"""Single-NPU ECCPUConnector correctness test."""
 
 import os
 import time
@@ -19,7 +19,7 @@ from tests.e2e.conftest import (
     wait_until_npu_memory_free,
 )
 
-MODEL = "/nas/disk1/Qwen2.5-VL-7B-Instruct"
+MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 EC_CPU_BYTES = 500 << 20
 MMAP_GLOB = "vllm_ec_*.mmap"
 MMAP_CLEANUP_TIMEOUT = 10.0
@@ -69,7 +69,7 @@ def _assert_mmaps_removed(paths: set[Path]) -> None:
         time.sleep(0.1)
 
 
-@pytest.mark.e2e_model("/nas/disk1/Qwen2.5-VL-7B-Instruct")
+@pytest.mark.e2e_model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.e2e_coverage(
     arch="multimodal",
     feature="cpu_offloading",
