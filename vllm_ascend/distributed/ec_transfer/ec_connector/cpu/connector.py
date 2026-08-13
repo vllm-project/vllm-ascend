@@ -28,6 +28,8 @@ class AscendECCPUConnector(ECCPUConnector):
 
         extra_config = ec_config.ec_connector_extra_config or {}
         raw_cpu_bytes = extra_config.get("ec_cpu_bytes")
+        if raw_cpu_bytes is None:
+            raise ValueError("ec_cpu_bytes must be a positive integer in ec_connector_extra_config")
         try:
             cpu_bytes = int(raw_cpu_bytes)
         except (TypeError, ValueError) as exc:
