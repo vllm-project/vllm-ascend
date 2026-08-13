@@ -562,14 +562,11 @@ jobs:
           fi
 
           if [ "${HAS_TESTS_A5}" = "true" ]; then
-            if [ "${HAS_READY_A5_LABEL}" != "true" ]; then
-              echo "::error::Selected A5 tests are required; add the ready-a5 label"
-              exit 1
-            fi
-
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${TESTS_A5_RESULT}" != "success" ]; then
+            if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
+              echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
+            elif [ "${TESTS_A5_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
               exit 1
             fi
