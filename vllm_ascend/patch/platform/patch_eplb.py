@@ -82,9 +82,6 @@ def _wrap_move_to_workspace(original_move):
             model_state.rebalanced = False
             model_state.pending_result = None
             pending_result.consumed_event.record()
-            state = getattr(model_state, "_ascend_eplb_state", None)
-            if state is not None:
-                state.complete_async_cycle()
             return None
 
         result = original_move(*bound.args, **bound.kwargs)
@@ -93,8 +90,6 @@ def _wrap_move_to_workspace(original_move):
             state = getattr(model_state, "_ascend_eplb_state", None)
             if state is not None:
                 state.commit_policy_layer(model_state, layer_idx)
-                if not model_state.rebalanced:
-                    state.complete_async_cycle()
         return result
 
     setattr(_move_to_workspace, _PATCH_MARKER, True)

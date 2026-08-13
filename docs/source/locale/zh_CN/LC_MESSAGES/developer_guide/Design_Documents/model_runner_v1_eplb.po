@@ -18,9 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# Expert Parallelism Load Balancer (EPLB)"
-msgstr "# 专家并行负载均衡器 (EPLB)"
-
 msgid "## Why We Need EPLB?"
 msgstr "## 为什么需要 EPLB？"
 
@@ -372,3 +369,15 @@ msgid ""
 msgstr ""
 "使用 EPLB 前，启动脚本并添加 `export DYNAMIC_EPLB=\"true\"`。\n"
 "在执行负载数据收集（或性能数据收集）前，启动脚本并添加 `export EXPERT_MAP_RECORD=\"true\"`。"
+
+msgid "# Model Runner V1 EPLB Architecture"
+msgstr ""
+
+msgid ""
+"This page describes the legacy Model Runner V1 (MRv1) EPLB implementation, "
+"including Swift and the MRv1 policy factory. Model Runner V2 uses a "
+"different controller, policy, and asynchronous movement lifecycle; see "
+"[Model Runner V2 EPLB Architecture](model_runner_v2_eplb.md). User-facing "
+"configuration for both runners is documented in the [EPLB user "
+"guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md)."
+msgstr ""

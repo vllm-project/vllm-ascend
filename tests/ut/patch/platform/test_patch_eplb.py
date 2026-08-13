@@ -122,7 +122,7 @@ def test_communicator_factory_forwards_other_backends_and_additive_parameters():
 
 def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     pending_result = SimpleNamespace(layer_idx=3, transfer_metadata=object())
-    state = SimpleNamespace(commit_policy_layer=MagicMock(), complete_async_cycle=MagicMock())
+    state = SimpleNamespace(commit_policy_layer=MagicMock())
     model_state = SimpleNamespace(
         pending_result=pending_result,
         rebalanced=True,
@@ -143,7 +143,6 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     assert result == "moved"
     refresh.assert_called_once_with(model_state, 3)
     state.commit_policy_layer.assert_called_once_with(model_state, 3)
-    state.complete_async_cycle.assert_not_called()
 
 
 def test_async_workspace_wrapper_acknowledges_no_transfer_cycle(monkeypatch):
@@ -153,12 +152,10 @@ def test_async_workspace_wrapper_acknowledges_no_transfer_cycle(monkeypatch):
         transfer_metadata=patch_eplb.NO_TRANSFER_CYCLE_COMPLETE,
         consumed_event=consumed_event,
     )
-    state = SimpleNamespace(complete_async_cycle=MagicMock())
     model_state = SimpleNamespace(
         pending_result=pending_result,
         rebalanced=True,
         model=SimpleNamespace(num_moe_layers=2),
-        _ascend_eplb_state=state,
     )
     original_move_called = False
 
@@ -178,4 +175,3 @@ def test_async_workspace_wrapper_acknowledges_no_transfer_cycle(monkeypatch):
     consumed_event.record.assert_called_once_with()
     assert original_move_called is False
     refresh.assert_not_called()
-    state.complete_async_cycle.assert_called_once_with()

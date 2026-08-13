@@ -945,13 +945,6 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
             elif command == "score":
                 req_outputs = llm.score(request["text_1"], request["text_2"], *request["args"], **request["kwargs"])
                 result = [req_output.outputs.score for req_output in req_outputs]
-            elif command == "collective_rpc":
-                result = llm.collective_rpc(
-                    request["method"],
-                    timeout=request["timeout"],
-                    args=request["args"],
-                    kwargs=request["kwargs"],
-                )
             else:
                 raise ValueError(f"Unsupported data parallel command: {command}")
 
@@ -1586,44 +1579,6 @@ class DPVllmRunner(VllmRunner):
             raise
 
         return _merge_data_parallel_results(len(prompts), shard_results)
-
-    def collective_rpc(
-        self,
-        method: str,
-        timeout: float | None = None,
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] | None = None,
-    ) -> list[list[Any]]:
-        """Run a worker RPC on every TP worker in every DP engine."""
-        for conn in self._dp_parent_conns:
-            conn.send(
-                {
-                    "command": "collective_rpc",
-                    "indices": [],
-                    "method": method,
-                    "timeout": timeout,
-                    "args": args,
-                    "kwargs": kwargs,
-                }
-            )
-
-        results: list[list[Any]] = []
-        try:
-            for rank, conn in enumerate(self._dp_parent_conns):
-                if not conn.poll(self._dp_request_timeout):
-                    raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to finish `collective_rpc`")
-                message = conn.recv()
-                if message["status"] != "ok":
-                    raise RuntimeError(
-                        f"Data parallel worker {rank} failed during `collective_rpc`:\n"
-                        f"{message.get('traceback', 'unknown error')}"
-                    )
-                results.append(message["result"])
-        except Exception:
-            self._stop_data_parallel_workers()
-            raise
-
-        return results
 
     def generate(
         self,

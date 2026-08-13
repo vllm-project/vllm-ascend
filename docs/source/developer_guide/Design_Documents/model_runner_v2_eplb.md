@@ -36,7 +36,7 @@ flowchart LR
 | vLLM `EPLBController` and `EplbState` | Step clock, load-window lifecycle, distributed reduction, placement state, and commit ordering |
 | `AscendEPLBController` | Batch-phase filtering and propagation of graph-safe recording inputs |
 | `AscendEplbState` | STAIR ownership, temporal-window preservation, fresh-load gating, committed policy history, and routing refresh |
-| STAIR policy adapter | Swift placement generation followed by FlashLB-inspired temporal acceptance |
+| STAIR policy | Incremental placement generation followed by FlashLB-inspired temporal acceptance |
 | Ascend asynchronous worker | Policy execution, changed-layer selection, Gloo-staged transfer, and explicit cycle completion |
 | Router and fused MoE adapter | Device-side logical-to-physical mapping and executed-load recording |
 | Quantization method | View of the expert tensors and coupled metadata consumed by its compute kernel |
@@ -57,12 +57,15 @@ EPLB rearrangement is skipped when no rank has recorded fresh load since the pre
 
 ## STAIR placement
 
-STAIR combines two existing balancing ideas without requiring an offline transfer-cost profile:
+STAIR combines Swift-style incremental placement with FlashLB-style temporal
+acceptance without importing or invoking either legacy Model Runner V1 policy:
 
-1. Swift generates a complete placement candidate from the aggregate logical-expert load over the current window.
+1. STAIR allocates redundant replicas to hot experts, places them with bounded
+   rank-pair communication, exchanges resident experts only when the peak rank
+   load decreases, and preserves unchanged experts in their original slots.
 2. A FlashLB-inspired temporal stage evaluates every changed layer over the full `[window, layer, expert]` series.
 3. A layer is accepted only when the candidate improves its mean peak-to-average rank-load score and its imbalance passes the temporal hysteresis gate.
-4. Placements that cannot be executed by the current per-rank transfer layout are rejected for that layer.
+4. Every generated placement satisfies the current per-rank transfer layout.
 
 The objective is load balance only; STAIR has no user-provided transfer-cost parameter. Each `AscendEplbState` owns its own policy history. History is recorded only after the main thread commits the corresponding layer, and it is discarded if the next cycle observes a placement different from the expected committed map.
 
@@ -93,13 +96,13 @@ Changes to this integration must preserve these rules:
 9. Movement updates the exact tensors and metadata read by the active quantized kernel.
 10. EPLB-disabled execution and the MRv1 path remain isolated.
 
-MRv2 EPLB on Ascend requires asynchronous mode, a fixed EP topology, and the `torch_gloo` communicator. Synchronous movement and elastic EP are rejected during initialization. A quantization format is supported only when it exposes a complete movable view of the storage used by compute; the current matrix is maintained in the [EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
+MRv2 EPLB on Ascend always uses asynchronous mode, a fixed EP topology, and the `torch_gloo` communicator. If `use_async=false` is supplied, startup warns and forces asynchronous mode. Elastic EP remains unsupported. A quantization format is supported only when it exposes a complete movable view of the storage used by compute; the current matrix is maintained in the [EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
 
 ## Extension and debugging points
 
 When adding a quantization format, begin with the expert-weight view and verify that every moved tensor and coupled metadata field is the storage consumed by fused MoE. Do not add layout knowledge to the controller or policy.
 
-For stale routing after a transfer, compare the committed vLLM map with the layer's device routing table and verify the weight/map/refresh ordering. For a worker that remains active, inspect the pending result, workspace acknowledgement, and cycle-complete marker. For unexpected movement volume, compare Swift's candidate-layer count with STAIR's accepted-layer count. For missing or shifted load, inspect the phase gate and rank-local unpadded-token scalar before the distributed reduction.
+For stale routing after a transfer, compare the committed vLLM map with the layer's device routing table and verify the weight/map/refresh ordering. For a worker that remains active, inspect the pending result, workspace acknowledgement, and cycle-complete marker. For unexpected movement volume, compare STAIR's proposed-layer count with its accepted-layer count. For missing or shifted load, inspect the phase gate and rank-local unpadded-token scalar before the distributed reduction.
 
 Changes to the vLLM communicator factory or `_move_to_workspace` signature are explicit compatibility boundaries: the Ascend patch validates these signatures during registration and should fail early when the upstream contract changes.
 

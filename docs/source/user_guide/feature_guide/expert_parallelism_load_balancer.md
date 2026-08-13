@@ -76,8 +76,8 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 ### Model Runner V2: Asynchronous STAIR EPLB
 
 Select MRv2 explicitly when the model or environment does not select it by
-default. Enable expert parallelism and EPLB. Asynchronous mode is required and
-STAIR is selected automatically; no Ascend policy option is exposed.
+default. Enable expert parallelism and EPLB. Ascend always uses asynchronous
+movement and selects STAIR automatically; no Ascend policy option is exposed.
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -104,7 +104,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `window_size` | `1000` | Number of recent steps used for expert-load recording. |
 | `step_interval` | `3000` | Number of EPLB steps between placement evaluations. When it exceeds `window_size`, only the most recent window contributes to the decision. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
-| `use_async` | `true` | Must remain `true`. Expert movement uses Gloo CPU staging on a background worker. |
+| `use_async` | `true` | Ascend always runs asynchronously. Setting this to `false` logs a warning and is overridden to `true`. |
 | `policy` | `default` | Leave at the upstream default. Ascend internally fixes MRv2 placement to STAIR. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
@@ -141,8 +141,8 @@ vllm serve Qwen/Qwen3-30B-A3B \
 ```
 
 > [!IMPORTANT]
-> MRv2 EPLB on Ascend supports the asynchronous Gloo path only. It rejects
-> synchronous movement, elastic EP, legacy `dynamic_eplb`, recording/static-map
+> MRv2 EPLB on Ascend supports the asynchronous Gloo path only. A synchronous
+> setting is ignored with a warning. It rejects elastic EP, legacy `dynamic_eplb`, recording/static-map
 > fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`. The in-tree regression scope
 > is one node with DP2 × TP2, EP world size four, asynchronous scheduling, and
 > `FULL_AND_PIECEWISE` graph mode. Multi-node deployment, other topologies, and

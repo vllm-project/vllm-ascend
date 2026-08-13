@@ -12,7 +12,7 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 
-from vllm_ascend.distributed.eplb_policy import StairEplbPolicyAdapter
+from vllm_ascend.distributed.stair_policy import StairEplbPolicy
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 
@@ -84,18 +84,16 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
-        self.stair_policy = StairEplbPolicyAdapter()
+        self.stair_policy = StairEplbPolicy()
         self.policy = self.stair_policy
         self._has_fresh_recorded_load = False
         self._preserve_expert_load_time_series = False
-        self.async_policy_cycles = 0
-        self.async_completed_cycles = 0
-        self.async_committed_layers = 0
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
 
     def add_model(self, model, model_config) -> None:
         super().add_model(model, model_config)
+        self.is_async = True
         # Upstream initializes its configured policy in add_model. Ascend MRv2
         # intentionally exposes one placement policy so state cannot diverge
         # between model registrations.
@@ -111,7 +109,7 @@ class AscendEplbState(_eplb_state.EplbState):
         is_profile: bool = False,
     ) -> None:
         del rank_mapping
-        if not self.is_async or self.async_worker is not None:
+        if self.async_worker is not None:
             return
         from vllm_ascend.distributed.eplb_async_worker import start_async_worker
 
@@ -200,9 +198,6 @@ class AscendEplbState(_eplb_state.EplbState):
             result = super().rearrange(is_profile=is_profile, rank_mapping=rank_mapping)
         finally:
             self._preserve_expert_load_time_series = False
-        if not is_profile and not self.is_async:
-            for model_state in self.model_states.values():
-                refresh_model_routing_tables(model_state)
         if not is_profile:
             self._has_fresh_recorded_load = False
         return result
@@ -218,11 +213,6 @@ class AscendEplbState(_eplb_state.EplbState):
             model_state.physical_to_logical_map[layer_idx].cpu(),
             model_state.eplb_stats.num_gpus,
         )
-        self.async_committed_layers += 1
-
-    def complete_async_cycle(self) -> None:
-        """Record a cycle only after its final result is consumed."""
-        self.async_completed_cycles += 1
 
     @classmethod
     def from_mapping(

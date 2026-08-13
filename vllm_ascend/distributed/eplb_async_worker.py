@@ -3,8 +3,13 @@
 
 """Ascend asynchronous EPLB execution with zero-change layer elision."""
 
+# TODO(upstream-eplb): Delete this local worker fork once vLLM exposes hooks
+# for changed-layer selection and explicit zero-transfer cycle completion.
+# Until then, changes to the upstream async-worker protocol must be mirrored
+# here and covered by contract tests so this copy cannot silently drift.
+
 import threading
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
@@ -68,8 +73,7 @@ def _run_rebalance_experts(
     )
     if new_mapping.device != torch.device("cpu"):
         raise RuntimeError("STAIR must return a CPU physical-to-logical map.")
-    cast(Any, model_state)._ascend_eplb_policy_load = load_window_cpu
-    state.async_policy_cycles += 1
+    model_state._ascend_eplb_policy_load = load_window_cpu
     return new_mapping
 
 
@@ -105,7 +109,6 @@ def transfer_run_periodically(
         eplb_cpu_group = eplb_coordinator.cpu_group
         ep_rank = eplb_group.rank()
 
-        assert state.is_async
         for model_state in state.model_states.values():
             model_state.communicator.set_stream(cuda_stream)
             with torch.cuda.stream(cuda_stream):

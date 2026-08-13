@@ -8,11 +8,11 @@ import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
 from vllm_ascend.distributed import eplb_state
-from vllm_ascend.distributed.eplb_policy import StairEplbPolicyAdapter
 from vllm_ascend.distributed.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
+from vllm_ascend.distributed.stair_policy import StairEplbPolicy
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(monkeypatch):
@@ -45,7 +45,7 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(monkeypa
     torch.testing.assert_close(captured_routing_table, new_routing_table)
 
 
-def test_async_rearrange_defers_routing_table_refresh_to_workspace_hook(monkeypatch):
+def test_rearrange_defers_routing_table_refresh_to_workspace_hook(monkeypatch):
     monkeypatch.setattr(
         upstream_eplb_state.EplbState,
         "rearrange",
@@ -223,12 +223,13 @@ def test_add_model_always_selects_state_owned_stair(monkeypatch):
 
     monkeypatch.setattr(upstream_eplb_state.EplbState, "add_model", upstream_add_model)
     state = AscendEplbState.__new__(AscendEplbState)
-    state.stair_policy = StairEplbPolicyAdapter()
+    state.stair_policy = StairEplbPolicy()
     state.policy = state.stair_policy
 
     state.add_model(object(), model_config)
 
-    assert isinstance(state.policy, StairEplbPolicyAdapter)
+    assert isinstance(state.policy, StairEplbPolicy)
+    assert state.is_async
     assert model_state._ascend_eplb_state is state
 
 
@@ -251,9 +252,9 @@ def test_async_loop_uses_ascend_state_owned_worker(monkeypatch):
 def test_commit_policy_layer_uses_committed_mapping(monkeypatch):
     commit_layer = MagicMock()
     state = AscendEplbState.__new__(AscendEplbState)
-    state.stair_policy = SimpleNamespace(commit_layer=commit_layer)
+    state.stair_policy = StairEplbPolicy()
+    monkeypatch.setattr(state.stair_policy, "commit_layer", commit_layer)
     state.policy = state.stair_policy
-    state.async_committed_layers = 0
     load_window = torch.ones((2, 1, 4), dtype=torch.int32)
     model_state = SimpleNamespace(
         _ascend_eplb_policy_load=load_window,
@@ -269,13 +270,3 @@ def test_commit_policy_layer_uses_committed_mapping(monkeypatch):
     assert args[1] == 0
     torch.testing.assert_close(args[2], model_state.physical_to_logical_map[0])
     assert args[3] == 2
-    assert state.async_committed_layers == 1
-
-
-def test_complete_async_cycle_counts_consumed_cycles():
-    state = AscendEplbState.__new__(AscendEplbState)
-    state.async_completed_cycles = 2
-
-    state.complete_async_cycle()
-
-    assert state.async_completed_cycles == 3

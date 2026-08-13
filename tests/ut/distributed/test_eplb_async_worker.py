@@ -3,12 +3,14 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 from vllm_ascend.distributed import eplb_async_worker
+from vllm_ascend.distributed.eplb_state import AscendEplbState
 
 
 class _CycleComplete(Exception):
@@ -58,7 +60,6 @@ def _run_one_cycle(monkeypatch, old_map, new_map):
         rearrange_event=_OneCycleEvent(),
         is_async=True,
         model_states={"model": model_state},
-        async_policy_cycles=0,
     )
     device_group = MagicMock()
     device_group.rank.return_value = 0
@@ -74,7 +75,7 @@ def _run_one_cycle(monkeypatch, old_map, new_map):
     monkeypatch.setattr(eplb_async_worker.torch.distributed, "all_reduce", all_reduce)
 
     with pytest.raises(_CycleComplete):
-        eplb_async_worker.transfer_run_periodically(state, stream)
+        eplb_async_worker.transfer_run_periodically(cast(AscendEplbState, state), stream)
 
     return model_state, stream, transfer_layer, all_reduce, pending_layers, completed_cycles
 

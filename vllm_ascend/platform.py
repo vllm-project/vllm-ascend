@@ -790,7 +790,21 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
             if not upstream_eplb_config.use_async:
-                raise ValueError("Model Runner V2 EPLB on Ascend requires eplb_config.use_async=true.")
+                logger.warning(
+                    "Synchronous EPLB is not supported on Ascend; "
+                    "parameter=eplb_config.use_async, value=False, "
+                    "action: forcing asynchronous EPLB."
+                )
+                upstream_eplb_config.use_async = True
+                upstream_eplb_config.communicator = "torch_gloo"
+            if upstream_eplb_config.policy != "default":
+                logger.warning(
+                    "Configurable EPLB policies are not supported by Model "
+                    "Runner V2 on Ascend; parameter=eplb_config.policy, "
+                    "value=%s, action: selecting STAIR.",
+                    upstream_eplb_config.policy,
+                )
+                upstream_eplb_config.policy = "default"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
             if upstream_eplb_config.communicator not in (None, "torch_gloo"):
