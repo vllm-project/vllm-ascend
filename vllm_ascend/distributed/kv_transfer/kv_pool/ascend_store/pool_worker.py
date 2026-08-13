@@ -26,26 +26,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    get_attention_compute_start_gate,
+    reset_attention_compute_start_gate,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
-    AscendConnectorMetadata,
-    AscendStoreKVConnectorWorkerMetadata,
-    ChunkedTokenDatabase,
-    KeyMetadata,
-    LayerBlockRange,
-    LayerLoadTask,
-    LayerMultiBlockReqMeta,
-    LayerTransferTask,
-    ReqMeta,
-    block_hash_to_bytes,
-    block_hash_to_str,
-    get_block_hashes,
-    get_cache_family_granularity,
-    infer_cache_family_ratio,
-    infer_group_cache_families,
-    infer_tp_mismatch_info,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -70,13 +56,27 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
+    LayerBlockRange,
+    LayerLoadTask,
+    LayerMultiBlockReqMeta,
+    LayerTransferTask,
+    ReqMeta,
+    block_hash_to_bytes,
+    block_hash_to_str,
+    get_block_hashes,
+    get_cache_family_granularity,
+    infer_cache_family_ratio,
+    infer_group_cache_families,
+    infer_tp_mismatch_info,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
-)
-from vllm_ascend.memcache_comm_fence import (
-    get_attention_compute_start_gate,
-    reset_attention_compute_start_gate,
 )
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a

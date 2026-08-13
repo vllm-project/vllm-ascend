@@ -96,7 +96,13 @@ class BlockTable:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
-        self.slot_mapping = self._make_buffer(self.max_num_batched_tokens + 2 * self.max_num_reqs, dtype=torch.int32)
+        # MTP slot preparation appends up to num_speculative_tokens - 1
+        # draft positions for every request beyond the scheduler token limit.
+        num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
+        self.slot_mapping = self._make_buffer(
+            self.max_num_batched_tokens + num_mtp_draft_slots,
+            dtype=torch.int32,
+        )
 
         self.kernel_sizes = kernel_sizes
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size

@@ -224,7 +224,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/distributed
-    - vllm_ascend/memcache_comm_fence.py
+    - vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
   tests:
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
