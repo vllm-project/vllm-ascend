@@ -193,9 +193,9 @@ class NPUModelRunner(GPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ):
-        if self.ascend_config.profiling_chunk_config.need_timing:
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
             if getattr(scheduler_output, "disable_profiling_timing", False):
-                self.ascend_config.profiling_chunk_config.need_timing = False
+                self.ascend_config.scheduler_config.profiling_chunk_config.need_timing = False
             else:
                 torch.npu.synchronize()
                 self._execution_start_time = time.perf_counter()
@@ -270,7 +270,9 @@ class NPUModelRunner(GPUModelRunner):
         if model_runner_output is None:
             return
 
-        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, "_execution_start_time"):
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing and hasattr(
+            self, "_execution_start_time"
+        ):
             torch.npu.synchronize()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
