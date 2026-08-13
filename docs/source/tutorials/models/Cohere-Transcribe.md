@@ -100,25 +100,47 @@ pip show vllm-ascend
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Replace `your_model_path` with the local model directory. Both model versions (`cohere-transcribe-03-2026` and `cohere-transcribe-arabic-07-2026`) are deployed with the same command.
+Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Both model versions can be deployed on one Ascend 910B (Atlas A2) NPU with the same parameters; only the model weight path changes.
 
 === "Atlas A2 inference products"
 
-    ```shell
-    export ASCEND_RT_VISIBLE_DEVICES=0
-    export HF_HUB_OFFLINE=1
-    export TRANSFORMERS_OFFLINE=1
+    The following examples are for Atlas A2 inference products (Ascend 910B).
 
-    vllm serve /data/llm-workspace/cohere-transcribe-03-2026 \
-      --served-model-name cohere-transcribe \
-      --trust-remote-code \
-      --tensor-parallel-size 1 \
-      --dtype bfloat16 \
-      --enforce-eager \
-      --block-size 128 \
-      --host 0.0.0.0 \
-      --port 8000
-    ```
+    === "cohere-transcribe-03-2026"
+
+        ```shell
+        export ASCEND_RT_VISIBLE_DEVICES=0
+        export HF_HUB_OFFLINE=1
+        export TRANSFORMERS_OFFLINE=1
+
+        vllm serve /data/llm-workspace/cohere-transcribe-03-2026 \
+          --served-model-name cohere-transcribe \
+          --trust-remote-code \
+          --tensor-parallel-size 1 \
+          --dtype bfloat16 \
+          --enforce-eager \
+          --block-size 128 \
+          --host 0.0.0.0 \
+          --port 8000
+        ```
+
+    === "cohere-transcribe-arabic-07-2026"
+
+        ```shell
+        export ASCEND_RT_VISIBLE_DEVICES=0
+        export HF_HUB_OFFLINE=1
+        export TRANSFORMERS_OFFLINE=1
+
+        vllm serve /data/llm-workspace/cohere-transcribe-arabic-07-2026 \
+          --served-model-name cohere-transcribe \
+          --trust-remote-code \
+          --tensor-parallel-size 1 \
+          --dtype bfloat16 \
+          --enforce-eager \
+          --block-size 128 \
+          --host 0.0.0.0 \
+          --port 8000
+        ```
 
     !!! note
 
