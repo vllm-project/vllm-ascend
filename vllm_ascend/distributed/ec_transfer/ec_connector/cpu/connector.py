@@ -41,7 +41,6 @@ class AscendECCPUConnector(ECCPUConnector):
         dtype = vllm_config.model_config.dtype
         element_size = torch.empty((), dtype=dtype).element_size()
         block_size = _get_encoder_cache_hidden_dim(vllm_config) * element_size
-        # 先保证区域至少能放下一个完整 block，避免后续调度时才发现容量无效。
         if cpu_bytes < block_size:
             raise ValueError(
                 f"ec_cpu_bytes must hold at least one encoder-cache block: "
@@ -51,7 +50,6 @@ class AscendECCPUConnector(ECCPUConnector):
         super().__init__(vllm_config, role)
 
     def _make_worker(self, vllm_config: "VllmConfig"):
-        # 复用上游的 role/scheduler 逻辑，只把 CUDA Worker 换成 Ascend Worker。
         from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.worker import (
             AscendECCPUWorker,
         )

@@ -95,7 +95,6 @@ class AscendECCPUWorker(ECCPUWorker):
         # Do not call ECCPUWorker.__init__: it optionally invokes the CUDA-only
         # ECSharedRegion.pin_memory(). The fields below deliberately mirror the
         # small upstream initialization seam while replacing pinning/streams.
-        # 上游初始化会触发 CUDA-only pin_memory；Ascend 改由 C++ ACL API 注册 mmap。
         self._region = create_ec_shared_region(vllm_config)
         self._dtype = vllm_config.model_config.dtype
         self._is_save_rank = (
@@ -273,13 +272,10 @@ class AscendECCPUWorker(ECCPUWorker):
         stream = current_platform.current_stream()
 
         try:
-            # 编码和 D2H 在同一条当前流上，流顺序保证源数据先写完。
             _swap_blocks_batch(
                 src_ptrs[:n], dst_ptrs[:n], sizes[:n], _DIRECTION_D2H
             )
         except Exception:
-            # The batch may have submitted DMA work before reporting an error.
-            # Drain the stream before making its descriptor arrays reusable.
             stream.synchronize()
             self._buf_pool.release(bufs)
             raise
@@ -317,7 +313,6 @@ class AscendECCPUWorker(ECCPUWorker):
         src_base = self._region.blocks.data_ptr()
 
         with current_platform.stream(self._load_stream):
-            # 目标 buffer 使用原 dtype，确保每个 block 的字节布局与 mmap 一致。
             dst_buf = torch.empty(
                 (total_blocks, elements_per_block),
                 dtype=self._dtype,
@@ -354,7 +349,6 @@ class AscendECCPUWorker(ECCPUWorker):
                     _DIRECTION_H2D,
                 )
             except Exception:
-                # As with D2H, only recycle after the load stream has drained.
                 self._load_stream.synchronize()
                 self._buf_pool.release(bufs)
                 raise
@@ -371,10 +365,7 @@ class AscendECCPUWorker(ECCPUWorker):
 
     def shutdown(self) -> None:
         torch.npu.synchronize()
-
-        # Device synchronization above makes every descriptor safe to reclaim.
-        # Clear ownership before unregister/cleanup, so a failed cleanup retry
-        # cannot return the same arrays to the pool twice.
+        # Device synchronization makes every descriptor safe to reclaim.
         save_bufs = self._save_bufs
         inflight = self._inflight_descriptor_bufs
         self._save_bufs = None
