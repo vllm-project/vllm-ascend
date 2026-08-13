@@ -224,8 +224,24 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         thread while the next ``execute_model`` may already have advanced the
         global wave. Stamping here (before returning AsyncOutput) keeps arm
         wave tied to the sample step that produced the tokens.
+
+        Async: only the consuming rank (last-PP TP0 / ``get_output``) stamps.
+        Other async ranks never ``take_sample_wave``, so stamping there only
+        grows the FIFO until deferred-wave force-reap (noisy warning logs).
+        Sync keeps stamping on every sample rank (they also call
+        ``check_after_sample`` and drain the FIFO).
         """
         wave = self.current_wave()
+        runner = getattr(self, "runner", None)
+        if runner is not None and bool(getattr(runner, "use_async_scheduling", False)):
+            if int(getattr(runner, "tp_rank", 0)) != 0:
+                return wave
+            try:
+                if not get_pp_group().is_last_rank:
+                    return wave
+            except Exception:
+                # Unit tests / early init without PP: still stamp on TP0.
+                pass
         RequestDfxStore.get().record_sample_waves(req_ids, wave)
         return wave
 

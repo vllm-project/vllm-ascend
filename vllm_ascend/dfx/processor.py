@@ -360,6 +360,7 @@ class DfxProcessor:
         """Main-thread: stamp ``current_wave`` for each sampled req (async-safe).
 
         Call before returning ``AsyncOutput`` / before sync ``check_after_sample``.
+        Non-consuming ranks (async non-TP0 / early PP) no-op inside ``Dumper``.
         """
         dumper = getattr(self, "dumper", None)
         if dumper is not None and hasattr(dumper, "record_sample_waves"):
