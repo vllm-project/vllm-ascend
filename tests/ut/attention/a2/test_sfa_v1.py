@@ -616,10 +616,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
+        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
-        common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
+        common_attn_metadata.seq_lens = torch.full((10,), 10, dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        common_attn_metadata._seq_lens_cpu = None
         common_attn_metadata.positions = torch.randn(100)
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
@@ -674,10 +676,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
+        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
-        common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
+        common_attn_metadata.seq_lens = torch.full((10,), 10, dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        common_attn_metadata._seq_lens_cpu = None
         common_attn_metadata.positions = torch.randn(100)
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
@@ -732,10 +736,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
+        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
         common_attn_metadata.slot_mapping = torch.randint(0, 10000, (100, 4, 1024), dtype=torch.int64)
-        common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
+        common_attn_metadata.seq_lens = torch.full((10,), 10, dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        common_attn_metadata._seq_lens_cpu = None
         common_attn_metadata.positions = torch.randn(100)
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
