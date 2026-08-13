@@ -7,8 +7,8 @@ import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.distributed import get_tp_group
+from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -76,6 +76,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.pcp_slot_mapping = pcp_slot_mapping
         return metadata
 
+
 class AscendSFACPImpl(AscendSFAImpl):
     def __init__(
         self,
@@ -116,9 +117,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         attn_metadata: M,
     ):
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-            (kv_no_split, cos, sin), slots, num_decode_tokens
-        )
+        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
@@ -142,9 +141,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
         tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
-        gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(
-            tensors, slot_mapping, num_decode_tokens
-        )
+        gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_decode_tokens)
         k_li = gathered_tensors[0]
         assert gathered_slot_mapping.numel() == k_li.shape[0], (
             "SFA PCP indexer cache write requires one slot per gathered token: "

@@ -60,6 +60,7 @@ class AscendPCPManager(PCPManager):
             cp_interleave=cp_interleave,
         )
         self.vllm_config = vllm_config
+
     @staticmethod
     def validate_config(
         vllm_config: VllmConfig,
@@ -90,16 +91,10 @@ class AscendPCPManager(PCPManager):
             CUDAGraphMode.FULL_DECODE_ONLY,
         }:
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP supports only FULL_DECODE_ONLY CUDA graphs. "
-                "Keep prefill eager."
+                "MRV2 sparse MLA PCP supports only FULL_DECODE_ONLY CUDA graphs. Keep prefill eager."
             )
-        if (
-            cudagraph_mode.has_full_cudagraphs()
-            and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
-        ):
-            raise NotImplementedError(
-                "MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only."
-            )
+        if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+            raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
@@ -112,38 +107,32 @@ class AscendPCPManager(PCPManager):
         is_decode_only = not bool(input_batch.is_prefilling_np.any())
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
         # Keep the request-shaped metadata at that same fixed graph extent.
-        graph_num_reqs = (
-            graph_num_tokens if is_decode_only else input_batch.num_reqs_after_padding
-        )
-        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding: #TODO(lwq) 这里的判断是在干什么
+        graph_num_reqs = graph_num_tokens if is_decode_only else input_batch.num_reqs_after_padding
+        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding:  # TODO(lwq) 这里的判断是在干什么
             assert self._input_buffers is not None
             input_buffers = self._input_buffers
             actual_tokens = local_batch.num_tokens
             actual_reqs = local_batch.num_reqs
             if graph_num_tokens > input_buffers.max_num_tokens:
                 raise RuntimeError(
-                    'PCP graph token count exceeds the local input buffer: '
-                    f'{graph_num_tokens} > {input_buffers.max_num_tokens}.'
+                    "PCP graph token count exceeds the local input buffer: "
+                    f"{graph_num_tokens} > {input_buffers.max_num_tokens}."
                 )
             if graph_num_reqs > input_buffers.max_num_reqs:
                 raise RuntimeError(
-                    'PCP graph request count exceeds the local input buffer: '
-                    f'{graph_num_reqs} > {input_buffers.max_num_reqs}.'
+                    "PCP graph request count exceeds the local input buffer: "
+                    f"{graph_num_reqs} > {input_buffers.max_num_reqs}."
                 )
             input_buffers.input_ids[actual_tokens:graph_num_tokens].zero_()
             input_buffers.positions[actual_tokens:graph_num_tokens].zero_()
             input_buffers.is_padding[actual_tokens:graph_num_tokens].fill_(True)
             input_buffers.seq_lens[actual_reqs:graph_num_reqs].zero_()
-            input_buffers.query_start_loc[actual_reqs + 1 : graph_num_reqs + 1].fill_(
-                actual_tokens
-            )
+            input_buffers.query_start_loc[actual_reqs + 1 : graph_num_reqs + 1].fill_(actual_tokens)
             seq_lens_cpu_upper_bound = torch.zeros(
                 graph_num_reqs,
                 dtype=local_batch.seq_lens_cpu_upper_bound.dtype,
             )
-            seq_lens_cpu_upper_bound[:actual_reqs].copy_(
-                local_batch.seq_lens_cpu_upper_bound[:actual_reqs]
-            )
+            seq_lens_cpu_upper_bound[:actual_reqs].copy_(local_batch.seq_lens_cpu_upper_bound[:actual_reqs])
             local_batch = replace(
                 local_batch,
                 num_reqs_after_padding=graph_num_reqs,
@@ -168,8 +157,8 @@ class AscendPCPManager(PCPManager):
         )
         return local_batch
 
-    def prepare_slot_mappings(self) -> torch.Tensor: #TODO(lwq) 这个函数是在哪里被调用的？
-        '''Pad PCP slot mappings to the fixed FULL-decode graph layout.'''
+    def prepare_slot_mappings(self) -> torch.Tensor:
+        """Pad PCP slot mappings to the fixed FULL-decode graph layout."""
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
         graph_num_tokens = self._global_batch.num_tokens_after_padding
