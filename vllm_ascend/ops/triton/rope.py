@@ -272,7 +272,7 @@ def rope_forward_triton(
     n_kv_head = k.shape[1]
     # TODO: use a more robust method to get BLOCK_SIZE_HEAD
     if is_neox_style:
-        BLOCK_SIZE_HEAD = 64
+        BLOCK_SIZE_HEAD = 32
     else:
         BLOCK_SIZE_HEAD = 32
     num_vectorcore = get_vectorcore_num()
