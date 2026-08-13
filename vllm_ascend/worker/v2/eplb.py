@@ -81,12 +81,10 @@ class AscendEPLBController(EPLBController):
         if not self.parallel_config.enable_eplb or self.suppressed or state is None or not self._has_registered_models:
             return
 
-        discard_current_load = not is_profile and not self._load_collection_phase_matched
-        # Phase selection may change the load submitted by each rank, but all
-        # ranks must advance the EPLB state machine and enter collectives in
-        # the same order. Treat a non-matching batch as an EPLB dummy step and
-        # let the upstream controller preserve the global logging schedule.
-        super().step(is_dummy=is_dummy or discard_current_load, is_profile=is_profile)
+        # prepare_forward() already gates load recording for a non-matching
+        # batch. Keep the step non-dummy so every rank advances the same load
+        # window slot; filtered ranks contribute zeros to that slot.
+        super().step(is_dummy=is_dummy, is_profile=is_profile)
 
     def setup_from_mapping(
         self,

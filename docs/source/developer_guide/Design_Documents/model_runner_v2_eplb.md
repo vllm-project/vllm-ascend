@@ -130,11 +130,10 @@ interface. Expert tensors are staged through CPU memory because the background
 worker does not issue HCCL collectives. Foreground MoE communication remains on
 its normal device path.
 
-Only asynchronous EPLB is supported. If `use_async=false` is configured,
-startup warns and selects asynchronous mode. The worker publishes one layer at
-a time and waits for the model-runner thread to acknowledge consumption before
-reusing the staging workspace. A cycle with no changed layers publishes an
-explicit completion marker and performs no expert transfer.
+Only asynchronous EPLB is supported. The worker publishes one layer at a time
+and waits for the model-runner thread to acknowledge consumption before reusing
+the staging workspace. A cycle with no changed layers publishes an explicit
+completion marker and performs no expert transfer.
 
 ## Invariants
 

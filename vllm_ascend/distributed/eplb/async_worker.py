@@ -55,7 +55,6 @@ def start_async_worker(
 
 def _run_rebalance_experts(
     model_state: "EplbModelState",
-    state: "AscendEplbState",
     physical_to_logical_map_cpu: torch.Tensor,
     cuda_stream: torch.cuda.Stream,
 ) -> torch.Tensor:
@@ -63,7 +62,7 @@ def _run_rebalance_experts(
     stats = model_state.eplb_stats
     with torch.cuda.stream(cuda_stream):
         load_window_cpu = stats.global_expert_load_window.cpu()
-    new_mapping = state.policy.rebalance_experts(
+    new_mapping = model_state._ascend_eplb_policy.rebalance_experts(
         load_window_cpu,
         stats.num_replicas,
         stats.num_groups,
@@ -115,7 +114,7 @@ def transfer_run_periodically(
             model_state.communicator.set_stream(cuda_stream)
             with torch.cuda.stream(cuda_stream):
                 old_mapping = model_state.physical_to_logical_map.cpu()
-            new_mapping = _run_rebalance_experts(model_state, state, old_mapping, cuda_stream)
+            new_mapping = _run_rebalance_experts(model_state, old_mapping, cuda_stream)
             changed_layers: list[int] = (
                 torch.any(new_mapping != old_mapping, dim=1).nonzero(as_tuple=False).flatten().tolist()
             )

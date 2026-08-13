@@ -103,8 +103,8 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
         self.assertIsInstance(controller.state, AscendEplbState)
 
-    def test_rank_local_phase_filter_preserves_global_stats_schedule(self):
-        for batch_has_prefill, expected_dummy in ((True, False), (False, True)):
+    def test_rank_local_phase_filter_keeps_load_window_steps_aligned(self):
+        for batch_has_prefill in (True, False):
             with self.subTest(batch_has_prefill=batch_has_prefill):
                 controller = self._make_controller(
                     load_collection_phase="prefill",
@@ -118,7 +118,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
                 controller.step()
 
-                state.step.assert_called_once_with(expected_dummy, False, log_stats=True)
+                state.step.assert_called_once_with(False, False, log_stats=True)
 
     def test_suppressed_controller_does_not_touch_state(self):
         controller = self._make_controller()

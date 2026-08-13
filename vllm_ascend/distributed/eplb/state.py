@@ -84,8 +84,11 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
-        self.stair_policy = StairEplbPolicy()
-        self.policy = self.stair_policy
+        # Upstream's profile path still calls the state-level policy. Runtime
+        # hysteresis lives on each model state so main and draft models cannot
+        # overwrite one another's layer history.
+        self._profile_policy = StairEplbPolicy()
+        self.policy = self._profile_policy
         self._has_fresh_recorded_load = False
         self._preserve_expert_load_time_series = False
         if self.cuda_device_index is None:
@@ -94,13 +97,13 @@ class AscendEplbState(_eplb_state.EplbState):
     def add_model(self, model, model_config) -> None:
         super().add_model(model, model_config)
         self.is_async = True
-        # Upstream initializes its configured policy in add_model. Ascend MRv2
-        # intentionally exposes one placement policy so state cannot diverge
-        # between model registrations.
-        self.policy = self.stair_policy
         model_state = self.model_states[model_config.compute_hash()]
         model_state_any: Any = model_state
+        model_state_any._ascend_eplb_policy = StairEplbPolicy()
         model_state_any._ascend_eplb_state = self
+        # super().add_model() replaces the state-level policy with the
+        # configured upstream policy. Restore the STAIR profile policy.
+        self.policy = self._profile_policy
         logger.info("Selected Ascend EPLB placement policy: Statistical Temporal-Aware Incremental Rebalancing (STAIR)")
 
     def start_async_loop(
@@ -207,7 +210,7 @@ class AscendEplbState(_eplb_state.EplbState):
         load_window = getattr(model_state, "_ascend_eplb_policy_load", None)
         if load_window is None or model_state.eplb_stats is None:
             return
-        self.stair_policy.commit_layer(
+        model_state._ascend_eplb_policy.commit_layer(
             load_window,
             layer_idx,
             model_state.physical_to_logical_map[layer_idx].cpu(),

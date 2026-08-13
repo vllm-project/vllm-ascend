@@ -213,24 +213,33 @@ def test_rearrange_scopes_temporal_allreduce_to_policy_cycle(monkeypatch):
     assert not state._preserve_expert_load_time_series
 
 
-def test_add_model_always_selects_state_owned_stair(monkeypatch):
-    model_state = SimpleNamespace()
-    model_config = SimpleNamespace(compute_hash=lambda: "model")
+def test_add_model_gives_each_model_an_independent_stair_policy(monkeypatch):
+    model_states = {
+        "main": SimpleNamespace(),
+        "draft": SimpleNamespace(),
+    }
 
     def upstream_add_model(self, model, model_config):
         self.policy = object()
-        self.model_states = {"model": model_state}
+        model_key = model_config.compute_hash()
+        self.model_states[model_key] = model_states[model_key]
 
     monkeypatch.setattr(upstream_eplb_state.EplbState, "add_model", upstream_add_model)
     state = AscendEplbState.__new__(AscendEplbState)
-    state.stair_policy = StairEplbPolicy()
-    state.policy = state.stair_policy
+    state.model_states = {}
+    state._profile_policy = StairEplbPolicy()
+    state.policy = state._profile_policy
 
-    state.add_model(object(), model_config)
+    state.add_model(object(), SimpleNamespace(compute_hash=lambda: "main"))
+    state.add_model(object(), SimpleNamespace(compute_hash=lambda: "draft"))
 
-    assert isinstance(state.policy, StairEplbPolicy)
+    assert state.policy is state._profile_policy
     assert state.is_async
-    assert model_state._ascend_eplb_state is state
+    assert isinstance(model_states["main"]._ascend_eplb_policy, StairEplbPolicy)
+    assert isinstance(model_states["draft"]._ascend_eplb_policy, StairEplbPolicy)
+    assert model_states["main"]._ascend_eplb_policy is not model_states["draft"]._ascend_eplb_policy
+    assert model_states["main"]._ascend_eplb_state is state
+    assert model_states["draft"]._ascend_eplb_state is state
 
 
 def test_async_loop_uses_ascend_state_owned_worker(monkeypatch):
@@ -252,11 +261,11 @@ def test_async_loop_uses_ascend_state_owned_worker(monkeypatch):
 def test_commit_policy_layer_uses_committed_mapping(monkeypatch):
     commit_layer = MagicMock()
     state = AscendEplbState.__new__(AscendEplbState)
-    state.stair_policy = StairEplbPolicy()
-    monkeypatch.setattr(state.stair_policy, "commit_layer", commit_layer)
-    state.policy = state.stair_policy
+    model_policy = StairEplbPolicy()
+    monkeypatch.setattr(model_policy, "commit_layer", commit_layer)
     load_window = torch.ones((2, 1, 4), dtype=torch.int32)
     model_state = SimpleNamespace(
+        _ascend_eplb_policy=model_policy,
         _ascend_eplb_policy_load=load_window,
         eplb_stats=SimpleNamespace(num_gpus=2),
         physical_to_logical_map=torch.tensor([[0, 2, 1, 3]], dtype=torch.int32),

@@ -107,7 +107,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `window_size` | `1000` | Number of recent steps used for expert-load recording. |
 | `step_interval` | `3000` | Interval between expert rearrangements. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
-| `use_async` | `true` | Ascend MRv2 always runs asynchronously. Setting this to `false` emits a warning and is overridden. |
+| `use_async` | `true` | Ascend MRv2 always runs asynchronously. |
 | `policy` | `default` | Leave at the default; Ascend selects STAIR internally. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
@@ -134,10 +134,10 @@ non-matching batches.
 
 Classification is performed once per batch. A batch containing any prefill
 request is classified entirely as prefill; otherwise it is decode. A batch
-that does not match `load_collection_phase` does not contribute load and does
-not advance the EPLB load window. It still participates in the global EPLB
-scheduling and communication sequence so that data-parallel ranks remain
-synchronized.
+that does not match `load_collection_phase` contributes zero load whenever the
+current step is recorded; it does not suppress the shared EPLB window advance.
+This keeps temporal slots, scheduling, and communication aligned across
+data-parallel ranks.
 
 For example, to collect only prefill load:
 
@@ -150,11 +150,10 @@ vllm serve Qwen/Qwen3-30B-A3B \
 ```
 
 > [!IMPORTANT]
-> MRv2 supports asynchronous EPLB only. A synchronous setting is overridden
-> with a warning. It rejects legacy `dynamic_eplb`, recording/static-map
-> fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as well as communicators
-> other than Gloo. Validate the target model, topology, graph mode, and traffic
-> independently before production use.
+> MRv2 supports asynchronous EPLB only. It rejects legacy `dynamic_eplb`,
+> recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
+> well as communicators other than Gloo. Validate the target model, topology,
+> graph mode, and traffic independently before production use.
 
 ### Model Runner V1: Legacy EPLB
 

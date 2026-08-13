@@ -27,6 +27,39 @@ class _OneCycleEvent:
             raise _CycleComplete
 
 
+def test_rebalance_uses_model_owned_policy(monkeypatch):
+    load_window = torch.ones((2, 1, 4), dtype=torch.int32)
+    old_map = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    new_map = torch.tensor([[0, 2, 1, 3]], dtype=torch.int32)
+    model_policy = MagicMock()
+    model_policy.rebalance_experts.return_value = new_map
+    model_state = SimpleNamespace(
+        _ascend_eplb_policy=model_policy,
+        _ascend_eplb_policy_load=None,
+        eplb_stats=SimpleNamespace(
+            global_expert_load_window=load_window,
+            num_replicas=4,
+            num_groups=1,
+            num_nodes=1,
+            num_gpus=2,
+        ),
+    )
+    monkeypatch.setattr(eplb_async_worker.torch.cuda, "stream", lambda stream: nullcontext())
+
+    result = eplb_async_worker._run_rebalance_experts(model_state, old_map, MagicMock())
+
+    assert result is new_map
+    model_policy.rebalance_experts.assert_called_once_with(
+        load_window,
+        4,
+        1,
+        1,
+        2,
+        old_map,
+    )
+    assert model_state._ascend_eplb_policy_load is load_window
+
+
 def _run_one_cycle(monkeypatch, old_map, new_map):
     pending_layers: list[int] = []
     completed_cycles: list[int] = []
