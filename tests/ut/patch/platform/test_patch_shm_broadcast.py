@@ -90,9 +90,10 @@ def test_acquire_read_releases_slot_when_reader_raises():
     )
     reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
     try:
-        writer.wait_until_ready()
-        reader.wait_until_ready()
-        writer.enqueue({"payload": "first"})
+        # Prepare a written SHM slot directly. This test only verifies slot
+        # cleanup and does not need the ZMQ ready/notification path.
+        with writer.acquire_write(timeout=0.1) as buf:
+            buf[0] = 1
 
         with (
             pytest.raises(RuntimeError, match="reader failed"),
@@ -109,3 +110,12 @@ def test_acquire_read_releases_slot_when_reader_raises():
     finally:
         writer.shutdown()
         reader.shutdown()
+        for socket in (
+            writer.local_socket,
+            writer._spin_condition.local_notify_socket,
+            reader.local_socket,
+            reader._spin_condition.local_notify_socket,
+            reader._spin_condition.read_cancel_socket,
+            reader._spin_condition.write_cancel_socket,
+        ):
+            socket.close(linger=0)
