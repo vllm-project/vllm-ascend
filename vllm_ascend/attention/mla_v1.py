@@ -1930,12 +1930,6 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             expanded_prefill_slots,
             num_decode_tokens=0,
         )
-        logger.info(
-            "[MLA PCP] rank=%d, local_kv=%s, gathered_kv=%s, slots=%s",
-            pcp_group.rank_in_group,
-            tuple(local_prefill_kv.shape),
-            tuple(gathered_kv.shape),
-            tuple(gathered_prefill_slots.shape),
         )
         # TODO Due to the npu_kv_rmsnorm_rope_cache fusion operator, the RMSNorm rope of the KV layer
         # involves repeated calculations, leaving room for optimization.
