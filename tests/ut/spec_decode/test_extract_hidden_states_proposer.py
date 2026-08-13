@@ -36,9 +36,30 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-        False,
+    from vllm.v1.utils import CpuGpuBuffer
+
+    # AscendPlatform reports pin-memory as available, so ``PIN_MEMORY`` is True
+    # and ``torch.zeros(..., pin_memory=True)`` raises "register
+    # PrivateUse1HooksInterface first" on CPU-only CI. Two call paths need it
+    # off:
+    #   - 0.27.1: extract_hidden_states passes ``pin_memory=PIN_MEMORY``
+    #     explicitly (a module-level name read at call time).
+    #   - main:   the arg was removed, so CpuGpuBuffer's captured
+    #     ``pin_memory`` default is used instead.
+    # CpuGpuBuffer.__init__ takes ``*size``, so its defaulted params are
+    # keyword-only and stored in ``__kwdefaults__`` (``__defaults__`` is None).
+    kwdefaults = CpuGpuBuffer.__init__.__kwdefaults__
+    with (
+        patch(
+            "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
+            False,
+            create=True,
+        ),
+        patch.object(
+            CpuGpuBuffer.__init__,
+            "__kwdefaults__",
+            {**kwdefaults, "pin_memory": False},
+        ),
     ):
         yield
 
