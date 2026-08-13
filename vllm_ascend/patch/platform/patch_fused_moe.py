@@ -15,17 +15,16 @@
 # limitations under the License.
 #
 
-# Patch vllm's FusedMoE factory to use AscendMoERunner by default.
+# Patch vllm's MoE factory to use AscendMoERunner by default.
 #
-# vllm's FusedMoE is a factory function (not a class). deepseek_v2 and other
-# models do `from vllm.model_executor.layers.fused_moe import FusedMoE` and
-# call it directly, so we must patch the binding in the package __init__ as
-# well as the layer module before any model is imported.
+# vLLM v0.26.0 exports the factory as FusedMoE, while vLLM main renamed it
+# to FusedMoEFactory. We patch the exact binding for the active version lane
+# in both the package __init__ and layer module before any model is imported.
 #
 # Import order in worker.__init__:
-#   1. adapt_patch()  ->  this file runs  ->  FusedMoE patched
+#   1. adapt_patch()  ->  this file runs  ->  MoE factory patched
 #   2. from vllm_ascend import ops
-#   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
+#   3. model loading  ->  deepseek_v2 imported  ->  gets patched factory  ✓
 
 from collections.abc import Callable
 from inspect import signature
@@ -45,7 +44,7 @@ from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
 # Capture the real original before fused_moe.py's module-level code runs.
-_original_FusedMoE = _fused_moe_layer.FusedMoE
+_original_FusedMoE = _fused_moe_layer.FusedMoEFactory
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
@@ -171,5 +170,5 @@ def _ascend_FusedMoE(
     return runner
 
 
-_fused_moe_layer.FusedMoE = _ascend_FusedMoE
-_fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+_fused_moe_layer.FusedMoEFactory = _ascend_FusedMoE
+_fused_moe_pkg.FusedMoEFactory = _ascend_FusedMoE

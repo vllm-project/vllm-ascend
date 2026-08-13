@@ -3,6 +3,8 @@
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import deepseek_v4
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class FakeTokenizer:
     vocab_size = 1
@@ -61,16 +63,28 @@ def test_deepseek_v4_tokenizer_maps_latest_reasoning_effort_values(monkeypatch):
     monkeypatch.setattr(deepseek_v4, "encode_messages", fake_encode_messages)
     tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
 
-    cases = [
-        ("none", "chat", None),
-        ("minimal", "thinking", "high"),
-        ("low", "thinking", "high"),
-        ("medium", "thinking", "high"),
-        ("high", "thinking", "high"),
-        ("xhigh", "thinking", "max"),
-        ("max", "thinking", "max"),
-        ("unexpected", "thinking", "high"),
-    ]
+    if vllm_version_is("0.27.1"):
+        cases = [
+            ("none", "chat", None),
+            ("minimal", "thinking", "high"),
+            ("low", "thinking", "high"),
+            ("medium", "thinking", "high"),
+            ("high", "thinking", "high"),
+            ("xhigh", "thinking", "max"),
+            ("max", "thinking", "max"),
+            ("unexpected", "thinking", "high"),
+        ]
+    else:
+        cases = [
+            ("none", "chat", None),
+            ("minimal", "thinking", "low"),
+            ("low", "thinking", "low"),
+            ("medium", "thinking", "low"),
+            ("high", "thinking", "high"),
+            ("xhigh", "thinking", "high"),
+            ("max", "thinking", "max"),
+            ("unexpected", "thinking", "high"),
+        ]
     for reasoning_effort, expected_mode, expected_effort in cases:
         tokenizer.apply_chat_template(
             [{"role": "user", "content": "hi"}],

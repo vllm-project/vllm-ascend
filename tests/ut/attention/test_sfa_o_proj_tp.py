@@ -22,7 +22,8 @@ from tests.ut.base import TestBase
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.sfa_v1 import PreprocessType, SFAForwardContext
 from vllm_ascend.quantization.tp_weight_switch import (
     TPWeightGatherSpec,
     TPWeightSwitchMixin,
@@ -54,10 +55,10 @@ class TestAscendSFAOProjTPParams(TestBase):
             self.quant_method = linear_method
 
     def setUp(self):
-        AscendSFAImpl.o_proj_full_pools.clear()
+        AscendSFADSACPImpl.o_proj_full_pools.clear()
 
     def _make_impl(self, linear_method=None):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
         impl.tp_size = 2
         impl.o_proj = self._OProj(linear_method or _OProjLinearMethod())
         impl._o_proj_tp_weight_switch_enabled = False
@@ -77,7 +78,7 @@ class TestAscendSFAOProjTPParams(TestBase):
         self.assertEqual(state.gather_parts["weight_scale"].tp_tensor.data_ptr(), original_scale_ptr)
         self.assertEqual(state.gather_parts["weight"].full_tensor.shape, (8, 3))
         self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (4, 3))
-        self.assertEqual(len(AscendSFAImpl.o_proj_full_pools), 2)
+        self.assertEqual(len(AscendSFADSACPImpl.o_proj_full_pools), 2)
 
         impl._enable_o_proj_tp_full_weight_switch()
         self.assertIs(impl.o_proj_tp_weight_state, state)
@@ -98,15 +99,15 @@ class TestAscendSFAOProjTPParams(TestBase):
 
         impl._apply_o_proj_full_weight = MagicMock(side_effect=_apply_with_full_weight)
 
-        output, require_o_proj_forward = impl._handle_o_proj_weight_switch_and_forward(
+        impl.enable_dsa_cp_with_o_proj_tp = True
+        output = impl._finalize_o_proj(
             attn_output=torch.randn(2, 8),
             output=torch.empty(2, 3),
-            should_shard_weight=True,
+            gather_full_o_proj=True,
         )
 
         self.assertEqual(impl.o_proj.weight.data_ptr(), original_weight_ptr)
         self.assertEqual(impl.o_proj.weight_scale.data_ptr(), original_scale_ptr)
-        self.assertFalse(require_o_proj_forward)
         self.assertTrue(torch.equal(output, torch.ones(2, 3)))
 
     def test_enable_o_proj_switch_rejects_unsupported_method(self):
@@ -116,8 +117,7 @@ class TestAscendSFAOProjTPParams(TestBase):
             impl._enable_o_proj_tp_full_weight_switch()
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.enable_dsa_cp = False
+        impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
         impl.enable_dsa_cp_with_o_proj_tp = True
         impl.enable_sp = False
         impl.has_indexer = False
@@ -140,6 +140,8 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl._q_proj_and_k_up_proj = MagicMock(return_value=(MagicMock(), MagicMock()))
         impl.rope_single = MagicMock(return_value=MagicMock())
         impl._record_query_gather_context = MagicMock()
+        impl._prepare_kv_for_parallel = MagicMock(return_value=(None, None, None, []))
+        impl._store_parallel_kv = MagicMock(return_value=(None, None, None))
         impl._get_indexcache_topk_indices = MagicMock(return_value=MagicMock())
         impl._execute_sparse_flash_attention_process = MagicMock(return_value=MagicMock())
         impl._v_up_proj = MagicMock(return_value=MagicMock())
@@ -148,12 +150,21 @@ class TestAscendSFAOProjTPParams(TestBase):
         output = MagicMock()
         kv_cache = (MagicMock(), MagicMock())
         impl._compose_sfa_kv_cache = MagicMock(return_value=kv_cache)
-        impl._handle_o_proj_weight_switch_and_forward = MagicMock(return_value=(output, False))
+        impl._finalize_o_proj = MagicMock(return_value=output)
 
         attn_metadata = MagicMock()
         attn_metadata.dcp_context = None
         attn_metadata.dsa_cp_context = None
         attn_metadata.num_input_tokens = 1
+        impl._get_parallel_forward_context = MagicMock(
+            return_value=SFAForwardContext(
+                actual_seq_lengths_query=MagicMock(),
+                actual_seq_lengths_key=MagicMock(),
+                kv_slot_mapping=MagicMock(),
+                topk_num_tokens=1,
+                gather_full_o_proj=True,
+            )
+        )
 
         with (
             patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),

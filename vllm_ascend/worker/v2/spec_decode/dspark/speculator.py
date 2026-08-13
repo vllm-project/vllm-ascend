@@ -28,7 +28,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
@@ -39,18 +38,13 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
 
-        # we need to update full graph params in run_fullgraph,
-        # so create a stream to update full graph params.
-        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
-        if cudagraph_mode.has_full_cudagraphs():
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
-
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
+        self.query_cudagraph_manager.update_stream = self.update_stream
 
     def set_attn(
         self,
@@ -84,37 +78,19 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         self.attn_backends = attn_backends
 
-    # The signature is split on vllm_version_is: v0.26.0's
-    # _build_draft_attn_metadata does not accept seq_lens_cpu_upper_bound /
-    # step; d02df748bf+ does.
-    if vllm_version_is("0.26.0"):
-
-        def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-            num_tokens_padded = num_reqs_padded * self.num_query_per_req
-            assert self.input_batch is not None
-            with build_attn_metadata_wrapper():
-                attn_metadata = self._build_draft_attn_metadata(
-                    num_reqs=self.input_batch.num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_tokens_padded,
-                    causal=self._group_causal,
-                )
-            return [attn_metadata]
-    else:
-
-        def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-            num_tokens_padded = num_reqs_padded * self.num_query_per_req
-            assert self.input_batch is not None
-            with build_attn_metadata_wrapper():
-                attn_metadata = self._build_draft_attn_metadata(
-                    num_reqs=self.input_batch.num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_tokens_padded,
-                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                    step=self.num_query_per_req,
-                    causal=self._group_causal,
-                )
-            return [attn_metadata]
+    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        assert self.input_batch is not None
+        with build_attn_metadata_wrapper():
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=self.input_batch.num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
+            )
+        return [attn_metadata]
 
     def propose(
         self,

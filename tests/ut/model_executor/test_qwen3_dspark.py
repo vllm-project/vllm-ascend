@@ -50,12 +50,12 @@ class TestQwen3DSparkWeightLoading:
 
         # Capture the final delegation without invoking the real model loader.
         with (
-            patch.object(
-                qwen3_dspark, "get_rotataion_matrix", return_value=rotation_matrix
-            ) as mock_get_rotation_matrix,
+            patch.object(qwen3_dspark, "get_rotation_matrix", return_value=rotation_matrix) as mock_get_rotation_matrix,
             patch.object(qwen3_dspark.Qwen3DSparkForCausalLM, "load_weights") as mock_parent_load_weights,
         ):
-            model.load_weights(weights_to_load)
+            # DefaultModelLoader passes a one-shot iterator. Exercise that path
+            # so materializing the weights before rotation cannot exhaust them.
+            model.load_weights(iter(weights_to_load))
 
         mock_get_rotation_matrix.assert_called_once_with(rotation_path)
         mock_parent_load_weights.assert_called_once()

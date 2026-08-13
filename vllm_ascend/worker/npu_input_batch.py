@@ -17,17 +17,21 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
+
 import numpy as np
 import torch
+from vllm.config.reasoning import ReasoningConfig
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
+from vllm.v1.sample.thinking_budget_state import (
+    maybe_create_thinking_budget_state_holder,
+)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -55,21 +59,22 @@ class NPUInputBatch(InputBatch):
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+        reasoning_config: "ReasoningConfig | None" = None,
         use_replayssm: bool = False,
         slot_mapping_modes: list | None = None,
     ):
-        # main2main compat: only store the new upstream kwargs when
-        # running against vllm main (post-0.26.0).
-        if not vllm_version_is("0.26.0"):
-            self.use_replayssm = use_replayssm
-            self.slot_mapping_modes = slot_mapping_modes
+        self.use_replayssm = use_replayssm
+        self.slot_mapping_modes = slot_mapping_modes
 
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
-        # Added for compatibility with InputBatch methods that reference these
-        # attributes after PR vllm-project/vllm#34668. NPU does not use
-        # thinking budget, so the holder is always None.
-        self.thinking_budget_state_holder = None
+        self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
+            reasoning_config,
+            max_num_reqs,
+            num_speculative_tokens,
+            device,
+            pin_memory,
+        )
         self.thinking_token_budget_reqs: set[str] = set()
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len

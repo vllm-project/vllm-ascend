@@ -197,6 +197,7 @@ TITLES = {
     },
     "user_guide/feature_guide/lora.md": {"en": "LoRA", "zh": "LoRA"},
     "user_guide/feature_guide/netloader.md": {"en": "NetLoader", "zh": "NetLoader"},
+    "user_guide/feature_guide/pipeline_parallel.md": {"en": "Pipeline Parallelism", "zh": "流水线并行"},
     "user_guide/feature_guide/quantization.md": {"en": "Quantization", "zh": "量化"},
     "user_guide/feature_guide/rfork.md": {"en": "RFork", "zh": "RFork"},
     "user_guide/feature_guide/sequence_parallelism.md": {"en": "Sequence Parallelism", "zh": "序列并行"},
