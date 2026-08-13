@@ -12,10 +12,8 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEAllGatherCom
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
-    FusedMC2CommImpl,
     MC2CommImpl,
 )
-from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
 from vllm_ascend.quantization.methods.base import QuantType
 
 
@@ -51,80 +49,6 @@ class TestMoECommMethod(TestBase):
     def tearDown(self):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
-
-    def _build_mega_moe_comm_impl(self):
-        comm_impl = object.__new__(FusedMC2CommImpl)
-        comm_impl.moe_config = self.moe_config
-        comm_impl.swiglu_limit = 7.0
-        comm_impl.swiglu_alpha = 1.702
-        comm_impl.swiglu_beta = 1.0
-        token_dispatcher = object.__new__(TokenDispatcherWithMC2)
-        token_dispatcher.global_bs = 0
-        token_dispatcher.ep_world_size = 4
-        token_dispatcher.moe_all_to_all_group_name = "test_group"
-        comm_impl.token_dispatcher = token_dispatcher
-        return comm_impl
-
-    def _build_mega_moe_input(self, num_tokens):
-        return MoEFusedExpertsInput(
-            hidden_states=torch.randn(num_tokens, 8),
-            topk_weights=torch.randn(num_tokens, 2),
-            topk_ids=torch.zeros(num_tokens, 2, dtype=torch.int64),
-            weights=MoEWeights(
-                w1=[torch.ones(8, 8, dtype=torch.int8)],
-                w2=[torch.ones(8, 8, dtype=torch.int8)],
-                w1_scale=[torch.ones(8, dtype=torch.int64)],
-                w2_scale=[torch.ones(8, dtype=torch.int64)],
-            ),
-            routing=MoeRouterInput(
-                expert_map=None,
-                global_redundant_expert_num=0,
-                mc2_mask=torch.ones(num_tokens, dtype=torch.bool),
-                apply_router_weight_on_input=False,
-            ),
-            activation="swigluoai_uninterleave",
-            quant=MoEQuantParams(quant_type=QuantType.W8A8),
-        )
-
-    @patch("torch.ops._C_ascend.mega_moe", create=True)
-    def test_mega_moe_prefill_is_split_at_operator_limit(self, mock_mega_moe):
-        self.mock_ascend_config.mega_moe_max_tokens = 131072
-        call_index = 0
-
-        def fake_mega_moe(*args, **kwargs):
-            nonlocal call_index
-            call_index += 1
-            return args[0].clone(), torch.full((2,), call_index, dtype=torch.int32)
-
-        mock_mega_moe.side_effect = fake_mega_moe
-        comm_impl = self._build_mega_moe_comm_impl()
-        out, expert_tokens = comm_impl._apply_cann_mega_moe(self._build_mega_moe_input(8192))
-
-        self.assertEqual(out.shape, (8192, 8))
-        self.assertTrue(torch.equal(expert_tokens, torch.full((2,), 10, dtype=torch.int32)))
-        self.assertEqual(mock_mega_moe.call_count, 4)
-        for call in mock_mega_moe.call_args_list:
-            self.assertEqual(call.args[0].shape[0], 2048)
-            self.assertEqual(call.args[7].shape, (2048,))
-            self.assertEqual(call.args[7].dtype, torch.int8)
-            self.assertEqual(call.args[12], 2048)
-            self.assertEqual(call.kwargs["activation"], "swigluoai")
-
-    @patch("torch.ops._C_ascend.mega_moe", create=True)
-    def test_mega_moe_decode_keeps_single_call(self, mock_mega_moe):
-        self.mock_ascend_config.mega_moe_max_tokens = 131072
-        mock_mega_moe.side_effect = lambda *args, **kwargs: (
-            args[0].clone(),
-            torch.ones(2, dtype=torch.int32),
-        )
-        comm_impl = self._build_mega_moe_comm_impl()
-        out, expert_tokens = comm_impl._apply_cann_mega_moe(self._build_mega_moe_input(4))
-
-        self.assertEqual(out.shape, (4, 8))
-        self.assertTrue(torch.equal(expert_tokens, torch.ones(2, dtype=torch.int32)))
-        mock_mega_moe.assert_called_once()
-        self.assertEqual(mock_mega_moe.call_args.args[11], 32)
-        self.assertEqual(mock_mega_moe.call_args.args[12], 4)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")

@@ -1,3 +1,4 @@
+import importlib.util
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -32,13 +33,15 @@ class MoECommType(Enum):
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "w8a8",
+    "w4a8",
     "w8a8_dynamic",
+    "w4a8_dynamic",
     "quanttype.w8a8",
+    "quanttype.w4a8",
 }
 
-# MegaMoe is built into vLLM Ascend's local custom-op package. The flag is
-# intentionally independent of the optional cann_ops_transformer wheel.
-_MEGA_MOE_SUPPORTED = True
+_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+_LOCAL_MEGA_MOE_SUPPORTED = hasattr(torch.ops._C_ascend, "mega_moe")
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -80,16 +83,13 @@ def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
     if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
         return False
 
-    quant_type = getattr(hf_text_config, "moe_quantize", getattr(hf_text_config, "quantize", None))
+    quant_type = getattr(
+        vllm_config.model_config.hf_text_config,
+        "moe_quantize",
+        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
+    )
     if quant_type is None:
-        quant_config = getattr(vllm_config, "quant_config", None)
-        quant_description = getattr(quant_config, "quant_description", None)
-        if isinstance(quant_description, dict):
-            quant_type = quant_description.get("model_quant_type")
-    # The local integration is intentionally W8A8-only. In particular, BF16
-    # must retain the established ALLTOALLV-prefill / MC2-decode paths.
-    if quant_type is None:
-        return False
+        return True
     quant_name = str(getattr(quant_type, "name", quant_type)).lower()
     return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
@@ -311,7 +311,8 @@ def _select_a3_moe_comm_method(
     if get_ascend_config().enable_fused_mc2 == 1:
         # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
         mega_moe_enable = get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
-        if _MEGA_MOE_SUPPORTED and mega_moe_enable:
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
+        if ((_MEGA_MOE_SUPPORTED or _LOCAL_MEGA_MOE_SUPPORTED) and mega_moe_enable) or dispatch_ffn_combine_enable:
             return MoECommType.FUSED_MC2
 
     if num_tokens is None or num_tokens <= mc2_tokens_capacity:
