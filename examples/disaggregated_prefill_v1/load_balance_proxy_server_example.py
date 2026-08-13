@@ -993,6 +993,7 @@ async def reassign_instances(
 
 async def handle_completions_impl(api: str, request: Request):
     runtime = get_runtime()
+    args = get_global_args()
     request_released = False
     try:
         req_data = await request.json()
