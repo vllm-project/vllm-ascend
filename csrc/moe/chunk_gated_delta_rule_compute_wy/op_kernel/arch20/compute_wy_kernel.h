@@ -23,6 +23,9 @@ constexpr uint32_t FLOAT_PER_BLOCK = BLOCK_BYTES / sizeof(float);
 constexpr uint32_t FLOAT_VEC_LEN = 64;
 constexpr uint32_t MAX_SAFE_HEAD_DIM = 128;
 constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
+// ||A||_inf below this value bounds the forward solve by 1/(1-threshold),
+// leaving ample fp16 headroom for the fast Cube doubling path.
+constexpr float FP32_FS_ROW_SUM_THRESHOLD = 0.75f;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
@@ -342,6 +345,48 @@ class KernelComputeWy {
     PipeBarrier<PIPE_V>();
   }
 
+  __aicore__ inline bool NeedsFp32ForwardSubstitution(const LocalTensor<float> a,
+                                                      LocalTensor<float> absScratch,
+                                                      LocalTensor<float> rowSums,
+                                                      LocalTensor<float> reduceScratch) const {
+    // A is strict-lower, so reducing full rows also computes their absolute
+    // lower-triangle sums. Keep the scan on the vector pipe; only 64 reduced
+    // scalars cross to the scalar unit.
+    Abs(absScratch, a, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < FIXED_CHUNK_SIZE; ++row) {
+      ReduceSum(rowSums[row], absScratch[row * FIXED_CHUNK_SIZE], reduceScratch, FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();
+    }
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    for (uint32_t row = 0; row < FIXED_CHUNK_SIZE; ++row) {
+      const float rowSum = rowSums.GetValue(row);
+      if (rowSum != rowSum || rowSum >= FP32_FS_ROW_SUM_THRESHOLD) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Stable in-place solve R = (I-A)^-1 R. Processing rows from top to bottom
+  // means each source row has already been solved, exactly matching the torch
+  // WY forward substitution. A, U and W stay fp32 until the final output cast.
+  __aicore__ inline void Fp32ForwardSubstitution(const LocalTensor<float> a, LocalTensor<float> u,
+                                                 LocalTensor<float> w) const {
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    for (uint32_t row = 1; row < FIXED_CHUNK_SIZE; ++row) {
+      const uint32_t aRowOffset = row * FIXED_CHUNK_SIZE;
+      const uint32_t uRowOffset = row * alignV_;
+      const uint32_t wRowOffset = row * alignK_;
+      for (uint32_t col = 0; col < row; ++col) {
+        const float coefficient = a.GetValue(aRowOffset + col);
+        Axpy(u[uRowOffset], u[col * alignV_], coefficient, static_cast<int32_t>(vHeadDim_));
+        Axpy(w[wRowOffset], w[col * alignK_], coefficient, static_cast<int32_t>(kHeadDim_));
+        PipeBarrier<PIPE_V>();
+      }
+    }
+  }
+
   __aicore__ inline void ProcessOneTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx) {
     const uint32_t tokenStart = chunkIdx * FIXED_CHUNK_SIZE;
     if (tokenStart + FIXED_CHUNK_SIZE > seqlen_ || kHeadIdx >= kNumHead_ || vHeadIdx >= vNumHead_) {
@@ -356,6 +401,7 @@ class KernelComputeWy {
     LocalTensor<float> gLocal = gBuf_.Get<float>();
     LocalTensor<float> expGLocal = expGBuf_.Get<float>();
     LocalTensor<float> betaLocal = rowBuf_.Get<float>();
+    LocalTensor<float> reduceScratch = negABuf_.Get<float>();
     LocalTensor<float> attnLocal = attnBuf_.Get<float>();
     LocalTensor<float> scratch = tmpBuf_.Get<float>();
 
@@ -387,17 +433,25 @@ class KernelComputeWy {
     BroadcastMulRowsFloat(vFloat, vFloat, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
     // kBeta already contains βK for the Gram matmul; only apply γ = exp(a) in place.
     BroadcastMulRowsFloat(kBeta, kBeta, expGLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
+    // betaLocal is dead after RHS construction and can hold the 64 row sums.
+    const bool useFp32ForwardSubstitution =
+        NeedsFp32ForwardSubstitution(attnLocal, scratch, betaLocal, reduceScratch);
 
-    // Nilpotent doubling: R ← (I−A)⁻¹ R without forming T.
-    // UploadP uses qHalf (>=64*64). U R-half uses vHalf (>=64*V); W R-half uses kHalf (>=64*K).
-    // scratch (tmpBuf_) is [64, max(K,V)] — contiguous C staging for bulk ApplyAdd.
-    for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
-      cubeGemm_.UploadP(attnLocal, qHalf);
-      cubeGemm_.GemmApplyAdd(vFloat, vHalf, scratch, vHeadDim_, alignV_, /*useU=*/true);
-      cubeGemm_.GemmApplyAdd(kBeta, kHalf, scratch, kHeadDim_, alignK_, /*useU=*/false);
-      if (round + 1 < DOUBLING_ROUNDS) {
-        cubeGemm_.GemmSquare(attnLocal, qHalf);
-        SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    if (useFp32ForwardSubstitution) {
+      Fp32ForwardSubstitution(attnLocal, vFloat, kBeta);
+    } else {
+      // Fast nilpotent doubling: R ← (I−A)⁻¹ R without forming T.
+      // UploadP uses qHalf (>=64*64). U R-half uses vHalf (>=64*V);
+      // W R-half uses kHalf (>=64*K). The norm gate above guarantees
+      // that the repeated fp16 operand casts have ample headroom.
+      for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
+        cubeGemm_.UploadP(attnLocal, qHalf);
+        cubeGemm_.GemmApplyAdd(vFloat, vHalf, scratch, vHeadDim_, alignV_, /*useU=*/true);
+        cubeGemm_.GemmApplyAdd(kBeta, kHalf, scratch, kHeadDim_, alignK_, /*useU=*/false);
+        if (round + 1 < DOUBLING_ROUNDS) {
+          cubeGemm_.GemmSquare(attnLocal, qHalf);
+          SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        }
       }
     }
 
