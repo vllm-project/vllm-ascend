@@ -1319,7 +1319,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
     def _finish_hidden_states_all_gather(
         gathered_hidden_states: torch.Tensor, handle: torch.distributed.Work | None, pad_size: int
     ) -> torch.Tensor:
-
         if handle is not None:
             handle.wait()
 
