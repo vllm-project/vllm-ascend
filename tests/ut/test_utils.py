@@ -15,6 +15,8 @@
 
 import math
 import os
+import sys
+import types
 from unittest import mock
 
 import pytest
@@ -33,6 +35,7 @@ class TestUtils(TestBase):
 
         importlib.reload(platform)
         utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
+        utils._CATEGORICAL_SAMPLE_OP_ENABLED = None
 
     def test_nd_to_nz_2d(self):
         # can be divided by 16
@@ -120,6 +123,43 @@ class TestUtils(TestBase):
         with mock.patch("builtins.__import__") as mock_import_module:
             mock_import_module.side_effect = ImportError("import error")
             self.assertFalse(utils.enable_custom_op())
+
+    def test_enable_categorical_sample_op_uses_general_path_on_a2_a3(self):
+        torch.ops._C_ascend.npu_categorical_sample = object()
+        self.addCleanup(delattr, torch.ops._C_ascend, "npu_categorical_sample")
+
+        with (
+            mock.patch(
+                "vllm_ascend.utils.get_ascend_device_type",
+                return_value=utils.AscendDeviceType.A3,
+            ),
+            mock.patch("vllm_ascend.utils.enable_custom_op", return_value=True) as enable_general,
+            mock.patch("vllm_ascend.utils.bootstrap_custom_op_env") as bootstrap,
+        ):
+            self.assertTrue(utils.enable_categorical_sample_op())
+
+        enable_general.assert_called_once_with()
+        bootstrap.assert_not_called()
+
+    def test_enable_categorical_sample_op_uses_acl_nn_path_on_a5(self):
+        torch.ops._C_ascend.npu_categorical_sample = object()
+        self.addCleanup(delattr, torch.ops._C_ascend, "npu_categorical_sample")
+        native_module = types.ModuleType("vllm_ascend.vllm_ascend_C")
+
+        with (
+            mock.patch(
+                "vllm_ascend.utils.get_ascend_device_type",
+                return_value=utils.AscendDeviceType.A5,
+            ),
+            mock.patch("vllm_ascend.utils.enable_custom_op") as enable_general,
+            mock.patch("vllm_ascend.utils.bootstrap_custom_op_env") as bootstrap,
+            mock.patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": native_module}),
+        ):
+            self.assertTrue(utils.enable_categorical_sample_op())
+            self.assertTrue(utils.enable_categorical_sample_op())
+
+        enable_general.assert_not_called()
+        bootstrap.assert_called_once_with(include_vendor_lib=True)
 
     def test_find_hccl_library(self):
         with mock.patch.dict(os.environ, {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):

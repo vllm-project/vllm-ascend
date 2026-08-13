@@ -415,6 +415,30 @@
     - vllm_ascend/ops/rel_pos_attention.py
   tests: []
 
+# Sampling
+- name: categorical_sampling
+  optional: true
+  source_file_dependencies:
+    - csrc/build_aclnn.sh
+    - csrc/sampling/categorical_sample
+    - csrc/torch_binding.cpp
+    - csrc/torch_binding_meta.cpp
+    - vllm_ascend/utils.py
+    - vllm_ascend/worker/v2/sample/gumbel.py
+    - vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py
+    - vllm_ascend/patch/worker/patch_v2/patch_triton.py
+    - tests/ut/sample/a2/test_categorical_sampling.py
+    - tests/ut/sample/a2/test_gumbel_sampling.py
+    - tests/ut/sample/a2/test_gumbel_sampling_heavy_tail.py
+    - tests/ut/sample/a2/test_rejection_sampling_v2.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_categorical_sampling.py
+  tests:
+    - tests/ut/sample/a2/test_categorical_sampling.py
+    - tests/ut/sample/a2/test_gumbel_sampling.py
+    - tests/ut/sample/a2/test_gumbel_sampling_heavy_tail.py
+    - tests/ut/sample/a2/test_rejection_sampling_v2.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_categorical_sampling.py
+
 # Patch
 - name: patch
   optional: false
@@ -878,7 +902,11 @@ estimated_times:
   tests/ut/quantization/methods/a2/test_w8a16.py: 40
   tests/ut/quantization/methods/a2/test_w8a8_dynamic.py: 40
   tests/ut/quantization/methods/a2/test_w8a8_static.py: 40
-  tests/ut/sample/a2/test_gumbel_sampling.py: 80
+  tests/ut/sample/a2/test_categorical_sampling.py: 180
+  tests/ut/sample/a2/test_gumbel_sampling.py: 90
+  tests/ut/sample/a2/test_gumbel_sampling_heavy_tail.py: 300
+  tests/ut/sample/a2/test_rejection_sampling_v2.py: 90
+  tests/e2e/pull_request/one_card/model_runner_v2/test_categorical_sampling.py: 240
   tests/ut/spec_decode/a2/test_eagle_proposer.py: 50
   tests/ut/worker/a2/test_block_table.py: 30
   tests/ut/worker/a2/test_model_runner_v1.py: 30

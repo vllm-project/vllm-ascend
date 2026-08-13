@@ -48,6 +48,7 @@
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
+#include "sampling/categorical_sample/categorical_sample_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2298,6 +2299,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd, Tensor x)"
         );
     ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
+
+    ops.def(
+        "npu_categorical_sample("
+        "Tensor processed_logits, Tensor expanded_idx_mapping, Tensor temperature, Tensor seed, Tensor pos, "
+        "bool return_lse=False, bool apply_temperature=False, "
+        "Tensor(a!)? output_processed_logits=None, Tensor? output_processed_logits_col=None, bool use_fp64=False"
+        ") -> (Tensor sampled_token_ids, Tensor lse)"
+    );
+    ops.impl("npu_categorical_sample", torch::kPrivateUse1, &vllm_ascend::npu_categorical_sample);
 
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);

@@ -61,6 +61,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
+_CATEGORICAL_SAMPLE_OP_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
@@ -457,6 +458,41 @@ def enable_custom_op():
                 e,
             )
     return _CUSTOM_OP_ENABLED
+
+
+def enable_categorical_sample_op() -> bool:
+    """Register the categorical sampler through the device-specific path.
+
+    A2/A3 use the general custom-op initializer. A5 keeps that global gate
+    disabled while custom-op coverage is incomplete, but supports ACLNN
+    operators packaged in ``_cann_ops_custom``. Importing the native extension
+    here registers the categorical Torch operator without enabling any A5
+    custom-op call sites guarded by :func:`enable_custom_op`.
+    """
+    global _CATEGORICAL_SAMPLE_OP_ENABLED
+
+    if _CATEGORICAL_SAMPLE_OP_ENABLED is not None:
+        return _CATEGORICAL_SAMPLE_OP_ENABLED
+
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        _CATEGORICAL_SAMPLE_OP_ENABLED = enable_custom_op() and hasattr(torch.ops._C_ascend, "npu_categorical_sample")
+        return _CATEGORICAL_SAMPLE_OP_ENABLED
+
+    try:
+        if not torch.compiler.is_compiling():
+            bootstrap_custom_op_env(include_vendor_lib=True)
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+        _CATEGORICAL_SAMPLE_OP_ENABLED = hasattr(torch.ops._C_ascend, "npu_categorical_sample")
+    except ImportError as error:
+        _CATEGORICAL_SAMPLE_OP_ENABLED = False
+        logger.warning(
+            "Failed to register the A5 categorical sampling operator. "
+            "Build and install the categorical custom OPP before using MRV2 sampling. error=%s",
+            error,
+        )
+
+    return _CATEGORICAL_SAMPLE_OP_ENABLED
 
 
 def find_hccl_library() -> str:
