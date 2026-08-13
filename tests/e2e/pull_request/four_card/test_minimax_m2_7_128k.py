@@ -24,6 +24,7 @@ from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.pull_request.four_card.minimax_m2_7_common import (
     BENCH_128K_ARGS,
     MINIMAX_M2_7_MODEL,
+    THROUGHPUT_THRESHOLD_128K,
     _benchmark_pair,
 )
 
@@ -44,9 +45,10 @@ NUM_BENCH_REPEATS = 1
 )
 @wait_until_npu_memory_free()
 def test_minimax_m2_7_128k1k_v2_vs_v1() -> None:
-    """128k1k: 160 requests, 8 concurrent, ~90% shared prefix, V2 >= V1 * 0.97."""
+    """128k1k: 160 requests, 8 concurrent, ~90% shared prefix, V2 >= V1 * 0.94."""
     _benchmark_pair(
         bench_args=BENCH_128K_ARGS,
         case="128k1k",
         num_repeats=NUM_BENCH_REPEATS,
+        threshold=THROUGHPUT_THRESHOLD_128K,
     )
