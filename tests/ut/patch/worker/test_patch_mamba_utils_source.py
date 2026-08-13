@@ -18,10 +18,9 @@ def _top_level_functions(path: Path) -> dict[str, ast.FunctionDef]:
 def test_postprocess_keeps_only_existing_ascend_precision_kernel() -> None:
     functions = _top_level_functions(POSTPROCESS)
 
-    assert set(functions) == {"postprocess_mamba_fused_kernel"}
+    assert set(functions) == {"postprocess_mamba_fused_kernel", "_memcpy_u64_tiled"}
     postprocess_source = ast.unparse(functions["postprocess_mamba_fused_kernel"])
-    assert "src_ptr = src_addr.to(tl.pointer_type(tl.uint8))" in postprocess_source
-    assert "dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))" in postprocess_source
+    assert "_memcpy_u64_tiled(" in postprocess_source
     assert "PRECOMPUTED_NEW_COMPUTED" in postprocess_source
     assert "tl.store(num_accepted_tokens_ptr + req_idx, 1)" in postprocess_source
 
