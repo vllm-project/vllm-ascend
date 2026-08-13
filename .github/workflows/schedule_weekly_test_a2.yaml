@@ -67,8 +67,6 @@ on:
         description: 'CANN version for base image tag'
         required: false
         default: '2026.08.03'
-        type: string
-
 permissions:
   contents: read
   pull-requests: read

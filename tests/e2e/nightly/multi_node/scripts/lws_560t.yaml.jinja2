@@ -49,6 +49,24 @@ spec:
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
+              - name: BISECT_GOOD_COMMIT
+                value: {{ bisect_good_commit | default("") | tojson }}
+              - name: BISECT_BAD_COMMIT
+                value: {{ bisect_bad_commit | default("HEAD") | tojson }}
+              - name: BISECT_FAIL_CONFIRM_RETRIES
+                value: {{ bisect_fail_confirm_retries | default("") | tojson }}
+              - name: BISECT_TRIAL_TIMEOUT
+                value: {{ bisect_trial_timeout | default("") | tojson }}
+              - name: BISECT_BARRIER_TIMEOUT
+                value: {{ bisect_barrier_timeout | default("") | tojson }}
+              - name: BISECT_NO_VERIFY_GOOD
+                value: {{ bisect_no_verify_good | default("false") | tojson }}
+              - name: BISECT_NO_VERIFY_BAD
+                value: {{ bisect_no_verify_bad | default("false") | tojson }}
+              - name: BISECT_FORCE_INITIAL_BUILD
+                value: {{ bisect_force_initial_build | default("false") | tojson }}
+              - name: BISECT_CONFIG_BASE_PATH
+                value: {{ bisect_config_base_path | default("") | tojson }}
               - name: OPENLIBING_SECRET
                 value: "{{ openlibing_secret | default("") }}"
               - name: HCCL_INTER_HCCS_DISABLE
@@ -127,6 +145,24 @@ spec:
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
+              - name: BISECT_GOOD_COMMIT
+                value: {{ bisect_good_commit | default("") | tojson }}
+              - name: BISECT_BAD_COMMIT
+                value: {{ bisect_bad_commit | default("HEAD") | tojson }}
+              - name: BISECT_FAIL_CONFIRM_RETRIES
+                value: {{ bisect_fail_confirm_retries | default("") | tojson }}
+              - name: BISECT_TRIAL_TIMEOUT
+                value: {{ bisect_trial_timeout | default("") | tojson }}
+              - name: BISECT_BARRIER_TIMEOUT
+                value: {{ bisect_barrier_timeout | default("") | tojson }}
+              - name: BISECT_NO_VERIFY_GOOD
+                value: {{ bisect_no_verify_good | default("false") | tojson }}
+              - name: BISECT_NO_VERIFY_BAD
+                value: {{ bisect_no_verify_bad | default("false") | tojson }}
+              - name: BISECT_FORCE_INITIAL_BUILD
+                value: {{ bisect_force_initial_build | default("false") | tojson }}
+              - name: BISECT_CONFIG_BASE_PATH
+                value: {{ bisect_config_base_path | default("") | tojson }}
               - name: HCCL_INTER_HCCS_DISABLE
                 value: "TRUE"
               - name: HCCL_IF_BASE_PORT
