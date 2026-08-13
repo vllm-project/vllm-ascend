@@ -163,6 +163,18 @@ jobs:
           - arch: linux/arm64
             runner: ubuntu-22.04-arm
             tag: arm64
+        dockerfile:
+          - Dockerfile
+          - Dockerfile.310p
+          - Dockerfile.310p.openEuler
+          - Dockerfile.a3
+          - Dockerfile.a3.openEuler
+          - Dockerfile.openEuler
+          - Dockerfile.a5
+          - Dockerfile.a5.openEuler
+        runner_info:
+          - {runner: linux-aarch64-cpu-4, arch: arm64}
+          - {runner: linux-amd64-cpu-4, arch: amd64}
 
     steps:
 
@@ -324,12 +336,36 @@ jobs:
           vllm_ascend/lib
           vllm_ascend/include
         key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+      
+    - name: Determine SOC_VERSION
+      id: vars
+      run: |
+        case "${{ matrix.dockerfile }}" in
+          Dockerfile|Dockerfile.openEuler)
+            echo "soc_version=ascend910b1" >> $GITHUB_OUTPUT
+            ;;
+          Dockerfile.310p|Dockerfile.310p.openEuler)
+            echo "soc_version=ascend310p1" >> $GITHUB_OUTPUT
+            ;;
+          Dockerfile.a3|Dockerfile.a3.openEuler)
+            echo "soc_version=ascend910_9391" >> $GITHUB_OUTPUT
+            ;;
+          Dockerfile.a5|Dockerfile.a5.openEuler)
+            echo "soc_version=ascend950dt_9582" >> $GITHUB_OUTPUT
+            ;;
+        esac
+
+    - name: Login to SWR
+      uses: docker/login-action@v3
+      with:
+        registry: swr.cn-north-12.myhuaweicloud.com
+        username: ${{ secrets.SWR_USERNAME }}
+        password: ${{ secrets.SWR_PASSWORD }}
 
     - name: Build and push
       uses: docker/build-push-action@v7
       id: build
       with:
-        platforms: ${{ matrix.arch }}
         # use the current repo path as the build context, ensure .git is contained
         context: .
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
@@ -339,8 +375,15 @@ jobs:
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
-          PIP_INDEX_URL=https://pypi.org/simple
-          COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
+          CANN_QUAY_URL=swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann
+          APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
+          PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
+          PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
+          ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
+          GIT_PROXY=https://gh-proxy.test.osinfra.cn/
+          SOC_VERSION=${{ steps.vars.outputs.soc_version }}
+          COMPILE_CUSTOM_KERNELS=0
           VLLM_COMMIT=${{ inputs.vllm_commit }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
