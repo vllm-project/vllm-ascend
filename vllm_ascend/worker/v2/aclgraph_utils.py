@@ -24,7 +24,6 @@ import torch
 import torch.nn as nn
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
@@ -94,30 +93,20 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
-        """Override run_fullgraph to update full graph params in run_fullgraph."""
+        """Replay a full graph and update its registered tasks."""
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        # Resolve every provider before replay so a provider failure cannot
+        # leave the graph blocked on an update event that will never be recorded.
+        resolved_tasks = graph.resolve_tasks(
+            self.model_runner.model_state.attn_metadata
+        )
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
-
-        num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        with (
-            set_current_vllm_config(self.vllm_config),
-            set_forward_context(
-                self.model_runner.model_state.attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                cudagraph_runtime_mode=desc.cg_mode,
-                num_tokens_across_dp=num_tokens_across_dp,
-                batch_descriptor=None,  # Full graph model don't need batch_descriptor
-                slot_mapping=None,
-            ),
-        ):
-            forward_context = get_forward_context()
-            graph = self.graphs[desc]
-            assert isinstance(graph, UpdatableGraph)
-            graph.update(self.update_stream, forward_context)
+        graph.update(self.update_stream, resolved_tasks)
         return ret
 
     def capture(
