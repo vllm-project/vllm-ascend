@@ -58,9 +58,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
-        self.enable_confidence_head = bool(
-            getattr(config, "enable_confidence_head", hasattr(config, "markov_head_type"))
-        )
+        self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
         if self.enable_confidence_head:
             model_prefix = maybe_prefix(prefix, "model")
             self.model.confidence_head = DSparkConfidenceHead(
