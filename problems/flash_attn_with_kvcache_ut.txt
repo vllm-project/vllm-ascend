@@ -1,16 +1,8 @@
-Traceback (most recent call last):
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm/zty/vllm/vllm/v1/executor/multiproc_executor.py", line 996, in worker_busy_loop
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     output = func(*args, **kwargs)
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]              ^^^^^^^^^^^^^^^^^^^^^
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/worker.py", line 710, in compile_or_warm_up_model
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     npugraph_memory_bytes = self.model_runner.capture_model()
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 5184, in capture_model
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     _e53_test_fresh_taskgroup()
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 371, in _e53_test_fresh_taskgroup
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     with torch.npu.graph(graph):
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/graphs.py", line 874, in __enter__
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     self.npu_graph.capture_begin(
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/graphs.py", line 625, in capture_begin
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     super().capture_begin(pool=pool, capture_error_mode=capture_error_mode, report_shape=True)
-(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004] RuntimeError: Inplace update to inference tensor outside InferenceMode is not allowed.You can make a clone to get a normal tensor before doing inplace update.See https://github.com/pytorch/rfcs/pull/17 for more details.
+rank1]:[W813 20:34:33.628640959 CopyKernelOpApi.cpp:58] Warning: EZ9999: Inner Error!
+EZ9999[PID: 79714] 2026-08-13-20:34:33.458.468 (EZ9999):  The error from device(chipId:1, dieId:0), serial number is 1, there is an exception of fftsplus aicore error, core id is 0, error code = 0, dump info: pc start: 0x12c09d894f34, current: 0x12c09d898380, vec error info: 0, mte error info: 0x39030000c8, ifu error info: 0x1000000000000, ccu error info: 0xde3ed28900000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c140082080, aic cond: 0.
+The extend info: errcode:(0, 0x8000, 0) errorStr: The scalar instruction accesses an invalid GM address or the cross-device memory access times out. fixp_error0 info: 0x30000c8, fixp_error1 info: 0x39, fsmId:0, tslot:3, thread:0, ctxid:0, blk:15, sublk:0, subErrType:4.
+For details, see the troubleshooting document on the Ascend official website. Search for the keyword "AI Core Error".[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:1117]
+TraceBack (most recent call last):
+       An error occurred in the kernel task, retCode=0x26, [aicore exception].[FUNC:PreCheckTaskErr][FILE:davinci_kernel_task.cc][LINE:1262]
+       rtStreamSynchronize execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+ (function copy_between_host_and_device_opapi)
