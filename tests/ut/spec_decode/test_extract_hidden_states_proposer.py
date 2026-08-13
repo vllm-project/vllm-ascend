@@ -21,8 +21,6 @@ with Ascend-specific additions for ACL graph differences.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import numpy as np
 import pytest
 import torch
@@ -32,15 +30,6 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
-
-
-@pytest.fixture(autouse=True)
-def _no_pin_memory():
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-        False,
-    ):
-        yield
 
 
 class MockCachedRequestState:
