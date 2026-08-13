@@ -182,6 +182,15 @@ spec:
               limits:
                 {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
+                ephemeral-storage: 100Gi
+              requests:
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                ephemeral-storage: 100Gi
+                cpu: 125
+            volumeMounts:
+              - mountPath: /root/.cache
+                name: shared-volume
+              - mountPath: /usr/local/Ascend/driver/tools
 {% if shared_volume_path %}
         - name: shared-volume
           hostPath:
