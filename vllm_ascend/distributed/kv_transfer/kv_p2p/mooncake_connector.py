@@ -2997,11 +2997,21 @@ class MooncakeConnectorWorker:
             group_local_block_ids: list[list[int]] = []
             is_final_shard = remote_kv_id == len(remote_handshake_port_list) - 1
             for group_idx, (group_spec, _) in kv_group_items:
+                # local/remote block ids are aligned with the KV cache manager
+                # groups (kv_cache_group_id), not the Mooncake transfer groups:
+                # a manager group may be split into multiple transfer groups
+                # (e.g. SFA MLA + indexer caches share one manager group), so
+                # index the ids by kv_cache_group_id like the transfer stage does.
+                kv_cache_group_id = self._get_kv_cache_group_id(group_idx, group_spec)
                 if group_spec["kv_cache_spec_type"] == "MambaSpec":
                     # Mamba state is not context-block sharded like attention
                     # KV. Transfer the final state from the final PCP/DCP shard.
-                    group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
-                    group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
+                    group_remote_block_ids.append(
+                        list(meta.remote_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
+                    group_local_block_ids.append(
+                        list(meta.local_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
                     continue
                 # Attention: expand to kernel blocks here. Remote is sliced from remote_first
                 # (skips this rank's prefix-cached blocks) then expanded; local kernels are
@@ -3010,7 +3020,7 @@ class MooncakeConnectorWorker:
                 # n == 0, so both kernel lists naturally come out empty.
                 _, remote_scale, kernel_size = group_kernel_params[group_idx]
                 remote_logical = list(
-                    meta.remote_block_ids[group_idx][remote_first : remote_first + num_blocks_to_pull]
+                    meta.remote_block_ids[kv_cache_group_id][remote_first : remote_first + num_blocks_to_pull]
                 )
                 kernel_remote = self._expand_block_ids(remote_logical, remote_scale)
                 kernel_local = self._local_kernel_ids_for_shard(
@@ -3024,7 +3034,7 @@ class MooncakeConnectorWorker:
                     remote_cp_size,
                     remote_block_size,
                     kernel_size,
-                    list(meta.local_block_ids[group_idx]),
+                    list(meta.local_block_ids[kv_cache_group_id]),
                 )
                 num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
                 group_remote_block_ids.append(kernel_remote[:num_kernel_blocks])
@@ -3316,11 +3326,29 @@ class MooncakeConnectorWorker:
         if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
             return tuple(), tuple()
 
-        if len(meta.remote_block_ids) != 1 or len(meta.local_block_ids) != 1:
-            raise AssertionError(
-                "SFA replicate-K currently expects exactly one KV cache group. "
-                f"Got remote groups={len(meta.remote_block_ids)}, local groups={len(meta.local_block_ids)}."
+        # Locate the KV cache group holding the replicated SFA indexer cache
+        # (block_size_scale > 1). The indexer cache can live in its own transfer
+        # group, so a single-group assumption is not valid.
+        replicate_group_id: int | None = None
+        for transfer_group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
+            kv_cache_group_id = group_spec.get("kv_cache_group_id", transfer_group_idx)
+            has_replicated_cache = any(
+                any(scale > 1 for scale in self.block_size_scale[layer_idx]) for layer_idx in layer_indices
             )
+            if has_replicated_cache:
+                replicate_group_id = kv_cache_group_id
+                break
+        if (
+            replicate_group_id is None
+            or replicate_group_id >= len(meta.local_block_ids)
+            or replicate_group_id >= len(meta.remote_block_ids)
+        ):
+            logger.warning(
+                "SFA replicate-K skipped: replicated indexer cache group not found (num_groups=%s block_size_scale=%s)",
+                len(meta.local_block_ids),
+                self.block_size_scale,
+            )
+            return tuple(), tuple()
 
         remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
         local_cp_size = self.pcp_size * self.dcp_size
@@ -3342,8 +3370,8 @@ class MooncakeConnectorWorker:
         if num_prefix_cached_blocks > 0 and not meta.local_full_block_ids:
             raise AssertionError("SFA replicate-K requires full local block ids when prefix cache is used.")
 
-        remote_blocks = list(meta.remote_block_ids[0])
-        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[0])
+        remote_blocks = list(meta.remote_block_ids[replicate_group_id])
+        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[replicate_group_id])
         if not local_full_blocks:
             return tuple(), tuple()
 
@@ -3360,6 +3388,16 @@ class MooncakeConnectorWorker:
             local_block_ids.append(
                 int(local_full_blocks[local_local_idx]) * local_cp_size + global_block_idx % local_cp_size
             )
+        logger.warning(
+            "SFA replicate-K: num_prompt_blocks=%s num_computed_tokens=%s prefix_cached=%s "
+            "transferred=%s remote_ids[:8]=%s local_ids[:8]=%s",
+            meta.num_prompt_blocks,
+            meta.num_computed_tokens,
+            num_prefix_cached_blocks,
+            len(local_block_ids),
+            remote_block_ids[:8],
+            local_block_ids[:8],
+        )
 
         local_block_ids = local_block_ids[:num_external_blocks]
         remote_block_ids = remote_block_ids[: len(local_block_ids)]

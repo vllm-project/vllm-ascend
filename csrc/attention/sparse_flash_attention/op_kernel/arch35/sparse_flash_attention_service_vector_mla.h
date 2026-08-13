@@ -119,6 +119,7 @@ private:
     __aicore__ inline int64_t GetkeyOffset(int64_t s2Idx, const RunInfo &runInfo, ConstInfo &constInfo);
     __aicore__ inline void GetRealCmpS2Idx(int64_t &token0Idx, int64_t &token1Idx, int64_t s2IdxInBase,
         const RunInfo &runInfo, ConstInfo &constInfo);
+    __aicore__ inline int64_t CalcSparseValidRows(const RunInfo &runInfo, ConstInfo &constInfo);
     __aicore__ inline void CopyInKvNotSparse(LocalTensor<KV_T> kvMergUb, int64_t v0Loop, int64_t dealRow,
         int64_t s2StartIdx, const RunInfo &runInfo, ConstInfo &constInfo);
     __aicore__ inline uint32_t CopyInKvSparse(LocalTensor<KV_T> kvInUb, int64_t startRow, int64_t token0Idx,
@@ -212,6 +213,36 @@ SFAVectorService<TEMPLATE_ARGS>::GetRealCmpS2Idx(int64_t &token0Idx, int64_t &to
     } else {
         token1Idx = sparseIndicesGm.GetValue(topkBS1Idx + topkKIdx) + runInfo.s2StartIdx;
     }
+}
+
+// 统计当前s2块内有效(-1前)的topk索引数, 用于屏蔽未拷贝的陈旧score列
+TEMPLATES_DEF_NO_DEFAULT __aicore__ inline int64_t SFAVectorService<TEMPLATE_ARGS>::CalcSparseValidRows(
+    const RunInfo &runInfo, ConstInfo &constInfo)
+{
+    int64_t topkBS1Idx = 0;
+    if constexpr (LAYOUT_T == SFA_LAYOUT::TND) {
+        uint64_t actualSeqQPrefixSum = runInfo.boIdx == 0 ? 0 : cuSeqlensQGm.GetValue(runInfo.boIdx - 1);
+        topkBS1Idx += (actualSeqQPrefixSum + runInfo.s1oIdx) * constInfo.sparseBlockCount; // T, N2(1), K
+    } else {
+        topkBS1Idx += runInfo.boIdx * constInfo.s1Size * constInfo.sparseBlockCount +
+            runInfo.s1oIdx * constInfo.sparseBlockCount; // B, S1, N2(1), K
+    }
+
+    int64_t chunkStart = runInfo.s2LoopCount * constInfo.s2BaseSize;
+    int64_t chunkEnd = Min(chunkStart + constInfo.s2BaseSize, (int64_t)constInfo.sparseBlockCount);
+    if (chunkEnd <= chunkStart) {
+        return 0;
+    }
+    // 无效索引均为尾部填充, 末项有效则整块有效
+    if (sparseIndicesGm.GetValue(topkBS1Idx + chunkEnd - 1) >= 0) {
+        return chunkEnd - chunkStart;
+    }
+    int64_t validRows = 0;
+    while (validRows < chunkEnd - chunkStart &&
+           sparseIndicesGm.GetValue(topkBS1Idx + chunkStart + validRows) >= 0) {
+        validRows++;
+    }
+    return validRows;
 }
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline
@@ -351,6 +382,126 @@ __simd_vf__ void CastScaleImpl(__ubuf__ float* ubDstAddr, __ubuf__ int8_t* ubSrc
     }
 }
 
+// 空行/部分行防护: 将s2块内未拷贝的陈旧score列置为minValue, 使max/sum只由真实拷贝的KV贡献
+template <typename T>
+__simd_vf__ void MaskSparseInvalidScoreVF(__ubuf__ T *scoreUb, const T minValue, const uint16_t m,
+    const uint32_t validRowCnt)
+{
+    constexpr uint16_t floatRepSize = 64;
+    constexpr uint16_t s2BaseSize = 128;
+    AscendC::MicroAPI::RegTensor<float> vreg_min;
+    AscendC::MicroAPI::RegTensor<float> vreg_input;
+    AscendC::MicroAPI::RegTensor<float> vreg_input_unroll;
+    AscendC::MicroAPI::MaskReg preg_all = AscendC::MicroAPI::CreateMask<T, AscendC::MicroAPI::MaskPattern::ALL>();
+    uint32_t validCols0 = (validRowCnt > floatRepSize) ? floatRepSize : validRowCnt;
+    uint32_t validCols1 = (validRowCnt > floatRepSize) ? (validRowCnt - floatRepSize) : 0;
+    AscendC::MicroAPI::MaskReg preg_valid0 = AscendC::MicroAPI::UpdateMask<T>(validCols0);
+    AscendC::MicroAPI::MaskReg preg_valid1 = AscendC::MicroAPI::UpdateMask<T>(validCols1);
+    AscendC::MicroAPI::Duplicate(vreg_min, minValue);
+    for (uint16_t i = 0; i < m; ++i) {
+        AscendC::MicroAPI::LoadAlign(vreg_input, scoreUb + i * s2BaseSize);
+        AscendC::MicroAPI::LoadAlign(vreg_input_unroll, scoreUb + floatRepSize + i * s2BaseSize);
+        if (validRowCnt == 0) {
+            AscendC::MicroAPI::Select(vreg_input, vreg_input, vreg_min, preg_all);
+            AscendC::MicroAPI::Select(vreg_input_unroll, vreg_input_unroll, vreg_min, preg_all);
+        } else {
+            AscendC::MicroAPI::Select(vreg_input, vreg_input, vreg_min, preg_valid0);
+            AscendC::MicroAPI::Select(vreg_input_unroll, vreg_input_unroll, vreg_min, preg_valid1);
+        }
+        AscendC::MicroAPI::StoreAlign<T, AscendC::MicroAPI::StoreDist::DIST_NORM_B32>(
+            scoreUb + i * s2BaseSize, vreg_input, preg_all);
+        AscendC::MicroAPI::StoreAlign<T, AscendC::MicroAPI::StoreDist::DIST_NORM_B32>(
+            scoreUb + floatRepSize + i * s2BaseSize, vreg_input_unroll, preg_all);
+    }
+}
+
+template <typename T>
+__aicore__ inline void MaskSparseInvalidScore(const LocalTensor<T> &scoreTensor, const T minValue,
+    const uint16_t m, const uint32_t validRowCnt)
+{
+    __ubuf__ T *scoreUb = (__ubuf__ T *)scoreTensor.GetPhyAddr();
+    MaskSparseInvalidScoreVF<T>(scoreUb, minValue, m, validRowCnt);
+}
+
+// 全无效行: max为minValue*scale的行写0, 保证Python侧lse = 0 + log(0) = -inf
+template <typename T>
+__simd_vf__ void ZeroInvalidLseVF(__ubuf__ T *maxUb, __ubuf__ T *sumUb, const T minValue, const uint16_t m)
+{
+    AscendC::MicroAPI::RegTensor<float> vreg_max;
+    AscendC::MicroAPI::RegTensor<float> vreg_zero;
+    AscendC::MicroAPI::RegTensor<float> vreg_data;
+    AscendC::MicroAPI::RegTensor<float> vreg_sel;
+    AscendC::MicroAPI::UnalignRegForStore ureg_max;
+    AscendC::MicroAPI::UnalignRegForStore ureg_sum;
+    AscendC::MicroAPI::MaskReg preg_all = AscendC::MicroAPI::CreateMask<T, AscendC::MicroAPI::MaskPattern::ALL>();
+    AscendC::MicroAPI::MaskReg preg_cmp;
+    AscendC::MicroAPI::Duplicate(vreg_zero, 0.0f);
+    __ubuf__ T *maxUbPtr = maxUb;
+    __ubuf__ T *sumUbPtr = sumUb;
+    for (uint16_t i = 0; i < m; ++i) {
+        AscendC::MicroAPI::LoadAlign<T, AscendC::MicroAPI::LoadDist::DIST_BRC_B32>(vreg_max, maxUb + i);
+        AscendC::MicroAPI::Compares<T, AscendC::MicroAPI::CMPMODE::EQ>(preg_cmp, vreg_max, minValue, preg_all);
+        AscendC::MicroAPI::LoadAlign<T, AscendC::MicroAPI::LoadDist::DIST_BRC_B32>(vreg_data, sumUb + i);
+        AscendC::MicroAPI::Select(vreg_sel, vreg_zero, vreg_data, preg_cmp);
+        AscendC::MicroAPI::StoreUnAlign<float, AscendC::MicroAPI::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T *&)sumUbPtr), vreg_sel, ureg_sum, 1);
+        AscendC::MicroAPI::Select(vreg_sel, vreg_zero, vreg_max, preg_cmp);
+        AscendC::MicroAPI::StoreUnAlign<float, AscendC::MicroAPI::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T *&)maxUbPtr), vreg_sel, ureg_max, 1);
+    }
+    AscendC::MicroAPI::StoreUnAlignPost<float, AscendC::MicroAPI::PostLiteral::POST_MODE_UPDATE>(
+        ((__ubuf__ T *&)maxUbPtr), ureg_max, 0);
+    AscendC::MicroAPI::StoreUnAlignPost<float, AscendC::MicroAPI::PostLiteral::POST_MODE_UPDATE>(
+        ((__ubuf__ T *&)sumUbPtr), ureg_sum, 0);
+}
+
+template <typename T>
+__aicore__ inline void ZeroInvalidLse(const LocalTensor<T> &maxTensor, const LocalTensor<T> &sumTensor,
+    const T minValue, const uint16_t m)
+{
+    __ubuf__ T *maxUb = (__ubuf__ T *)maxTensor.GetPhyAddr();
+    __ubuf__ T *sumUb = (__ubuf__ T *)sumTensor.GetPhyAddr();
+    ZeroInvalidLseVF<T>(maxUb, sumUb, minValue, m);
+}
+
+// 全无效行: attention_out写0 (minValue按scale后实际值传入)
+template <typename T>
+__simd_vf__ void ZeroInvalidAttnOutVF(__ubuf__ T *finalUb, __ubuf__ T *maxUb, const T minValue, const uint16_t m,
+    const uint16_t d, const int64_t dSize)
+{
+    constexpr uint16_t floatRepSize = 64;
+    const uint16_t dLoops = d / floatRepSize;
+    constexpr uint32_t tmpZero = 0x00000000;
+    const T zeroValue = *((T *)&tmpZero);
+    AscendC::MicroAPI::RegTensor<T> vreg_zero;
+    AscendC::MicroAPI::RegTensor<float> vreg_max;
+    AscendC::MicroAPI::RegTensor<T> vreg_final;
+    AscendC::MicroAPI::RegTensor<T> vreg_final_new;
+    AscendC::MicroAPI::MaskReg preg_all = AscendC::MicroAPI::CreateMask<T, AscendC::MicroAPI::MaskPattern::ALL>();
+    AscendC::MicroAPI::MaskReg preg_cmp;
+    AscendC::MicroAPI::Duplicate<T, T>(vreg_zero, zeroValue);
+    for (uint16_t i = 0; i < m; ++i) {
+        AscendC::MicroAPI::LoadAlign<T, AscendC::MicroAPI::LoadDist::DIST_BRC_B32>(vreg_max, maxUb + i);
+        AscendC::MicroAPI::Compares<T, AscendC::MicroAPI::CMPMODE::EQ>(preg_cmp, vreg_max, minValue, preg_all);
+        for (uint16_t j = 0; j < dLoops; ++j) {
+            AscendC::MicroAPI::LoadAlign<T, AscendC::MicroAPI::LoadDist::DIST_NORM>(vreg_final,
+                finalUb + i * dSize + j * floatRepSize);
+            AscendC::MicroAPI::Select<T>(vreg_final_new, vreg_zero, vreg_final, preg_cmp);
+            AscendC::MicroAPI::StoreAlign<T, AscendC::MicroAPI::StoreDist::DIST_NORM_B32>(
+                finalUb + i * dSize + j * floatRepSize, vreg_final_new, preg_all);
+        }
+    }
+}
+
+template <typename T>
+__aicore__ inline void ZeroInvalidAttnOut(const LocalTensor<T> &finalTensor, const LocalTensor<T> &maxTensor,
+    const T minValue, const uint16_t m, const uint16_t d, const int64_t dSize)
+{
+    __ubuf__ T *finalUb = (__ubuf__ T *)finalTensor.GetPhyAddr();
+    __ubuf__ T *maxUb = (__ubuf__ T *)maxTensor.GetPhyAddr();
+    ZeroInvalidAttnOutVF<T>(finalUb, maxUb, minValue, m, d, dSize);
+}
+
 TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>::CopyOutKvUb2Gm(
     Buffer<BufferType::GM, SyncType::CROSS_CORE_SYNC_BACKWARD> &v0ResGm, LocalTensor<Q_T> kvOutUb,
@@ -476,6 +627,12 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>:
     LocalTensor<T> apiTmpBuffer = this->commonTBuf.template Get<T>();
     LocalTensor<T> mmRes = bmm1ResBuf.template GetTensor<T>();
 
+    // 空行/部分行防护: 未拷贝的陈旧score列置minValue, 经scale后仍远小于有效score, 不参与max/sum
+    int64_t sparseValidRows = CalcSparseValidRows(runInfo, constInfo);
+    if (sparseValidRows < runInfo.s2RealSize) {
+        MaskSparseInvalidScore(mmRes, negativeFloatScalar, runInfo.halfMRealSize, sparseValidRows);
+    }
+
     // loopCount = 0 但传入sinks时走update分支，maxUb通过sinks初始化，sumUb初始化为1.0
     if (runInfo.s2LoopCount == 0) { // sink 丢失首token信息，sink会增加首token信息，维度是n1
         if (likely(runInfo.s2RealSize == 128)) { // s2RealSize等于128分档, VF内常量化减少if判断
@@ -572,6 +729,10 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>:
             LastDivNew<T, Q_T, OUTPUT_T, dTemplateAlign64, false>(
                 vec2ResUb, vec2ResUb, sumUb, runInfo.vec2MRealSize, dTemplateAlign64, 1.0);
         }
+        // 全无效行attention_out写0, 避免陈旧L1数据经BMM2污染输出
+        LocalTensor<float> maxUb = this->softmaxMaxBuf[runInfo.multiCoreIdxMod2].template Get<float>();
+        ZeroInvalidAttnOut(vec2ResUb, maxUb, negativeFloatScalar * constInfo.softmaxScale,
+            runInfo.vec2MRealSize, dTemplateAlign64, dTemplateAlign64);
 
         this->CopyOutAttentionOut(runInfo, constInfo, vec2ResUb, 0, vec2CalcSize);
     }
@@ -707,6 +868,8 @@ void SFAVectorService<TEMPLATE_ARGS>::CopyFALseToGm(RunInfo &runInfo, ConstInfo 
 
     // 拷贝 softmaxMaxUb -> GM
     WaitFlag<HardEvent::MTE3_V>(mte3ToVLseOutId);
+    // 全无效行(max为minValue*scale)写0, 下游lse = 0 + log(0) = -inf
+    ZeroInvalidLse(maxUb, sumUb, negativeFloatScalar * constInfo.softmaxScale, runInfo.halfMRealSize);
     DataCopy(lseUb, maxUb, alignedSize);
     SetFlag<HardEvent::V_MTE3>(vToMte3LseOutId);
     WaitFlag<HardEvent::V_MTE3>(vToMte3LseOutId);

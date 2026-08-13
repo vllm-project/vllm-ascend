@@ -79,9 +79,9 @@ construct_kv_quant_sparse_flash_attention_output_tensor(
     }
 
     at::Tensor softmax_max =
-        at::empty(softmax_size, query.options().dtype(at::kFloat));
+        at::zeros(softmax_size, query.options().dtype(at::kFloat));
     at::Tensor softmax_sum =
-        at::empty(softmax_size, query.options().dtype(at::kFloat));
+        at::zeros(softmax_size, query.options().dtype(at::kFloat));
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(
         attention_output, softmax_max, softmax_sum);
 }
@@ -133,7 +133,7 @@ npu_kv_quant_sparse_flash_attention(
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(
-        aclnnKvQuantSparseFlashAttention,
+        aclnnKvQuantSparseFlashAttentionV2,
         query,
         key,
         value,
