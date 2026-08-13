@@ -477,7 +477,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             topk_ids = torch.cat([topk_ids, shared_expert_ids], dim=1)
             topk_weights = torch.cat([topk_weights, shared_expert_weights], dim=1)
 
-        topk_weights = topk_weights.to(hidden_states.dtype)
+        topk_weights = topk_weights.to(router_logits.dtype)
         # This is a naive implementation for experts load balance so as to
         # avoid accumulating too much tokens on a single rank. It is only
         # activated when doing profile runs.

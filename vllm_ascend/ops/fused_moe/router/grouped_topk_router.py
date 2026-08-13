@@ -119,7 +119,7 @@ class AscendGroupedTopKRouter(BaseRouter):
             topk_weights = topk_weights + self.e_score_correction_bias
 
         topk_weights, topk_ids = topk_weights.topk(self.top_k, dim=-1)
-        topk_weights = topk_weights.to(hidden_states.dtype)
+        topk_weights = topk_weights.to(router_logits.dtype)
 
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
