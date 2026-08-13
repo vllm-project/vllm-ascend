@@ -50,7 +50,7 @@ class TriggerEvent:
 
 
 class ManualTriggerManager:
-    """Consumes manual trigger flags from config and emits trigger events."""
+    """Consumes manual trigger counts from config and emits trigger events."""
 
     _last_manual_trigger_warn_ts: float = 0.0
 
@@ -58,12 +58,25 @@ class ManualTriggerManager:
         self._dfx_config = dfx_config
         self._runner = runner
 
+    @staticmethod
+    def _local_batch_nonempty(runner: Any) -> bool:
+        """True when this wave has at least one local request to snapshot."""
+        input_batch = getattr(runner, "input_batch", None)
+        req_ids = getattr(input_batch, "req_ids", None) if input_batch is not None else None
+        if req_ids and any(req_ids):
+            return True
+        requests = getattr(runner, "requests", None)
+        return bool(isinstance(requests, dict) and any(requests))
+
     def consume_once(self, *, allow_arm: bool) -> TriggerEvent | None:
-        if not self._dfx_config.manual_trigger():
+        remaining = self._dfx_config.manual_trigger_count()
+        if remaining <= 0:
             return None
         if not allow_arm:
             logger.debug(
-                "[DFX manual_trigger] dump.manual_trigger deferred (allow_arm=False); await execute_model wave"
+                "[DFX manual_trigger] dump.manual_trigger deferred (allow_arm=False); "
+                "await execute_model wave (remaining=%d)",
+                remaining,
             )
             return None
         if not self._dfx_config.dump_enabled():
@@ -71,18 +84,34 @@ class ManualTriggerManager:
             if now - self._last_manual_trigger_warn_ts >= _MANUAL_TRIGGER_WARN_INTERVAL_S:
                 self._last_manual_trigger_warn_ts = now
                 logger.warning(
-                    "[DFX manual_trigger] dump.manual_trigger=true but dump.enabled=false; "
-                    "not consuming. Set dump.enabled=true to trigger."
+                    "[DFX manual_trigger] dump.manual_trigger=%s but dump.enabled=false; "
+                    "not consuming. Set dump.enabled=true to trigger.",
+                    remaining,
                 )
+            return None
+        # Keep count until a wave with requests so report/detail is useful and
+        # empty idle cleanup steps do not burn remaining dumps.
+        if not self._local_batch_nonempty(self._runner):
+            logger.debug(
+                "[DFX manual_trigger] dump.manual_trigger deferred (empty batch); remaining=%d",
+                remaining,
+            )
             return None
         if not self._dfx_config.consume_manual_trigger():
             return None
+        left = self._dfx_config.manual_trigger_count()
         if not should_run_anomaly_check_on_rank(self._runner):
             return None
-        logger.info("[DFX manual_trigger] dump.manual_trigger consumed and armed")
+        logger.info(
+            "[DFX manual_trigger] dump.manual_trigger armed (remaining_after=%d)",
+            left,
+        )
         return TriggerEvent(
             trigger_type=MANUAL_TRIGGER_TYPE,
             req_id=MANUAL_TRIGGER_REQ_ID,
-            detail={"source": "dump.manual_trigger"},
+            detail={
+                "source": "dump.manual_trigger",
+                "manual_trigger_remaining_after": left,
+            },
             consume_quota=False,
         )

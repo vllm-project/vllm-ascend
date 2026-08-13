@@ -74,11 +74,14 @@ vllm serve <model> --additional-config '{
 ### 2.2 手动 `manual_trigger`
 
 1. 确认热更已开、`dump.enabled=true`、`dump_config_path` 有效（**不必**开 detector）。  
-2. 将 JSON 中 `"manual_trigger": true`（仅本 EngineCore 的 writer 路径）。  
-3. 等待**有真实请求**的下一拍 `execute_model`（空闲 / `execute_dummy_batch` **不会**消费）。  
-4. 若 `dump.enabled=false`：**不消费** flag（保持 true）并打日志，修好后再等下一拍。  
-5. 成功后写回 `false`；日志可搜 `manual_trigger` / `[DFX manual_trigger]`。  
-6. **Report**：arm 成功后写一份 `manual_trigger` 报告；`detail.requests` 含当前 batch **全部**请求的 prompt/output（`save_sensitive_info` 控制是否带 token ids）。
+2. 将 JSON 中 `"manual_trigger"` 设为：  
+   - `true`：兼容旧行为，等价于 `1`（只 dump 一次）；  
+   - 正整数 `N`：在接下来 **N** 个「有本地 batch 请求」的真实 `execute_model` 拍上各 arm 一次，每拍减 1，到 `0`/`false` 为止；  
+   - `false` / `0`：关闭。  
+3. 等待**有真实请求的 batch** 的下一拍 `execute_model`（空闲 / `execute_dummy_batch` / **空 batch 清理拍** **不会**消费）。  
+4. 若 `dump.enabled=false`：**不消费**剩余次数并打日志，修好后再等下一拍。  
+5. 每成功消费一次写回剩余次数（最后一次写回 `false`）；日志可搜 `manual_trigger` / `[DFX manual_trigger]`。  
+6. **Report**：每次 arm 写一份 `manual_trigger` 报告；`detail.requests` 含该拍 batch **全部**请求的 prompt/output（`save_sensitive_info` 控制是否带 token ids）；`detail.manual_trigger_remaining_after` 为消费后剩余次数。
 
 ### 2.2.1 Report 截断（查命中时）
 

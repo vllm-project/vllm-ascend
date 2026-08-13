@@ -141,7 +141,12 @@ def test_manual_trigger_manager_paths(tmp_path):
     cfg = make_dfx_config(tmp_path)
     cfg._data["dump"]["enabled"] = True
     cfg._data["dump"]["manual_trigger"] = True
-    mgr = ManualTriggerManager(dfx_config=cfg, runner=SimpleNamespace(tp_rank=0, use_async_scheduling=False))
+    runner = SimpleNamespace(
+        tp_rank=0,
+        use_async_scheduling=False,
+        input_batch=SimpleNamespace(req_ids=["r1"]),
+    )
+    mgr = ManualTriggerManager(dfx_config=cfg, runner=runner)
 
     assert mgr.consume_once(allow_arm=False) is None
     assert cfg.manual_trigger() is True
@@ -149,16 +154,27 @@ def test_manual_trigger_manager_paths(tmp_path):
     cfg._data["dump"]["enabled"] = False
     assert mgr.consume_once(allow_arm=True) is None
 
+    # Empty batch must not burn remaining count.
     cfg._data["dump"]["enabled"] = True
+    cfg._data["dump"]["manual_trigger"] = 2
+    empty_mgr = ManualTriggerManager(
+        dfx_config=cfg,
+        runner=SimpleNamespace(tp_rank=0, use_async_scheduling=False, input_batch=SimpleNamespace(req_ids=[])),
+    )
+    assert empty_mgr.consume_once(allow_arm=True) is None
+    assert cfg.manual_trigger_count() == 2
+
+    cfg._data["dump"]["enabled"] = True
+    cfg._data["dump"]["manual_trigger"] = True
     with patch(
         "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
         return_value=False,
     ):
-        # Consumes flag even when this rank does not arm.
+        # Consumes count even when this rank does not arm.
         assert mgr.consume_once(allow_arm=True) is None
     assert cfg.manual_trigger() is False
 
-    cfg._data["dump"]["manual_trigger"] = True
+    cfg._data["dump"]["manual_trigger"] = 2
     cfg._data["dump"]["enabled"] = True
     with patch(
         "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
@@ -168,6 +184,8 @@ def test_manual_trigger_manager_paths(tmp_path):
     assert ev is not None
     assert ev.trigger_type == "manual_trigger"
     assert ev.to_report_detail()["source"] == "dump.manual_trigger"
+    assert cfg.manual_trigger_count() == 1
+    assert ev.detail["manual_trigger_remaining_after"] == 1
 
 
 def test_processor_get_tokenizer_and_save_sample_param(tmp_path):
