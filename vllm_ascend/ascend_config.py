@@ -179,6 +179,12 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_MLAPO",
             ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
         )
+        # When True, keep MLAPO prefill weights on NPU instead of freeing them
+        # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
+        # normal local-prefill paths (recompute / fallback / preempt) that crash
+        # when the weights are freed (issue #11882). Default False (preserve
+        # existing memory-saving behavior).
+        self.mlapo_keep_prefill_weights = additional_config.get("mlapo_keep_prefill_weights", False)
         self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
             "msmonitor_use_daemon",

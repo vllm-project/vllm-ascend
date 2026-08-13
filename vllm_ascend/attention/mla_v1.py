@@ -1052,11 +1052,18 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
-        # referenced, so drop them to save memory.
+        # referenced by the MLAPO decode fast path, so drop them to save NPU memory.
+        # However, D nodes have normal local-prefill paths (recompute / fallback /
+        # preempt) that dereference these weights, and freeing them crashes the
+        # worker with UndefinedTensorImpl (issue #11882). When
+        # mlapo_keep_prefill_weights is enabled, skip the free to trade NPU
+        # memory for stability.
+        ascend_config = get_ascend_config()
         if (
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            and not ascend_config.mlapo_keep_prefill_weights
         ):
             self.fused_qkv_a_proj.weight = None  # type: ignore[union-attr]
             self.fused_qkv_a_proj.deq_scale = None  # type: ignore[union-attr]
