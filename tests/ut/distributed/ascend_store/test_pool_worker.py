@@ -88,12 +88,12 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.prefetch_layer_map = {}
         worker.layer_load_finished_events = [threading.Event()]
         worker.kv_recv_thread = MagicMock()
-        worker.layerwise_reuse_waiter = MagicMock()
+        worker.external_slot_release_waiter = MagicMock()
         worker._submit_ready_layer_loads = MagicMock()
 
         worker.wait_for_layer_load()
 
-        worker.layerwise_reuse_waiter.assert_called_once_with(0)
+        worker.external_slot_release_waiter.assert_called_once_with(0)
 
     def test_find_all_discontinuous_hit_positions_all_tp_hits(self):
         cls = self._make_worker_class()
