@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.parallel_state import get_pp_group
@@ -24,6 +25,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm_ascend.dfx.dfx_types import DumpFinishMeta, DumpPhase
 from vllm_ascend.dfx.dumper.msprobe import MsprobeBridgeMixin
 from vllm_ascend.dfx.dumper.pending import PendingDumpMixin, anomaly_check_rank_skip_reason
+from vllm_ascend.dfx.request_state import RequestDfxStore
 from vllm_ascend.dfx.runtime_config import DfxRuntimeConfig
 from vllm_ascend.logger import init_logger_ascend
 
@@ -87,13 +89,11 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         self._pending_dump_skip_quota = False
         # Real-step wave index (advanced on allow_arm sync_for_step only).
         self._wave_index = 0
-        # Open arm→activate tracking (committed into finish metas on activate).
+        # Open arm→activate tracking (committed into RequestDfxStore on activate).
         self._open_dump_arm_wave: int | None = None
         self._open_dump_finish_req_ids: list[str] = []
         self._open_dump_anomaly_type: str | None = None
         self._open_dump_source: str | None = None
-        # req_id → meta retained until clear_finished writes dump_finish sidecar.
-        self._dump_finish_by_req: dict[str, DumpFinishMeta] = {}
 
         # True after construction-time debugger probe finishes. Late success
         # under ACLGraph may miss already-captured graphs.
@@ -217,20 +217,33 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         """Monotonic real-step wave index (0 before the first allow_arm sync)."""
         return int(getattr(self, "_wave_index", 0) or 0)
 
+    def record_sample_waves(self, req_ids: Iterable[str] | None) -> int:
+        """Main-thread: append ``current_wave`` for each req after sample.
+
+        Under async scheduling, ``check_after_sample`` runs on the output-copy
+        thread while the next ``execute_model`` may already have advanced the
+        global wave. Stamping here (before returning AsyncOutput) keeps arm
+        wave tied to the sample step that produced the tokens.
+        """
+        wave = self.current_wave()
+        RequestDfxStore.get().record_sample_waves(req_ids, wave)
+        return wave
+
+    def take_sample_wave(self, req_id: str) -> int | None:
+        """Pop the oldest main-thread sample wave for ``req_id`` (FIFO)."""
+        return RequestDfxStore.get().take_sample_wave(req_id)
+
+    def clear_sample_waves(self, req_id: str) -> None:
+        """Drop any queued sample waves for a finished request."""
+        RequestDfxStore.get().clear_sample_waves(req_id)
+
     def dump_arm_wave_for_report(self) -> int | None:
         """Arm-wave stamp for the in-flight open dump, else ``None``."""
         return getattr(self, "_open_dump_arm_wave", None)
 
     def dump_arm_wave_for_req(self, req_id: str) -> int | None:
         """Arm-wave for ``req_id`` from committed dump_finish meta, if any."""
-        if not req_id:
-            return None
-        by_req = getattr(self, "_dump_finish_by_req", None)
-        if not isinstance(by_req, dict):
-            return None
-        meta = by_req.get(req_id)
-        arm = getattr(meta, "dump_arm_wave", None) if meta is not None else None
-        return int(arm) if isinstance(arm, int) else None
+        return RequestDfxStore.get().dump_arm_wave_for_req(req_id)
 
     def needs_io_for_dump_finish(self) -> bool:
         """True when TP0 should keep appending cumulative IO for dump_finish.
@@ -242,11 +255,10 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             return True
         if getattr(self, "_open_dump_finish_req_ids", None):
             return True
-        by_req = getattr(self, "_dump_finish_by_req", None)
-        return bool(by_req)
+        return RequestDfxStore.get().has_dump_finish_meta()
 
     def take_dump_finish_meta(self, req_id: str) -> DumpFinishMeta | None:
-        """Pop finish meta for ``req_id`` (one-shot; used by clear_finished).
+        """Pop finish meta for ``req_id`` (one-shot; used by reap / dump_finish write).
 
         Prefers committed meta (after successful activate). If the req is still
         only on the open arm list (pending, not yet activated), pop it from
@@ -256,11 +268,9 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         """
         if not req_id:
             return None
-        by_req = getattr(self, "_dump_finish_by_req", None)
-        if isinstance(by_req, dict):
-            committed = by_req.pop(req_id, None)
-            if committed is not None:
-                return committed
+        committed = RequestDfxStore.get().take_dump_finish(req_id)
+        if committed is not None:
+            return committed
         open_ids = list(getattr(self, "_open_dump_finish_req_ids", ()) or ())
         if req_id not in open_ids:
             return None
@@ -285,10 +295,19 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         *,
         anomaly_type: str | None,
         source: str,
+        arm_wave: int | None = None,
     ) -> None:
-        """Stamp arm wave + reqs that should get a dump_finish sidecar later."""
+        """Stamp arm wave + reqs that should get a dump_finish sidecar later.
+
+        ``arm_wave`` should be the main-thread sample stamp when arming from
+        async ``check_after_sample``; omit to use ``current_wave()`` (sync /
+        manual paths on the worker main thread).
+        """
         reqs = [str(r) for r in (finish_req_ids or ()) if r]
-        self._open_dump_arm_wave = self.current_wave()
+        if arm_wave is None:
+            self._open_dump_arm_wave = self.current_wave()
+        else:
+            self._open_dump_arm_wave = int(arm_wave)
         self._open_dump_finish_req_ids = reqs
         self._open_dump_anomaly_type = anomaly_type
         self._open_dump_source = source
@@ -317,26 +336,18 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             dump_count = int(getattr(self, "_msprobe_dump_total_count", 0) or 0)
         else:
             dump_count = None
-        by_req = getattr(self, "_dump_finish_by_req", None)
-        if not isinstance(by_req, dict):
-            self._dump_finish_by_req = {}
-            by_req = self._dump_finish_by_req
-        meta_base = DumpFinishMeta(
-            anomaly_type=getattr(self, "_open_dump_anomaly_type", None),
-            source=getattr(self, "_open_dump_source", None),
-            dump_arm_wave=int(arm) if arm is not None else None,
-            dump_activate_wave=int(activate),
-            dump_waves_after_report=waves_after,
-            dump_count=dump_count,
-        )
+        store = RequestDfxStore.get()
         for req_id in reqs:
-            by_req[req_id] = DumpFinishMeta(
-                anomaly_type=meta_base.anomaly_type,
-                source=meta_base.source,
-                dump_arm_wave=meta_base.dump_arm_wave,
-                dump_activate_wave=meta_base.dump_activate_wave,
-                dump_waves_after_report=meta_base.dump_waves_after_report,
-                dump_count=meta_base.dump_count,
+            store.set_dump_finish(
+                req_id,
+                DumpFinishMeta(
+                    anomaly_type=getattr(self, "_open_dump_anomaly_type", None),
+                    source=getattr(self, "_open_dump_source", None),
+                    dump_arm_wave=int(arm) if arm is not None else None,
+                    dump_activate_wave=int(activate),
+                    dump_waves_after_report=waves_after,
+                    dump_count=dump_count,
+                ),
             )
         self._clear_open_dump_wave_tracking()
 
@@ -379,8 +390,14 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         alert: AnomalyAlert,
         *,
         detector: AnomalyDetector | None = None,
+        arm_wave: int | None = None,
     ) -> bool:
-        """Arm / activate dump from a detector alert (report is runner-owned)."""
+        """Arm / activate dump from a detector alert (report is runner-owned).
+
+        ``arm_wave``: preferred sample-step stamp from
+        :meth:`take_sample_wave` (async-safe). When omitted, uses
+        ``current_wave()`` at arm time.
+        """
         if alert is None or not alert.is_ill or not alert.req_id:
             return False
         ok = self.enable_msprobe_dump_if_needed(
@@ -391,6 +408,7 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             finish_req_ids=[alert.req_id],
             anomaly_type=alert.anomaly_type,
             source="anomaly",
+            arm_wave=arm_wave,
         )
         if not ok:
             return False

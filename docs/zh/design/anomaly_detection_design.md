@@ -19,13 +19,14 @@ detector.check_all(...) → list[AnomalyAlert]
 共同点：
 
 - **DetectorManager 门面**（`detector/manager.py`）：具体 detector 私有；runner / `DfxProcessor` 只调阶段钩子。
+- **RequestDfxStore（per-req 共享态）**：跨模块的请求内存态集中在 `RequestDfxState`（累计 `output_token_ids`、filter allow 缓存、sample-wave FIFO、`stopped_after_alert`、committed `dump_finish` meta）。`mark_finished` 打标；真正 sidecar + `Store.clear` 在 sample-wave 队列排空后（`check_after_sample` / 下一波 `sync_for_step`）`_reap_finished_requests`。超时 `max_deferred_waves`（默认 8）强制 reap。detector 私有缓冲仍各管各的，但清理入口统一。
+- **RequestIoSnapshotManager（报告 I/O 视图）**：不是第二套请求状态。职责是 normalize→写入 Store、以及 `snapshot()` 拼 report 字段；仅保留同 wave 的 snapshot 缓存（经 `register_on_clear` 挂到 Store，失败打 error 日志）。
 - **InputFilterManager 门控**：每个 detector 在 `check_all` 内 `_passes_input_filter`（`dump.manual_trigger` 除外）。
-- **`stop_after_alert`**（`detector.stop_after_alert`，默认 `true`）：某请求一旦检出异常，后续步按 `req_id` 跳过再检（不拆 batch 行），避免反复写 report；`clear_finished` 后重算。设 `false` 则持续重检。
+- **`stop_after_alert`**（`detector.stop_after_alert`，默认 `true`）：某请求一旦检出异常，后续步按 `req_id` 跳过再检（不拆 batch 行），避免反复写 report；reap / `Store.clear` 后重算。设 `false` 则持续重检。
 - **只产 `AnomalyAlert`**：detector 不碰 Dumper；arm 由 processor 调 `Dumper.handle_anomaly_alert`。
 - **配置**：`detector.<name>.enabled`（默认 `false`）+ 各自阈值，JSON 热更新（广播 / file poll）。
 - **与 dump 正交**：detect 不依赖 `dump.enabled` / `max_times`；dump arm 失败仍写 report。
-- **完整 I/O**：由 `RequestIoSnapshotManager` 在写 report 时挂一次；detector 只写检测指标 / pattern 证据。
-- **累计 output 流**：`check_after_spec` / `check_after_sample` 各写一次 `append_batch`；`OutputSubstring` / `TokenRepeat` 在 sample 阶段以 `sampled_token_ids=None` 读同一条累计流（含 speculative accepted tokens）。
+- **累计 output 流**：数据在 Store；`check_after_spec` / `check_after_sample` 经 `append_batch` 写入；`OutputSubstring` / `TokenRepeat` 在 sample 阶段以 `sampled_token_ids=None` 读同一条累计流。
 
 当前检测器：SpecAcceptance / TokenLogprob / OutputSubstring / TokenRepeat，以下分节。
 
@@ -125,7 +126,7 @@ msprobe ILLDetector.detector(topk_dicts, tokens, model_config)
 ### 3.4 生命周期与资源
 
 - 每请求缓冲：最多 `window × topk` 个 (id, logprob)。
-- 请求结束：`DfxProcessor.clear_finished` → detector `clear_finished` 销毁缓冲与命中计数。
+- 请求结束：`DfxProcessor.mark_finished`；`sample_waves` 排空后 `_reap_finished_requests` → `Store.clear` + detector `clear_finished`。
 - 检测时日志：`active_reqs`、`ill_type`、hits；报告见 `dfx/report/anomaly_*.log`。
 
 ### 3.5 与 dump 共用策略
@@ -157,7 +158,7 @@ msprobe ILLDetector.detector(topk_dicts, tokens, model_config)
 - **文本或 token 双视图**：pattern 可写成 `str`（文本，自动 encode）或 `list[int]`（token ids，自动 decode 供日志/报告可读）。
 - **连续匹配**：对**累计输出 token id** 做匹配（不做逐 token decode），命中即告警。
 - **默认子序列 / 可选前缀**：`match_prefix=false`（默认）在输出任意位置找连续子序列；`true` 时仅从输出开头做前缀匹配。
-- **每请求一次**：同一 `req_id` 最多告警一次，直到 `clear_finished`（另受共享 `stop_after_alert` 约束）。
+- **每请求一次**：同一 `req_id` 最多告警一次，直到 reap / `Store.clear`（另受共享 `stop_after_alert` 约束）。
 - **复用 dump / report 通路**：命中后走 `AnomalyAlert` → dump arm + DFX Report。
 
 ### 4.2 开关与配置
@@ -205,7 +206,7 @@ DfxProcessor.check_after_sample
 
 - 匹配用的是**完整累计 output**（`RequestIoSnapshotManager` 自建累计列表，async 安全）。
 - **Report 截断注意**：检测用完整序列，但 report 里 `output_token_ids` 受 `report.max_output_token_ids`（默认 1000）从头部截断。若命中片段在截断窗口之外，JSON 里看不到该 id 不等于没命中——核对全量设 `max_output_token_ids: 0`（详见 [dfx_ops.md](./dfx_ops.md) §2.2.1）。
-- 每请求告警一次：`_alerted` 集合在 `clear_finished(req_id)` 时清除。
+- 每请求告警一次：`_alerted` 集合在 reap 时随 detector `clear_finished(req_id)` 清除。
 
 ### 4.4 Report 字段
 
@@ -232,7 +233,7 @@ DfxProcessor.check_after_sample
 - **增量 fold**：每请求维护 `_consumed_len` 游标，只推送自上次 check 以来的新 id；跳过 / 已告警仍推进游标，防止之后重复计入。
 - **O(1) 滑窗**：`freq` + `scores` deque；每步 score = 新 id 在**先前** content 窗内的出现次数；`repeat_sum` = 最近 `window` 个 score 之和。
 - **可忽略 filler**：`ignore_token_ids` 不进 content 窗（score=0），避免标点等拉高假阳性。
-- **每请求一次**：`_alerted` + 共享 `stop_after_alert`；`clear_finished` 清状态 / 游标。
+- **每请求一次**：`_alerted` + 共享 `stop_after_alert`；reap 时 detector `clear_finished` 清状态 / 游标。
 - **热更改 `window`**：清空在途 per-req 状态（deque 与游标一并失效）。
 
 ### 5.2 开关与配置
@@ -317,7 +318,8 @@ check_after_sample
 | `vllm_ascend/dfx/detector/output_substring.py` | 输出子串命中 |
 | `vllm_ascend/dfx/detector/token_repeat.py` | 局部重读（滑窗 repeat_sum） |
 | `vllm_ascend/dfx/input_filters.py` | detect 输入过滤（`InputFilterManager`） |
-| `vllm_ascend/dfx/io_snapshot.py` | `RequestIoSnapshotManager` 累计 output / report 挂 I/O |
+| `vllm_ascend/dfx/request_state.py` | `RequestDfxStore` / `RequestDfxState`：per-req 共享态；`mark_finished` + deferred `clear` |
+| `vllm_ascend/dfx/io_snapshot.py` | `RequestIoSnapshotManager`：report I/O 视图（normalize→Store + snapshot） |
 | `vllm_ascend/dfx/dumper/` | dump 生命周期、pending-OR（无检测转发） |
 | `vllm_ascend/dfx/report.py` | 短报告落盘 |
 | `vllm_ascend/worker/model_runner_v1.py` / `v2` | sync / async 调用点 |

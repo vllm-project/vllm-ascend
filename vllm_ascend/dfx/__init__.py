@@ -21,8 +21,9 @@ Components:
 3. Detector — anomaly checks returning ``AnomalyAlert`` (``DetectorManager``)
 4. Dump / observability — msprobe dump + ``ascend_log`` switch (``Dumper``)
 5. Report — short anomaly records under ``dfx/report`` (``DfxReportWriter``)
-6. I/O snapshot — prompt/output attach at report time (``RequestIoSnapshotManager``)
-7. Processor — runner hooks wiring the above (``DfxProcessor``)
+6. Request state — per-req shared memory + unified clear (``RequestDfxStore``)
+7. I/O snapshot — report views over Store (``RequestIoSnapshotManager``)
+8. Processor — runner hooks wiring the above (``DfxProcessor``)
 
 Call chain: model runner → ``DfxProcessor`` → ``DetectorManager`` → (input filter
 gate) → detector → ``AnomalyAlert`` → ``Dumper.handle_anomaly_alert`` (+ report).

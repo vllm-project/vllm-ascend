@@ -232,6 +232,7 @@ class PendingDumpMixin:
         finish_req_ids: list[str] | None = None,
         anomaly_type: str | None = None,
         source: str = "anomaly",
+        arm_wave: int | None = None,
     ) -> bool:
         if self._debugger is None:
             logger.error(
@@ -280,6 +281,7 @@ class PendingDumpMixin:
                 tracked,
                 anomaly_type=anomaly_type,
                 source=source,
+                arm_wave=arm_wave,
             )
             self._pending_dump = True
             self._pending_dump_req_id = req_id if consume_quota else None
@@ -298,5 +300,6 @@ class PendingDumpMixin:
             tracked,
             anomaly_type=anomaly_type,
             source=source,
+            arm_wave=arm_wave,
         )
         return self._activate_msprobe_dump(req_id if consume_quota else None, consume_quota=consume_quota)

@@ -460,7 +460,7 @@ def test_maybe_print_input_token_ids_once_defers_without_prompts():
     proc.dfx_config.consume_print_input_token_ids_once.assert_not_called()
 
 
-def test_clear_finished_prints_output_when_enabled():
+def test_mark_finished_prints_output_when_enabled():
     import logging
     from types import SimpleNamespace
 
@@ -480,6 +480,7 @@ def test_clear_finished_prints_output_when_enabled():
     proc.dfx_config.report_decode_token_ids.return_value = False
     proc.detectors = MagicMock()
     proc.dumper = MagicMock()
+    proc.dumper.current_wave.return_value = 1
     proc.dumper.take_dump_finish_meta.return_value = None
     proc.report_writer = MagicMock()
     proc._get_detector_tokenizer = MagicMock(return_value=None)  # type: ignore[method-assign]
@@ -495,7 +496,9 @@ def test_clear_finished_prints_output_when_enabled():
     logger.setLevel(logging.INFO)
     logger.addHandler(handler)
     try:
-        proc.clear_finished(["r1"])
+        proc.mark_finished(["r1"])
+        # print + clear happen on reap (waves empty → ready immediately).
+        proc._reap_finished_requests()
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prev_level)
@@ -505,7 +508,7 @@ def test_clear_finished_prints_output_when_enabled():
     assert any("print_output" in r.getMessage() and "r1" in r.getMessage() for r in records)
 
 
-def test_clear_finished_skips_print_when_disabled():
+def test_mark_finished_skips_print_when_disabled():
     from types import SimpleNamespace
 
     from vllm_ascend.dfx.input_filters import InputFilterManager
@@ -521,11 +524,14 @@ def test_clear_finished_skips_print_when_disabled():
     proc.dfx_config.report_decode_token_ids.return_value = False
     proc.detectors = MagicMock()
     proc.dumper = MagicMock()
+    proc.dumper.current_wave.return_value = 1
     proc.dumper.take_dump_finish_meta.return_value = None
     proc.report_writer = MagicMock()
     proc._maybe_print_output_on_finish = MagicMock()  # type: ignore[method-assign]
 
-    proc.clear_finished(["r1"])
+    proc.mark_finished(["r1"])
+    proc._maybe_print_output_on_finish.assert_not_called()
+    proc._reap_finished_requests()
     proc._maybe_print_output_on_finish.assert_not_called()
     proc.detectors.clear_finished.assert_called_once_with("r1")
 
@@ -553,7 +559,7 @@ def test_consume_print_input_token_ids_once_roundtrip(tmp_path):
     assert saved["input_filter"]["print_input_token_ids_once"] is False
 
 
-def test_clear_finished_writes_dump_finish_when_meta_present():
+def test_mark_finished_writes_dump_finish_when_meta_present():
     from types import SimpleNamespace
 
     from vllm_ascend.dfx.dfx_types import DumpFinishMeta
@@ -585,7 +591,11 @@ def test_clear_finished_writes_dump_finish_when_meta_present():
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
 
-    proc.clear_finished(["r1"])
+    proc.mark_finished(["r1"])
+    proc.report_writer.write_dump_finish.assert_not_called()
+    assert io.cumulative_output_ids("r1") == [1, 2, 3, 4]
+
+    proc._reap_finished_requests()
 
     proc.report_writer.write_dump_finish.assert_called_once()
     kwargs = proc.report_writer.write_dump_finish.call_args.kwargs

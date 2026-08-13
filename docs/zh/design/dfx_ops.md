@@ -33,7 +33,7 @@ vllm serve <model> --additional-config '{
 编辑 DFX JSON（热更开启后约 N 秒生效）。detect 与 dump **正交**；各 `detector.<name>.enabled` 默认 `false`。
 
 > `detector.stop_after_alert`（默认 `true`）：请求在每步持续检测，一旦该请求检出异常就停止检测它——
-> 防止同一请求反复告警、不停写 report；请求结束（`clear_finished`）后重算。设 `false` 恢复对同一请求持续重检/重告警。
+> 防止同一请求反复告警、不停写 report；请求 reap（`Store.clear`）后重算。设 `false` 恢复对同一请求持续重检/重告警。
 
 **只 detect、不 dump**（异常仍写 report）：
 
@@ -108,7 +108,7 @@ vllm serve <model> --additional-config '{
 | 文件 | 何时 | 用途 |
 |------|------|------|
 | `anomaly_*[_dump]_pid*.log` | 检测 / `manual_trigger` 当下 | 即时短报；arm 成功时带 `_dump` 与 `dump_arm_wave` |
-| `dump_finish_*_pid*.log` | **已 arm dump** 的请求在 `clear_finished` 时（含仍 pending 未 activate） | 累计 output（受 `report.save_sensitive_info` / `max_*`）+ wave；未 activate 时 `dump_activate_wave=null` |
+| `dump_finish_*_pid*.log` | **已 arm dump** 的请求在 reap 时（`sample_waves` 空后；含仍 pending 未 activate） | 累计 output（受 `report.save_sensitive_info` / `max_*`）+ wave；未 activate 时 `dump_activate_wave=null` |
 
 **wave 字段怎么对齐**（只计真实 `execute_model` 拍，`allow_arm=True`；dummy 不计）：
 
@@ -119,9 +119,9 @@ vllm serve <model> --additional-config '{
 | `dump_waves_after_report` | dump_finish | `activate − arm`（同拍为 `0`；未 activate / 算不出为 `null`） |
 | `dump_finish_wave` | dump_finish | 请求结束、写 sidecar 时的拍号 |
 
-对齐方式：用同一 `req_id`（+ 可选 `dump_count`）把带 `_dump` 的 anomaly 与 `dump_finish_*` 配对；看 `dump_waves_after_report` 可知 report→activate 隔了几拍。pending-OR 下检测器告警常见差为 `1`；手动触发同 `sync_for_step` 内 arm+activate 常见为 `0`。空 batch 的 manual 可能没有 dump_finish（没有真实 req 可挂）。
+对齐方式：用同一 `req_id`（+ 可选 `dump_count`）把带 `_dump` 的 anomaly 与 `dump_finish_*` 配对；看 `dump_waves_after_report` 可知 report→activate 隔了几拍。pending-OR 下检测器告警常见差为 `1`（主线程在 sample 返回时把本拍 wave 写入 per-req 队列，异步 `get_output` 检测时 pop 该戳作为 `dump_arm_wave`，避免与下一拍 `advance_wave` 竞态）；手动触发同 `sync_for_step` 内 arm+activate 常见为 `0`。空 batch 的 manual 可能没有 dump_finish（没有真实 req 可挂）。
 
-`dump_activate_wave=null`：dump 已 arm（open），但请求在 activate 成功前就 `clear_finished`——仍写 dump_finish 落累计 output / `dump_arm_wave`，避免内存孤儿；msprobe 窗口可能尚未打开。
+`dump_activate_wave=null`：dump 已 arm（open），但请求在 activate 成功前就结束并 reap——仍写 dump_finish 落累计 output / `dump_arm_wave`，避免内存孤儿；msprobe 窗口可能尚未打开。
 
 ### 2.3 打印一次输入 token ids（写 filter 用）
 

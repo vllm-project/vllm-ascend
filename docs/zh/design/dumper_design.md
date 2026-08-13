@@ -42,7 +42,7 @@ Detect 输入过滤见 [dfx_design.md](./dfx_design.md) §2.6 / [dfx_ops.md](./d
 Runner 侧：
 
 - `self.dfx = DfxProcessor(self)`（runner **不**直接摸 `Dumper`）
-- 阶段钩子：`dfx.sync_for_step()` / `dfx.clear_finished()` / `dfx.check_after_spec()` / `dfx.check_after_sample()` / `dfx.ensure_logprobs_for_detection()`
+- 阶段钩子：`dfx.sync_for_step()` / `dfx.mark_finished()` / `dfx.check_after_spec()` / `dfx.check_after_sample()` / `dfx.ensure_logprobs_for_detection()`
 - dump 生命周期经 processor 委托：`dfx.start_dump_data()` / `dfx.finalize_dump_data()`
 
 ## 4. 调用链（v1 / v2）
@@ -51,7 +51,7 @@ Runner 侧：
 
 1. 初始化：`Dumper(..., dfx_config=ascend_config.dfx_config)`
 2. `execute_model()` 入口：`dfx.sync_for_step()` → `dfx.start_dump_data()` → forward →（非 last PP 早 `dfx.finalize_dump_data()`；last PP 在 `sample_tokens` 末 `finalize`）
-3. 采样后：`dfx.clear_finished` → `dfx.check_after_spec`；sync 当场 `dfx.check_after_sample`，async 在 `AscendAsyncGPUModelRunnerOutput.get_output()` 中检测
+3. 采样后：`dfx.mark_finished`→ `dfx.check_after_spec`；sync 当场 `dfx.check_after_sample`（末尾 reap），async 在 `get_output()` 中检测并 reap；idle 下一波 `sync_for_step` 也可 reap
 
 ### 4.2 v2
 

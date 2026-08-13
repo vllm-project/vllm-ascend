@@ -653,10 +653,11 @@ def test_init_debugger_real_import_error_soft_fails():
 
 def test_wave_tracking_same_wave_activate_delta_zero():
     from vllm_ascend.dfx.dfx_types import DumpFinishMeta
+    from vllm_ascend.dfx.request_state import RequestDfxStore
 
+    RequestDfxStore.reset_for_tests()
     dumper = _make_dumper()
     dumper._wave_index = 0
-    dumper._dump_finish_by_req = {}
     dumper._open_dump_arm_wave = None
     dumper._open_dump_finish_req_ids = []
     dumper._open_dump_anomaly_type = None
@@ -684,10 +685,11 @@ def test_wave_tracking_same_wave_activate_delta_zero():
 
 def test_wave_tracking_next_wave_activate_delta_one():
     from vllm_ascend.dfx.dfx_types import DumpFinishMeta
+    from vllm_ascend.dfx.request_state import RequestDfxStore
 
+    RequestDfxStore.reset_for_tests()
     dumper = _make_dumper()
     dumper._wave_index = 0
-    dumper._dump_finish_by_req = {}
     dumper._open_dump_arm_wave = None
     dumper._open_dump_finish_req_ids = []
     dumper._open_dump_anomaly_type = None
@@ -707,18 +709,71 @@ def test_wave_tracking_next_wave_activate_delta_one():
     assert m2.dump_activate_wave == 2
     assert dumper.dump_arm_wave_for_req("r1") is None  # already taken
     # Re-commit path: put meta back and query via public getter.
-    dumper._dump_finish_by_req["r9"] = DumpFinishMeta(dump_arm_wave=7, dump_activate_wave=8)
+    RequestDfxStore.get().set_dump_finish("r9", DumpFinishMeta(dump_arm_wave=7, dump_activate_wave=8))
     assert dumper.dump_arm_wave_for_req("r9") == 7
     assert dumper.dump_arm_wave_for_req("missing") is None
+
+
+def test_sample_wave_queue_survives_advance_for_async_arm():
+    """Main-thread stamp must be used for arm even after current_wave advances."""
+    from vllm_ascend.dfx.dfx_types import DumpFinishMeta
+    from vllm_ascend.dfx.request_state import RequestDfxStore
+
+    RequestDfxStore.reset_for_tests()
+    dumper = _make_dumper()
+    dumper._wave_index = 0
+
+    dumper.advance_wave(allow_arm=True)  # wave 1 (sample step)
+    assert dumper.record_sample_waves(["r1", "r2"]) == 1
+    assert dumper.take_sample_wave("r1") == 1
+    # Simulate next execute_model advancing before async get_output arms.
+    dumper.advance_wave(allow_arm=True)  # wave 2
+    assert dumper.current_wave() == 2
+    # FIFO: second req still has wave 1 stamped.
+    assert dumper.take_sample_wave("r2") == 1
+    assert dumper.take_sample_wave("r2") is None
+
+    dumper._begin_dump_wave_tracking(
+        ["r1"],
+        anomaly_type="token_repeat",
+        source="anomaly",
+        arm_wave=1,
+    )
+    assert dumper.dump_arm_wave_for_report() == 1
+    dumper._msprobe_dump_total_count = 1
+    dumper._commit_dump_finish_metas(consume_quota=True)
+    meta = dumper.take_dump_finish_meta("r1")
+    assert isinstance(meta, DumpFinishMeta)
+    assert meta.dump_arm_wave == 1
+    assert meta.dump_activate_wave == 2
+    assert meta.dump_waves_after_report == 1
+
+
+def test_sample_wave_queue_fifo_and_clear():
+    from vllm_ascend.dfx.request_state import RequestDfxStore
+
+    RequestDfxStore.reset_for_tests()
+    dumper = _make_dumper()
+    dumper._wave_index = 0
+    dumper.advance_wave(allow_arm=True)
+    dumper.record_sample_waves(["r1"])
+    dumper.advance_wave(allow_arm=True)
+    dumper.record_sample_waves(["r1"])
+    assert dumper.take_sample_wave("r1") == 1
+    assert dumper.take_sample_wave("r1") == 2
+    dumper.record_sample_waves(["r1"])
+    dumper.clear_sample_waves("r1")
+    assert dumper.take_sample_wave("r1") is None
 
 
 def test_take_dump_finish_meta_from_open_pending_has_null_activate():
     """Finish before activate: still emit meta with activate_wave=None."""
     from vllm_ascend.dfx.dfx_types import DumpFinishMeta
+    from vllm_ascend.dfx.request_state import RequestDfxStore
 
+    RequestDfxStore.reset_for_tests()
     dumper = _make_dumper()
     dumper._wave_index = 5
-    dumper._dump_finish_by_req = {}
     dumper._begin_dump_wave_tracking(
         ["r1", "r2"],
         anomaly_type="token_repeat",

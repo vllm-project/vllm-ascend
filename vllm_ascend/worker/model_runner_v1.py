@@ -2047,7 +2047,7 @@ class NPUModelRunner(GPUModelRunner):
                             encoder_cache=self.encoder_cache,
                         ) as ec_connector_output:
                             self._execute_mm_encoder(scheduler_output)
-                            self.dfx.clear_finished(getattr(scheduler_output, "finished_req_ids", None))
+                            self.dfx.mark_finished(getattr(scheduler_output, "finished_req_ids", None))
                             return make_empty_encoder_model_runner_output(scheduler_output)
                     finally:
                         self.dfx.finalize_dump_data()
@@ -2065,11 +2065,10 @@ class NPUModelRunner(GPUModelRunner):
                         # is called into to avoid out of sync issues.
                         self._dummy_run(1)
                     # Idle cleanup steps still carry finished_req_ids (between
-                    # previous finish and current schedule). clear_finished
+                    # previous finish and current schedule). mark_finished
                     # normally runs in sample_tokens; that path is skipped
-                    # here, so print_output_on_finish / detector state must
-                    # be drained on this early return.
-                    self.dfx.clear_finished(getattr(scheduler_output, "finished_req_ids", None))
+                    # here, so finish mark / later reap must still run.
+                    self.dfx.mark_finished(getattr(scheduler_output, "finished_req_ids", None))
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2558,7 +2557,7 @@ class NPUModelRunner(GPUModelRunner):
         self.dfx.finalize_dump_data()
 
         finished_req_ids = getattr(scheduler_output, "finished_req_ids", None)
-        self.dfx.clear_finished(finished_req_ids)
+        self.dfx.mark_finished(finished_req_ids)
 
         if self.need_accepted_tokens:
             assert self.sampling_done_event is not None
@@ -2586,6 +2585,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if not self.use_async_scheduling:
+            self.dfx.record_sample_waves(req_ids_output_copy)
             self.dfx.check_after_sample(
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs_lists=logprobs_lists,
@@ -2626,6 +2626,9 @@ class NPUModelRunner(GPUModelRunner):
                     :total
                 ].clone(),
             )
+        # Stamp sample wave on the main thread before handing off to the
+        # async output-copy thread (which may race the next sync_for_step).
+        self.dfx.record_sample_waves(req_ids_output_copy)
         async_output = AscendAsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,

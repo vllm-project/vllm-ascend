@@ -935,7 +935,7 @@ class DfxRuntimeConfig:
     def log_print_output_on_finish(self) -> bool:
         """Whether to log output token ids + text when any request finishes.
 
-        Default False. When True, TP0 logs on ``clear_finished`` for every
+        Default False. When True, TP0 logs on reap (after ``mark_finished``) for every
         finished request (independent of dump_finish sidecars and of
         ``save_sensitive_info``). Can be large / sensitive — leave off in prod.
         """

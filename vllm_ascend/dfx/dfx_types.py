@@ -42,7 +42,7 @@ class DumpPhase(str, Enum):
 class DumpFinishMeta:
     """Wave / dump correlation kept until the request finishes.
 
-    Written to a sidecar file on ``clear_finished`` (not by rewriting the
+    Written to a sidecar file on reap (not by rewriting the
     immediate anomaly report). ``dump_waves_after_report`` is
     ``activate_wave - arm_wave`` when both are known, else ``None``.
     """

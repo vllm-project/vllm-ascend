@@ -24,6 +24,7 @@ from vllm_ascend.dfx.input_filters import (
     build_input_filter_chain,
     matches_input_token_id_prefixes,
 )
+from vllm_ascend.dfx.request_state import RequestDfxStore
 
 
 def test_matches_input_token_id_prefixes_or_semantics():
@@ -108,7 +109,8 @@ def test_input_filter_length_before_prefix_and_allow_cache():
         ]
     )
     assert mgr.allow("req-a", prompt_token_ids=[1, 2], log=False) is True
-    assert mgr._allow_cache.get("req-a") is True
+    store = RequestDfxStore.get()
+    assert store.get_filter_allowed("req-a") is True
     # Same configs on every refresh_config step must keep the allow cache.
     assert (
         mgr.apply_configs(
@@ -123,12 +125,12 @@ def test_input_filter_length_before_prefix_and_allow_cache():
         )
         is False
     )
-    assert mgr._allow_cache.get("req-a") is True
+    assert store.get_filter_allowed("req-a") is True
     mgr.clear_req("req-a")
-    assert "req-a" not in mgr._allow_cache
+    assert store.get_filter_allowed("req-a") is None
     assert mgr.allow("req-a", prompt_token_ids=[0], log=False) is False
     assert mgr.apply_configs([]) is True  # rebuild clears cache
-    assert mgr._allow_cache == {}
+    assert store.get_filter_allowed("req-a") is None
     InputFilterManager.reset_for_tests()
 
 

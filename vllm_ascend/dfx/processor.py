@@ -33,6 +33,7 @@ from vllm_ascend.dfx.input_filters import InputFilterManager, iter_batch_prompt_
 from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
 from vllm_ascend.dfx.manual_trigger import ManualTriggerManager, TriggerEvent
 from vllm_ascend.dfx.report import DfxReportWriter
+from vllm_ascend.dfx.request_state import RequestDfxStore
 from vllm_ascend.dfx.tokenizer import load_model_tokenizer
 from vllm_ascend.dfx.util import decode_token_ids
 from vllm_ascend.logger import init_logger_ascend
@@ -209,6 +210,9 @@ class DfxProcessor:
                 dumper.advance_wave(allow_arm=allow_arm)
             self.refresh_config(allow_arm=allow_arm)
             self.sync_dump_pending_or(allow_arm=allow_arm)
+            # Idle / early-return finishes never reach check_after_sample; reap
+            # finished reqs whose sample-wave FIFO is already drained.
+            self._reap_finished_requests()
         finally:
             logger.debug(
                 "[DFX sync] leave sync_for_step allow_arm=%s dp=%s tp=%s pp=%s",
@@ -220,19 +224,45 @@ class DfxProcessor:
 
     # ---- sample / get_output hooks ----------------------------------------
 
-    def clear_finished(self, finished_req_ids: Any) -> None:
+    def mark_finished(self, finished_req_ids: Any) -> None:
+        """Mark requests finished; defer Store.clear until last sample is consumed.
+
+        Runner order is ``mark_finished`` → (optional) ``record_sample_waves``
+        → ``check_after_sample`` / async ``get_output``. Only Store
+        :meth:`~RequestDfxStore.mark_finished` runs here so the last stamp /
+        detect / append still see the same state. Sidecars + clear happen in
+        :meth:`_reap_finished_requests`.
+        """
         if not finished_req_ids:
             return
+        store = RequestDfxStore.get()
+        dumper = getattr(self, "dumper", None)
+        wave = 0
+        if dumper is not None and hasattr(dumper, "current_wave"):
+            try:
+                wave = int(dumper.current_wave())
+            except (TypeError, ValueError):
+                wave = 0
+        store.mark_finished(finished_req_ids, wave=wave)
+
+    def _reap_finished_requests(self) -> None:
+        """Write finish sidecars and clear reqs that are finished and drained."""
+        store = RequestDfxStore.get()
+        dumper = getattr(self, "dumper", None)
+        wave = 0
+        if dumper is not None and hasattr(dumper, "current_wave"):
+            try:
+                wave = int(dumper.current_wave())
+            except (TypeError, ValueError):
+                wave = 0
+        reapable = store.list_reapable(current_wave=wave)
+        if not reapable:
+            return
         io_mgr = RequestIoSnapshotManager.get()
-        filt = InputFilterManager.get()
         if self.dfx_config.log_print_output_on_finish():
-            self._maybe_print_output_on_finish(finished_req_ids, io_mgr)
-        # Dump-finish sidecars need cumulative IO before clear_req.
-        self._maybe_write_dump_finish(finished_req_ids, io_mgr)
-        for req_id in finished_req_ids:
-            self.detectors.clear_finished(req_id)
-            io_mgr.clear_req(req_id)
-            filt.clear_req(req_id)
+            self._maybe_print_output_on_finish(reapable, io_mgr)
+        self._maybe_write_dump_finish(reapable, io_mgr)
+        store.clear_many(reapable, detectors=self.detectors)
 
     def _maybe_write_dump_finish(self, finished_req_ids: Any, io_mgr: RequestIoSnapshotManager) -> None:
         """Write dump_finish sidecar for dump-linked reqs (activated or still pending)."""
@@ -326,6 +356,15 @@ class DfxProcessor:
         for alert in self.detectors.check_after_spec(sampled_tokens, accepted_token_nums):
             self._handle_alert(alert, detector=self.detectors.get(alert.anomaly_type))
 
+    def record_sample_waves(self, req_ids: list[str] | None) -> None:
+        """Main-thread: stamp ``current_wave`` for each sampled req (async-safe).
+
+        Call before returning ``AsyncOutput`` / before sync ``check_after_sample``.
+        """
+        dumper = getattr(self, "dumper", None)
+        if dumper is not None and hasattr(dumper, "record_sample_waves"):
+            dumper.record_sample_waves(req_ids)
+
     def check_after_sample(
         self,
         sampled_token_ids: Any,
@@ -335,13 +374,45 @@ class DfxProcessor:
         """Sample step hook: run all post-sample detectors (token / substring / …).
 
         Detection gating (rank / dump / detector-on) lives in ``DetectorManager``.
+        Arm wave prefers main-thread stamps from :meth:`record_sample_waves`.
         """
+        wave_by_req: dict[str, int] = {}
+        dumper = getattr(self, "dumper", None)
+        runner = getattr(self, "runner", None)
+        async_sched = bool(getattr(runner, "use_async_scheduling", False)) if runner is not None else False
+        if dumper is not None and hasattr(dumper, "take_sample_wave"):
+            ids = list(req_ids) if req_ids else []
+            if async_sched and not ids:
+                logger.warning_once(
+                    "[DFX wave] async check_after_sample without req_ids; "
+                    "arm_wave will fall back to current_wave (may race advance_wave)"
+                )
+            for rid in ids:
+                if not rid:
+                    continue
+                rid_s = str(rid)
+                stamped = dumper.take_sample_wave(rid_s)
+                if stamped is not None:
+                    wave_by_req[rid_s] = stamped
+                elif async_sched:
+                    logger.warning(
+                        "[DFX wave] missing sample-wave stamp for req_id=%s under async "
+                        "scheduling; arm_wave falls back to current_wave (may be polluted)",
+                        rid_s,
+                    )
         for alert in self.detectors.check_after_sample(
             sampled_token_ids=sampled_token_ids,
             logprobs_lists=logprobs_lists,
             req_ids=req_ids,
         ):
-            self._handle_alert(alert, detector=self.detectors.get(alert.anomaly_type))
+            arm_wave = wave_by_req.get(alert.req_id) if alert.req_id else None
+            self._handle_alert(
+                alert,
+                detector=self.detectors.get(alert.anomaly_type),
+                arm_wave=arm_wave,
+            )
+        # Last get_output / sync sample consumed stamps → reap finished reqs.
+        self._reap_finished_requests()
 
     # ---- dump lifecycle (delegated so callers never touch ``Dumper``) ------
 
@@ -414,6 +485,7 @@ class DfxProcessor:
         *,
         detector: AnomalyDetector | None = None,
         write_report: bool = True,
+        arm_wave: int | None = None,
     ) -> None:
         """Arm dump (optional) and write report immediately.
 
@@ -424,7 +496,7 @@ class DfxProcessor:
         dump_attempted = bool(self.dfx_config.dump_enabled())
         dump_armed = False
         if dump_attempted:
-            dump_armed = bool(self.dumper.handle_anomaly_alert(alert, detector=detector))
+            dump_armed = bool(self.dumper.handle_anomaly_alert(alert, detector=detector, arm_wave=arm_wave))
         else:
             if detector is not None:
                 detector.on_alert_armed(alert)

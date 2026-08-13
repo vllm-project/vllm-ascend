@@ -13,17 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Request prompt/output token snapshots for DFX reports.
+"""Report-time I/O views over :class:`RequestDfxStore` + runner prompts.
 
-Detectors own anomaly metrics only. Full ``prompt_token_ids`` /
-``output_token_ids`` are attached once at report time by
-``RequestIoSnapshotManager`` (process-wide singleton) — not in model_runner
-and not duplicated per detector.
+Ownership split:
 
-Async scheduling leaves ``req_output_token_ids`` as ``-1`` placeholders unless
-logits processors need real ids. DFX therefore **self-accumulates** accepted
-output token ids on the detect rank (via :meth:`append_output`) and prefers
-that cumulative list for report / counts.
+- **Data** (cumulative ``output_token_ids``, append dedupe): ``RequestDfxStore``
+- **View** (this module): normalize token rows, ``snapshot()`` for reports,
+  same-wave snapshot cache only
+
+Detectors / ``DetectorManager`` call :meth:`append_output` /
+:meth:`append_batch` as a thin normalize→Store adapter. They must not treat
+this manager as a second per-req state owner — finish cleanup is
+``RequestDfxStore.clear`` only.
+
+Async scheduling leaves runner ``req_output_token_ids`` as ``-1`` placeholders
+unless logits processors need real ids; DFX therefore prefers Store-built
+cumulative ids for counts and report bodies.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from typing import Any
 import torch
 
 from vllm_ascend.dfx.input_filters import prompt_token_ids_for_request
+from vllm_ascend.dfx.request_state import RequestDfxStore
 
 
 def normalize_token_ids(token_ids: Any) -> list[int]:
@@ -71,15 +77,13 @@ def _raw_output_token_ids(runner: Any, req_id: str, req_idx: int | None) -> Any:
 
 
 def output_token_count_for_request(runner: Any, req_id: str, req_idx: int | None = None) -> int:
-    """Length of cumulative output; prefer DFX self-built list when present."""
-    mgr = RequestIoSnapshotManager.get()
-    built = mgr.cumulative_output_count(req_id)
+    """Length of cumulative output; prefer DFX Store list when present."""
+    built = RequestDfxStore.get().cumulative_output_count(req_id)
     if built > 0:
         return built
     raw = _raw_output_token_ids(runner, req_id, req_idx)
     if raw is None:
         return 0
-    # Avoid counting async ``-1`` placeholders as real tokens.
     try:
         ids = normalize_token_ids(raw)
     except TypeError:
@@ -116,77 +120,77 @@ class RequestIoSnapshot:
 
 
 class RequestIoSnapshotManager:
-    """Process-wide helper: accumulate outputs + snapshot I/O for report write.
+    """Report I/O view helper (not a second per-req state owner).
 
-    One copy per detect-rank process (last-PP TP0 under pending-OR) is enough;
-    peers do not need a mirror.
+    - Accumulates via Store (``append_*`` = normalize + ``RequestDfxStore``).
+    - Builds :class:`RequestIoSnapshot` for anomaly / dump_finish reports.
+    - Keeps a same-wave snapshot cache only; cleared each ``clear_wave_cache``
+      and on Store.clear via registered hook.
     """
 
     _instance: RequestIoSnapshotManager | None = None
 
     def __init__(self) -> None:
-        # Optional same-wave cache: cache_key → snapshot (cleared by processor).
         self._cache: dict[str, RequestIoSnapshot] = {}
-        # Self-built cumulative accepted output ids (detect rank only).
-        self._output_by_req: dict[str, list[int]] = {}
-        # Last appended chunk per req within the current engine wave only.
-        # Cleared by :meth:`clear_wave_cache` so identical chunks across
-        # consecutive steps are kept (only same-wave double writes are skipped).
-        self._last_append: dict[str, tuple[int, ...]] = {}
+        RequestDfxStore.get().register_on_clear(self.clear_req_cache)
 
     @classmethod
     def get(cls) -> RequestIoSnapshotManager:
         if cls._instance is None:
             cls._instance = cls()
+        else:
+            # Store may have been reset_for_tests while this singleton survived.
+            RequestDfxStore.get().register_on_clear(cls._instance.clear_req_cache)
         return cls._instance
 
     @classmethod
     def reset_for_tests(cls) -> None:
         cls._instance = None
+        RequestDfxStore.reset_for_tests()
 
     def clear_wave_cache(self) -> None:
-        """Drop snapshot cache and same-wave append dedupe state.
+        """Drop snapshot cache and same-wave append dedupe on Store.
 
         Called at the start of each ``sync_for_step`` / ``refresh_config`` wave
         so content-identical chunks from a later step are not swallowed.
         """
         self._cache.clear()
-        self._last_append.clear()
+        RequestDfxStore.get().clear_wave_append_frontier()
 
-    def clear_req(self, req_id: str) -> None:
-        """Drop cumulative output + wave cache entries for a finished request."""
+    def clear_req_cache(self, req_id: str) -> None:
+        """Drop wave snapshot cache entries for ``req_id`` (Store on_clear hook)."""
         if not req_id:
             return
-        self._output_by_req.pop(req_id, None)
-        self._last_append.pop(req_id, None)
-        stale = [k for k in self._cache if k.startswith(f"{req_id}|")]
+        prefix = f"{req_id}|"
+        stale = [k for k in self._cache if k.startswith(prefix)]
         for key in stale:
             self._cache.pop(key, None)
 
+    def clear_req(self, req_id: str) -> None:
+        """Compatibility: finish cleanup via :meth:`RequestDfxStore.clear`."""
+        if not req_id:
+            return
+        RequestDfxStore.get().clear(str(req_id))
+
     def cumulative_output_ids(self, req_id: str) -> list[int]:
-        return list(self._output_by_req.get(req_id, ()))
+        return RequestDfxStore.get().cumulative_output_ids(req_id)
 
     def cumulative_output_count(self, req_id: str) -> int:
-        return len(self._output_by_req.get(req_id, ()))
+        return RequestDfxStore.get().cumulative_output_count(req_id)
 
     def append_output(self, req_id: str, token_ids: Any) -> None:
-        """Extend cumulative output for ``req_id`` with accepted token ids.
+        """Normalize accepted ids and append into :class:`RequestDfxStore`.
 
-        Drops ``-1`` placeholders. Within one engine wave, if ``token_ids``
-        equals the previous append for this req (e.g. spec + sample both
-        recording the same step), skip. Across waves, identical chunks are
-        kept — :meth:`clear_wave_cache` resets the dedupe frontier.
+        Drops ``-1`` placeholders. Within one engine wave, duplicate chunks
+        for the same req are skipped (Store ``last_append_chunk``). Across
+        waves, identical chunks are kept after :meth:`clear_wave_cache`.
         """
         if not req_id:
             return
         new_ids = _filter_valid_token_ids(token_ids)
         if not new_ids:
             return
-        chunk = tuple(new_ids)
-        if self._last_append.get(req_id) == chunk:
-            return
-        self._output_by_req.setdefault(req_id, []).extend(new_ids)
-        self._last_append[req_id] = chunk
+        RequestDfxStore.get().append_output_ids(req_id, new_ids)
 
     def append_batch(
         self,
@@ -216,9 +220,9 @@ class RequestIoSnapshotManager:
     ) -> RequestIoSnapshot:
         """Build prompt + cumulative-output view for ``req_id``.
 
-        Output prefers self-built cumulative ids (async-safe). Prompt is still
-        read from the runner. ``include_token_ids`` controls whether full id
-        lists are attached (``report.save_sensitive_info``).
+        Output prefers Store cumulative ids (async-safe). Prompt is read from
+        the runner. ``include_token_ids`` attaches full id lists when
+        ``report.save_sensitive_info`` is on.
         """
         if not req_id:
             return RequestIoSnapshot(req_id="", prompt_token_count=0, output_token_count=0)
@@ -227,7 +231,8 @@ class RequestIoSnapshotManager:
             return self._cache[cache_key]
 
         prompt_ids: list[int] | None = None
-        built_output = self.cumulative_output_ids(req_id)
+        store = RequestDfxStore.get()
+        built_output = store.cumulative_output_ids(req_id)
         if include_token_ids and runner is not None:
             raw_prompt = prompt_token_ids_for_request(runner, req_id, req_idx)
             prompt_ids = list(raw_prompt) if raw_prompt is not None else []
@@ -235,7 +240,6 @@ class RequestIoSnapshotManager:
             if built_output:
                 output_ids = built_output
             else:
-                # Fallback: runner list, stripping async placeholders.
                 output_ids = _filter_valid_token_ids(_raw_output_token_ids(runner, req_id, req_idx))
             output_count = len(output_ids)
         else:

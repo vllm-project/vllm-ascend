@@ -236,16 +236,21 @@ class NPUModelRunner(GPUModelRunner):
         # did not set sampling_params.logprobs.
         self.dfx.ensure_logprobs_for_detection()
         output = super().sample_tokens(grammar_output)
-        self.dfx.clear_finished(finished_req_ids)
+        self.dfx.mark_finished(finished_req_ids)
 
         if isinstance(output, AsyncOutput):
             # Async: defer token/logprob check until D2H in get_output().
+            # Stamp wave on the main thread before the output-copy thread runs.
+            mro = getattr(output, "model_runner_output", None)
+            req_ids = getattr(mro, "req_ids", None) if mro is not None else None
+            self.dfx.record_sample_waves(req_ids)
             wrapped = AscendAsyncOutput(output, self)
             self._attach_observability_fields(wrapped)
             return wrapped
 
         if isinstance(output, ModelRunnerOutput):
             # Sync: super() already called get_output(); check immediately.
+            self.dfx.record_sample_waves(output.req_ids)
             self.dfx.check_after_sample(
                 sampled_token_ids=output.sampled_token_ids,
                 logprobs_lists=output.logprobs,
