@@ -137,6 +137,7 @@ def test_receive_completion_is_deduplicated():
 def test_metadata_carries_async_save_source_indexes():
     metadata = AscendMultiKVConnectorMetadata(metadata=(), async_save_sources={"req": (1, 2)})
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = []
     connector._extra_async_saves = {}
     connector._async_save_sources = {}
     connector.bind_connector_metadata(metadata)
