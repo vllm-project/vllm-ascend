@@ -48,6 +48,24 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 1a. File: platform/patch_async_prefill_recompute.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.async_scheduler.AsyncScheduler._update_request_with_output`
+#    Why:
+#       A P-side request can be preempted while an async output is in flight.
+#       Preemption frees its block table, but the stale output can still make
+#       the one-token prefill request finish and emit empty transfer metadata.
+#    How:
+#       Drop only terminal in-flight outputs for preempted remote-decode
+#       requests. The request remains in the P-side waiting queue and is
+#       recomputed there before valid transfer metadata is emitted.
+#    Related PR (if no, explain why):
+#       No, this is a vLLM-Ascend P/D stopgap while block-table snapshot
+#       ownership across async preemption is being designed.
+#    Future Plan:
+#       Remove this patch after the scheduler and KV connector share a stable
+#       block-table snapshot or ownership contract for in-flight outputs.
+#
 # ** 2. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`
