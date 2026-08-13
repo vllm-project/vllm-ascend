@@ -22,6 +22,7 @@ if (BUILD_OPEN_PROJECT)  # custom
     # upstream layout keeps them under op_host/op_tiling/<arch>, so register
     # the applicable source explicitly as build glue.  Keep the upstream
     # tiling implementation itself unchanged.
+    add_tiling_modules()
     if ("arch22" IN_LIST ARCH_DIRECTORY)
         target_sources(${OPHOST_NAME}_tiling_obj PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/op_tiling/arch22/mega_moe_tiling_arch22.cpp)
@@ -34,10 +35,20 @@ if (BUILD_OPEN_PROJECT)  # custom
     # the newer ops-transformer build adds this path through its op-api target.
     target_include_directories(${OPHOST_NAME}_opapi_obj PRIVATE
         ${ASCEND_AUTOGEN_DIR}/inner)
+    target_include_directories(${OPHOST_NAME}_infer_obj BEFORE PRIVATE
+        ${CMAKE_SOURCE_DIR}/mc2/mega_moe/build_compat
+        ${CMAKE_SOURCE_DIR}/mc2/common/utils)
+    target_include_directories(${OPHOST_NAME}_tiling_obj BEFORE PRIVATE
+        ${CMAKE_SOURCE_DIR}/mc2/mega_moe/build_compat
+        ${CMAKE_SOURCE_DIR}/mc2/common/utils
+        ${CMAKE_SOURCE_DIR}/mc2/common/op_kernel)
+    target_sources(${OPHOST_NAME}_tiling_obj PRIVATE
+        ${CMAKE_SOURCE_DIR}/mc2/mega_moe/build_compat/mc2_hcom_topo_info.cpp)
+    target_compile_options(${OPHOST_NAME}_tiling_obj PRIVATE
+        -include${CMAKE_SOURCE_DIR}/mc2/mega_moe/mega_moe_build_compat.h)
     set(SUB_MC2_COMPILE TRUE PARENT_SCOPE)
-    set(MC2_OPT ON PARENT_SCOPE)
-    set(mega_moe_depends mc2/common mc2/3rd  PARENT_SCOPE)
-    set(mega_moe_apt_depends mc2/common mc2/3rd mc2/moe_distribute_dispatch_v2 mc2/moe_distribute_dispatch_v3 PARENT_SCOPE)
+    set(mega_moe_depends mc2/common PARENT_SCOPE)
+    set(mega_moe_apt_depends mc2/common mc2/moe_distribute_dispatch_v2 mc2/moe_distribute_dispatch_v3 PARENT_SCOPE)
 
     set(CONDITION_UNIT ${ASCEND_COMPUTE_UNIT})
     if ("${CONDITION_UNIT}" STREQUAL "ascend950")
@@ -50,7 +61,6 @@ if (BUILD_OPEN_PROJECT)  # custom
             OP_NAME MegaMoe
             OPTIONS --cce-auto-sync=on
             OPTIONS -I${CMAKE_SOURCE_DIR}/mc2/common/op_kernel
-            OPTIONS -I${CMAKE_SOURCE_DIR}/mc2/common/inc/kernel
         )
     endif()
 

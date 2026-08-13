@@ -9,8 +9,6 @@
  */
 
 #include <vector>
-#include "common/utils/op_mc2.h"
-#include "common/utils/op_mc2_def.h"
 #include "opdev/op_log.h"
 #include "opdev/common_types.h"
 #include "opdev/make_op_executor.h"
@@ -18,11 +16,9 @@
 #include "opdev/platform.h"
 #include "aclnn/aclnn_base.h"
 #include "aclnn_util.h"
-#include "common/op_host/op_api/mc2_3rd_matmul_util.h"
 #include "aclnn_kernels/common/op_error_check.h"
 #include "aclnnInner_mega_moe.h"
 
-using namespace Ops::Transformer;
 using namespace op;
 
 #ifdef __cplusplus

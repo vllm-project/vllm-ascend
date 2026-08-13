@@ -1,0 +1,6 @@
+#ifndef VLLM_ASCEND_MEGA_MOE_MC2_TILING_UTILS_FORWARDER_H
+#define VLLM_ASCEND_MEGA_MOE_MC2_TILING_UTILS_FORWARDER_H
+
+#include "../../../mc2_tiling_utils.h"
+
+#endif

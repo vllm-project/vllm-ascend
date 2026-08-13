@@ -117,9 +117,8 @@ set(OPAPI_INCLUDE
   ${OPS_TRANSFORMER_DIR}/common/stub/op_api
   $<$<NOT:$<BOOL:${BUILD_OPEN_PROJECT}>>:${TOP_DIR}/output/${PRODUCT}/aclnnop_resource>
 
-  ${OPS_TRANSFORMER_DIR}/mc2/common/utils
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_host/op_tiling
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_kernel
+  ${OPS_TRANSFORMER_DIR}/mc2/common/inc
+  ${OPS_TRANSFORMER_DIR}/mc2/common/new_mc2_mm
   ${OPS_TRANSFORMER_DIR}/mc2/3rd
   ${OPS_TRANSFORMER_DIR}/mc2
 )
@@ -163,12 +162,8 @@ set(OP_TILING_INCLUDE
   ${OPS_TRANSFORMER_DIR}/common/stub/op_tiling
   
   ${OPS_TRANSFORMER_DIR}/mc2/common
-  ${OPS_TRANSFORMER_DIR}/mc2/common/utils
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_host/op_tiling
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_kernel
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_host
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_graph
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_api
+  ${OPS_TRANSFORMER_DIR}/mc2/common/inc
+  ${OPS_TRANSFORMER_DIR}/mc2/common/new_mc2_mm
   ${OPS_TRANSFORMER_DIR}/mc2/3rd
   ${OPS_TRANSFORMER_DIR}/mc2
   ${NNOPBASE_INCLUDE_DIRS}
@@ -221,8 +216,8 @@ set(OP_PROTO_INCLUDE
 
   ${OPS_TRANSFORMER_DIR}/common/include
 
-  ${OPS_TRANSFORMER_DIR}/mc2/common/utils
-  ${OPS_TRANSFORMER_DIR}/mc2/common/op_kernel
+  ${OPS_TRANSFORMER_DIR}/mc2/common/inc
+  ${OPS_TRANSFORMER_DIR}/mc2/common/new_mc2_mm
   ${OPS_TRANSFORMER_DIR}/mc2/3rd
   ${OPS_TRANSFORMER_DIR}/mc2
 )
