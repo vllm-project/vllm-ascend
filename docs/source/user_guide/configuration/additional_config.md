@@ -128,10 +128,8 @@ The details of each configuration option are as follows:
 The accepted fields depend on the model runner:
 
 - **Model Runner V2** accepts only `load_collection_phase` here. Configure
-  other EPLB options through `--enable-eplb` and `--eplb-config`. MRv2 requires
-  asynchronous EPLB with the Gloo communicator. A synchronous setting is
-  overridden with a warning. STAIR is the fixed placement policy and has no
-  policy-selection field.
+  upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend selects
+  asynchronous Gloo movement and the STAIR policy automatically.
 - **Model Runner V1** accepts the legacy fields below except
   `load_collection_phase`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
