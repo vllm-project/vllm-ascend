@@ -244,15 +244,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
-        if (
-            self.custom_routing_function is None
-            and self.e_score_correction_bias is not None
-            and not vllm_config.model_config.is_deepseek_mla
-        ):
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
-
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         try:
             get_weight_views = self.quant_method.get_eplb_weight_views
