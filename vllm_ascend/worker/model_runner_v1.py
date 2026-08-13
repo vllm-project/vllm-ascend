@@ -1753,7 +1753,12 @@ class NPUModelRunner(GPUModelRunner):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         out = super().take_draft_token_ids()
-        per_req_k = getattr(self.drafter, "_dspark_num_verify_tokens", None)
+        if out is None:
+            return None
+        dynamic_spec = getattr(self.drafter, "dynamic_spec", None)
+        if dynamic_spec is None:
+            return out
+        per_req_k = dynamic_spec.num_verify_tokens
         if per_req_k is None:
             return out
         per_req_k = [
