@@ -189,16 +189,23 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             chunk_finish=False,
         )
 
-    def test_handle_request_completes_reuse_gate_on_error(self):
+    def test_final_layer_transfer_error_completes_reuse_gate_and_request(self):
+        req_meta = self.req_meta_base
+        req_meta.chunk_finish = True
         callback = MagicMock()
         self.thread.reuse_completion_callback = callback
         self.thread._transfer_kv_cache = MagicMock(side_effect=RuntimeError("write failed"))
-        task = SendTask(layer_idx=2)
+        task = SendTask(
+            send_request={"req": req_meta},
+            layer_idx=2,
+            layer_name="layer2",
+        )
         self.thread.send_queue.put(task)
 
         self.thread._handle_request(task)
 
         callback.assert_called_once_with(2, "write failed")
+        self.thread.callback_func.assert_called_once_with("req", req_meta, 0, trans_flag=False)
         self.assertEqual(self.thread.send_queue.unfinished_tasks, 0)
 
     @patch(
@@ -486,21 +493,6 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.thread._handle_request(send_task)
 
         self.thread.callback_func.assert_called_once()
-
-    def test_final_layer_generic_error_sends_failed_completion(self):
-        req_meta = self.req_meta_base
-        req_meta.chunk_finish = True
-        self.thread._transfer_kv_cache = MagicMock(side_effect=RuntimeError("write failed"))
-        send_task = SendTask(
-            send_request={"req": req_meta},
-            layer_idx=2,
-            layer_name="layer2",
-        )
-        self.thread.send_queue.put(send_task)
-
-        self.thread._handle_request(send_task)
-
-        self.thread.callback_func.assert_called_once_with("req", req_meta, 0, trans_flag=False)
 
     def test_final_layer_metadata_error_sends_failed_completion(self):
         req_meta = self.req_meta_base

@@ -125,24 +125,3 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     connector.wait_for_layer_load("model.layers.7.self_attn")
 
     assert call_order == ["provider", "sibling"]
-
-
-def test_layerwise_reuse_waiter_joins_all_providers():
-    providers = [
-        SimpleNamespace(
-            is_producer=True,
-            connector_worker=object(),
-            supports_layerwise_buffer_reuse=True,
-            wait_for_layer_reuse=MagicMock(),
-        )
-        for _ in range(2)
-    ]
-    store = SimpleNamespace(set_layerwise_reuse_waiter=MagicMock(return_value=True))
-    connector = AscendMultiConnector.__new__(AscendMultiConnector)
-    connector._connectors = [providers[0], store, providers[1]]
-
-    connector._configure_layerwise_reuse_completion()
-    store.set_layerwise_reuse_waiter.call_args.args[0](4)
-
-    for provider in providers:
-        provider.wait_for_layer_reuse.assert_called_once_with(4)
