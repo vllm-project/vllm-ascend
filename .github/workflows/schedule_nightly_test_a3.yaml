@@ -71,6 +71,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  statuses: write
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -222,6 +223,7 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
+      send_ready_signal: false
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -263,6 +265,9 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
+      send_ready_signal: true
+      run_id: ${{ github.run_id }}
+      signal_context_prefix: double-node-pods-ready-a3
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -271,14 +276,29 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
+  double-node-pods-started:
+    name: Wait for all double-node pods launched
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    uses: ./.github/workflows/_nightly_wait_for_pods_ready.yaml
+    with:
+      matrix_json: ${{ needs.setup-vars.outputs.double_node }}
+      filter: ${{ needs.parse-trigger.outputs.filter }}
+      context_prefix: 'double-node-pods-ready-a3'
+      run_id: ${{ github.run_id }}
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -311,7 +331,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
