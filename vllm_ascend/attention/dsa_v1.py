@@ -630,7 +630,24 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
+        dspark_swa_indices = None
+        ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
+            if not common_attn_metadata.causal:
+                # DSpark non-causal parallel drafting: every draft query attends to
+                # the trailing context window plus the whole current draft block.
+                assert self.speculative_config is not None
+                dspark_swa_indices, _ = build_dspark_swa_indices(
+                    self.block_table[: self.num_decodes],
+                    self.speculative_config.num_speculative_tokens,
+                    self.model_config.hf_config.sliding_window,
+                    self.block_size,
+                    query_start_loc[: self.num_decodes + 1],
+                    self.seq_lens[: self.num_decodes],
+                    self.num_decode_tokens,
+                )
+                dspark_swa_indices = dspark_swa_indices[: self.num_decode_tokens]
+                ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
             cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
                 self.common_ratio_to_sas_metadata,
                 "cu_seqlens_ori_kv",
@@ -687,6 +704,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=qli_metadata,
             attn_mask=None,
             cu_cmp_seqlen_list=cu_seqlens_cmp_kv,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            dspark_swa_indices=dspark_swa_indices,
         )
 
     def build_for_drafting(

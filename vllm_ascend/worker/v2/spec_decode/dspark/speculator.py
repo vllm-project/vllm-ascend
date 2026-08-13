@@ -15,10 +15,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Mapping
 from typing import Any, cast
 
-import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -31,8 +29,8 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
-    build_attn_metadata,
     build_attn_metadata_wrapper,
+    build_draft_attn_metadata_factory,
 )
 
 
@@ -86,7 +84,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
-        with build_attn_metadata_wrapper():
+        with (build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded),
+        ):
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
                 num_reqs_padded=num_reqs_padded,
@@ -137,7 +137,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         is_profile: bool = False,
     ) -> torch.Tensor:
         self.input_batch = input_batch
-        with build_attn_metadata_wrapper():
+        with (
+            build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(self.input_buffers.positions, self.max_num_tokens),
+        ):
             return super().propose(
                 input_batch,
                 attn_metadata,
