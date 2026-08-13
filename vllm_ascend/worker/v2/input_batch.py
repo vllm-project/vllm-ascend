@@ -68,7 +68,11 @@ class AscendInputBatch(InputBatch):
 
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
-    seq_lens_np: np.ndarray
+    # Default None keeps the field ordering valid: upstream InputBatch gained
+    # default-valued fields (e.g. max_query_len) at the end of its field list,
+    # so a non-default field in this subclass would break dataclass
+    # construction with "non-default argument follows default argument".
+    seq_lens_np: np.ndarray | None = None
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
 
