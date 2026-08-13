@@ -80,9 +80,9 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         varlen_decode: bool = False,
     ):
         # Upstream vLLM main (after #51256) passes varlen_decode to
-        # ModelCudaGraphManager; v0.26.0 has no such parameter, so only forward
-        # it on the main lane.
-        if vllm_version_is("0.26.0"):
+        # ModelCudaGraphManager; v0.26.0 / v0.27.1 have no such parameter, so
+        # only forward it on the main lane.
+        if vllm_version_is("0.26.0") or vllm_version_is("0.27.1"):
             super().__init__(
                 vllm_config,
                 device,
