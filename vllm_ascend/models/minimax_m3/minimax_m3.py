@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only MiniMaxM3 model."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
@@ -35,6 +36,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context
@@ -105,6 +107,26 @@ _EMBEDDING_QUANT_AUX_WEIGHT_SUBSTRS = [
     "embed_tokens.weight_scale",
     "lm_head.weight_scale",
 ]
+
+_M3_COMPARE = os.getenv("VLLM_ASCEND_MINIMAX_M3_COMPARE", "0") == "1"
+
+
+def _m3_compare_tensor(tag: str, tensor: torch.Tensor) -> None:
+    """Log a small deterministic tensor sample for two-version comparison."""
+    if not _M3_COMPARE or get_tensor_model_parallel_rank() != 0:
+        return
+    with torch.no_grad():
+        flat = tensor.detach().reshape(-1)
+        probe = flat[:: max(flat.numel() // 64, 1)][:64].float()
+        logger.warning(
+            "M3_COMPARE tag=%s shape=%s dtype=%s sum=%.9e absmax=%.9e first=%s",
+            tag,
+            tuple(tensor.shape),
+            tensor.dtype,
+            probe.sum().item(),
+            probe.abs().max().item(),
+            probe[:8].cpu().tolist(),
+        )
 
 
 def _scatter_index_cache(
@@ -955,14 +977,28 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        if _M3_COMPARE and positions.numel() > 1 and get_pp_group().is_first_rank:
+            _m3_compare_tensor("prefill/embedding", hidden_states)
+
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            if (
+                _M3_COMPARE
+                and positions.numel() > 1
+                and layer.layer_idx in (0, self.num_hidden_layers // 2, self.num_hidden_layers - 1)
+            ):
+                _m3_compare_tensor(
+                    f"prefill/after_layer_{layer.layer_idx}",
+                    hidden_states + residual,
+                )
             self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
         hidden_states, _ = self.norm(hidden_states, residual)
+        if _M3_COMPARE and positions.numel() > 1:
+            _m3_compare_tensor("prefill/final_norm", hidden_states)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -1258,6 +1294,15 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
             skipped_multimodal_tensors,
             len(loaded_params),
         )
+        if _M3_COMPARE:
+            probe_names = {
+                "model.embed_tokens.weight",
+                "lm_head.weight",
+            }
+            for name, param in self.named_parameters():
+                canonical_name = name.replace(".routed_experts", "")
+                if name in loaded_params and canonical_name in probe_names:
+                    _m3_compare_tensor(f"loaded/{canonical_name}", param)
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
