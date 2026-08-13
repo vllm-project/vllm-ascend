@@ -23,6 +23,7 @@ const size_t STATE_INDEX = 5;
 
 const size_t DIM_0 = 0;
 const size_t DIM_1 = 1;
+const size_t DIM_2 = 2;
 
 static ge::graphStatus InferShapeRecurrentKda(InferShapeContext *context)
 {
@@ -35,13 +36,16 @@ static ge::graphStatus InferShapeRecurrentKda(InferShapeContext *context)
     auto shapeValue = context->GetInputShape(VALUE_INDEX);
     auto shapeInitialState = context->GetInputShape(STATE_INDEX);
     auto shapeOut = context->GetOutputShape(DIM_0);
-    auto shapeFinalState = context->GetOutputShape(DIM_1);
-    if (shapeValue == nullptr || shapeInitialState == nullptr || shapeOut == nullptr || shapeFinalState == nullptr) {
+    auto shapeInitialStateOut = context->GetOutputShape(DIM_1);
+    auto shapeFinalState = context->GetOutputShape(DIM_2);
+    if (shapeValue == nullptr || shapeInitialState == nullptr || shapeOut == nullptr ||
+        shapeInitialStateOut == nullptr || shapeFinalState == nullptr) {
         OP_LOGE(opName, "[InferShape] shape is null");
         return ge::GRAPH_FAILED;
     }
 
     *shapeOut = *shapeValue;
+    *shapeInitialStateOut = *shapeInitialState;
     *shapeFinalState = *shapeInitialState;
 
     return ge::GRAPH_SUCCESS;
@@ -51,6 +55,7 @@ static ge::graphStatus InferDataTypeRecurrentKda(gert::InferDataTypeContext *con
 {
     context->SetOutputDataType(0, ge::DT_BF16);
     context->SetOutputDataType(1, context->GetInputDataType(STATE_INDEX));
+    context->SetOutputDataType(2, context->GetInputDataType(STATE_INDEX));
     return ge::GRAPH_SUCCESS;
 }
 
