@@ -19,38 +19,73 @@ transfer strategy efficiently.
 | Stage | Compute pattern | Offload strategy | NPU-resident data |
 | :--- | :--- | :--- | :--- |
 | Prefill | High computation per layer | Transfer complete layers and overlap transfer with computation | A few reusable layer buffers |
-| Decode | Low computation per token | Keep full KV in host memory and load only selected entries | Indexer cache and a hot top-k buffer |
+| Decode | Low computation per token | Keep full KV in host memory and load only selected entries | Indexer cache and per-layer hot top-k buffers |
 
 Loading a complete layer during every Decode step would add transfer latency
 that cannot be hidden by Decode computation. Sparse Decode Offload avoids that
 cost by moving only the entries selected by sparse attention.
 
+The following conceptual diagrams illustrate the difference. In Prefill, a
+small number of complete-layer buffers are reused over time. In Decode, the
+full main-KV history stays in host memory, while the full indexer cache and
+sparse main-KV selections remain on the NPU. Device memory in the RFC figures
+corresponds to NPU HBM in this implementation.
+
+![Layerwise Prefill KV cache offload concept](../../assets/layerwise_kv_offload_concept.png)
+
+*Layerwise Prefill Offload. Source: [RFC #48203](https://github.com/vllm-project/vllm/issues/48203).*
+
+![Sparse Decode KV cache offload concept](../../assets/sparse_kv_offload_concept.png)
+
+*Sparse Decode Offload. Source: [RFC #48203](https://github.com/vllm-project/vllm/issues/48203).*
+
 ## 2. System Overview
+
+The production design targets disaggregated Prefill/Decode deployment. Hybrid
+KV cache layouts are not currently supported. P/D colocation is limited to a
+debug path and is not part of the supported production workflow.
 
 The combined design has four storage regions:
 
 - reusable layer buffers in Prefill NPU memory;
 - the Memcache-backed Prefill host KV pool;
 - the full main KV cache in Decode host memory; and
-- the indexer cache and hot top-k buffer in Decode NPU memory.
+- the indexer cache and per-layer hot top-k buffers in Decode NPU memory.
 
 ```mermaid
 flowchart LR
     PHost["Prefill host KV pool<br/>Memcache"]
     PNPU["Prefill NPU<br/>reusable layer buffers"]
     DHost["Decode host<br/>full main KV cache"]
-    DNPU["Decode NPU<br/>indexer + hot top-k buffer"]
+    DNPU["Decode NPU<br/>indexer + per-layer hot top-k buffers"]
 
     PHost <-->|"Layerwise load / save"| PNPU
     PNPU -->|"Remote D2H pull<br/>main KV"| DHost
     PNPU -->|"Remote pull<br/>indexer / LIC8 scale"| DNPU
-    DHost -->|"Top-k misses"| DNPU
+    DNPU -->|"New-token D2H"| DHost
+    DHost -->|"Top-k miss H2D"| DNPU
 ```
 
 `AscendStoreConnector` manages Layerwise Prefill Offload through Memcache.
 `SfaRemoteD2HConnector` exposes Prefill NPU buffers and lets Decode pull main KV
 into Decode-owned host memory and indexer data into rank-local NPU memory
 through MemFabric. Optional LIC8 scale data follows the indexer destination.
+
+### Transfer granularity
+
+The data path uses different transfer granularities according to when the
+required addresses become known:
+
+| Path | Granularity | Purpose |
+| :--- | :--- | :--- |
+| Prefill NPU to Decode host | Layer/block ranges | Populate Decode's full main KV history |
+| Prefill NPU to Decode NPU | Block ranges within indexer/scale tensors | Populate rank-local indexer and optional LIC8 scale data |
+| Decode current KV to Decode host | Token rows | Append newly generated KV without a full NPU main cache |
+| Decode host to Decode NPU | Top-k miss rows | Populate only missing entries in the per-layer hot buffer |
+
+The Prefill transfers are known after each layer finishes and can be issued in
+larger ranges. Decode miss addresses are known only after top-k selection and
+residency lookup, so they use sparse token-row copies.
 
 ## 3. Layerwise Prefill Offload
 
@@ -69,7 +104,13 @@ R = N - I
 B = configured shared-buffer count
 
 physical buffers = I + min(B, R)
+
+main-KV NPU footprint ratio ~= physical buffers / N
 ```
+
+The footprint ratio assumes a uniform cache layout with equal-size layer
+buffers. It describes only main-KV storage and does not include the indexer or
+other fixed NPU allocations.
 
 Reusable layers are assigned to the shared buffers in round-robin order.
 Layers with incompatible main KV specifications do not share a physical
@@ -112,7 +153,8 @@ Sparse Decode Offload keeps the full main KV cache in a pinned Decode host
 pool. Decode NPU memory contains:
 
 - the rank-local indexer cache used to select important tokens; and
-- a hot buffer containing recently used top-k main KV entries.
+- per-layer K/V hot buffers containing recently selected main-KV entries for
+  active Decode rows.
 
 Each Decode DP rank owns a separate main host pool. Within one DP rank, its TP
 ranks share that pool, while every TP rank owns the indexer data required by its
@@ -123,11 +165,21 @@ local attention computation. Control-plane ports are assigned as
 
 For each Decode step:
 
-1. the indexer selects the required top-k token positions;
-2. entries already present in the hot buffer are reused;
-3. only cache misses are copied from host memory to the NPU;
-4. sparse attention consumes the resulting top-k KV; and
-5. residency metadata is updated for the next step.
+1. Decode generates the new-token K/V without writing it to a full NPU paged
+   main cache;
+2. the new K/V rows are copied to their logical slots in the shared host pool;
+3. the indexer selects logical top-k token positions;
+4. the per-layer LRU residency table identifies hits, assigns physical hot
+   buffer slots to misses, and selects eviction slots when necessary;
+5. only miss rows are copied from host memory to the NPU;
+6. logical top-k positions are remapped to physical hot-buffer slots; and
+7. sparse attention consumes the resident K/V while residency metadata is
+   retained for the next step.
+
+With tensor parallelism, Decode-produced K/V is replicated. TP rank 0 allocates
+the shared host pool and writes the new-token rows. All TP ranks access that
+allocation through the broadcast global virtual addresses provided by the
+MemFabric offload path.
 
 The full history remains available in host memory, but transfer volume is
 proportional to top-k misses rather than total sequence length. This makes
@@ -201,14 +253,19 @@ presence and sizes, optional LIC8 scale layout, and destination block ranges.
 A mismatch fails the layer instead of leaving partially valid destination
 data.
 
-Every readiness notification reaches a terminal success or failure state. A
-failed MemFabric read invalidates the Decode destination and releases the
-Prefill-side waiter with an error, preventing silent corruption or a buffer
-reuse deadlock.
+After Decode processes a readiness notification, it replies with `READ_DONE` or
+`READ_FAILED`. A reported MemFabric read failure invalidates the Decode
+destination and releases the Prefill-side waiter with an error, preventing
+silent corruption. A lost acknowledgement or stopped Decode process is not
+treated as a terminal state, so Prefill may continue waiting.
 
 ## 8. Current Boundaries
 
 - Layerwise shared-buffer offload requires the Memcache backend and eager mode.
+- Sparse Decode Offload requires Model Runner V1 and an SFA/MLA sparse-attention
+  model. The main KV cache must use BF16; LIC8 quantization is supported only
+  for the device-resident indexer cache.
+- Hybrid KV cache layouts are not supported.
 - Sparse Decode Offload supports DP and TP; CP and PP are not supported.
 - Joint deployment requires Prefill TP to be greater than or equal to, and
   divisible by, Decode TP.
