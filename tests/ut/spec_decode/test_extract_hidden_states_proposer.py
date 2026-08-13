@@ -21,15 +21,34 @@ with Ascend-specific additions for ACL graph differences.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 import torch
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_pin_memory():
+    # Ascend reports pin_memory as available (vllm-ascend platform returns
+    # True), so CpuGpuBuffer defaults pin_memory to True. On a pure CPU test
+    # device that trips torch_npu's RegisterPrivateUse1HooksInterface check.
+    # Force pin_memory=False for the CPU-only tests; the buffer contents are
+    # not asserted here.
+    original_init = CpuGpuBuffer.__init__
+
+    def _init(self, *size, dtype, device, pin_memory=True, **kwargs):
+        original_init(self, *size, dtype=dtype, device=device, pin_memory=False, **kwargs)
+
+    with patch.object(CpuGpuBuffer, "__init__", _init):
+        yield
 
 
 class MockCachedRequestState:
