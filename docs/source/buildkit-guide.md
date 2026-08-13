@@ -71,7 +71,7 @@ Override via `build-args` in the workflow:
       PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
 ```
 
-> The `PYTORCH_INDEX_URL` ARG is smart: when set to a non-default value (e.g., an internal cache service), it automatically uses `--find-links` instead of `--extra-index-url` to avoid slow index queries. With the default value (`https://download.pytorch.org/whl/cpu/`), it behaves exactly as before.
+> The `PYTORCH_INDEX_URL` ARG is used as `--extra-index-url`. The internal cache service (`cache-service.../whl/cpu`) whitelists PyTorch packages (`torch`, `torchvision`, `torchaudio`) and returns an instant empty index page for all other packages, so pip never hits the slow international `download.pytorch.org` for non-PyTorch dependencies. With the default value (`https://download.pytorch.org/whl/cpu/`), it behaves exactly as before.
 
 ## Authentication
 
