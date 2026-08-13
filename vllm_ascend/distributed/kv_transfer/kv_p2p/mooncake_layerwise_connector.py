@@ -512,7 +512,10 @@ class KVCacheSendingLayerThread(threading.Thread):
                         session_id,
                         ret,
                     )
-                    self.failed_reqs.add(req_id)
+                    # The whole batched write failed, so every request merged
+                    # into this session's transfer failed, not just the last
+                    # one iterated above.
+                    self.failed_reqs.update(transfer_meta.req_ids)
                 else:
                     req_end_time = time.perf_counter()
                     self.xfer_stats.record_transfer(

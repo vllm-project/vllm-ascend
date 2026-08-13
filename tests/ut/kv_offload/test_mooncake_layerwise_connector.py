@@ -1308,6 +1308,34 @@ class TestMooncakeLayerwiseConnectorStats(unittest.TestCase):
         self.assertEqual(stats_data["transfer_duration"], [])
         self.assertIn("req1", thread.failed_reqs)
 
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.npu_stream_switch",
+        side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.Tensor.data_ptr",
+        autospec=True,
+        return_value=0x200000,
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.align_memory",
+        side_effect=lambda x, _align: x,
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous")
+    def test_engine_failure_marks_all_requests_in_session_failed(self, mock_group, _sync, _align, _dataptr, _stream):
+        # Regression: a failed batched write must fail every request merged
+        # into that session's transfer, not just the last-iterated one.
+        mock_group.return_value = ([[10, 11], [20, 21]], [])
+        self.engine.batch_transfer_sync_write.return_value = -1
+        thread = self._make_send_thread()
+
+        task = self._make_send_task()
+        task.send_request["req2"] = task.send_request["req1"]
+        thread._transfer_kv_cache(task)
+
+        self.assertEqual(thread.failed_reqs, {"req1", "req2"})
+
     def test_handle_request_exception_records_failed_transfer(self):
         thread = self._make_send_thread()
         with patch.object(thread, "_transfer_kv_cache", side_effect=RuntimeError("boom")):
