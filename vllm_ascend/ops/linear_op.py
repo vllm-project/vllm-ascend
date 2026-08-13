@@ -55,7 +55,9 @@ from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
@@ -68,6 +70,8 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
+
+DYNAMIC_W8A8_MMRS_COMM_MODE = "aiv"
 
 
 class CustomLinearOp:
@@ -366,8 +370,13 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         from vllm_ascend.quantization.method_adapters import AscendLinearMethod
         from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 
+        layer_prefix = getattr(self.layer, "prefix", "<unknown>")
+        mmrs_op_enabled = mmrs_fusion and "self_attn.o_proj" in layer_prefix
+        quantized_mmrs_op_enabled = mmrs_op_enabled and get_ascend_device_type() != AscendDeviceType.A5
+        dynamic_w8a8_mmrs_enabled = quantized_mmrs_op_enabled
+
         # For unquant
-        if mmrs_fusion and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
+        if mmrs_op_enabled and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
             output = DeviceOperator.npu_mm_reduce_scatter_base(
                 x,
                 self.layer.weight.t(),
@@ -380,7 +389,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             if bias_ is not None:
                 output.add_(bias_)
         # For w8a8 quant
-        elif mmrs_fusion and (
+        elif quantized_mmrs_op_enabled and (
             isinstance(self.layer.quant_method, AscendLinearMethod)
             and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)
         ):
@@ -409,7 +418,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             )
             output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
         # For dynamic w8a8 quant
-        elif mmrs_fusion and (
+        elif dynamic_w8a8_mmrs_enabled and (
             isinstance(self.layer.quant_method, AscendLinearMethod)
             and isinstance(self.layer.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
             and hasattr(self.layer, "weight")
@@ -436,6 +445,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 x1_scale=x1_scale,
                 x2_scale=x2_scale,
                 output_dtype=x.dtype,
+                comm_mode=DYNAMIC_W8A8_MMRS_COMM_MODE,
             )
             if need_unsqueeze:
                 output = output.unsqueeze(dim=1)
