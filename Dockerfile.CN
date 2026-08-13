@@ -122,7 +122,7 @@ RUN set -eux; \
     python3 -m pip install triton-ascend==3.2.1 \
         --index-url "${PIP_INDEX_URL}" \
         --extra-index-url "${ASCEND_PIP_INDEX_URL}"; \
-    python3 -m pip cache purge
+    true
 
 RUN set -eux; \
     python3 -m compileall -q /vllm-workspace/vllm-ascend/vllm_ascend; \
