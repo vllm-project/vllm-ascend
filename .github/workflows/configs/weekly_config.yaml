@@ -301,4 +301,7 @@ a3:
       - name: Qwen3-32B-w8a8sc-310p
         os: linux-aarch64-310p-4
         config_file_path: Qwen3-32B-w8a8sc-310p.yaml
+      - name: Qwen3.6-27B-W8A8-310P-300I-DUO
+        os: linux-aarch64-310p-2
+        config_file_path: Qwen3.6-27B-W8A8-310P-300I-DUO.yaml
 

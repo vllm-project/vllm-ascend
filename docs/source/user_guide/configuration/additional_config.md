@@ -21,7 +21,6 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 | `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
-| `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` | `enable_context_parallel` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
 | `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
 
@@ -88,7 +87,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
-| `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via the `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the migration period. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FlashComm1. Please ensure that FlashComm1 is enabled before enabling this feature.|
@@ -205,20 +203,23 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 
 **dynamic_spec_config**
 
-> **Note**: This is an exploratory feature for model runner v1. The current `"dspark"` method relies on the DSpark confidence head. You still need a normal DSpark `speculative_config`; `dynamic_spec_config` only controls how many drafted tokens are verified per request. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding) for usage and limitations.
+> **Note**: This is an exploratory feature for model runner v1. Supported methods are `"dspark"` (DSpark confidence head) and `"dflash"` (head-free; uses max-softmax over draft logits as a confidence proxy). You still need a matching `speculative_config` (`method: "dspark"` or `"dflash"`); `dynamic_spec_config` only controls how many drafted tokens are verified per request. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding) for usage and limitations.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `method` | str | `None` | Dynamic method name. Currently only `"dspark"` is supported. Omit or set to `None` to disable. |
+| `method` | str | `None` | Dynamic method name. Supported values: `"dspark"`, `"dflash"`. Omit or set to `None` to disable. |
 | `method_params` | dict | `{}` | Method-specific hyperparameters. When empty, each method falls back to its built-in defaults. |
 
-**dynamic_spec_config.method_params** (when `method` is `"dspark"`)
+**dynamic_spec_config.method_params** (when `method` is `"dspark"` or `"dflash"`)
+
+`dspark` and `dflash` share the same scheduling hyperparameters. The difference is only how per-token acceptance confidence is estimated: DSpark uses its confidence head (`sigmoid`), while DFlash (head-free) uses `max(softmax(logits))` of the drafted token.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `initial_verify_budget_per_req` | int | `5` | Initial per-request verify budget before the first recompute. |
-| `budget_update_interval` | int | `50` | Recompute the shared verify budget every N decode steps. |
-| `budget_threshold` | float | `0.7` | Confidence threshold used when estimating the mean verify budget from `sigmoid(confidence)`. |
+| `budget_update_interval` | int | `16` | Recompute the shared verify budget every N decode steps. |
+| `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
+| `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
 
 **scheduler_config.short_request_first_config**
 
