@@ -269,6 +269,9 @@ curl http://<node0_ip>:8900/v1/chat/completions \
     }'
 ```
 
+For requests with `"model": "dsv4"`, omitted `thinking` and `reasoning_effort` fields default to
+`{"type": "enabled"}` and `"high"`, respectively. Explicitly supplied values are preserved.
+
 Expected Result:
 
 The service returns HTTP 200 OK with a JSON response containing the `choices` field.

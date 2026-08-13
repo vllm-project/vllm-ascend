@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
+import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import deepseek_v4
 
@@ -12,6 +15,52 @@ class FakeTokenizer:
 
     def encode(self, text, add_special_tokens=False, **kwargs):
         return text
+
+
+def _parse_chat_request(model: str, **extra_fields):
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        **extra_fields,
+    }
+    return ChatCompletionRequest.model_validate_json(json.dumps(payload))
+
+
+def test_dsv4_request_adds_thinking_defaults():
+    request = _parse_chat_request("dsv4")
+    params = request.build_chat_params(None, "auto")
+
+    assert request.thinking == {"type": "enabled"}
+    assert request.reasoning_effort == "high"
+    assert params.chat_template_kwargs["enable_thinking"] is True
+
+
+@pytest.mark.parametrize(
+    ("provided_fields", "expected_thinking", "expected_reasoning_effort"),
+    [
+        ({"thinking": {"type": "disabled"}}, {"type": "disabled"}, "high"),
+        ({"reasoning_effort": "low"}, {"type": "enabled"}, "low"),
+        (
+            {"thinking": None, "reasoning_effort": None},
+            None,
+            None,
+        ),
+    ],
+)
+def test_dsv4_request_preserves_provided_fields(
+    provided_fields, expected_thinking, expected_reasoning_effort
+):
+    request = _parse_chat_request("dsv4", **provided_fields)
+
+    assert request.thinking == expected_thinking
+    assert request.reasoning_effort == expected_reasoning_effort
+
+
+def test_request_defaults_only_apply_to_dsv4():
+    request = _parse_chat_request("another-model")
+
+    assert "thinking" not in request.model_dump()
+    assert request.reasoning_effort is None
 
 
 def test_deepseek_v4_reasoning_effort_accepts_latest_values():
