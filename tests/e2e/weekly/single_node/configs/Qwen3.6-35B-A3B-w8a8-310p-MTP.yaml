@@ -1,5 +1,5 @@
 test_cases:
-  - name: "Qwen3.6-35B-A3B-w8a8"
+  - name: "Qwen3.6-35B-A3B-w8a8-310p-MTP"
     model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
     envs:
       SERVER_PORT: "DEFAULT_PORT"
