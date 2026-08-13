@@ -21,9 +21,7 @@ if TYPE_CHECKING:
 class AscendECCPUConnector(ECCPUConnector):
     """Adapt upstream ECCPU scheduling and transfer plumbing for Ascend."""
 
-    def __init__(
-        self, vllm_config: "VllmConfig", role: ECConnectorRole
-    ) -> None:
+    def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
         ec_config = vllm_config.ec_transfer_config
         if ec_config is None:
             raise ValueError("ec_transfer_config is required for ECCPUConnector")
@@ -33,10 +31,7 @@ class AscendECCPUConnector(ECCPUConnector):
         try:
             cpu_bytes = int(raw_cpu_bytes)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "ec_cpu_bytes must be a positive integer in "
-                "ec_connector_extra_config"
-            ) from exc
+            raise ValueError("ec_cpu_bytes must be a positive integer in ec_connector_extra_config") from exc
 
         dtype = vllm_config.model_config.dtype
         element_size = torch.empty((), dtype=dtype).element_size()
@@ -56,9 +51,7 @@ class AscendECCPUConnector(ECCPUConnector):
 
         return AscendECCPUWorker(vllm_config)
 
-    def build_connector_meta(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> ECCPUConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> ECCPUConnectorMetadata:
         metadata = super().build_connector_meta(scheduler_output)
 
         # Upstream's LIFO allocator returns the selected blocks in stack-pop
@@ -66,12 +59,6 @@ class AscendECCPUConnector(ECCPUConnector):
         # order for both save and load metadata. This keeps their byte layout
         # identical while exposing physically adjacent blocks as contiguous
         # runs that the Ascend worker can submit as one larger DMA descriptor.
-        metadata.saves = {
-            mm_hash: sorted(block_ids)
-            for mm_hash, block_ids in metadata.saves.items()
-        }
-        metadata.loads = {
-            mm_hash: sorted(block_ids)
-            for mm_hash, block_ids in metadata.loads.items()
-        }
+        metadata.saves = {mm_hash: sorted(block_ids) for mm_hash, block_ids in metadata.saves.items()}
+        metadata.loads = {mm_hash: sorted(block_ids) for mm_hash, block_ids in metadata.loads.items()}
         return metadata

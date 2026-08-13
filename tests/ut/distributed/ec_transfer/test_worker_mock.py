@@ -212,9 +212,7 @@ def test_init_registers_mmap_after_creating_load_stream(monkeypatch):
 
 
 def test_init_rejects_unsupported_runtime_and_cleans_region(monkeypatch):
-    region, platform, register_calls = patch_init_dependencies(
-        monkeypatch, supported=False
-    )
+    region, platform, register_calls = patch_init_dependencies(monkeypatch, supported=False)
     config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
 
     with pytest.raises(RuntimeError, match="aclrtMemcpyBatchAsync"):
@@ -288,9 +286,7 @@ def test_descriptor_reuse_waits_for_event_completion(monkeypatch):
 def test_event_record_failure_falls_back_to_synchronous_d2h_release(
     monkeypatch,
 ):
-    worker, platform, npu = make_worker_env(
-        monkeypatch, dtype=torch.int8, record_error=True
-    )
+    worker, platform, npu = make_worker_env(monkeypatch, dtype=torch.int8, record_error=True)
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
 
     save_one_block(worker)
@@ -305,9 +301,7 @@ def test_event_record_failure_falls_back_to_synchronous_d2h_release(
 
 
 def test_d2h_event_record_and_sync_failure_propagates_sync_error(monkeypatch):
-    worker, platform, _ = make_worker_env(
-        monkeypatch, dtype=torch.int8, record_error=True
-    )
+    worker, platform, _ = make_worker_env(monkeypatch, dtype=torch.int8, record_error=True)
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
 
     save_one_block(worker)
@@ -399,21 +393,15 @@ def test_save_coalesces_contiguous_blocks_into_one_descriptor(monkeypatch):
 
 def test_save_descriptor_buffer_capacity_uses_block_count():
     worker = make_worker(dtype=torch.int8)
-    metadata = ECCPUConnectorMetadata(
-        saves={"first": [0, 1, 4], "second": [6, 7]}
-    )
+    metadata = ECCPUConnectorMetadata(saves={"first": [0, 1, 4], "second": [6, 7]})
 
-    worker.save_caches(
-        {"first": torch.arange(48, dtype=torch.int8)}, "first", metadata
-    )
+    worker.save_caches({"first": torch.arange(48, dtype=torch.int8)}, "first", metadata)
 
     assert worker._save_bufs is not None
     assert worker._save_bufs.src_ptrs.numel() == 5
     assert worker._save_count == 2
 
-    worker.save_caches(
-        {"second": torch.arange(32, dtype=torch.int8)}, "second", metadata
-    )
+    worker.save_caches({"second": torch.arange(32, dtype=torch.int8)}, "second", metadata)
 
     assert worker._save_bufs.src_ptrs.numel() == 5
     assert worker._save_count == 3
@@ -427,9 +415,7 @@ def test_save_descriptor_buffer_capacity_uses_block_count():
     ],
     ids=["not-allocated", "non-save-rank"],
 )
-def test_save_early_exits_without_reading_encoder_cache(
-    monkeypatch, is_save_rank, cache_hash, metadata
-):
+def test_save_early_exits_without_reading_encoder_cache(monkeypatch, is_save_rank, cache_hash, metadata):
     worker = make_worker(dtype=torch.int8)
     worker._is_save_rank = is_save_rank
     calls = []
@@ -466,9 +452,7 @@ def test_flush_releases_descriptors_when_dma_submission_fails(monkeypatch):
     worker, platform, _ = make_worker_env(monkeypatch, dtype=torch.int8)
     save_one_block(worker)
 
-    monkeypatch.setattr(
-        worker_mod, "_swap_blocks_batch", raises("D2H submission failed")
-    )
+    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("D2H submission failed"))
 
     with pytest.raises(RuntimeError, match="D2H submission failed"):
         worker.flush_saves()
@@ -485,9 +469,7 @@ def test_load_builds_h2d_descriptors_and_waits(monkeypatch):
 
     existing = torch.zeros((1, 4), dtype=torch.float32)
     encoder_cache = {"cached": existing}
-    metadata = ECCPUConnectorMetadata(
-        loads={"loaded": [7, 2], "cached": [1]}
-    )
+    metadata = ECCPUConnectorMetadata(loads={"loaded": [7, 2], "cached": [1]})
     worker.start_load_caches(encoder_cache, metadata)
 
     loaded = encoder_cache["loaded"]
@@ -533,9 +515,7 @@ def test_load_coalesces_each_cache_item_without_changing_output_offsets(
     calls = patch_copy_capture(monkeypatch)
 
     encoder_cache = {}
-    metadata = ECCPUConnectorMetadata(
-        loads={"first": [0, 1], "second": [4, 5]}
-    )
+    metadata = ECCPUConnectorMetadata(loads={"first": [0, 1], "second": [4, 5]})
     worker.start_load_caches(encoder_cache, metadata)
 
     first = encoder_cache["first"]
@@ -555,9 +535,7 @@ def test_load_descriptor_buffer_capacity_uses_block_count(monkeypatch):
     worker, _, _ = make_worker_env(monkeypatch)
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
     encoder_cache = {}
-    metadata = ECCPUConnectorMetadata(
-        loads={"first": [0, 1, 4], "second": [6, 7]}
-    )
+    metadata = ECCPUConnectorMetadata(loads={"first": [0, 1, 4], "second": [6, 7]})
 
     worker.start_load_caches(encoder_cache, metadata)
 
@@ -588,9 +566,7 @@ def test_load_is_noop_when_all_hashes_are_already_cached(monkeypatch):
 def test_load_releases_descriptors_when_dma_submission_fails(monkeypatch):
     worker, platform, _ = make_worker_env(monkeypatch)
 
-    monkeypatch.setattr(
-        worker_mod, "_swap_blocks_batch", raises("H2D submission failed")
-    )
+    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("H2D submission failed"))
     encoder_cache = {}
     metadata = ECCPUConnectorMetadata(loads={"hash": [1]})
 
@@ -638,9 +614,7 @@ def test_event_record_failure_falls_back_to_synchronous_h2d_release(
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
 
     encoder_cache = {}
-    worker.start_load_caches(
-        encoder_cache, ECCPUConnectorMetadata(loads={"hash": [1]})
-    )
+    worker.start_load_caches(encoder_cache, ECCPUConnectorMetadata(loads={"hash": [1]}))
 
     assert worker._load_stream.synchronize_calls == 1
     assert len(worker._buf_pool._pool) == 1
@@ -659,12 +633,8 @@ def test_h2d_event_record_and_sync_failure_propagates_sync_error(monkeypatch):
         "synchronize",
         raises("load stream synchronize failed"),
     )
-    with pytest.raises(
-        RuntimeError, match="load stream synchronize failed"
-    ) as exc_info:
-        worker.start_load_caches(
-            {}, ECCPUConnectorMetadata(loads={"hash": [1]})
-        )
+    with pytest.raises(RuntimeError, match="load stream synchronize failed") as exc_info:
+        worker.start_load_caches({}, ECCPUConnectorMetadata(loads={"hash": [1]}))
 
     assert isinstance(exc_info.value.__context__, RuntimeError)
     assert str(exc_info.value.__context__) == "event record failed"
