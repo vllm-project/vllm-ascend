@@ -27,7 +27,7 @@ on:
         default: 'main'
         type: string
       test_cases:
-        description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
+        description: 'Test cases to run (comma‑separated, e.g., "qwen3‑32b,accuracy‑group" or "all" for all tests)'
         required: false
         default: 'all'
         type: string
@@ -37,17 +37,17 @@ on:
         default: ''
         type: string
       skip_build_image:
-        description: 'Skip build-image job (used when triggered by /nightly command)'
+        description: 'Skip build‑image job (used when triggered by /nightly command)'
         required: false
         default: 'false'
         type: string
       vllm_ascend_ref:
-        description: 'PR commit SHA for PR-triggered tests'
+        description: 'PR commit SHA for PR‑triggered tests'
         required: false
         default: ''
         type: string
       aop_enabled:
-        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
+        description: 'Enable AOP hooks (capture / classify / skip‑or‑process)'
         required: false
         default: false
         type: boolean
@@ -61,6 +61,39 @@ on:
           - daily
       cann_version:
         description: 'CANN version for base image tag'
+        required: false
+        default: '2026.08.03'
+        type: string
+  workflow_call:
+    inputs:
+      vllm_ascend_branch:
+        required: true
+        type: string
+      test_cases:
+        required: false
+        default: 'all'
+        type: string
+      request_id:
+        required: false
+        default: ''
+        type: string
+      skip_build_image:
+        required: false
+        default: 'false'
+        type: string
+      vllm_ascend_ref:
+        required: false
+        default: ''
+        type: string
+      aop_enabled:
+        required: false
+        default: false
+        type: boolean
+      build_type:
+        required: false
+        default: 'release'
+        type: string
+      cann_version:
         required: false
         default: '2026.08.03'
         type: string
@@ -91,7 +124,7 @@ jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
     if: >-
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' || github.event_name == 'issue_comment'
     runs-on: linux-aarch64-a5-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
