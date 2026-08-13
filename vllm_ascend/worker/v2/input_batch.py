@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendInputBuffers(InputBuffers):
@@ -82,13 +83,25 @@ class AscendInputBatch(InputBatch):
         num_reqs: int,
         num_tokens: int,
         input_buffers: AscendInputBuffers,
+        max_query_len: int | None = None,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
-        input_batch = InputBatch.make_dummy(
-            num_reqs,
-            num_tokens,
-            input_buffers,
-        )
+        # Upstream vLLM main (after #51256) added max_query_len to
+        # InputBatch.make_dummy; v0.26.0 has no such parameter, so only forward
+        # it on the main lane.
+        if vllm_version_is("0.26.0"):
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                input_buffers,
+            )
+        else:
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                input_buffers,
+                max_query_len=max_query_len,
+            )
         # Evenly distribute num_tokens across requests instead of dumping the
         # whole remainder on the last request.
         # The old distribution could make the last dummy request's seq_len
