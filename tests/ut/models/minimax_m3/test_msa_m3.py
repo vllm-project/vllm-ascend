@@ -582,9 +582,7 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
 
     mock_sparse_attention_score.assert_called_once()
     kwargs = mock_sparse_attention_score.call_args.kwargs
-    assert torch.equal(
-        kwargs["actual_seq_lengths"], torch.tensor([2, 2], dtype=torch.int32)
-    )
+    assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([2, 2], dtype=torch.int32))
     assert kwargs["actual_seq_lengths_kv"] is seq_lens
     assert torch.equal(
         kwargs["select_num_idx"],

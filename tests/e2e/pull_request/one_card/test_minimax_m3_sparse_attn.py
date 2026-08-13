@@ -29,6 +29,8 @@ import torch
 
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn,
+)
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
