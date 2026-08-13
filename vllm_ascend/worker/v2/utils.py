@@ -4,7 +4,7 @@ import torch
 from vllm.logger import logger
 
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
-from vllm_ascend.worker.v2.updatable_graph import UpdatableGraph, capture_updatable_graph
+from vllm_ascend.worker.v2.updatable_graph import UpdatableGraph
 
 
 @contextmanager
@@ -51,10 +51,8 @@ def torch_npu_graph_wrapper(*args, **kwargs):
     # manager's exit to weak-ref graph workspaces after each capture,
     # without adding another upstream monkey patch.
     try:
-        graph = args[0]
-        with capture_updatable_graph(graph):
-            with torch.npu.graph(*args, **kwargs):
-                yield
+        with torch.npu.graph(*args, **kwargs):
+            yield
     finally:
         weak_ref_workspaces(get_graph_params())
         weak_ref_workspaces(get_draft_graph_params())

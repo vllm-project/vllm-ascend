@@ -120,8 +120,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 class FIARuntimeParameterProvider:
     layer_name: str
 
-    def resolve(self, forward_context) -> dict[str, Any]:
-        metadata = forward_context.attn_metadata[self.layer_name]
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        metadata = attn_metadata[self.layer_name]
         return {
             "actual_seq_lengths": metadata.query_start_loc,
             "actual_seq_lengths_kv": metadata.seq_lens,
