@@ -40,7 +40,33 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedEx
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    AscendDeviceType,
+    get_ascend_device_type,
+    maybe_trans_nz,
+)
+
+
+def _preserve_routing_bias_fp32(vllm_config, quant_method) -> bool:
+    """Keep MiniMax-M3's A5 MXFP8 routing correction in FP32."""
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return False
+
+    model_config = vllm_config.model_config
+    architectures = getattr(model_config, "architectures", None) or ()
+    if isinstance(architectures, str):
+        architectures = (architectures,)
+    is_minimax_m3 = any(
+        isinstance(architecture, str) and architecture.startswith("MiniMaxM3")
+        for architecture in architectures
+    )
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    is_minimax_m3 = is_minimax_m3 or getattr(hf_text_config, "model_type", None) == "minimax_m3"
+
+    quant_scheme = getattr(quant_method, "quant_method", quant_method)
+    is_mxfp8 = quant_scheme.__class__.__name__ == "AscendW8A8MXFP8DynamicFusedMoEMethod"
+    return is_minimax_m3 and is_mxfp8
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -248,6 +274,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.custom_routing_function is None
             and self.e_score_correction_bias is not None
             and not vllm_config.model_config.is_deepseek_mla
+            and not _preserve_routing_bias_fp32(vllm_config, self.quant_method)
         ):
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype

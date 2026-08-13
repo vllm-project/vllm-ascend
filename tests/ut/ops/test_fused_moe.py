@@ -90,6 +90,36 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     assert method.maybe_make_prepare_finalize() is None
 
 
+@pytest.mark.parametrize(
+    ("device_type", "model_type", "quant_scheme_name", "expected"),
+    [
+        ("A5", "minimax_m3", "AscendW8A8MXFP8DynamicFusedMoEMethod", True),
+        ("A3", "minimax_m3", "AscendW8A8MXFP8DynamicFusedMoEMethod", False),
+        ("A5", "deepseek_v3", "AscendW8A8MXFP8DynamicFusedMoEMethod", False),
+        ("A5", "minimax_m3", "AscendW8A8DynamicFusedMoEMethod", False),
+    ],
+)
+def test_preserve_routing_bias_fp32_only_for_a5_minimax_m3_mxfp8(
+    monkeypatch,
+    device_type,
+    model_type,
+    quant_scheme_name,
+    expected,
+):
+    device = getattr(routed_experts_module.AscendDeviceType, device_type)
+    monkeypatch.setattr(routed_experts_module, "get_ascend_device_type", lambda: device)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architectures=(),
+            hf_text_config=SimpleNamespace(model_type=model_type),
+        )
+    )
+    quant_scheme = type(quant_scheme_name, (), {})()
+    quant_method = SimpleNamespace(quant_method=quant_scheme)
+
+    assert routed_experts_module._preserve_routing_bias_fp32(vllm_config, quant_method) is expected
+
+
 def test_ascend_routed_experts_uses_parent_unquantized_method_during_init(monkeypatch):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     routed_experts.tid2eid = object()
