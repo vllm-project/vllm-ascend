@@ -225,7 +225,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_w8a8_static.py: 40
   tests/e2e/pull_request/one_card/test_gumbel_sampling.py: 110
   tests/e2e/pull_request/one_card/test_model_runner_v1_with_device.py: 70
-  tests/e2e/fault_tolerance/test_fault_tolerance_e2e.py: 1200
+  tests/e2e/pull_request/four_card/fault_tolerance/test_fault_tolerance_e2e.py: 1200
 
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
@@ -243,8 +243,6 @@ runner_mapping:
     310p: 310p-4
   tests/e2e/pull_request/eight_card:
     default: a3-8
-  tests/e2e/fault_tolerance:
-    default: a3-4
 
 # === Partition Configuration ===
 # Maps logical test buckets to exact labels from runner_label.json and controls
