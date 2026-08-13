@@ -71,50 +71,6 @@ if not _ENABLED:
 
     AscendAttentionBackend310.get_kv_cache_shape = staticmethod(_spy)
 
-if _ENABLED:
-    from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
-    from vllm_ascend.attention.turboquant_attn_310 import (
-        AscendTurboQuantAttentionBackend310,
-        AscendTurboQuantAttentionBackendImpl310,
-    )
-
-    AscendTurboQuantAttentionBackend310.tq_k_bits = _K_BITS
-    AscendTurboQuantAttentionBackend310.tq_v_bits = _V_BITS
-    AscendTurboQuantAttentionBackendImpl310.tq_k_bits = _K_BITS
-    AscendTurboQuantAttentionBackendImpl310.tq_v_bits = _V_BITS
-
-    def _tq_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size, cache_type=""):
-        shape = AscendTurboQuantAttentionBackend310.get_kv_cache_shape(
-            num_blocks, block_size, num_kv_heads, head_size, cache_type
-        )
-        _report(shape, block_size, num_kv_heads, head_size, f"TURBOQUANT k{_K_BITS}v{_V_BITS}")
-        return shape
-
-    AscendAttentionBackend310.get_kv_cache_shape = staticmethod(_tq_kv_cache_shape)
-
-    if _TIER2:
-        from vllm_ascend.attention.turboquant_attn_310_tier2 import (
-            AscendTurboQuantTier2AttentionBackendImpl310,
-            norm_bytes_per_block,
-        )
-
-        if _K_BITS != _V_BITS:
-            raise ValueError(
-                f"VLLM_ASCEND_TQ_TIER2=1 needs matching widths; got k={_K_BITS} "
-                f"v={_V_BITS}. The kernels take a single `bits` per op."
-            )
-        AscendAttentionBackend310.get_impl_cls = staticmethod(
-            lambda: AscendTurboQuantTier2AttentionBackendImpl310
-        )
-        _patch_page_size_for_norms()
-        _log(f"ENABLED TIER 2 (AscendC kernels) k={_K_BITS} v={_V_BITS} bits")
-    else:
-        AscendAttentionBackend310.get_impl_cls = staticmethod(
-            lambda: AscendTurboQuantAttentionBackendImpl310
-        )
-        _log(f"ENABLED k={_K_BITS} v={_V_BITS} bits -- patched AscendAttentionBackend310")
-
-
 def _patch_page_size_for_norms():
     """Budget the Tier-2 norm planes into page_size_bytes.
 
@@ -154,6 +110,61 @@ def _patch_page_size_for_norms():
     AttentionSpec._tq_page_patched = True
     _log("page_size_bytes now budgets the norm planes "
          f"(+{norm_bytes_per_block(128)} B per 128-token block)")
+
+
+if _ENABLED:
+    from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+    from vllm_ascend.attention.turboquant_attn_310 import (
+        AscendTurboQuantAttentionBackend310,
+        AscendTurboQuantAttentionBackendImpl310,
+    )
+
+    AscendTurboQuantAttentionBackend310.tq_k_bits = _K_BITS
+    AscendTurboQuantAttentionBackend310.tq_v_bits = _V_BITS
+    AscendTurboQuantAttentionBackendImpl310.tq_k_bits = _K_BITS
+    AscendTurboQuantAttentionBackendImpl310.tq_v_bits = _V_BITS
+
+    def _tq_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size, cache_type=""):
+        shape = AscendTurboQuantAttentionBackend310.get_kv_cache_shape(
+            num_blocks, block_size, num_kv_heads, head_size, cache_type
+        )
+        _report(shape, block_size, num_kv_heads, head_size, f"TURBOQUANT k{_K_BITS}v{_V_BITS}")
+        return shape
+
+    AscendAttentionBackend310.get_kv_cache_shape = staticmethod(_tq_kv_cache_shape)
+
+    if _TIER2:
+        from vllm_ascend.attention.turboquant_attn_310_tier2 import (
+            AscendTurboQuantTier2AttentionBackendImpl310,
+            norm_bytes_per_block,
+        )
+
+        if _K_BITS != _V_BITS:
+            raise ValueError(
+                f"VLLM_ASCEND_TQ_TIER2=1 needs matching widths; got k={_K_BITS} "
+                f"v={_V_BITS}. The kernels take a single `bits` per op."
+            )
+        AscendAttentionBackend310.get_impl_cls = staticmethod(
+            lambda: AscendTurboQuantTier2AttentionBackendImpl310
+        )
+        # OFF by default: padding page_size_bytes breaks
+        #   assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+        # in model_runner_310p, because vLLM sizes the KV tensor against the
+        # UNPADDED page (32768 B here) and the padded one (36864 B) no longer
+        # divides it. Consequence while off: the norm planes (+12.5% at
+        # block_size=64) are outside vLLM's block accounting, so the allocation
+        # is over-committed by that much -- compensate with a slightly lower
+        # gpu_memory_utilization. Proper fix is to make the planner aware of the
+        # padded page rather than to patch the property after the fact.
+        if os.environ.get("VLLM_ASCEND_TQ_PAGE_PAD", "0") == "1":
+            _patch_page_size_for_norms()
+        _log(f"ENABLED TIER 2 (AscendC kernels) k={_K_BITS} v={_V_BITS} bits")
+    else:
+        AscendAttentionBackend310.get_impl_cls = staticmethod(
+            lambda: AscendTurboQuantAttentionBackendImpl310
+        )
+        _log(f"ENABLED k={_K_BITS} v={_V_BITS} bits -- patched AscendAttentionBackend310")
+
 
 
 # --- per-channel RMS diagnostic (VLLM_ASCEND_TQ_STATS=1) --------------------

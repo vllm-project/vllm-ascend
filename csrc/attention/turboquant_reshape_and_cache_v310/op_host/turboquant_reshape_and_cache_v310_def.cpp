@@ -36,13 +36,13 @@ public:
         this->Input("key_cache")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
+            .Format({ge::FORMAT_FRACTAL_NZ})
+            .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ});
         this->Input("value_cache")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
+            .Format({ge::FORMAT_FRACTAL_NZ})
+            .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ});
         this->Input("slot_mapping")
             .ParamType(REQUIRED)
             .DataType({ge::DT_INT32})

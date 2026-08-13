@@ -29,13 +29,13 @@ public:
         this->Input("key_cache")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
+            .Format({ge::FORMAT_FRACTAL_NZ})
+            .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ});
         this->Input("value_cache")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
+            .Format({ge::FORMAT_FRACTAL_NZ})
+            .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ});
         // [num_slots, num_kv_heads] -- produced by the write op
         this->Input("key_norms")
             .ParamType(REQUIRED)
