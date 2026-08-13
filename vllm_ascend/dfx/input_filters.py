@@ -35,6 +35,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from vllm_ascend.dfx.request_state import RequestDfxStore
 from vllm_ascend.logger import init_logger_ascend
 
 logger = init_logger_ascend(__name__)
@@ -410,8 +411,6 @@ class InputFilterManager:
 
     def __init__(self) -> None:
         self._chain: InputFilterChain = InputFilterChain(filters=())
-        # Prompt is stable per request; cache definitive allow/deny until clear.
-        self._allow_cache: dict[str, bool] = {}
         # Last applied normalized configs; unchanged → skip rebuild / cache clear.
         self._applied_configs: list[dict[str, Any]] = []
 
@@ -425,6 +424,7 @@ class InputFilterManager:
     def reset_for_tests(cls) -> None:
         """Drop singleton (unit tests only)."""
         cls._instance = None
+        RequestDfxStore.reset_for_tests()
 
     def apply_configs(self, configs: Sequence[dict[str, Any]] | None) -> bool:
         """Rebuild chain from ``configs``.
@@ -441,7 +441,7 @@ class InputFilterManager:
             return False
         self._chain = build_input_filter_chain(configs)
         self._applied_configs = configs
-        self._allow_cache.clear()
+        RequestDfxStore.get().clear_all_filter_allowed()
         return True
 
     def apply_from_config(self, dfx_config: Any | None) -> bool:
@@ -456,8 +456,11 @@ class InputFilterManager:
         return self.apply_configs(configs)
 
     def clear_req(self, req_id: str) -> None:
-        """Drop cached allow result when a request finishes."""
-        self._allow_cache.pop(req_id, None)
+        """Drop cached allow result when a request finishes.
+
+        Prefer :meth:`RequestDfxStore.clear` from ``DfxProcessor._reap_finished_requests`` / Store.clear.
+        """
+        RequestDfxStore.get().clear_filter_allowed(req_id)
 
     def clear_reqs(self, req_ids: Iterable[str]) -> None:
         for req_id in req_ids:
@@ -476,11 +479,12 @@ class InputFilterManager:
 
         Empty chain → allow all. Missing prompt while filters configured → deny
         (not cached: prompt may appear on a later step). Otherwise cache by
-        ``req_id`` until :meth:`clear_req` or filter-chain rebuild.
+        ``req_id`` until :meth:`clear_req` / Store.clear or filter-chain rebuild.
         """
         if not self._chain.filters:
             return True
-        cached = self._allow_cache.get(req_id)
+        store = RequestDfxStore.get()
+        cached = store.get_filter_allowed(req_id)
         if cached is not None:
             return cached
         ids: list[int] | None
@@ -496,7 +500,7 @@ class InputFilterManager:
                 )
             return False
         ok = self._chain.allow(InputFilterContext(req_id=req_id, prompt_token_ids=ids))
-        self._allow_cache[req_id] = ok
+        store.set_filter_allowed(req_id, ok)
         if not ok and log:
             logger.debug(
                 "[DFX filter] skip detect req_id=%s: input filter reject prompt_len=%d filters=%d",

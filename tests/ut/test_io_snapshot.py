@@ -99,7 +99,7 @@ def test_clear_wave_cache_resets_snapshot_cache_only():
     assert snap.output_token_ids == [1, 2, 3]
 
 
-def test_clear_finished_clears_cumulative():
+def test_mark_finished_clears_cumulative():
     RequestIoSnapshotManager.reset_for_tests()
     mgr = RequestIoSnapshotManager.get()
     mgr.append_output("r1", [1, 2])
@@ -109,8 +109,12 @@ def test_clear_finished_clears_cumulative():
     proc.dfx_config.log_print_output_on_finish.return_value = False
     proc.dfx_config.report_decode_token_ids.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.current_wave.return_value = 1
     proc.dumper.take_dump_finish_meta.return_value = None
     proc.report_writer = MagicMock()
-    proc.clear_finished(["r1"])
+    proc.mark_finished(["r1"])
+    # Mark only: state kept until reap (sample_waves empty → immediately reapable).
+    assert mgr.cumulative_output_ids("r1") == [1, 2]
+    proc._reap_finished_requests()
     proc.detectors.clear_finished.assert_called_once_with("r1")
     assert mgr.cumulative_output_ids("r1") == []

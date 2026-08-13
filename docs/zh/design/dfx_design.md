@@ -13,7 +13,8 @@
 | 4. Report | `report.py`（`DfxReportWriter`） | 异常短日志落盘到 `dfx/report/` |
 | 5. Processor | `processor.py`（`DfxProcessor`） | runner 侧编排（构造 / refresh / check / report）；刷新 `InputFilterManager` |
 | 6. Input filter | `input_filters.py`（`InputFilterManager`） | detect 前输入过滤（单例；`manual_trigger` 不走） |
-| 7. I/O snapshot | `io_snapshot.py`（`RequestIoSnapshotManager`） | report 时挂 prompt/output（单例；非 model_runner） |
+| 7. Request state | `request_state.py`（`RequestDfxStore`） | per-req 共享态；`mark_finished` 后延迟 `clear` |
+| 8. I/O snapshot | `io_snapshot.py`（`RequestIoSnapshotManager`） | report I/O 视图（normalize→Store + `snapshot`；非第二套状态） |
 
 对外入口：`from vllm_ascend.dfx import Dumper`（以及 `DfxProcessor` / `DfxRuntimeConfig` 等）。
 
@@ -28,7 +29,7 @@ Worker: runner.dfx = DfxProcessor(runner)
   └─ sync_dump_pending_or()        # 仅 last-PP TP
          │
 采样 / get_output
-  dfx.clear_finished / check_after_spec / check_after_sample
+  dfx.mark_finished / check_after_spec / check_after_sample
     → DetectorManager → detector.check_all → AnomalyAlert
     → dumper.handle_anomaly_alert  # 只管 dump
     → report_writer.write          # Report
@@ -185,7 +186,8 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
 | `DfxRuntimeConfig` / `runtime_config.py` | 运行时热更新控制面 |
 | `DfxProcessor` / `processor.py` | runner 侧编排（构造 dumper/detectors、check/clear/report） |
 | `InputFilterManager` / `input_filters.py` | detect 输入过滤单例 |
-| `RequestIoSnapshotManager` / `io_snapshot.py` | report 时 prompt/output 快照单例 |
+| `RequestDfxStore` / `request_state.py` | per-req 共享态；finished 后 wave 空再 clear |
+| `RequestIoSnapshotManager` / `io_snapshot.py` | report I/O 视图（经 Store；非第二套状态） |
 
 ### 2.6 InputFilterManager（detect 输入过滤）
 
@@ -264,7 +266,7 @@ runner.dfx = DfxProcessor(runner)
   ├─ sync_for_step()  # = refresh_config() + sync_dump_pending_or()
   ├─ refresh_config() 中 ManualTriggerManager.consume_once() -> TriggerEvent
   │     └─ _handle_manual_trigger -> dumper.handle_manual_trigger
-  ├─ clear_finished / check_after_spec / check_after_sample
+  ├─ mark_finished / check_after_spec / check_after_sample
   │     └─ DetectorManager（内部 Spec / Token / OutputSubstring）
   └─ _handle_alert → (dump.on? arm dump : on_alert_armed) + report per dump/report policy
 ```
@@ -308,7 +310,7 @@ Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `
 - 目录：默认 `<dfx_root>/report/`
 - 文件：
   - `anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pid<pid>.log`（毫秒 + pid；成功 arm dump 时带 `_dump`；**格式化 JSON**，每文件一条；含 `dump_armed` / `dump_attempted` / `dump_arm_wave` / `dump_count` / `dump_max_times`）
-  - `dump_finish_YYYYMMDD_HHMMSS_mmm_<req>_pid<pid>.log`：对 **已 arm dump** 的请求，在 `clear_finished` 时写；含累计 output（受 `save_sensitive_info` / `max_*`）与 `dump_arm_wave` / `dump_activate_wave` / `dump_waves_after_report` / `dump_finish_wave`。若结束时仍 pending（尚未 activate），`dump_activate_wave` / `dump_waves_after_report` 为 `null`
+  - `dump_finish_YYYYMMDD_HHMMSS_mmm_<req>_pid<pid>.log`：对 **已 arm dump** 的请求，在 `_reap_finished_requests`（`sample_waves` 排空后）写；含累计 output（受 `save_sensitive_info` / `max_*`）与 `dump_arm_wave` / `dump_activate_wave` / `dump_waves_after_report` / `dump_finish_wave`。若结束时仍 pending（尚未 activate），`dump_activate_wave` / `dump_waves_after_report` 为 `null`
 - 何时写 anomaly：
   - `dump.enabled=false`（detect-only）：检测到异常即写 report（无 `_dump`）
   - `dump.enabled=true`：尝试 arm dump；**无论 arm 成功与否都写 report**（arm 失败——如配额耗尽——不吞掉检测证据；仅成功时文件名带 `_dump`）
@@ -316,7 +318,7 @@ Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `
 - `max_prompt_token_ids` / `max_output_token_ids`（默认 1000，`0`=不截断）：只限制**落盘**的 id 列表长度（从**头部**截断）；`*_token_count` 仍是完整长度。截断时 detail 会带 `*_token_ids_truncated=true` 与 `*_token_ids_max`
 - **易踩坑**：检测 / 命中匹配用的是完整累计 output；report 里的 `output_token_ids` 可能被截断。若 `matched_token_ids` 在完整序列中、却在截断窗口之外，JSON 里会看不到该 id——查全量请设 `max_*=0`，或对照 `*_token_count` 与 `*_truncated`
 - JSON 格式化：结构缩进，但 **int 数组（token ids）单行紧凑**，避免「一数字一行」
-- 完整 `prompt_token_ids` / `output_token_ids` 由 **`RequestIoSnapshotManager`**（单例，自建累计 output）在 **写 report 时** 挂一次；detector 只写检测指标 / window 证据，不各自拷贝全量 I/O
+- 完整 `prompt_token_ids` / `output_token_ids`：累计 output 在 **`RequestDfxStore`**；**`RequestIoSnapshotManager`** 在 **写 report 时** `snapshot()` 挂一次；detector 只写检测指标 / pattern 证据，不各自拷贝全量 I/O
 - Detector / dump 日志只打长度，不打印 token ids；完整 I/O 仅走 report / dump_finish
 - `log` 段（与 `report` 正交）：
   - `log.print_sampling_meta`：可选 `[SamplingMeta]` 日志（TP0+last-PP）

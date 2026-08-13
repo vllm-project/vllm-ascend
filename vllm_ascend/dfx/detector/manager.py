@@ -37,6 +37,7 @@ from vllm_ascend.dfx.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.dfx.detector.token_logprob import TokenLogprobDetector
 from vllm_ascend.dfx.detector.token_repeat import TokenRepeatDetector
 from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
+from vllm_ascend.dfx.request_state import RequestDfxStore
 from vllm_ascend.logger import init_logger_ascend
 
 if TYPE_CHECKING:
@@ -49,7 +50,7 @@ class DetectorManager:
     """Owns detectors and exposes stage hooks only.
 
     Callers (``DfxProcessor`` / runners) use ``check_after_spec`` /
-    ``check_after_sample`` / ``clear_finished`` only.
+    ``check_after_sample`` / ``clear_finished`` (reap path) only.
     Concrete detectors stay private (``_spec_det`` & co.); ``get`` exists solely
     for alert routing in ``DfxProcessor._handle_alert``.
     """
@@ -98,17 +99,23 @@ class DetectorManager:
             self._token_repeat_det,
         ):
             self._registry.register(det)
-        # Requests that already produced an anomaly (stop_after_alert): no longer
-        # run through detection, so the same anomaly does not write endless reports.
-        self._stopped_req_ids: set[str] = set()
+        # stop_after_alert flags live on RequestDfxStore (RequestDfxState).
 
     def get(self, anomaly_type: str) -> AnomalyDetector | None:
         """Resolve a detector for alert routing (``DfxProcessor._handle_alert`` only)."""
         return self._registry.get(anomaly_type)
 
     def clear_finished(self, req_id: str) -> None:
-        """Drop per-request state from every detector when a request finishes."""
-        self._stopped_req_ids.discard(req_id)
+        """Drop per-request detector state when a request finishes.
+
+        Shared fields (IO / filter / waves / dump_finish) are cleared by
+        :meth:`RequestDfxStore.clear`. This also clears ``stopped_after_alert``
+        so direct callers / tests can re-detect without popping the whole state.
+        Prefer Store.clear from ``DfxProcessor._reap_finished_requests``.
+        """
+        state = RequestDfxStore.get().get_state(req_id)
+        if state is not None:
+            state.stopped_after_alert = False
         for det in self._registry:
             det.clear_finished(req_id)
 
@@ -176,9 +183,10 @@ class DetectorManager:
 
     def _mark_alerted(self, alerts: list[AnomalyAlert]) -> None:
         """Stop detecting requests that just produced an anomaly."""
+        store = RequestDfxStore.get()
         for alert in alerts:
             if alert.req_id:
-                self._stopped_req_ids.add(alert.req_id)
+                store.mark_stopped_after_alert(alert.req_id)
 
     def check_after_spec(
         self,
@@ -189,7 +197,7 @@ class DetectorManager:
         if self._gated("after_spec"):
             return []
         self._record_spec_step_outputs(sampled_tokens, accepted_token_nums)
-        skip = self._stopped_req_ids if self._stop_after_alert() else None
+        skip = RequestDfxStore.get().stopped_req_ids() if self._stop_after_alert() else None
         alerts = self._spec_det.check_all(sampled_tokens, accepted_token_nums, skip_req_ids=skip)
         if skip is not None:
             self._mark_alerted(alerts)
@@ -239,7 +247,7 @@ class DetectorManager:
         # Detect path: always accumulate once before detectors read cumulative IO.
         RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
 
-        skip = self._stopped_req_ids if self._stop_after_alert() else None
+        skip = RequestDfxStore.get().stopped_req_ids() if self._stop_after_alert() else None
         if skip is not None and resolved_ids and all(rid in skip for rid in resolved_ids if rid):
             # Entire batch already alerted: IO updated; no further detect / reports.
             return []

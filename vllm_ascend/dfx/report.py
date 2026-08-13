@@ -337,7 +337,7 @@ class DfxReportWriter:
     ) -> Path | None:
         """Write dump-linked finish sidecar with output + wave stamps.
 
-        Called from ``clear_finished`` for reqs that successfully activated a
+        Called from reap (``_reap_finished_requests``) for reqs that successfully activated a
         dump. Does not rewrite the immediate anomaly report. Token ids follow
         the same ``save_sensitive_info`` / ``max_*`` / ``decode_token_ids``
         policy as anomaly reports.
