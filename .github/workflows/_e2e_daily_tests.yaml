@@ -115,8 +115,8 @@ jobs:
           echo "=== Installing from checkout (main HEAD, full compile) ==="
           # Normal compile (NOT COMPILE_CUSTOM_KERNELS=0) -- the nightly-ci image
           # has cmake/pybind11/CANN build deps. COMPILE_CUSTOM_KERNELS=0 would skip
-          # all C extensions (setup.py:462 ext_modules=[]), leaving vllm_ascend_C.so
-          # missing and causing E2E failures on NPU (see worker.py:102 warning).
+          # all C extensions (setup.py:434 ext_modules=[]), leaving vllm_ascend_C.so
+          # missing and causing E2E failures on NPU (see worker.py:110 warning).
           pip install -e . --no-build-isolation 2>&1 | tail -10
           echo "=== Verify C extension ==="
           python3 -c "import vllm_ascend.vllm_ascend_C; print('vllm_ascend_C OK')"
