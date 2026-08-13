@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_prefill_inputs,
 )
 from vllm.v1.worker.gpu.model_runner import (
+    BatchReqState,
     ExecuteModelState,
     GPUModelRunner,
     sort_batch_req_ids,
@@ -284,6 +285,7 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
@@ -466,6 +468,7 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             is_prefilling_np=is_prefilling_np,
+            has_prefill=batch_req_state.has_prefill,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,

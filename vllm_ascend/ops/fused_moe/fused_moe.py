@@ -154,17 +154,27 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
-            if self.is_internal_router:
-                gate = self.gate
-                assert gate is not None
-                # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
-                # increase with extra hidden states. We also assume that all gate
-                # linear is unquantized so that we the weight is pre-casted in
-                # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                hidden_states_fp32 = hidden_states.float()
-                before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
-                after_routed_experts = torch.npu.current_stream().record_event()
+            if self.gate is not None and (self.is_internal_router or router_logits is hidden_states):
+                # Upstream main passes `router_logits=hidden_states` as a
+                # placeholder and expects the runner to compute the router
+                # logits via its gate. When the gate weight has not been
+                # pre-cast to fp32 (`is_internal_router` False, e.g. the
+                # AscendGateLinear used by upstream models), run the gate's own
+                # forward instead so routing stays correct.
+                if self.is_internal_router:
+                    # NOTE(Angazenn): To make this cast explicitly, the hbm usage
+                    # might increase with extra hidden states. We also assume that
+                    # all gate linear is unquantized so that the weight is
+                    # pre-casted in process_weights_after_loading of
+                    # AscendUnquantizedLinearMethod.
+                    hidden_states_fp32 = hidden_states.float()
+                    before_routed_experts = torch.npu.current_stream().record_event()
+                    router_logits = F.linear(hidden_states_fp32, self.gate.weight_fp32)
+                    after_routed_experts = torch.npu.current_stream().record_event()
+                else:
+                    before_routed_experts = torch.npu.current_stream().record_event()
+                    router_logits, _ = self.gate(hidden_states)
+                    after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()
                 after_routed_experts = None

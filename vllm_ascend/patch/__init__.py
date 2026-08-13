@@ -1172,6 +1172,9 @@
 #       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
 #       The patch is guarded with contextlib.suppress(ImportError) so it does
 #       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#       On upstream main FusedInputNorm.forward applies the per-channel affine
+#       transform directly (no F.batch_norm), so the patch is skipped there
+#       (vllm_version_is("0.27.1")).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50411
 #    Future Plan:

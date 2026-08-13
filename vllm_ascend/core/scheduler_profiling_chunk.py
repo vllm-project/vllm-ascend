@@ -42,6 +42,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -251,6 +252,14 @@ class ProfilingChunkScheduler(Scheduler):
         time_budget = target_latency if target_latency is not None else float("inf")
         # <<< PROFILING CHUNK <<<
         token_budget = self.max_num_scheduled_tokens
+        input_budget = self.scheduler_config.max_num_batched_tokens
+        if vllm_version_is("0.27.1"):
+            # On 0.27.1, _set_max_num_scheduled_tokens already deducts draft
+            # slots globally, so per-request draft accounting is not needed.
+            draft_slots = 0
+        else:
+            spec = self.vllm_config.speculative_config
+            draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
         if self._pause_state == PauseState.PAUSED_ALL:
             token_budget = 0
 
@@ -271,6 +280,8 @@ class ProfilingChunkScheduler(Scheduler):
         while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
             # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
+            if input_budget <= draft_slots:
+                break
 
             if (
                 request.num_output_placeholders > 0
@@ -285,7 +296,7 @@ class ProfilingChunkScheduler(Scheduler):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = min(num_new_tokens, token_budget, input_budget - draft_slots)
 
             # Make sure the input position does not exceed the max model len.
             num_new_tokens = min(
@@ -370,7 +381,9 @@ class ProfilingChunkScheduler(Scheduler):
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
-                            token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                            restored = num_scheduled_tokens.pop(preempted_req_id)
+                            token_budget += restored
+                            input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
@@ -403,6 +416,7 @@ class ProfilingChunkScheduler(Scheduler):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            input_budget -= num_new_tokens + draft_slots
             # Decode requests (num_new_tokens == 1) have negligible latency;
             # skip time_budget accounting so they don't starve other requests.
             if request.num_computed_tokens < request.num_prompt_tokens:
@@ -453,6 +467,8 @@ class ProfilingChunkScheduler(Scheduler):
             # >>> PROFILING CHUNK >>>
             while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 # <<< PROFILING CHUNK <<<
+                if input_budget <= draft_slots:
+                    break
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -538,6 +554,7 @@ class ProfilingChunkScheduler(Scheduler):
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
                 else:
+                    request_token_budget = min(token_budget, input_budget - draft_slots)
                     num_new_tokens = request.num_tokens - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
@@ -567,10 +584,10 @@ class ProfilingChunkScheduler(Scheduler):
                             break
                     # <<< PROFILING CHUNK <<<
 
-                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
+                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > request_token_budget:
                         break
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -659,6 +676,7 @@ class ProfilingChunkScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                input_budget -= num_new_tokens + draft_slots
                 # Decode requests (num_new_tokens == 1) have negligible latency;
                 # skip time_budget accounting so they don't starve other requests.
                 if request.num_computed_tokens < request.num_prompt_tokens:
@@ -689,6 +707,7 @@ class ProfilingChunkScheduler(Scheduler):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
+        assert input_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
