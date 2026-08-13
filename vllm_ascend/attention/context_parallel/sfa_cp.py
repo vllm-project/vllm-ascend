@@ -562,7 +562,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         gathered, handle = all_gather_async(x.permute(perm).contiguous(), self.dcp_group)
         return gathered, handle, restore_perm
 
-    def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
+    def _remap_sparse_indices(
+        self,
+        topk_indices: torch.Tensor,
+        max_local_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if self.dcp_size <= 1:
             return topk_indices
 
@@ -586,6 +590,14 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             local_offsets = topk_indices_fp32 - local_block_indices * interleave_size
             remapped_indices_fp32 = torch.floor(topk_indices_fp32 / (self.dcp_size * interleave_size))
             remapped_indices_fp32 = remapped_indices_fp32 * interleave_size + local_offsets
+        if max_local_indices is not None:
+            # Bound remapped indices by the request's local KV length. The bound
+            # must join the mask before packing: the kernel stops scanning at
+            # the first -1, so invalid entries have to stay in the row tail.
+            local_owner_mask &= remapped_indices_fp32 < max_local_indices.to(
+                device=remapped_indices_fp32.device,
+                dtype=remapped_indices_fp32.dtype,
+            )
         remapped_indices = torch.where(
             local_owner_mask,
             remapped_indices_fp32,
@@ -636,10 +648,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         weights = torch.softmax(lse_recv, dim=0)
         weights = torch.nan_to_num(weights, nan=0.0)
 
-        # ==== TEMP DEBUG FIX: zero-weight ranks may carry NaN local outputs;
-        # 0 * NaN would poison the merge. Neutralize NaN/Inf payloads first. ====
+        # TEMP: zero-weight ranks may still carry NaN outputs; 0 * NaN would
+        # poison the merge. TODO: drop once the kernel guards empty topk rows.
         output_recv = torch.nan_to_num(output_recv, nan=0.0, posinf=0.0, neginf=0.0)
-        # ==== end TEMP DEBUG FIX ====
         output = (output_recv.to(lse_recv.dtype) * weights.unsqueeze(-1)).sum(dim=0)
         return output.movedim(token_dim - 1, 0).contiguous()
 
@@ -849,7 +860,31 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 f"block_table_row0[:8]={dcp_context.block_table[:1, :8].cpu().tolist()}"
             )
         # ==== end TEMP DEBUG ====
-        topk_indices = self._remap_sparse_indices(topk_indices)
+        # Per-token bound for the remap: the request's DCP-local KV length
+        # expanded by query length. Rows beyond num_actual_tokens are padding
+        # and get a large bound so stale cache indices stay harmless.
+        num_tokens = topk_indices.shape[0]
+        num_reqs = dcp_context.seq_lens.shape[0]
+        query_lens = torch.diff(
+            attn_metadata.cum_query_lens,
+            prepend=attn_metadata.cum_query_lens.new_zeros(1),
+        )
+        req_indices = torch.repeat_interleave(
+            torch.arange(num_reqs, dtype=torch.int32, device=dcp_context.seq_lens.device),
+            query_lens,
+            output_size=num_tokens,
+        )
+        num_bounded = min(attn_metadata.num_actual_tokens, req_indices.shape[0])
+        max_local_indices = dcp_context.seq_lens[req_indices[:num_bounded]]
+        if max_local_indices.shape[0] < num_tokens:
+            max_local_indices = torch.cat(
+                [
+                    max_local_indices,
+                    max_local_indices.new_full((num_tokens - max_local_indices.shape[0],), 1 << 30),
+                ]
+            )
+        max_local_indices = max_local_indices.view(num_tokens, *([1] * (topk_indices.dim() - 1)))
+        topk_indices = self._remap_sparse_indices(topk_indices, max_local_indices=max_local_indices)
         if _SFA_DCP_DEBUG_DO_PRINT:
             flat = topk_indices.flatten(0, 1)
             if num_actual is not None and num_actual < flat.shape[0]:
@@ -899,13 +934,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 f"softmax_max[0:4]={_sm_max[:4].cpu().tolist()} softmax_sum[0:4]={_sm_sum[:4].cpu().tolist()} "
                 f"lse[0:4]={softmax_lse.flatten()[:4].cpu().tolist()}"
             )
-        # ==== end TEMP DEBUG ====
-        # ==== TEMP DEBUG (experiment A): skip LSE merge, keep this rank's head slice over its local KV shard ====
-        # Interpretation: meaningful-but-half output => local attention OK, LSE/merge is broken.
-        # Garbage output => problem is before the local attention (remap/seq_lens/block_table).
-        local_heads = self.local_num_heads
-        output = sfa_output[:, self.dcp_rank * local_heads : (self.dcp_rank + 1) * local_heads, :].contiguous()
-        return output.to(output_dtype)
         # ==== end TEMP DEBUG ====
         output = self._merge_dcp_outputs(sfa_output, softmax_lse, attn_metadata.dsa_cp_context)
         return output.to(output_dtype)

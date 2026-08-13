@@ -81,9 +81,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_sparse_flash_attention_
     }
 
     at::Tensor softmax_max =
-        at::empty(softmax_size, query.options().dtype(at::kFloat));
+        at::zeros(softmax_size, query.options().dtype(at::kFloat));
     at::Tensor softmax_sum =
-        at::empty(softmax_size, query.options().dtype(at::kFloat));
+        at::zeros(softmax_size, query.options().dtype(at::kFloat));
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(
         attention_output, softmax_max, softmax_sum);
 }
