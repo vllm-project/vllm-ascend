@@ -363,7 +363,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # still be spec+1. This mismatch causes CausalConv1d tiling to
         # fail with "numAcceptedTokens exceeds varlen segment length".
         spec_query_lens = (
-           attn_metadata.spec_query_start_loc[1 : spec_num_rows + 1]
+            attn_metadata.spec_query_start_loc[1 : spec_num_rows + 1]
             - attn_metadata.spec_query_start_loc[:spec_num_rows]
         ).to(attn_metadata.num_accepted_tokens.dtype)
         clamped_num_accepted = torch.clamp(
