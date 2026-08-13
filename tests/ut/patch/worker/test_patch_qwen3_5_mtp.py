@@ -10,6 +10,22 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.patch.worker import patch_qwen3_5
 
 
+def test_qwen3_5_text_attention_uses_standard_rope():
+    attention = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_5_moe_text"),
+        rotary_emb=SimpleNamespace(),
+    )
+    assert not patch_qwen3_5._uses_multimodal_rope(attention)
+
+
+def test_qwen3_5_multimodal_attention_uses_mrope():
+    attention = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_5_moe"),
+        rotary_emb=SimpleNamespace(mrope_section=[11, 11, 10]),
+    )
+    assert patch_qwen3_5._uses_multimodal_rope(attention)
+
+
 @pytest.mark.skipif(
     patch_qwen3_5.Qwen3_5MultiTokenPredictor is None,
     reason="Qwen3.5 MTP model is not available in this vLLM version.",
