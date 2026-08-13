@@ -6,7 +6,6 @@ import torch
 from vllm.distributed import (
     get_ep_group,
 )
-from vllm.logger import init_logger
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
     WorkerSentinel as GPUWorkerSentinel,
@@ -14,8 +13,6 @@ from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
-
-logger = init_logger(__name__)
 
 
 class WorkerSentinel(GPUWorkerSentinel):
