@@ -1975,9 +1975,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_li is not None
                 k_li = self._get_full_kv(k_li, attn_metadata)
 
-        if kv_cache is not None and self.is_kv_producer:
-            attn_metadata.reshape_cache_event = torch.npu.Event()
-
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
             use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
