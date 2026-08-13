@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.distributed.eplb_state import AscendEplbLayerState
+from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
 from vllm_ascend.patch.platform import patch_fused_moe
 
 

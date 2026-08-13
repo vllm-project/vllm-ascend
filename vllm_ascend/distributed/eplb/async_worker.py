@@ -20,7 +20,7 @@ from vllm.logger import logger
 if TYPE_CHECKING:
     from vllm.distributed.eplb.eplb_state import EplbModelState
 
-    from vllm_ascend.distributed.eplb_state import AscendEplbState
+    from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
 class NoTransferCycleComplete:

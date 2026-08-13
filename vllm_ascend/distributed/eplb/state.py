@@ -12,7 +12,7 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 
-from vllm_ascend.distributed.stair_policy import StairEplbPolicy
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 
@@ -111,7 +111,7 @@ class AscendEplbState(_eplb_state.EplbState):
         del rank_mapping
         if self.async_worker is not None:
             return
-        from vllm_ascend.distributed.eplb_async_worker import start_async_worker
+        from vllm_ascend.distributed.eplb.async_worker import start_async_worker
 
         self.async_worker = start_async_worker(self, is_profile=is_profile)
 

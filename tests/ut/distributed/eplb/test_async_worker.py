@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm_ascend.distributed import eplb_async_worker
-from vllm_ascend.distributed.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb import async_worker as eplb_async_worker
+from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
 class _CycleComplete(Exception):

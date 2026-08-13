@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.distributed.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb.state import AscendEplbState
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
     is_eplb_load_collection_phase_matched,
@@ -229,11 +229,11 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
 
         with (
             patch(
-                "vllm_ascend.distributed.eplb_state.get_ep_group",
+                "vllm_ascend.distributed.eplb.state.get_ep_group",
                 return_value=ep_group,
             ),
             patch(
-                "vllm_ascend.distributed.eplb_state.all_reduce",
+                "vllm_ascend.distributed.eplb.state.all_reduce",
                 side_effect=set_remote_fresh_load,
             ) as sync_fresh_load,
         ):

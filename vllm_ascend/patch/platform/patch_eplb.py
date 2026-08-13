@@ -10,9 +10,9 @@ from vllm.config import parallel as _parallel_config
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
-from vllm_ascend.distributed.eplb_async_worker import NO_TRANSFER_CYCLE_COMPLETE
-from vllm_ascend.distributed.eplb_communicator import AscendGlooEplbCommunicator
-from vllm_ascend.distributed.eplb_state import refresh_model_routing_tables
+from vllm_ascend.distributed.eplb.async_worker import NO_TRANSFER_CYCLE_COMPLETE
+from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.state import refresh_model_routing_tables
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 

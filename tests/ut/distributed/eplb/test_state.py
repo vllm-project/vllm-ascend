@@ -7,12 +7,12 @@ from unittest.mock import MagicMock
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
-from vllm_ascend.distributed import eplb_state
-from vllm_ascend.distributed.eplb_state import (
+from vllm_ascend.distributed.eplb import state as eplb_state
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
+from vllm_ascend.distributed.eplb.state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
-from vllm_ascend.distributed.stair_policy import StairEplbPolicy
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(monkeypatch):
@@ -236,7 +236,7 @@ def test_add_model_always_selects_state_owned_stair(monkeypatch):
 def test_async_loop_uses_ascend_state_owned_worker(monkeypatch):
     start_worker = MagicMock(return_value=object())
     monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb_async_worker.start_async_worker",
+        "vllm_ascend.distributed.eplb.async_worker.start_async_worker",
         start_worker,
     )
     state = AscendEplbState.__new__(AscendEplbState)

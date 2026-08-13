@@ -9,7 +9,7 @@ from vllm.distributed.eplb.eplb_communicator import (
     TorchDistGlooStagedEplbCommunicator,
 )
 
-from vllm_ascend.distributed.eplb_communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 
 
 @pytest.fixture

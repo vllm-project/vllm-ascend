@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.distributed.stair_policy import (
+from vllm_ascend.distributed.eplb.policy.stair import (
     StairEplbPolicy,
     _build_incremental_candidate,
     compute_balance_score,
@@ -100,7 +100,7 @@ def test_stair_uses_full_time_series_for_temporal_acceptance(monkeypatch):
         return candidate.copy()
 
     monkeypatch.setattr(
-        "vllm_ascend.distributed.stair_policy._build_incremental_candidate",
+        "vllm_ascend.distributed.eplb.policy.stair._build_incremental_candidate",
         fake_candidate,
     )
     result = _rebalance(StairEplbPolicy(), load_window, placement)
