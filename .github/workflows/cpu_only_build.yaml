@@ -1,0 +1,67 @@
+# Real CPU-only package verification.  This workflow deliberately uses a
+# clean Docker image rather than the CANN-based image used by NPU tests.
+name: CPU-only build verification
+
+on:
+  pull_request:
+    branches:
+      - main
+      - '*-dev'
+      - 'releases/v*'
+    paths:
+      - 'Dockerfile.cpu'
+      - 'tools/cpu_only_build.sh'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'csrc/**'
+      - 'vllm_ascend/**'
+      - 'tests/ut/test_dependency_documentation.py'
+      - '.github/workflows/scripts/test_config.yaml'
+      - '.github/workflows/scripts/select_tests.py'
+      - 'docs/source/installation.md'
+      - 'docs/source/tutorials/features/suffix_speculative_decoding.md'
+      - 'docs/source/user_guide/feature_guide/speculative_decoding.md'
+      - '.github/workflows/cpu_only_build.yaml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile.cpu'
+      - 'tools/cpu_only_build.sh'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'csrc/**'
+      - 'vllm_ascend/**'
+      - 'tests/ut/test_dependency_documentation.py'
+      - '.github/workflows/scripts/test_config.yaml'
+      - '.github/workflows/scripts/select_tests.py'
+      - '.github/workflows/cpu_only_build.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and smoke-test CPU image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout vllm-ascend
+        uses: actions/checkout@v7
+
+      - name: Build CPU-only image
+        run: |
+          docker build --progress=plain \
+            --file Dockerfile.cpu \
+            --tag vllm-ascend-cpu-ci:${{ github.sha }} \
+            .
+
+      - name: Run CPU-only smoke verification
+        run: |
+          docker run --rm vllm-ascend-cpu-ci:${{ github.sha }}

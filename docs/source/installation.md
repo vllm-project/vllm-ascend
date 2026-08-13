@@ -238,12 +238,12 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
 CPU-only verification checks that the Python package can be built when no
 Ascend device is visible. It does **not** validate NPU runtime loading,
-inference examples, custom kernels, or NPU-specific tests. A CANN toolkit is
-still required because the build reads its headers and libraries.
+inference examples, custom kernels, or NPU-specific tests. With
+`COMPILE_CUSTOM_KERNELS=0`, this build-only path does not require a CANN
+toolkit; CANN is still required for custom kernels and NPU runtime validation.
 
 Install the Python build backend and native build tools first. The editable
-build uses setuptools-scm directly, and `arctic-inference` requires CMake and
-Ninja when a compatible wheel is not available:
+build uses setuptools-scm directly:
 
 ```bash
 python -m pip install --upgrade \
@@ -272,11 +272,17 @@ python -m pip install \
     -r requirements.txt
 ```
 
+`arctic-inference` is intentionally not part of the universal requirements.
+It is an optional plugin for suffix speculative decoding; install a version
+compatible with the selected vLLM stack separately when that feature is used,
+for example `python -m pip install "arctic-inference>=0.2.0"`. The old
+`arctic-inference==0.1.1` source distribution requires a PyTorch 2.7 build
+environment and is not a requirement of the CPU-only package build.
+
 Set the build target explicitly and disable device backend auto-loading before
 building vLLM Ascend:
 
 ```bash
-export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export COMPILE_CUSTOM_KERNELS=0
 export SOC_VERSION=ascend910b1  # Atlas A2; use the matching value below for other products
