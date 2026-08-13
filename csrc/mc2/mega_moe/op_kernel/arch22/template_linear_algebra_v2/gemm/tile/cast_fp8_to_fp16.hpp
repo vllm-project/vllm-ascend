@@ -110,7 +110,7 @@ struct TileCastFp8ToFp16Dequant {
         uint32_t loopsPerTile, tilesInALoop;
         uint32_t tileLenRoundFp8 = RoundUp<Alignment, uint32_t>(tileLen);
         if (tileLenRoundFp8 > COMPUTE_LENGTH / 2) {
-            // One signle tile length is bigger than COMPUTE_LENGTH, which should be clipped.
+            // One single tile length is bigger than COMPUTE_LENGTH, which should be clipped.
             loopsPerTile = CeilDiv(tileLen, COMPUTE_LENGTH);
             totalLoops = tilesPerAiv * loopsPerTile;
         } else if (tileLenRoundFp8 != 0) {
@@ -228,7 +228,7 @@ struct TileCastFp8ToFp16Dequant {
         uint32_t loopsPerTile, tilesInALoop;
         uint32_t tileLenRoundFp8 = RoundUp<Alignment, uint32_t>(tileLen);
         if (tileLenRoundFp8 > COMPUTE_LENGTH / 2) {
-            // One signle tile length is bigger than COMPUTE_LENGTH, which should be clipped.
+            // One single tile length is bigger than COMPUTE_LENGTH, which should be clipped.
             loopsPerTile = CeilDiv(tileLen, COMPUTE_LENGTH);
             totalLoops = tilesPerAiv * loopsPerTile;
         } else if (tileLenRoundFp8 != 0) {

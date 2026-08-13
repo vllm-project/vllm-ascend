@@ -260,7 +260,7 @@ void PrintPeermemInfo(const MegaMoeTilingData *tilingData, const char *nodeName)
 
 static ge::DataType GetDataTypeByOpQuantMode(const int64_t opQuantMode)
 {
-    // unsupport UNQUANT, STATIC, DYNAMIC currently
+    // unsupported UNQUANT, STATIC, DYNAMIC currently
     switch (opQuantMode) {
         case DISPATCH_QUANT_OUT_DTYPE_E5M2:
             return ge::DT_FLOAT8_E5M2;

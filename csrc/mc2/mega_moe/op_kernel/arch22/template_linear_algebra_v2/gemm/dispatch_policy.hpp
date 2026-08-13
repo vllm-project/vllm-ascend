@@ -27,7 +27,7 @@ struct MmadBase {
 using MmadAtlasA2 = MmadBase<Arch::AtlasA2, false>;
 using MmadAtlasA2Async = MmadBase<Arch::AtlasA2, true>;
 
-// Now ENABLE_UNIT_FLAG_ must be false when intput element is int8
+// Now ENABLE_UNIT_FLAG_ must be false when input element is int8
 template <bool ENABLE_UNIT_FLAG_ = false>
 struct MmadAtlasA2Pingpong : public MmadAtlasA2 {
     static constexpr uint32_t STAGES = 2;
@@ -240,7 +240,7 @@ struct MmadAtlasA2Small : public MmadAtlasA2 {
     static constexpr bool ENABLE_SHUFFLE_K = ENABLE_SHUFFLE_K_;
 };
 
-// Now ENABLE_UNIT_FLAG_ must be false when intput element is int8
+// Now ENABLE_UNIT_FLAG_ must be false when input element is int8
 template <class ArchTag_, bool ENABLE_UNIT_FLAG_ = false>
 struct MmadPingpong : public MmadBase<ArchTag_, false> {
     static constexpr uint32_t STAGES = 2;

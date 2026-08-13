@@ -20,8 +20,12 @@ def test_swigluoai_uninterleave_uses_local_mega_moe(mock_get_ascend_config):
     comm_impl._apply_local_mega_moe = MagicMock(return_value=(torch.empty(1), torch.empty(1)))
 
     with patch.object(torch.ops._C_ascend, "mega_moe", create=True):
-        comm_impl.fused_experts(SimpleNamespace(activation="swigluoai_uninterleave", weights=SimpleNamespace(
-            w1_scale=torch.empty(1), w2_scale=torch.empty(1))))
+        comm_impl.fused_experts(
+            SimpleNamespace(
+                activation="swigluoai_uninterleave",
+                weights=SimpleNamespace(w1_scale=torch.empty(1), w2_scale=torch.empty(1)),
+            )
+        )
 
     comm_impl._apply_local_mega_moe.assert_called_once()
 
@@ -33,7 +37,8 @@ def test_other_activation_keeps_existing_mega_moe(mock_get_ascend_config):
     comm_impl = _make_comm_impl()
     comm_impl._apply_cann_mega_moe = MagicMock(return_value=(torch.empty(1), torch.empty(1)))
 
-    comm_impl.fused_experts(SimpleNamespace(activation="silu", weights=SimpleNamespace(
-        w1_scale=torch.empty(1), w2_scale=torch.empty(1))))
+    comm_impl.fused_experts(
+        SimpleNamespace(activation="silu", weights=SimpleNamespace(w1_scale=torch.empty(1), w2_scale=torch.empty(1)))
+    )
 
     comm_impl._apply_cann_mega_moe.assert_called_once()

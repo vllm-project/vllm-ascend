@@ -1614,7 +1614,7 @@ private:
                 workspaceOffset += params.maxOutputSize * sizeof(ElementPerTokenScale);
             }
 
-            // gmm out resues workspace
+            // gmm out reuses workspace
             ptrC = params.ptrWorkspace + workspaceOffset;
             ptrC2 = params.ptrWorkspace + workspaceOffset;
             workspaceOffset += params.maxOutputSize * params.gmmOutPreRowStride * sizeof(ElementC);

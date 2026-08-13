@@ -205,7 +205,7 @@ struct SplitkGemmIdentityBlockSwizzle {
     GemmCoord problemShape;
     GemmCoord tileShape;
     GemmCoord loopsMNK;
-    uint32_t splitkFactor = 1; // splite k dim into virtual cores
+    uint32_t splitkFactor = 1; // split k dim into virtual cores
 
     /// Methods
 
@@ -742,7 +742,7 @@ struct StreamkGemmIdentityBlockSwizzle {
     // If computing streamk blocks, how many kTile should each core process
     uint32_t kTileNumPerCore;
     // Since the number of kTiles may not be evenly divisible by the number of cores,
-    // some cores need to compute one additoinal kTile compared to others
+    // some cores need to compute one additional kTile compared to others
     uint32_t kTileRemain;
 
     struct StreamkBlockDec {
