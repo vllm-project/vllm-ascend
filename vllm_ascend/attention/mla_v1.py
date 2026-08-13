@@ -47,6 +47,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, get_identity_cos_and_sin_mla
+from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -954,13 +955,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
-        if not self.use_mla_rope and (self.fa_quant_layer or self.enable_mlapo):
-            # Both optimized preprocess paths fuse rotary reordering into the
-            # q/kv prolog. A no-RoPE positional slice must remain in checkpoint
-            # order, so use the explicit no-RoPE baseline instead.
-            logger.warning_once("FA quant/MLAPO is disabled for MLA layers with RoPE disabled.")
-            self.fa_quant_layer = False
-            self.enable_mlapo = False
         if self.fa_quant_layer:
             self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:
@@ -1178,23 +1172,34 @@ class AscendMLAImpl(MLAAttentionImpl):
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
+        fused_qkv_quant_method = None
+        if self.fused_qkv_a_proj is not None:
+            fused_qkv_quant_method = getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None)
+        q_proj_quant_method = getattr(self.q_proj.quant_method, "quant_method", None)
+        self.mlapo_quant_mode = "per_tensor_quant_asymm"
+        dynamic_w8a8_mlapo = (
+            get_ascend_device_type() != AscendDeviceType.A5
+            and isinstance(fused_qkv_quant_method, AscendW8A8DynamicLinearMethod)
+            and isinstance(q_proj_quant_method, AscendW8A8DynamicLinearMethod)
+            and act_dtype == torch.bfloat16
+        )
         if self.enable_mlapo:
-            # Currently mlapo only supports W8A8 and W8A8MXFP8 quantization in MLA scenario
-            # TODO(whx): modify this limitation when mlapo supports floating point
+            # A3 supports W8A8 dynamic through mla_preprocess's
+            # per_token_quant_symm mode. The mode requires BF16 activations and
+            # both packed QKV-A and Q-B projections to use the dynamic scheme.
             if self.fused_qkv_a_proj is None or (
-                not isinstance(
-                    getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
-                )
-                and not isinstance(
-                    getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None),
-                    AscendW8A8MXFP8DynamicLinearMethod,
-                )
+                not isinstance(fused_qkv_quant_method, AscendW8A8LinearMethod)
+                and not isinstance(fused_qkv_quant_method, AscendW8A8MXFP8DynamicLinearMethod)
+                and not dynamic_w8a8_mlapo
             ):
                 self.enable_mlapo = False
                 logger.warning_once(
-                    "mlapo only supports W8A8 quantization in MLA. "
-                    "Some layers not W8A8 quantized, mlapo disabled for these layers."
+                    "mlapo only supports static W8A8, A3 BF16 W8A8 dynamic, "
+                    "or W8A8 MXFP8 quantization in MLA. MLAPO is disabled "
+                    "for unsupported layers."
                 )
+        if self.enable_mlapo and dynamic_w8a8_mlapo:
+            self.mlapo_quant_mode = "per_token_quant_symm"
         if self.enable_mlapo:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self._process_weights_for_fused_mlapo_a5(act_dtype)
@@ -1234,6 +1239,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
         assert self.q_a_layernorm is not None
         assert self.kv_a_layernorm is not None
+        dynamic_w8a8 = getattr(self, "mlapo_quant_mode", "per_tensor_quant_asymm") == "per_token_quant_symm"
+        if dynamic_w8a8:
+            for linear in (self.fused_qkv_a_proj, self.q_proj):
+                if torch.count_nonzero(linear.weight_offset).item() != 0:
+                    raise ValueError(
+                        "A3 MLAPO W8A8 dynamic requires symmetric weights "
+                        f"(zero weight_offset), but {getattr(linear, 'prefix', '<unknown>')} has a non-zero offset."
+                    )
+
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
@@ -1244,19 +1258,35 @@ class AscendMLAImpl(MLAAttentionImpl):
         wd_qkv = transdata(wd_qkv, block_size=(16, 32)).unsqueeze(0).contiguous()
         self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
-        kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
-        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[: self.q_lora_rank].contiguous()  # type: ignore[union-attr]
-        kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
+        fused_qkv_scale = (
+            self.fused_qkv_a_proj.weight_scale.data.flatten()
+            if dynamic_w8a8
+            else self.fused_qkv_a_proj.deq_scale
+        )
+        kv_a_proj_deq_scl = fused_qkv_scale[self.q_lora_rank :].contiguous()
+        q_a_proj_deq_scl = fused_qkv_scale[: self.q_lora_rank].contiguous()
+        kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
+            self.kv_lora_rank + self.qk_rope_head_dim, -1
+        ).contiguous()
         kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl, self.qk_rope_head_dim)
-        kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
+        kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(
+            self.kv_lora_rank + self.qk_rope_head_dim
+        ).contiguous()
         self.deq_scale_qkv = torch.cat((kv_a_proj_deq_scl, q_a_proj_deq_scl), dim=-1).contiguous()
 
-        kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
-        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[: self.q_lora_rank].contiguous()  # type: ignore[union-attr]
-        kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
-        kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias, self.qk_rope_head_dim)
-        kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias), dim=-1).contiguous()
+        if dynamic_w8a8:
+            self.quant_bias_qkv = torch.zeros_like(self.deq_scale_qkv, dtype=torch.int32)
+        else:
+            kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[self.q_lora_rank :].contiguous()
+            q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[: self.q_lora_rank].contiguous()
+            kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(
+                self.kv_lora_rank + self.qk_rope_head_dim, -1
+            ).contiguous()
+            kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias, self.qk_rope_head_dim)
+            kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(
+                self.kv_lora_rank + self.qk_rope_head_dim
+            ).contiguous()
+            self.quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias), dim=-1).contiguous()
 
         wu_q = self.q_proj.weight.data
         wu_q = wu_q.t().reshape(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
@@ -1265,24 +1295,44 @@ class AscendMLAImpl(MLAAttentionImpl):
         wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
         self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
 
-        qb_deq_scl = self.q_proj.deq_scale.data
-        qb_deq_scl = qb_deq_scl.reshape(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
+        qb_deq_scl = self.q_proj.weight_scale.data.flatten() if dynamic_w8a8 else self.q_proj.deq_scale.data
+        qb_deq_scl = qb_deq_scl.reshape(
+            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1
+        )
         qb_deq_scl = trans_rope_weight(qb_deq_scl, self.qk_rope_head_dim)
-        self.qb_deq_scl = qb_deq_scl.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+        self.qb_deq_scl = qb_deq_scl.reshape(
+            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        )
 
-        qb_qt_bias = self.q_proj.quant_bias.data
-        qb_qt_bias = qb_qt_bias.reshape(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
-        qb_qt_bias = trans_rope_weight(qb_qt_bias, self.qk_rope_head_dim)
-        self.qb_qt_bias = qb_qt_bias.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+        if dynamic_w8a8:
+            self.qb_qt_bias = torch.zeros_like(self.qb_deq_scl, dtype=torch.int32)
+        else:
+            qb_qt_bias = self.q_proj.quant_bias.data
+            qb_qt_bias = qb_qt_bias.reshape(
+                self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1
+            )
+            qb_qt_bias = trans_rope_weight(qb_qt_bias, self.qk_rope_head_dim)
+            self.qb_qt_bias = qb_qt_bias.reshape(
+                self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+            )
 
         device = self.q_proj.weight.device
-        self.gamma1 = self.q_a_layernorm.weight.data  # type: ignore[union-attr]
-        self.beta1 = torch.zeros_like(self.gamma1) if (_bias := self.q_a_layernorm.bias) is None else _bias.data  # type: ignore[union-attr]
-        self.gamma2 = self.kv_a_layernorm.weight.data  # type: ignore[union-attr]
-        self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data  # type: ignore[union-attr]
-        self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data  # type: ignore[union-attr]
-        self.quant_scale1 = self.q_proj.input_scale.data
-        self.quant_offset1 = self.q_proj.input_offset.data
+        self.gamma1 = self.q_a_layernorm.weight.data
+        self.beta1 = torch.zeros_like(self.gamma1) if (_bias := self.q_a_layernorm.bias) is None else _bias.data
+        self.gamma2 = self.kv_a_layernorm.weight.data
+        if dynamic_w8a8:
+            # per_token_quant_symm derives activation scales in the kernel.
+            # Keep valid placeholders because all quantized kernels initialize
+            # these input addresses.
+            self.quant_scale0 = torch.ones(1, dtype=act_dtype, device=device)
+            self.quant_offset0 = torch.zeros(1, dtype=torch.int8, device=device)
+            self.quant_scale1 = torch.ones(1, dtype=act_dtype, device=device)
+            self.quant_offset1 = torch.zeros(1, dtype=torch.int8, device=device)
+        else:
+            self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
+            self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
+            self.quant_scale1 = self.q_proj.input_scale.data
+            self.quant_offset1 = self.q_proj.input_offset.data
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
@@ -1294,12 +1344,18 @@ class AscendMLAImpl(MLAAttentionImpl):
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
         ):
-            self.fused_qkv_a_proj.weight = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.deq_scale = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.quant_bias = None  # type: ignore[union-attr]
+            self.fused_qkv_a_proj.weight = None
             self.q_proj.weight = None
-            self.q_proj.deq_scale = None
-            self.q_proj.quant_bias = None
+            if dynamic_w8a8:
+                self.fused_qkv_a_proj.weight_scale = None
+                self.fused_qkv_a_proj.weight_offset = None
+                self.q_proj.weight_scale = None
+                self.q_proj.weight_offset = None
+            else:
+                self.fused_qkv_a_proj.deq_scale = None
+                self.fused_qkv_a_proj.quant_bias = None
+                self.q_proj.deq_scale = None
+                self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
@@ -2129,7 +2185,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states.contiguous(), need_gather_q_kv
             )
             decode_preprocess_res, prefill_preprocess_res = DeviceOperator.mla_preprocess_only_decode(
-                self, hidden_states, kv_cache, attn_metadata
+                self,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                use_mla_rope=self.use_mla_rope,
             )
         else:
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
