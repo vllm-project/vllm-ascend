@@ -1,0 +1,142 @@
+# syntax=docker/dockerfile:1
+#
+# ARM64 vLLM-Ascend v0.25.1rc build using mainland-accessible sources.
+
+ARG CANN_IMAGE="swr.tzytcloud-fs-1.tz-cbncloud.com/gcable-ai/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12"
+FROM ${CANN_IMAGE}
+
+SHELL ["/bin/bash", "-c"]
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG UBUNTU_MIRROR="https://mirrors.aliyun.com/ubuntu-ports"
+ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
+ARG ASCEND_PIP_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG CATLASS_REPOSITORY="https://gitcode.com/cann/catlass.git"
+ARG CATLASS_COMMIT="41bf90da655bba3c66d0acd7e00abe33960ecfd6"
+ARG MOONCAKE_TAG="0.3.11.post1"
+ARG VLLM_VERSION="0.25.1"
+ARG VLLM_ASCEND_SOURCE_COMMIT="release-v0.25.1rc"
+ARG SOC_VERSION="ascend910b1"
+ARG COMPILE_CUSTOM_KERNELS=1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    SOC_VERSION=${SOC_VERSION} \
+    TASK_QUEUE_ENABLE=1 \
+    OMP_NUM_THREADS=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /workspace
+
+# Keep every network request on a mainland mirror or through the supplied
+# proxy. SWR is expected to be reachable directly from 0001.
+RUN set -eux; \
+    find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 \
+        | xargs -0 -r sed -i -E \
+            -e "s#https?://(archive|security)\.ubuntu\.com/ubuntu/?#${UBUNTU_MIRROR}#g" \
+            -e "s#https?://ports\.ubuntu\.com/ubuntu-ports/?#${UBUNTU_MIRROR}#g"; \
+    export http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" \
+        HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" \
+        no_proxy="${NO_PROXY}" NO_PROXY="${NO_PROXY}"; \
+    apt-get update -y; \
+    apt-get install -y --no-install-recommends \
+        git wget ca-certificates gcc g++ make cmake ninja-build numactl \
+        libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15; \
+    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20; \
+    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20; \
+    rm -rf /var/cache/apt/* /var/lib/apt/lists/*
+
+RUN set -eux; \
+    python3 -m pip config set global.index-url "${PIP_INDEX_URL}"; \
+    export http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" \
+        HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" \
+        no_proxy="${NO_PROXY}" NO_PROXY="${NO_PROXY}"; \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh; \
+    python3 -m pip install \
+        "mooncake-transfer-engine-npu==${MOONCAKE_TAG}" \
+        --index-url "${PIP_INDEX_URL}" \
+        --extra-index-url "${ASCEND_PIP_INDEX_URL}"; \
+    python3 -m pip install \
+        modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' \
+        --index-url "${PIP_INDEX_URL}"; \
+    python3 -m pip install \
+        "torch==2.10.0" "torch-npu==2.10.0.post2" \
+        "torchvision==0.25.0" "torchaudio==2.10.0" \
+        --no-deps --index-url "${PIP_INDEX_URL}" \
+        --extra-index-url "${ASCEND_PIP_INDEX_URL}"; \
+    python3 -m pip install \
+        'cmake>=3.26.1' ninja 'packaging>=24.2' \
+        'setuptools>=77.0.3,<81.0.0' 'setuptools-scm>=8.0' \
+        'setuptools-rust>=1.9.0' wheel jinja2 \
+        --index-url "${PIP_INDEX_URL}"; \
+    python3 -m pip install fsspec networkx 'sympy>=1.13.3' nanobind \
+        --index-url "${PIP_INDEX_URL}"
+
+# PyPI source archives are available through the mainland mirror, avoiding a
+# GitHub clone that the 0001 proxy cannot reach.
+RUN set -eux; \
+    export http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" \
+        HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" \
+        no_proxy="${NO_PROXY}" NO_PROXY="${NO_PROXY}"; \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh; \
+    VLLM_SOURCE_URL="$(PIP_INDEX_URL="${PIP_INDEX_URL}" VLLM_VERSION="${VLLM_VERSION}" \
+        python3 -c 'import html, os, urllib.parse, urllib.request; base=os.environ["PIP_INDEX_URL"].rstrip("/")+"/vllm/"; page=urllib.request.urlopen(base, timeout=30).read().decode(); name="vllm-"+os.environ["VLLM_VERSION"]+".tar.gz"; quote=chr(34); links=[html.unescape(part.split(quote, 2)[1]) for part in page.split("href=")[1:] if len(part.split(quote, 2)) > 1 and name in part.split(quote, 2)[1]]; assert links, "vLLM source archive was not found in the mainland mirror"; print(urllib.parse.urljoin(base, links[0].split("#", 1)[0]))')"; \
+    wget --quiet --output-document=/tmp/vllm.tar.gz "${VLLM_SOURCE_URL}"; \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 VLLM_TARGET_DEVICE="empty" \
+        python3 -m pip install --no-build-isolation "vllm[audio] @ file:///tmp/vllm.tar.gz"; \
+    rm -f /tmp/vllm.tar.gz; \
+    python3 -m pip uninstall -y triton || true
+
+COPY . /vllm-workspace/vllm-ascend/
+
+RUN set -eux; \
+    find /vllm-workspace/vllm-ascend -type f -name '*.sh' -print0 \
+        | xargs -0 -r sed -i 's/\r$//'; \
+    catlass_dir=/vllm-workspace/vllm-ascend/csrc/third_party/catlass; \
+    rm -rf "${catlass_dir}"; \
+    mkdir -p "${catlass_dir}"; \
+    export http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" \
+        HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" \
+        no_proxy="${NO_PROXY}" NO_PROXY="${NO_PROXY}"; \
+    git -C "${catlass_dir}" init; \
+    git -C "${catlass_dir}" remote add origin "${CATLASS_REPOSITORY}"; \
+    git -C "${catlass_dir}" fetch --depth=1 origin "${CATLASS_COMMIT}"; \
+    git -C "${catlass_dir}" checkout --detach FETCH_HEAD
+
+RUN set -eux; \
+    export http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" \
+        HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" \
+        no_proxy="${NO_PROXY}" NO_PROXY="${NO_PROXY}"; \
+    export VLLM_BATCH_INVARIANT=1; \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh; \
+    set +u; source /usr/local/Ascend/nnal/atb/set_env.sh; set -u; \
+    python3 -m pip install -r /vllm-workspace/vllm-ascend/requirements.txt \
+        --no-build-isolation \
+        --index-url "${PIP_INDEX_URL}" \
+        --extra-index-url "${ASCEND_PIP_INDEX_URL}"; \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ \
+        --no-build-isolation --no-deps \
+        --index-url "${PIP_INDEX_URL}" \
+        --extra-index-url "${ASCEND_PIP_INDEX_URL}"; \
+    python3 -m pip uninstall -y triton triton-ascend || true; \
+    python3 -m pip install triton-ascend==3.2.1 \
+        --index-url "${PIP_INDEX_URL}" \
+        --extra-index-url "${ASCEND_PIP_INDEX_URL}"; \
+    python3 -m pip cache purge
+
+RUN set -eux; \
+    python3 -m compileall -q /vllm-workspace/vllm-ascend/vllm_ascend; \
+    python3 -c 'import importlib.metadata as m; assert m.version("vllm").startswith("0.25.1"); print(m.version("vllm"), m.version("vllm-ascend"), m.version("torch-npu"))'
+
+RUN echo 'source /usr/local/Ascend/ascend-toolkit/set_env.sh' >> /root/.bashrc; \
+    echo 'export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD' >> /root/.bashrc; \
+    echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> /root/.bashrc
+
+LABEL org.opencontainers.image.title="vLLM-Ascend v0.25.1rc KV fix" \
+      org.opencontainers.image.version="v0.25.1rc-kv-fix-20260813" \
+      com.ascend.vllm-ascend.source="${VLLM_ASCEND_SOURCE_COMMIT}" \
+      com.ascend.vllm-ascend.vllm-version="${VLLM_VERSION}"
+
+CMD ["/bin/bash"]
