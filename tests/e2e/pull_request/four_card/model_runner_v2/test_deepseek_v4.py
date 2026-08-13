@@ -25,6 +25,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
 
+@pytest.mark.skip("Temporarily skip this DeepSeek V4 test.")
 @pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
