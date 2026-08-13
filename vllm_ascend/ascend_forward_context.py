@@ -41,7 +41,6 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
 }
 
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-_LOCAL_MEGA_MOE_SUPPORTED = hasattr(torch.ops._C_ascend, "mega_moe")
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -312,7 +311,7 @@ def _select_a3_moe_comm_method(
         # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
         mega_moe_enable = get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
         dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
-        if ((_MEGA_MOE_SUPPORTED or _LOCAL_MEGA_MOE_SUPPORTED) and mega_moe_enable) or dispatch_ffn_combine_enable:
+        if (_MEGA_MOE_SUPPORTED and mega_moe_enable) or dispatch_ffn_combine_enable:
             return MoECommType.FUSED_MC2
 
     if num_tokens is None or num_tokens <= mc2_tokens_capacity:

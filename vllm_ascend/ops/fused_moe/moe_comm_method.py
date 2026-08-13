@@ -499,8 +499,9 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            activation = getattr(fused_experts_input.activation, "value", fused_experts_input.activation)
-            if activation == "swigluoai_uninterleave":
+            if hasattr(torch.ops._C_ascend, "mega_moe") and getattr(
+                fused_experts_input.activation, "value", fused_experts_input.activation
+            ) == "swigluoai_uninterleave":
                 out, expert_tokens = self._apply_local_mega_moe(fused_experts_input)
             elif _MEGA_MOE_SUPPORTED:
                 out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input)
