@@ -77,6 +77,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
+    MooncakeKVConnectorStats,
     ReqMeta,
     ensure_zmq_recv,
     ensure_zmq_send,
@@ -3291,6 +3292,174 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
+
+
+class TestMooncakeConnectorStats(unittest.TestCase):
+    def setUp(self):
+        self.engine = MagicMock()
+        self.ready_event = threading.Event()
+        self.vllm_config = MockVllmConfig()
+        self.kv_caches = make_mock_kv_caches()
+        self.thread = KVCacheRecvingThread(
+            tp_rank=0,
+            tp_size=4,
+            _prefill_pp_size=1,
+            engine=self.engine,
+            local_engine_id="local_engine",
+            local_handshake_port=5555,
+            side_channel_port=30000,
+            local_kv_caches_base_addr=[[0x1000], [0x2000]],
+            block_len_per_addr=[[1024], [2048]],
+            block_stride_per_addr=[[1024], [2048]],
+            ready_event=self.ready_event,
+            vllm_config=self.vllm_config,
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None,
+        )
+        self.test_req = {
+            "request_id": "req1",
+            "remote_request_id": "req1",
+            "local_block_ids": [[1, 2]],
+            "remote_block_ids": [[3, 4]],
+            "group_pulls": [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)],
+            "remote_engine_id": "remote_engine",
+            "remote_host": "localhost",
+            "remote_handshake_port": 6666,
+            "remote_port_send_num": {6666: 1},
+            "all_task_done": True,
+            "remote_block_size": 16,
+        }
+        self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])}
+        self.thread.group_compress_ratios = {0: 1}
+        self.thread.block_size_scale = [[1]]
+        self.thread.task_tracker = MagicMock()
+        self.thread.remote_te_port = {"remote_engine": {6666: 7777}}
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024]]
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
+        self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1]]}
+
+    def _transfer(self):
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread._transfer_kv_cache_all_groups(self.test_req)
+
+    def test_transfer_success_records_stats(self):
+        self.engine.batch_transfer_sync_read.return_value = 0
+        self._transfer()
+
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        stats_data = self.thread.xfer_stats.data
+        self.assertEqual(len(stats_data["transfer_duration"]), 1)
+        self.assertGreaterEqual(stats_data["transfer_duration"][0], 0)
+        self.assertEqual(stats_data["bytes_transferred"], [sum(call_args[3])])
+        self.assertEqual(stats_data["num_descriptors"], [len(call_args[1])])
+        self.assertEqual(stats_data["num_failed_transfers"], [])
+
+    def test_transfer_engine_failure_records_failed_transfer(self):
+        self.engine.batch_transfer_sync_read.return_value = -1
+        with self.assertRaises(RuntimeError):
+            self._transfer()
+
+        stats_data = self.thread.xfer_stats.data
+        self.assertEqual(stats_data["num_failed_transfers"], [1])
+        self.assertEqual(stats_data["transfer_duration"], [])
+
+    @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
+    @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
+    @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
+    def test_handle_request_exception_records_failed_recv(self, mock_transfer, mock_send, mock_free):
+        mock_transfer.side_effect = RuntimeError("boom")
+        self.thread.request_queue = MagicMock()
+
+        self.thread._handle_request(self.test_req)
+
+        self.assertEqual(self.thread.xfer_stats.data["num_failed_recvs"], [1])
+        # The failed-request mark is cleared once the last task finishes, but
+        # the failed blocks stay recorded for the scheduler to invalidate.
+        self.assertEqual(self.thread.invalid_block_ids, {1, 2})
+
+    def test_recv_thread_shares_worker_stats(self):
+        shared = MooncakeKVConnectorStats()
+        thread = KVCacheRecvingThread(
+            tp_rank=0,
+            tp_size=4,
+            _prefill_pp_size=1,
+            engine=self.engine,
+            local_engine_id="local_engine",
+            local_handshake_port=5555,
+            side_channel_port=30000,
+            local_kv_caches_base_addr=[[0x1000]],
+            block_len_per_addr=[[1024]],
+            block_stride_per_addr=[[1024]],
+            ready_event=self.ready_event,
+            vllm_config=self.vllm_config,
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None,
+            xfer_stats=shared,
+        )
+        self.assertIs(thread.xfer_stats, shared)
+        self.assertIs(thread.task_tracker.xfer_stats, shared)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
+    def test_tracker_records_expired_request(self, mock_logger):
+        from vllm import envs as vllm_envs
+
+        stats = MooncakeKVConnectorStats()
+        tracker = KVCacheTaskTracker(xfer_stats=stats)
+        tracker.add_req_to_process("req1")
+        tracker.add_delayed_request("req1", time.time() - vllm_envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT - 1)
+
+        result = tracker.get_and_clear_finished_requests()
+
+        self.assertEqual(result, {"req1"})
+        self.assertEqual(stats.data["num_kv_expired_reqs"], [1])
+
+    def test_tracker_without_stats_still_expires(self):
+        tracker = KVCacheTaskTracker()
+        tracker.add_req_to_process("req1")
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger"):
+            from vllm import envs as vllm_envs
+
+            tracker.add_delayed_request("req1", time.time() - vllm_envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT - 1)
+            result = tracker.get_and_clear_finished_requests()
+        self.assertEqual(result, {"req1"})
+
+    def test_worker_get_kv_connector_stats_drains(self):
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.xfer_stats = MooncakeKVConnectorStats()
+
+        self.assertIsNone(worker.get_kv_connector_stats())
+
+        worker.xfer_stats.record_transfer(duration_s=0.5, total_bytes=2**20, num_descs=4)
+        worker.xfer_stats.record_failed_recv()
+        snapshot = worker.get_kv_connector_stats()
+
+        assert snapshot is not None
+        self.assertEqual(snapshot.data["transfer_duration"], [0.5])
+        self.assertEqual(snapshot.data["num_failed_recvs"], [1])
+        reduced = snapshot.reduce()
+        self.assertEqual(reduced["Num successful transfers"], 1)
+        self.assertEqual(reduced["Num failed recvs"], 1)
+        # A second call in the same interval has nothing new to report.
+        self.assertIsNone(worker.get_kv_connector_stats())
+
+    def test_connector_stats_methods(self):
+        connector = object.__new__(MooncakeConnector)
+        connector.connector_worker = None
+        self.assertIsNone(connector.get_kv_connector_stats())
+
+        worker = MagicMock()
+        sentinel = MooncakeKVConnectorStats()
+        worker.get_kv_connector_stats.return_value = sentinel
+        connector.connector_worker = worker
+        self.assertIs(connector.get_kv_connector_stats(), sentinel)
+
+        built = MooncakeConnector.build_kv_connector_stats()
+        self.assertIsInstance(built, MooncakeKVConnectorStats)
+        self.assertTrue(built.is_empty())
+        rebuilt = MooncakeConnector.build_kv_connector_stats({"transfer_duration": [0.1]})
+        assert rebuilt is not None
+        self.assertEqual(rebuilt.data["transfer_duration"], [0.1])
 
 
 if __name__ == "__main__":
