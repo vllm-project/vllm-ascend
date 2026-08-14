@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -77,6 +77,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
         super().__init__()
         self.tasks: list[GraphUpdateTask] = []
         self.provider_sizes: dict[ParamProvider, int] = {}
+        self.capture_resources: dict[Hashable, Any] = {}
         self.capture_token: Token[UpdatableGraph | None] | None = None
 
     def capture_begin(self, pool=None, capture_error_mode: str = "global") -> None:
@@ -91,6 +92,16 @@ class UpdatableGraph(torch.npu.NPUGraph):
             assert self.capture_token is not None
             _ACTIVE_GRAPH.reset(self.capture_token)
             self.capture_token = None
+            self.capture_resources = weak_ref_tensors(self.capture_resources)
+
+    def get_capture_resource(
+        self,
+        key: Hashable,
+        factory: Callable[[], Any],
+    ) -> Any:
+        if key not in self.capture_resources:
+            self.capture_resources[key] = factory()
+        return self.capture_resources[key]
 
     def register_task(
         self,
@@ -153,3 +164,13 @@ def register_task(
         operation(**kwargs)
     else:
         graph.register_task(operation, kwargs, provider)
+
+
+def get_capture_resource(
+    key: Hashable,
+    factory: Callable[[], Any],
+) -> Any:
+    graph = _ACTIVE_GRAPH.get()
+    if graph is None:
+        return factory()
+    return graph.get_capture_resource(key, factory)
