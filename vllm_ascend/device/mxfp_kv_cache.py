@@ -1,4 +1,5 @@
 import torch
+import torch_npu
 
 
 # KV cache MXFP8 scale layouts:

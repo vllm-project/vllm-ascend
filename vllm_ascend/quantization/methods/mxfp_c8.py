@@ -1,7 +1,6 @@
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.logger import logger
 
 from .base import AscendAttentionScheme
 
@@ -64,7 +63,10 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
         target_dtype = vllm_config.model_config.dtype
         exponent = layer.v_cache_scale.data.to(torch.float32) - 127
         layer.v_cache_scale_float = torch.nn.Parameter(torch.exp2(exponent).to(target_dtype), requires_grad=False)
-        layer.v_cache_scale_float_reciprocal = torch.nn.Parameter(1 / torch.exp2(exponent).to(target_dtype), requires_grad=False)
+        layer.v_cache_scale_float_reciprocal = torch.nn.Parameter(
+            1 / torch.exp2(exponent).to(target_dtype),
+            requires_grad=False,
+        )
 
     def apply(
         self,

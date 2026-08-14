@@ -21,11 +21,9 @@ from typing import Any
 
 import torch
 import torch_npu
-import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -129,9 +127,9 @@ def _build_c8_mxfp_fia_v2_kwargs(
         "query_dtype": torch.float8_e4m3fn,
         "key_dtype": torch.float8_e4m3fn,
         "value_dtype": torch.float8_e4m3fn,
-        "dequant_scale_query_dtype": FLOAT8_E8M0FNU_DTYPE,
-        "dequant_scale_key_dtype": FLOAT8_E8M0FNU_DTYPE,
-        "dequant_scale_value_dtype": FLOAT8_E8M0FNU_DTYPE,
+        "dequant_scale_query_dtype": torch_npu.float8_e8m0fnu,
+        "dequant_scale_key_dtype": torch_npu.float8_e8m0fnu,
+        "dequant_scale_value_dtype": torch_npu.float8_e8m0fnu,
     }
     if atten_mask is not None:
         kwargs["atten_mask"] = atten_mask

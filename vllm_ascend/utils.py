@@ -1182,7 +1182,10 @@ A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
 
 
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
-    return vllm_config.quant_config is not None and vllm_config.quant_config.enable_mxfp_c8_quant
+    return bool(
+        vllm_config.quant_config is not None
+        and getattr(vllm_config.quant_config, "enable_mxfp_c8_quant", False)
+    )
 
 
 def refresh_block_size(vllm_config):
