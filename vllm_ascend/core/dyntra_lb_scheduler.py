@@ -1136,6 +1136,12 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
+        num_spec_tokens_to_schedule = self._apply_ascend_proposal_gate(
+            num_spec_tokens_to_schedule,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            num_scheduled_requests=len(num_scheduled_tokens),
+            prefill_scheduled=prefill_scheduled,
+        )
 
         scheduled_encoder_input_stats = None
         if self.log_stats and self.observability_config.enable_logging_iteration_details:

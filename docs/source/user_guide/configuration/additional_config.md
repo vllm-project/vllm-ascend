@@ -208,6 +208,9 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `method` | str | `None` | Dynamic method name. Supported values: `"dspark"`, `"dflash"`. Omit or set to `None` to disable. |
+| `policy` | str | `"confidence_budget"` | Budget policy. `"confidence_budget"` preserves the threshold policy; `"hardware_aware"` selects verification lengths using a profiled Ascend latency curve. |
+| `proposal_gate_enabled` | bool | `False` | Enable the batch-level hardware gate. After a low-load hysteresis window it launches the configured K; under prefill or queue pressure it returns `K=0` without running the drafter. |
+| `proposal_gate_params` | dict | `{}` | Hysteresis parameters: `enter_ratio`, `exit_ratio`, `max_avg_scheduled_tokens`, `enter_steps`, and `exit_steps`. |
 | `method_params` | dict | `{}` | Method-specific hyperparameters. When empty, each method falls back to its built-in defaults. |
 
 **dynamic_spec_config.method_params** (when `method` is `"dspark"` or `"dflash"`)
@@ -220,6 +223,12 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `budget_update_interval` | int | `16` | Recompute the shared verify budget every N decode steps. |
 | `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
 | `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
+| `profile_path` | str | `None` | JSON profile used by the `hardware_aware` policy. The profile maps target verification token batch sizes to `latency_ms` (or `sps`) and may include `fingerprint` and `confidence_temperatures`. |
+| `profile` | dict | `None` | Inline equivalent of `profile_path`, useful for tests and programmatic deployment. |
+| `profile_fingerprint` | dict | `None` | Runtime fingerprint fields that must match the profile when `strict_profile_fingerprint` is enabled. |
+| `strict_profile_fingerprint` | bool | `True` | If `True`, a profile fingerprint mismatch falls back to `confidence_budget`. |
+| `decision_interval` | int | `16` | Recompute the hardware-optimal global verification budget every N draft steps; per-request prefixes are still allocated each step. The interval also bounds NPU-to-host synchronization to one scalar per recompute. |
+| `confidence_temperatures` | list[float] | `None` | Optional per-position temperature scaling values. They override values stored in the hardware profile. |
 
 **scheduler_config.short_request_first_config**
 

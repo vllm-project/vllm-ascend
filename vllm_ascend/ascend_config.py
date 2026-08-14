@@ -476,6 +476,10 @@ class DynamicSpecConfig:
         "dspark",
         "dflash",
     )
+    SUPPORTED_POLICIES = (
+        "confidence_budget",
+        "hardware_aware",
+    )
 
     def __init__(self, config: dict | None = None):
         if config is None:
@@ -483,12 +487,21 @@ class DynamicSpecConfig:
 
         # None disables the dynamic speculative-length path.
         self.method: str | None = config.get("method")
+        # ``confidence_budget`` preserves the policy shipped by PR #13216 and
+        # #13819. ``hardware_aware`` consumes an Ascend latency/SPS profile.
+        self.policy: str = config.get("policy", "confidence_budget")
         # Custom parameters of the selected dynamic method; the expected keys
         # depend on `method` (e.g. dspark accepts
         # initial_verify_budget_per_req, budget_update_interval and
         # budget_threshold). Empty by default, in which case each method
         # falls back to its own built-in defaults.
         self.method_params: dict = config.get("method_params", {})
+        # Batch-level proposal gate.  It is opt-in so existing dynamic
+        # speculative decoding keeps its current behaviour.
+        self.proposal_gate_enabled: bool = bool(
+            config.get("proposal_gate_enabled", False)
+        )
+        self.proposal_gate_params: dict = config.get("proposal_gate_params", {})
         self._validate()
 
     def _validate(self) -> None:
@@ -496,11 +509,22 @@ class DynamicSpecConfig:
             raise ValueError(
                 f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
             )
+        if self.policy not in self.SUPPORTED_POLICIES:
+            raise ValueError(
+                "dynamic_spec_config.policy must be one of "
+                f"{self.SUPPORTED_POLICIES}, got {self.policy!r}"
+            )
         if not isinstance(self.method_params, dict):
             raise TypeError(
                 "dynamic_spec_config.method_params must be a dict, "
                 f"got {type(self.method_params).__name__}: "
                 f"{self.method_params}"
+            )
+        if not isinstance(self.proposal_gate_params, dict):
+            raise TypeError(
+                "dynamic_spec_config.proposal_gate_params must be a dict, "
+                f"got {type(self.proposal_gate_params).__name__}: "
+                f"{self.proposal_gate_params}"
             )
 
 

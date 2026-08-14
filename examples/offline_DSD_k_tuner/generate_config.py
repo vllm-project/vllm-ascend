@@ -450,6 +450,10 @@ def main():
         "batch_stats": batch_stats,
         "max_num_speculative_tokens": len(acceptance_rate_per_pos),
         "acceptance_rate_per_pos": acceptance_rate_per_pos,
+        # This profile can be passed to Ascend's confidence-based scheduler as
+        # ``dynamic_spec_config.method_params.profile``.  It intentionally
+        # contains no hardware fingerprint until the caller supplies one.
+        "hardware_profile": manager.get_hardware_profile(),
     }
 
     config_path = f"{args.result_dir}/dynamic_speculative_config.json"
