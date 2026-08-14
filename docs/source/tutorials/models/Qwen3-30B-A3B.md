@@ -56,12 +56,13 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
 For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
 
 :::::{tab-set}
+
 ::::{tab-item} Atlas A3 inference products
 :sync: A3
 
 ```{code-block} bash
-   :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 
 docker run \
     --name vllm-ascend-env \
@@ -105,40 +106,40 @@ If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci
 ::::{tab-item} Atlas A2 inference products
 :sync: A2
 
-  ```{code-block} bash
-   :substitutions:
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+```{code-block} bash
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
-    docker run \
-        --name vllm-ascend-env \
-        --ipc host \
-        --net host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /usr/local/sbin:/usr/local/sbin \
-        -it -d $IMAGE bash
-    ```
+docker run \
+    --name vllm-ascend-env \
+    --ipc host \
+    --net host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -it -d $IMAGE bash
+```
 
 ::::
 ::::{tab-item} Atlas 300I DUO
 
 ```{code-block} bash
-   :substitutions:
+  :substitutions:
 
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 
 docker run --rm \
         --name vllm-ascend \

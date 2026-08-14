@@ -74,6 +74,7 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 Start the docker image on each node.
 
 :::::{tab-set}
+
 ::::{tab-item} Atlas A3 inference products
 :sync: A3
 

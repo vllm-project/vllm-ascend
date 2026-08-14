@@ -289,8 +289,8 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-openeuler | Atlas A2 | openEuler |
 | vllm-ascend:{{ vllm_ascend_version }}-a3 | Atlas A3 | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
-| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas inference products | Ubuntu |
-| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas inference products | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I DUO | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I DUO | openEuler |
 | vllm-ascend:{{ vllm_ascend_version }}-a5 | Atlas 950DT | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler | Atlas 950DT | openEuler |
 

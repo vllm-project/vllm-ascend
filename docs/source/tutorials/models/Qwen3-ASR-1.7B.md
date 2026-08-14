@@ -31,12 +31,13 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
 For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
 
 :::::{tab-set}
+
 ::::{tab-item} Atlas A2 inference products
 :sync: A2
 
 ```{code-block} bash
-   :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 docker run --rm \
         --name vllm-ascend \
@@ -60,9 +61,9 @@ docker run --rm \
 ::::{tab-item} Atlas 300I DUO
 
 ```{code-block} bash
-   :substitutions:
+  :substitutions:
 
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 
 docker run --rm \
         --name vllm-ascend \

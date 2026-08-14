@@ -38,7 +38,8 @@ For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later 
 ::::{tab-item} A2 series
 :sync: A2
 
-```bash
+```{code-block} bash
+  :substitutions:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
@@ -63,7 +64,8 @@ docker run --rm \
 ::::{tab-item} Atlas 300I DUO
 :sync: atlas300
 
-```bash
+```{code-block} bash
+  :substitutions:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 docker run --rm \
     --name vllm-ascend \

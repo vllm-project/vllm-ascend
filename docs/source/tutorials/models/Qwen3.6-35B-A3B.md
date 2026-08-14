@@ -34,6 +34,7 @@ For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
 :::::{tab-set}
+
 ::::{tab-item} Atlas A3 inference products
 :sync: A3
 
