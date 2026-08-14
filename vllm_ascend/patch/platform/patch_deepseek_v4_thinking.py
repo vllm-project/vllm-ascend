@@ -145,8 +145,7 @@ def _patched_get_deepseek_v4_tokenizer(tokenizer: deepseek_v4.HfTokenizer):
 @wraps(_original_deepseek_v4_parser_init)
 def _patched_deepseek_v4_parser_init(
     self: DeepSeekV4Parser,
-    tokenizer: Any,
-    tools: list[Any] | None = None,
+    *args: Any,
     **kwargs: Any,
 ) -> None:
     chat_kwargs = kwargs.get("chat_template_kwargs") or {}
@@ -155,7 +154,7 @@ def _patched_deepseek_v4_parser_init(
         chat_kwargs["enable_thinking"] = True
         kwargs["chat_template_kwargs"] = chat_kwargs
 
-    _original_deepseek_v4_parser_init(self, tokenizer, tools, **kwargs)
+    _original_deepseek_v4_parser_init(self, *args, **kwargs)
 
 
 if not hasattr(deepseek_v4_encoding, "REASONING_EFFORT_PROMPTS"):
