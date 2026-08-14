@@ -358,7 +358,7 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
 def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_enabled, expected):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     runner.ascend_shared_experts = SimpleNamespace(
-        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON)
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON)
     )
     shared_output = object()
     monkeypatch.setattr(
@@ -375,11 +375,11 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
 @pytest.mark.parametrize(
     ("mode", "fused_output_is_reduced", "reduce_shared"),
     [
-        (SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF, False, False),
-        (SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF, True, True),
-        (SharedExpertParallelMode.FLASHCOMM_ON_SEDP_OFF, True, False),
-        (SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_ON, True, False),
-        (SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON, True, False),
+        (SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF, False, False),
+        (SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF, True, True),
+        (SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF, True, False),
+        (SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON, True, False),
+        (SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON, True, False),
     ],
 )
 def test_shared_output_reduction_depends_on_weight_layout(
@@ -415,10 +415,10 @@ def test_shared_output_reduction_depends_on_weight_layout(
 @pytest.mark.parametrize(
     ("mode", "reduce_routed"),
     [
-        (SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF, False),
-        (SharedExpertParallelMode.FLASHCOMM_ON_SEDP_OFF, False),
-        (SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_ON, True),
-        (SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON, False),
+        (SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF, False),
+        (SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF, False),
+        (SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON, True),
+        (SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON, False),
     ],
 )
 def test_local_shared_expert_dp_reduces_partial_routed_output(
@@ -768,12 +768,12 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
         "expected_mode",
     ),
     [
-        (False, False, False, False, SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF),
-        (True, False, False, False, SharedExpertParallelMode.FLASHCOMM_ON_SEDP_OFF),
-        (False, True, False, False, SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_ON),
-        (True, True, False, False, SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON),
-        (False, True, True, False, SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON),
-        (False, True, False, True, SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON),
+        (False, False, False, False, SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF),
+        (True, False, False, False, SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF),
+        (False, True, False, False, SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON),
+        (True, True, False, False, SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON),
+        (False, True, True, False, SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON),
+        (False, True, False, True, SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON),
     ],
 )
 def test_shared_expert_parallel_mode_matches_activation_and_weight_layout(
@@ -876,7 +876,7 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     )
     shared_experts.multistream_overlap = False
     shared_experts.quant_type = QuantType.W8A8
-    shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON)
+    shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON)
     hidden_states = torch.randn(2, 4)
     part1_out = torch.randn(2, 8)
     shared_out = torch.randn(2, 4)

@@ -114,7 +114,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
         shared_experts = getattr(self, "ascend_shared_experts", None)
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
-            return SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF
+            return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
         return shared_experts.parallel_mode()
 
     def _reduce_shared_output_if_needed(
@@ -125,7 +125,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if (
             shared_output is not None
             and fused_output_is_reduced
-            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF
+            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
@@ -165,7 +165,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
 
         if (
-            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_ON
+            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON
             and not fused_output_is_reduced
         ):
             fused_output = tensor_model_parallel_all_reduce(fused_output)

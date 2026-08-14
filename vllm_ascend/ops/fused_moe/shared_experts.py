@@ -49,10 +49,10 @@ class FusedMoEEvents:
 class SharedExpertParallelMode(Enum):
     """Effective activation and weight layout for a shared-expert forward."""
 
-    FLASHCOMM_OFF_SEDP_OFF = auto()  # Full activations, TP-sharded weights.
-    FLASHCOMM_ON_SEDP_OFF = auto()  # Sharded activations, TP-sharded weights.
-    FLASHCOMM_OFF_SEDP_ON = auto()  # Full activations, replicated weights.
-    FLASHCOMM_ON_SEDP_ON = auto()  # Sharded activations, replicated weights.
+    FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF = auto()  # Full activations, TP-sharded weights.
+    FLASHCOMM_ON_SHARED_EXPERT_DP_OFF = auto()  # Sharded activations, TP-sharded weights.
+    FLASHCOMM_OFF_SHARED_EXPERT_DP_ON = auto()  # Full activations, replicated weights.
+    FLASHCOMM_ON_SHARED_EXPERT_DP_ON = auto()  # Sharded activations, replicated weights.
 
 
 class AscendSharedExperts:
@@ -158,18 +158,18 @@ class AscendSharedExperts:
         # group, so their layout must be derived from that group instead.
         tp_size = self.moe_config.tp_group.world_size
         if tp_size <= 1:
-            return SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF
+            return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
 
         activations_sharded = (
             _EXTRA_CTX.flash_comm_v1_enabled or self.moe_config.is_sequence_parallel or enable_sp_by_pass()
         )
         if activations_sharded and self.weights_replicated:
-            return SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON
+            return SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON
         if activations_sharded:
-            return SharedExpertParallelMode.FLASHCOMM_ON_SEDP_OFF
+            return SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF
         if self.weights_replicated:
-            return SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_ON
-        return SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF
+            return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON
+        return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
 
     def _prepare_local_dp_input(
         self,
@@ -218,19 +218,19 @@ class AscendSharedExperts:
                 torch.npu.current_stream().wait_event(evt)
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
-            if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_ON:
+            if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON:
                 # Full activations + replicated weights: shard tokens locally,
                 # run the MLP, then gather its complete output.
                 maybe_wait_event(fused_moe_evts.before_routed_experts)
                 hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
-            elif mode is SharedExpertParallelMode.FLASHCOMM_ON_SEDP_OFF:
+            elif mode is SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF:
                 # TP-sharded weights need the full activation slice. Gather the
                 # FlashComm shard before the MLP and reduce-scatter afterwards.
                 maybe_wait_event(fused_moe_evts.before_routed_experts)
                 hidden_states = self._prepare_flashcomm_tp_input(hidden_states)
             elif mode not in {
-                SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON,
-                SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF,
+                SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON,
+                SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF,
             }:
                 raise AssertionError(f"Unsupported shared expert mode: {mode}")
 
@@ -330,14 +330,14 @@ class AscendSharedExperts:
         if self.multistream_overlap:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
-        if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_ON:
+        if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON:
             assert local_dp_metadata is not None
             shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
-        elif mode is SharedExpertParallelMode.FLASHCOMM_ON_SEDP_OFF:
+        elif mode is SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF:
             shared_out = self._finalize_flashcomm_tp_output(shared_out)
         elif mode not in {
-            SharedExpertParallelMode.FLASHCOMM_ON_SEDP_ON,
-            SharedExpertParallelMode.FLASHCOMM_OFF_SEDP_OFF,
+            SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON,
+            SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF,
         }:
             raise AssertionError(f"Unsupported shared expert mode: {mode}")
         return shared_out
