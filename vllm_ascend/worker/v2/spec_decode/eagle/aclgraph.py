@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -26,7 +26,11 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
+from vllm_ascend.worker.v2.aclgraph_utils import (
+    _get_graph_update_backend,
+    collect_sorted_captured_token_sizes,
+    model_capture_wrapper,
+)
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -137,14 +141,17 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
-        with set_forward_context(
-            self.speculator.model_state.attn_metadata,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=desc.cg_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
-            batch_descriptor=None,  # Full graph model don't need batch_descriptor
-            slot_mapping=None,
+        with (
+            set_current_vllm_config(self.vllm_config),
+            set_forward_context(
+                self.speculator.model_state.attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=desc.cg_mode,
+                num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=None,  # Full graph model don't need batch_descriptor
+                slot_mapping=None,
+            ),
         ):
             # decide to update draft graph params
             _EXTRA_CTX.is_draft_model = True
@@ -153,9 +160,10 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
 
             forward_context = get_forward_context()
+            attn_backend = _get_graph_update_backend(self.speculator.attn_groups)
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
-                list(self.speculator.attn_backends.values())[0],
+                attn_backend,
                 self.update_stream,
                 forward_context,
                 num_tokens,
