@@ -114,10 +114,10 @@ class MoECommMethod(ABC):
         hidden_states = self.prepare_finalize.finalize(hidden_states, reduce_results, padded_hidden_states_shape)
         return hidden_states
 
-    def fused_experts(
-        self,
-        fused_experts_input: MoEFusedExpertsInput,
-    ):
+    def fused_experts(self, fused_experts_input: MoEFusedExpertsInput):
+        return self.fused_experts_with_stream(fused_experts_input=fused_experts_input)
+
+    def fused_experts_with_stream(self, fused_experts_input: MoEFusedExpertsInput, maybe_current_stream=None):
         # Check constraints
         assert fused_experts_input.hidden_states.dtype in [
             torch.float32,
@@ -131,7 +131,10 @@ class MoECommMethod(ABC):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
-        before_dispatch_evt = torch.npu.current_stream().record_event()
+        current_stream = maybe_current_stream
+        if current_stream is None:
+            current_stream = torch.npu.current_stream()
+        before_dispatch_evt = current_stream.record_event()
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
@@ -144,9 +147,11 @@ class MoECommMethod(ABC):
             moe_config=self.moe_config,
         )
 
+        if hasattr(self, "_apply_mlp_with_stream"):
+            mlp_output, before_gmm2_evt = self._apply_mlp_with_stream(mlp_compute_input, maybe_current_stream)  # type: ignore
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
-        before_combine_evt = torch.npu.current_stream().record_event()
+        before_combine_evt = current_stream.record_event()
         routed_out = self.token_dispatcher.token_combine(
             hidden_states=mlp_output,
             combine_metadata=token_dispatch_output.combine_metadata,
@@ -163,6 +168,9 @@ class MoECommMethod(ABC):
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+    def _apply_mlp_with_stream(self, mlp_compute_input: MoEMlpComputeInput, maybe_current_stream=None) -> torch.Tensor:
+        return unified_apply_mlp(mlp_compute_input=mlp_compute_input, s=maybe_current_stream)
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:
