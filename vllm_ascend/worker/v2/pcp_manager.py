@@ -52,13 +52,6 @@ class AscendPCPManager(PCPManager):
         if vllm_config.lora_config is not None:
             raise NotImplementedError("Ascend MRV2 PCP does not support LoRA yet.")
 
-        if not model_config.use_mla:
-            text_config = model_config.hf_text_config
-            if text_config.num_attention_heads <= text_config.num_key_value_heads:
-                raise NotImplementedError(
-                    "Ascend MRV2 GQA PCP requires num_attention_heads to be greater than num_key_value_heads."
-                )
-
     def __init__(
         self,
         pcp_world_size: int,
