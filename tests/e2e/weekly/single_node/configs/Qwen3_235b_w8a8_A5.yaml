@@ -1,51 +1,27 @@
-# ==========================================
 # Shared Configurations
 # ==========================================
 
 _envs: &envs
-  TASK_QUEUE_ENABLE: "1"
-  VLLM_USE_V1: "1"
-  HCCL_OP_EXPANSION_MODE: "AIV"
-  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "1024"
   OMP_PROC_BIND: "false"
-  OMP_NUM_THREADS: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_USE_V1: "1"
 
 
 _server_cmd: &server_cmd
   - "--async-scheduling"
-  - "--tensor-parallel-size"
-  - "2"
-  - "--data-parallel-size"
-  - "4"
-  - "--data-parallel-size-local"
-  - "4"
-  - "--data-parallel-start-rank"
-  - "0"
-  - "--data-parallel-rpc-port"
-  - "2345"
-  - "--max-num-seqs"
-  - "40"
-  - "--max-model-len"
-  - "40960"
-  - "--max-num-batched-tokens"
-  - "16384"
-  - "--gpu-memory-utilization"
-  - "0.9"
-  - "--enable-expert-parallel "
+  - "--enable-expert-parallel"
   - "--port"
   - "$SERVER_PORT"
-  - "--no-enable-prefix-caching"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"
-  - "--host"
-  - "0.0.0.0"
-  - "--data-parallel-address"
-  - "0.0.0.0"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
-_benchmarks: &benchmarks
+_benchmarks_gpqa: &benchmarks_gpqa
   acc:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
@@ -59,6 +35,20 @@ _benchmarks: &benchmarks
     top_p: 0.95
     top_k: 20
     ignore_eos: false
+_benchmarks_perf1: &benchmarks_perf1
+  acc:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 22.5957 #原基线是和关闭pcp/dcp启动服务化后启动服务话做对比的
+    threshold: 0.95
+    temperature: 0
+    ignore_eos: True
 
 # ==========================================
 # ACTUAL TEST CASES
@@ -66,13 +56,66 @@ _benchmarks: &benchmarks
 
 test_cases:
   - name: "vllm_Qwen3_235B_Accuracy_FULL_Graph_GPQA"
-    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
     envs:
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_NUM_THREADS: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--host"
+      - "0.0.0.0"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--data-parallel-size"
+      - "2"
+      - "--data-parallel-size-local"
+      - "2"
+      - "--data-parallel-start-rank"
+      - "0"
+      - "--data-parallel-address"
+      - "0.0.0.0"
+      - "--data-parallel-rpc-port"
+      - "2345"
+      - "--max-num-seqs"
+      - "40"
+      - "--max-model-len"
+      - "40960"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--enable-prefix-caching"
     benchmarks:
-      <<: *benchmarks
-
+      <<: *benchmarks_gpqa
+  - name: "longSeq_pcpdcp_performance_0004"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
+    envs:
+      ASCEND_LAUNCH_BLOCKING: "0"
+      OMP_NUM_THREADS: "100"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--tensor-parallel-size"
+      - "4"
+      - "--data-parallel-size"
+      - "2"
+      - "--data-parallel-size-local"
+      - "2"
+      - "--data-parallel-start-rank"
+      - "0"
+      - "--data-parallel-address"
+      - "0.0.0.0"
+      - "--data-parallel-rpc-port"
+      - "2345"
+      - "--max-num-seqs"
+      - "4"
+      - "--max-model-len"
+      - "16384"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--no-enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3_235B_A22B_EAGLE3","enforce_eager":true,"num_speculative_tokens":1}'
+    benchmarks:
+      <<: *benchmarks_perf1
