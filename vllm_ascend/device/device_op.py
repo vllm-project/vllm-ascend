@@ -224,6 +224,25 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
+        # The custom Weight-NZ V2 bridge is not replay-safe for packed W8A8
+        # weights on A2. Use torch-npu's V2 binding for that layout; it exposes
+        # the same TensorList ABI and keeps the fused kernel in ACLGraph.
+        if (
+            get_ascend_device_type() == AscendDeviceType.A2
+            and act_quant_type == torch.int8
+            and weight.dtype == torch.int8
+            and swiglu_limit == 0.0
+        ):
+            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                x=x,
+                weight=[weight],
+                weight_scale=[weight_scale],
+                x_scale=x_scale,
+                group_list=group_list,
+                weight_assist_matrix=[bias] if bias is not None else None,
+                group_list_type=group_list_type,
+            )
+
         return torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
             x=x,
             weight=[weight],

@@ -4,6 +4,60 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.utils import AscendDeviceType
+
+
+def _packed_w8a8_gmm_swiglu_kwargs(*, swiglu_limit=0.0):
+    return {
+        "x": torch.zeros(2, 4, dtype=torch.int8),
+        "weight": torch.zeros(3, 4, 8, dtype=torch.int8),
+        "group_list": torch.tensor([1, 1, 2], dtype=torch.int64),
+        "group_list_type": 0,
+        "weight_scale": torch.ones(3, 8),
+        "x_scale": torch.ones(2),
+        "act_quant_type": torch.int8,
+        "swiglu_limit": swiglu_limit,
+    }
+
+
+def test_a2_packed_w8a8_gmm_swiglu_uses_torch_npu_v2():
+    expected = (torch.zeros(2, 4, dtype=torch.int8), torch.ones(2))
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        ),
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
+            return_value=expected,
+        ) as system_v2,
+    ):
+        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**_packed_w8a8_gmm_swiglu_kwargs())
+
+    assert output is expected
+    call_kwargs = system_v2.call_args.kwargs
+    assert len(call_kwargs["weight"]) == 1
+    assert len(call_kwargs["weight_scale"]) == 1
+    assert call_kwargs["group_list_type"] == 0
+
+
+def test_a2_packed_w8a8_with_swiglu_limit_uses_custom_v2():
+    expected = (torch.zeros(2, 4, dtype=torch.int8), torch.ones(2))
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        ),
+        mock.patch(
+            "vllm_ascend.device.device_op.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
+            return_value=expected,
+            create=True,
+        ) as custom_v2,
+    ):
+        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**_packed_w8a8_gmm_swiglu_kwargs(swiglu_limit=1.0))
+
+    assert output is expected
+    assert custom_v2.call_args.kwargs["swiglu_limit"] == 1.0
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
