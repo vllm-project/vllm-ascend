@@ -77,9 +77,10 @@
 #       and max uses the new "Beyond maximum" prefix. The supported vLLM
 #       Python tokenizer predates this 0731 prompt mapping.
 #    How:
-#       Monkey-patch the tokenizer wrapper to preserve low as the default
-#       no-prefix mode, and wrap render_message to prepend the official 0731
-#       high or max prompt before the first message in thinking mode.
+#       Monkey-patch tokenizer normalization so omitted options select
+#       thinking with high effort and compatibility aliases map to canonical
+#       low, high, or max. Wrap render_message to prepend the official 0731
+#       prompt before the first message in thinking mode.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50580
 #    Future Plan:

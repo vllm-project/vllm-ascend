@@ -50,6 +50,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend.patch.platform.patch_swa_inflight_free import _inflight as _swa_inflight
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -205,7 +206,6 @@ class RecomputeScheduler(Scheduler):
                 # they are all rejected.
                 and request.num_computed_tokens + 2 - request.num_output_placeholders
                 >= request.num_prompt_tokens + request.max_tokens
-                or request.num_computed_tokens >= self.max_model_len
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
@@ -993,8 +993,13 @@ class RecomputeScheduler(Scheduler):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
-            if request is not None:
+            if request is not None and hasattr(request, "num_in_flight_tokens"):
                 request.num_in_flight_tokens -= num_tokens_scheduled
+            remaining_inflight = _swa_inflight.get(req_id, 0) - num_tokens_scheduled
+            if remaining_inflight <= 0:
+                _swa_inflight.pop(req_id, None)
+            else:
+                _swa_inflight[req_id] = remaining_inflight
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
