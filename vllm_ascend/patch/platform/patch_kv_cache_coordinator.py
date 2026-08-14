@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -88,12 +89,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_in_flight_tokens: int | None = None,
         max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
+        num_prefill_lookahead: int = 0,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
         del pcp_world_size
         self.dcp_world_size = dcp_world_size
         self.scheduler_block_size = scheduler_block_size
+        # Mirrors upstream KVCacheCoordinator: the last num_reprefillable_tokens
+        # computed tokens can be re-prefilled by the multi-module MTP drafter, so
+        # cache_blocks must not cache them. Upstream PR vllm-project/vllm#50062.
+        self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
@@ -128,6 +134,20 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+
+        # Multi-module MTP with prefix caching requires the scheduler block to
+        # hold the whole prefill lookahead, mirroring the upstream coordinator
+        # contract from vllm-project/vllm#50062.
+        if (
+            enable_caching
+            and self.eagle_group_ids
+            and scheduler_block_size < num_prefill_lookahead
+        ):
+            raise ValueError(
+                "Multi-module MTP with prefix caching requires scheduler_block_size"
+                f" (={scheduler_block_size}) >= num_speculative_tokens"
+                f" (={num_prefill_lookahead})."
+            )
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
@@ -401,6 +421,7 @@ def get_kv_cache_coordinator(
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
     max_num_batched_tokens: int | None = None,
+    num_prefill_lookahead: int = 0,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
@@ -421,6 +442,7 @@ def get_kv_cache_coordinator(
             max_in_flight_tokens=token_budget,
             max_num_batched_tokens=token_budget,
             scheduler_block_size=scheduler_block_size,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
@@ -437,6 +459,11 @@ def get_kv_cache_coordinator(
         )
         orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
+        # Upstream vLLM main (after vllm-project/vllm#50062) passes
+        # num_prefill_lookahead to the coordinator; v0.27.1 has no such
+        # parameter, so only forward it on the main lane.
+        if not vllm_version_is("0.27.1"):
+            orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
     return AscendHybridKVCacheCoordinator(
@@ -453,6 +480,7 @@ def get_kv_cache_coordinator(
         max_in_flight_tokens=token_budget,
         max_num_batched_tokens=token_budget,
         scheduler_block_size=scheduler_block_size,
+        num_prefill_lookahead=num_prefill_lookahead,
     )
 
 
