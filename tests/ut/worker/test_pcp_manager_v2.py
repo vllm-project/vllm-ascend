@@ -20,7 +20,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager, maybe_build_pcp_manager
 
@@ -233,3 +235,57 @@ def test_npu_model_runner_uses_ascend_pcp_manager():
     assert manager.dcp_rank == 0
     assert manager.cp_interleave == 4
     validate_config.assert_called_once_with(vllm_config, False)
+
+
+def _make_pcp_config(
+    *,
+    speculative_config=None,
+    cudagraph_mode=CUDAGraphMode.NONE,
+    sparse_mla: bool = False,
+):
+    hf_text_config = SimpleNamespace()
+    if sparse_mla:
+        hf_text_config.index_topk = 2048
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(
+            is_encoder_decoder=False,
+            hf_text_config=hf_text_config,
+        ),
+        lora_config=None,
+        speculative_config=speculative_config,
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+    )
+
+
+def test_ascend_pcp_validation_accepts_dense_eager_mode():
+    AscendPCPManager.validate_config(_make_pcp_config(), supports_mm_inputs=False)
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            _make_pcp_config(speculative_config=SimpleNamespace()),
+            "does not support speculative decoding",
+        ),
+        (
+            _make_pcp_config(cudagraph_mode=CUDAGraphMode.FULL),
+            "supports PIECEWISE ACL graphs only",
+        ),
+        (
+            _make_pcp_config(
+                sparse_mla=True,
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            ),
+            "sparse MLA PCP does not support ACL graphs",
+        ),
+    ],
+)
+def test_ascend_pcp_validation_rejects_unsupported_runtime_modes(config, message):
+    with pytest.raises(NotImplementedError, match=message):
+        AscendPCPManager.validate_config(config, supports_mm_inputs=False)

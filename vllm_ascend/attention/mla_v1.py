@@ -11,7 +11,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
 )
-from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import (
@@ -1925,10 +1924,11 @@ class AscendMLAPCPImpl(AscendMLAImpl):
         )
         # Remove the decoding area and flatten it.
         expanded_prefill_slots = rank_slot_mappings[:, num_decode_tokens:].flatten()
-        (gathered_kv, gathered_cos, gathered_sin), gathered_prefill_slots = _gather_prefill_cache_inputs(
-            (local_prefill_kv, padded_cos, padded_sin),
-            expanded_prefill_slots,
-            num_decode_tokens=0,
+        # The PCP manager already expands the prefill slot mapping in rank
+        # order. Gather only the padded prefill values here; decode cache
+        # writes are handled separately and must not be duplicated.
+        gathered_kv, gathered_cos, gathered_sin = (
+            pcp_group.all_gather(tensor.contiguous(), dim=0) for tensor in (local_prefill_kv, padded_cos, padded_sin)
         )
         # TODO Due to the npu_kv_rmsnorm_rope_cache fusion operator, the RMSNorm rope of the KV layer
         # involves repeated calculations, leaving room for optimization.
@@ -1937,7 +1937,7 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             gathered_cos,
             gathered_sin,
             kv_cache,
-            gathered_prefill_slots,
+            expanded_prefill_slots,
         )
         prefill_k_pe = gathered_k_pe[attn_metadata.pcp_local_prefill_start : attn_metadata.pcp_local_prefill_end]
         prefill_k_c_normed = gathered_k_c_normed[

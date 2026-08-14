@@ -18,7 +18,7 @@
 #
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
@@ -51,6 +51,17 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("Ascend MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("Ascend MRV2 PCP does not support LoRA yet.")
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError("Ascend MRV2 PCP does not support speculative decoding yet.")
+
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        if is_sparse_mla and cudagraph_mode != CUDAGraphMode.NONE:
+            raise NotImplementedError(
+                "Ascend MRV2 sparse MLA PCP does not support ACL graphs yet. Set -cc.cudagraph_mode=NONE."
+            )
+        if cudagraph_mode.has_full_cudagraphs():
+            raise NotImplementedError("Ascend MRV2 PCP supports PIECEWISE ACL graphs only.")
 
     def __init__(
         self,

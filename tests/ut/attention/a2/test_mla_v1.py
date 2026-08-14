@@ -46,9 +46,18 @@ class TestAscendMLABackend(TestBase):
         )
         self.mla_config_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_dcp
+        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
 
+        self.enable_dcp = enable_dcp
+        self.enable_pcp = enable_pcp
         enable_dcp.cache_clear()
+        enable_pcp.cache_clear()
+
+    def tearDown(self):
+        self.enable_dcp.cache_clear()
+        self.enable_pcp.cache_clear()
+        self.mla_config_patcher.stop()
+        self.utils_patcher.stop()
 
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
@@ -56,6 +65,7 @@ class TestAscendMLABackend(TestBase):
     def test_get_builder_cls(self):
         self.assertEqual(AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder)
         self.mock_parallel_config.prefill_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
         self.assertIs(AscendMLABackend.get_builder_cls(), AscendMLAPCPMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
@@ -65,6 +75,7 @@ class TestAscendMLABackend(TestBase):
     def test_get_impl_cls(self):
         self.assertEqual(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
         self.mock_parallel_config.prefill_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
         self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAPCPImpl)
 
     def test_get_supported_kernel_block_sizes(self):
@@ -87,6 +98,7 @@ class TestAscendMLABackend(TestBase):
     def test_pcp_and_dcp_are_rejected(self, mock_enable_dcp):
         mock_enable_dcp.return_value = True
         self.mock_parallel_config.prefill_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
 
         with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
             AscendMLABackend.get_builder_cls()
@@ -141,24 +153,20 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
 def test_mla_pcp_prefill_pads_and_gathers_cache_inputs() -> None:
     impl = AscendMLAPCPImpl.__new__(AscendMLAPCPImpl)
-    captured: dict[str, torch.Tensor] = {}
+    captured: dict[str, object] = {}
 
-    def fake_gather(tensors, slot_mapping, num_decode_tokens):
-        assert num_decode_tokens == 0
-        captured["local_kv"] = tensors[0]
-        captured["local_cos"] = tensors[1]
-        captured["slots"] = slot_mapping
-        return (
-            tuple(torch.cat((tensor + 100, tensor), dim=0) for tensor in tensors),
-            slot_mapping,
-        )
+    def fake_all_gather(tensor, dim):
+        assert dim == 0
+        assert tensor.is_contiguous()
+        captured.setdefault("gather_inputs", []).append(tensor)
+        return torch.cat((tensor + 100, tensor), dim=0)
 
     def fake_exec_kv_prefill(self, kv, cos, sin, kv_cache, slots):
         captured["gathered_kv"] = kv
         captured["cache_slots"] = slots
         return cos, kv[:, :2]
 
-    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1, all_gather=fake_all_gather)
     metadata = _make_pcp_metadata(num_actual_tokens=3, num_decode_tokens=1)
     metadata.slot_mapping = torch.tensor(
         [5, 10, 11, -1, -1, 20, 21, -1],
@@ -176,10 +184,6 @@ def test_mla_pcp_prefill_pads_and_gathers_cache_inputs() -> None:
             "vllm_ascend.attention.mla_v1.get_pcp_group",
             return_value=pcp_group,
         ),
-        patch(
-            "vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs",
-            side_effect=fake_gather,
-        ),
         patch.object(
             AscendMLAImpl,
             "exec_kv_prefill",
@@ -196,10 +200,12 @@ def test_mla_pcp_prefill_pads_and_gathers_cache_inputs() -> None:
         )
 
     expected_slots = torch.tensor([10, 11, -1, 20, 21, -1])
-    torch.testing.assert_close(captured["slots"], expected_slots)
-    torch.testing.assert_close(captured["local_kv"][:2], kv)
-    torch.testing.assert_close(captured["local_kv"][2], torch.zeros(3))
-    torch.testing.assert_close(captured["local_cos"][-1], torch.zeros(1))
+    gather_inputs = captured["gather_inputs"]
+    assert isinstance(gather_inputs, list)
+    assert len(gather_inputs) == 3
+    torch.testing.assert_close(gather_inputs[0][:2], kv)
+    torch.testing.assert_close(gather_inputs[0][2], torch.zeros(3))
+    torch.testing.assert_close(gather_inputs[1][-1], torch.zeros(1))
     assert captured["gathered_kv"].shape[0] == 6
     torch.testing.assert_close(captured["cache_slots"], expected_slots)
     torch.testing.assert_close(k_pe, cos)
