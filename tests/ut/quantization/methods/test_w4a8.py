@@ -25,7 +25,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()
-        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0}, get_name=ASCEND_QUANTIZATION_METHOD)
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0})
+        mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
         mock_vllm_config.parallel_config = Mock(enable_expert_parallel=True, enable_eplb=False)
         mock_vllm_config.use_v2_model_runner = False
         mock_vllm_config.scheduler_config = Mock(
@@ -47,6 +48,9 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             AscendW4A8DynamicFusedMoEMethod()
 
         # test init rejects tp>16 when use modelslim weights
+        mock_vllm_config.use_v2_model_runner = True
+        mock_vllm_config.quant_config = Mock(quant_description={})
+        mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
         mock_vllm_config.parallel_config = Mock(enable_expert_parallel=False)
         mock_tp_size.return_value = 32
         with self.assertRaisesRegex(ValueError, "tp>16"):

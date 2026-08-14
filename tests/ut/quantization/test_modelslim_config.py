@@ -177,9 +177,13 @@ class TestAscendModelSlimConfig(TestBase):
         mock_scheme = MagicMock()
 
         with (
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
-            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
+            ),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
                 return_value=MagicMock(),

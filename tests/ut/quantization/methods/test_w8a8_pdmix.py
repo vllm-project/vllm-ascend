@@ -4,16 +4,10 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
-from vllm_ascend.quantization.methods import (
-    AscendW8A8LinearMethod,
-    AscendW8A8PDMixLinearMethod,
-)
+from vllm_ascend.quantization.methods import AscendW8A8PDMixLinearMethod
 
 
 class TestAscendW8A8PDMixLinearScheme(TestBase):
-    def setUp(self):
-        self.method = AscendW8A8LinearMethod()
-
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8LinearMethod")
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_pdmix.get_current_vllm_config")

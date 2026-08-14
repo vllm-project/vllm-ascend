@@ -12,7 +12,8 @@ class TestAscendW8A8LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.get_current_vllm_config")
     def setUp(self, get_current_vllm_config):
         mock_vllm_config = Mock()
-        mock_vllm_config.quant_config = Mock(get_name=ASCEND_QUANTIZATION_METHOD)
+        mock_vllm_config.quant_config = Mock()
+        mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
         get_current_vllm_config.return_value = mock_vllm_config
         self.method = AscendW8A8LinearMethod()
 
@@ -160,7 +161,8 @@ class TestAscendW8A8LinearMethodWithNpu(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.get_current_vllm_config")
     def setUp(self, get_current_vllm_config):
         mock_vllm_config = Mock()
-        mock_vllm_config.quant_config = Mock(get_name=ASCEND_QUANTIZATION_METHOD)
+        mock_vllm_config.quant_config = Mock()
+        mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
         get_current_vllm_config.return_value = mock_vllm_config
         self.method = AscendW8A8LinearMethod()
         self.mock_get_config = patch("vllm_ascend.utils.get_ascend_config")
