@@ -926,7 +926,7 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     shared_experts.part2.assert_called_once_with(hidden_states, part1_out)
 
 
-def test_a2_w8a8_multistream_waits_for_routed_gmm1_before_shared_gate(monkeypatch):
+def test_a2_w8a8_multistream_uses_default_stream(monkeypatch):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
         gate_up_proj=SimpleNamespace(
@@ -965,8 +965,10 @@ def test_a2_w8a8_multistream_waits_for_routed_gmm1_before_shared_gate(monkeypatc
         before_combine=before_combine,
     )
 
-    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *args, **kwargs: nullcontext())
-    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
+    stream_switch = MagicMock(return_value=nullcontext())
+    shared_expert_stream = MagicMock()
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", stream_switch)
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", lambda: shared_expert_stream)
     monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: current_stream)
     monkeypatch.setattr(shared_experts_module, "get_ascend_device_type", lambda: AscendDeviceType.A2)
     monkeypatch.setattr(
@@ -997,6 +999,8 @@ def test_a2_w8a8_multistream_waits_for_routed_gmm1_before_shared_gate(monkeypatc
         output = shared_experts.forward(hidden_states, events)
 
     assert output is shared_out
+    stream_switch.assert_called_once_with(shared_expert_stream, enabled=False)
+    current_stream.wait_stream.assert_not_called()
     assert current_stream.wait_event.call_args_list == [
         call(before_routed_experts),
         call(before_gmm2),
