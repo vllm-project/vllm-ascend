@@ -123,11 +123,17 @@ def test_grouped_matmul_swiglu_quant_v2_multi_tensor():
     x_scale = torch.rand(M) * 0.9 + 0.1  # uniform(0.1, 1.0)
     x_scale = x_scale.to(torch.float32)
 
-    group_list = torch.tensor([2048, 4096, 6144, 8192], dtype=torch.int64)
+    group_sizes = torch.tensor([2048, 2048, 2048, 2048], dtype=torch.int64)
+    group_list = group_sizes.cumsum(dim=0)
 
     output_cpu, output_scale_cpu = process_groups(x, weight, weight_scale, x_scale, group_list)
     output_npu, output_scale_npu = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
-        x.npu(), weight_nz_npu, weight_scale_npu, x_scale.npu(), group_list.npu()
+        x.npu(),
+        weight_nz_npu,
+        weight_scale_npu,
+        x_scale.npu(),
+        group_sizes.npu(),
+        group_list_type=1,
     )
     output_npu_valid = output_npu[: group_list[-1], :]
     output_scale_npu_valid = output_scale_npu[: group_list[-1]]
