@@ -33,6 +33,17 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         mock_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         self.addCleanup(self.ascend_config_patcher.stop)
 
+        self.device_type_patcher = patch("vllm_ascend.worker.worker.get_ascend_device_type")
+        mock_get_device_type = self.device_type_patcher.start()
+        from vllm_ascend.worker.worker import AscendDeviceType
+
+        mock_get_device_type.return_value = AscendDeviceType.A2
+        self.addCleanup(self.device_type_patcher.stop)
+
+        self.warm_up_atb_patcher = patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
+        self.warm_up_atb_patcher.start()
+        self.addCleanup(self.warm_up_atb_patcher.stop)
+
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #

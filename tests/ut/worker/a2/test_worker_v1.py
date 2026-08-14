@@ -748,8 +748,12 @@ class TestNPUWorker(TestBase):
     @patch("torch_npu.npu.memory_stats")
     @patch("torch_npu.npu.mem_get_info")
     @patch("vllm_ascend.worker.worker.logger")
+    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
     def test_determine_available_memory_normal_case(
         self,
+        mock_warm_up_atb,
+        mock_get_ascend_device_type,
         mock_logger,
         mock_torch_mem_get_info,
         mock_torch_memory_stats,
@@ -759,7 +763,9 @@ class TestNPUWorker(TestBase):
         mock_get_ascend_config,
     ):
         """Test determine_available_memory normal case (no non-torch memory allocation)"""
-        from vllm_ascend.worker.worker import NPUWorker
+        from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
+
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A2
 
         # Mock memory_profiling context manager
         mock_profile_result = MagicMock()
@@ -802,6 +808,7 @@ class TestNPUWorker(TestBase):
             result = worker.determine_available_memory()
 
             worker.model_runner.profile_run.assert_called_once()
+            mock_warm_up_atb.assert_called_once()
 
             # non_kv_cache_memory = non_torch_increase(1000) + torch_peak_increase(2000-0) + weights_memory(500) = 3500
             # result = requested_memory(8000) - non_kv_cache_memory(3500) = 4500
@@ -814,8 +821,12 @@ class TestNPUWorker(TestBase):
     @patch("torch.npu.empty_cache")
     @patch("torch_npu.npu.memory_stats")
     @patch("torch_npu.npu.mem_get_info")
+    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
     def test_determine_available_memory_with_non_torch_allocations(
         self,
+        mock_warm_up_atb,
+        mock_get_ascend_device_type,
         mock_torch_mem_get_info,
         mock_torch_memory_stats,
         mock_torch_empty_cache,
@@ -824,7 +835,9 @@ class TestNPUWorker(TestBase):
         mock_get_ascend_config,
     ):
         """Test determine_available_memory with significant non-torch memory allocation"""
-        from vllm_ascend.worker.worker import NPUWorker
+        from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
+
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A2
 
         # Mock memory_profiling context manager with large non-torch allocation
         mock_profile_result = MagicMock()
@@ -873,11 +886,21 @@ class TestNPUWorker(TestBase):
     @patch("torch.npu.mem_get_info")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
+    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
     def test_determine_available_memory_memory_profiling_error(
-        self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
+        self,
+        mock_warm_up_atb,
+        mock_get_ascend_device_type,
+        mock_torch_empty_cache,
+        mock_torch_reset_peak_memory_stats,
+        mock_torch_mem_get_info,
+        mock_memory_profiling,
     ):
         """Test determine_available_memory throws exception on memory profiling error"""
-        from vllm_ascend.worker.worker import NPUWorker
+        from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
+
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A2
 
         # Mock memory_profiling where free memory after profile > init free memory (error case)
         mock_profile_result = MagicMock()
@@ -920,8 +943,12 @@ class TestNPUWorker(TestBase):
     @patch("torch.npu.empty_cache")
     @patch("torch_npu.npu.memory_stats")
     @patch("torch_npu.npu.mem_get_info")
+    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
     def test_determine_available_memory_negative_result(
         self,
+        mock_warm_up_atb,
+        mock_get_ascend_device_type,
         mock_torch_mem_get_info,
         mock_torch_memory_stats,
         mock_torch_empty_cache,
@@ -930,7 +957,9 @@ class TestNPUWorker(TestBase):
         mock_get_ascend_config,
     ):
         """Test determine_available_memory returns 0 when result is negative"""
-        from vllm_ascend.worker.worker import NPUWorker
+        from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
+
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A2
 
         # Mock memory_profiling where non_kv_cache_memory > requested_memory
         mock_profile_result = MagicMock()
@@ -1309,7 +1338,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(mock_logger.info.call_count, 4)
 
             # Verify atb warm up
-            mock_warm_up_atb.assert_called_once()
+            mock_warm_up_atb.assert_not_called()
             mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
@@ -1371,7 +1400,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner.capture_model.assert_called_once()
 
             # Verify atb warm up
-            mock_warm_up_atb.assert_called_once()
+            mock_warm_up_atb.assert_not_called()
             mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
