@@ -1,4 +1,5 @@
 from vllm.triton_utils import triton
+from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker.gpu import structured_outputs
 from vllm.v1.worker.gpu.metrics import logits as metrics_logits
 from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, penalties, prompt_logprob, sampler, states
@@ -38,8 +39,4 @@ rejection_sampler.rejection_sample = npu_rejection_sample
 dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
 metrics_logits.libdevice = triton.language.extra.cann.libdevice
 # triton ops that filed in ops/triton
-# Both the main sampling path (Sampler.sample) and the spec-decode draft
-# verification path (SamplingState.apply_top_k_top_p, called by
-# RejectionSampler._verify) must route top-k/top-p to the Ascend kernel.
-sampler.apply_top_k_top_p = apply_top_k_top_p_triton
-states.apply_top_k_top_p = apply_top_k_top_p_triton
+topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_triton
