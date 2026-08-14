@@ -74,6 +74,9 @@ class DCPMetadataBuilderMixin:
         end: int | None = None,
         device: torch.device | None = None,
     ) -> torch.Tensor:
+        local_seq_lens = getattr(common_attn_metadata, "dcp_local_seq_lens", None)
+        if local_seq_lens is not None:
+            return local_seq_lens[start:end].to(dtype=torch.int32, device=device)
         return self._get_dcp_context_lens(
             common_attn_metadata,
             start=start,
@@ -132,6 +135,29 @@ class DCPImplMixin:
                 dcp_size=self.dcp_size,
                 dcp_device_group=self.dcp_device_group,
             ),
+            dcp_size=self.dcp_size,
+        )
+
+    def _merge_dcp_replicated_attention_output(
+        self,
+        attn_output: torch.Tensor,
+        softmax_lse: torch.Tensor,
+        head_size: int,
+    ) -> torch.Tensor:
+        """Merge DCP partials while preserving every local query head.
+
+        PCP+DCP replicates a query head across KV shards, so the DCP-only
+        all-to-all/head-scatter layout is not applicable. Gather each rank's
+        output and LSE in rank order, then reuse the NPU LSE-aware update.
+        """
+        attn_out_lse = torch.cat(
+            (attn_output.to(torch.float32), softmax_lse.to(torch.float32)),
+            dim=-1,
+        )
+        attn_out_lse = self._dcp_all_gather(attn_out_lse, dim=1)
+        return _npu_attention_update(
+            head_size,
+            attn_out_lse,
             dcp_size=self.dcp_size,
         )
 

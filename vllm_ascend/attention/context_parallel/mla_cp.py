@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import VllmConfig
+from vllm.distributed import get_pcp_group, get_tp_group
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -16,6 +17,9 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
+    AscendMLAPCPImpl,
+    AscendMLAPCPMetadata,
+    AscendMLAPCPMetadataBuilder,
 )
 # isort: on
 
@@ -23,6 +27,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
+    get_dcp_local_seq_lens,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
@@ -88,10 +93,21 @@ class AscendMlaDCPMetadataBuilder(
         if chunked_context_metadata is None:
             return None
 
-        local_context_lens_allranks = self._get_dcp_context_lens(
-            common_attn_metadata,
-            start=self.num_decodes,
-        )
+        if common_attn_metadata.dcp_local_seq_lens is not None:
+            # MRV2 provides only the authoritative current-rank vector. The
+            # chunked context path also needs an all-rank matrix, derived from
+            # the rank-invariant global context lengths.
+            local_context_lens_allranks = get_dcp_local_seq_lens(
+                self.context_lens_cpu,
+                self.dcp_size,
+                self.cp_local_block_size,
+            )
+        else:
+            # Compatibility path for the legacy MRV1 DCP metadata schema.
+            local_context_lens_allranks = self._get_dcp_context_lens(
+                common_attn_metadata,
+                start=self.num_decodes,
+            )
         padded_local_context_lens_cpu = (
             cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
         )
@@ -146,17 +162,55 @@ class AscendMlaDCPMetadataBuilder(
     ) -> AscendMLADecodeMetadata:
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
         assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
-        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
-        if dcp_metadata.draft_cp_seq_len is not None:
+        dcp_metadata = common_attn_metadata.context_parallel_metadata
+        if dcp_metadata is not None and dcp_metadata.draft_cp_seq_len is not None:
             decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+        elif common_attn_metadata.dcp_local_seq_lens is not None:
+            # ``dcp_local_seq_lens`` is NPU-resident. FIA consumes a host list,
+            # so derive the same rank-local lengths from the already available
+            # CPU sequence lengths instead of synchronizing the device here.
+            decode_metadata.cp_seq_len = self._get_mrv2_dcp_rank_seq_lens()
         else:
             decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
                 common_attn_metadata,
                 end=self.num_decodes,
             ).tolist()
         decode_metadata.actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
-        decode_metadata.dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask
+        decode_metadata.dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask if dcp_metadata is not None else None
         return decode_metadata
+
+    def _get_mrv2_dcp_rank_seq_lens(self) -> list[int]:
+        local_seq_lens_allranks = get_dcp_local_seq_lens(
+            self.seq_lens[: self.num_decodes],
+            self.dcp_size,
+            self.cp_local_block_size,
+        )
+        return local_seq_lens_allranks[:, self.dcp_rank].tolist()
+
+
+class AscendMlaPCPDCPMetadataBuilder(
+    AscendMLAPCPMetadataBuilder,
+    AscendMlaDCPMetadataBuilder,
+):
+    """Compose PCP cache-write metadata with DCP attention metadata."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AscendMLAAttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendMLAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls or AscendMLAPCPMetadata,
+            supports_dcp_with_varlen,
+        )
 
 
 class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
@@ -164,6 +218,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    can_return_lse_for_decode = True
 
     @staticmethod
     def update_graph_params(
@@ -296,10 +352,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
-        if self.dcp_size > 1:
-            num_heads = self.num_heads * self.dcp_size
-        else:
-            num_heads = self.num_heads
+        # reorg_decode_q owns the topology-specific query layout. Derive the
+        # kernel head count from that tensor instead of assuming all DCP ranks
+        # contributed distinct query heads.
+        num_heads = q_nope.shape[1]
         # Use DCP-local computed token counts to build sequence lengths and masks.
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
@@ -527,3 +583,37 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert reorganized_k_pe.shape[0] == sum_seq_len
         assert max_seq_len_check == max_seq_len
         return reorganized_kv_c_normed, reorganized_k_pe
+
+
+class AscendMlaPCPDCPImpl(AscendMLAPCPImpl, AscendMlaDCPImpl):
+    """Dense eager MLA policy for the two upstream PCP+DCP topologies."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.pcp_size = get_pcp_group().world_size
+        self.tp_group = get_tp_group()
+
+    def reorg_decode_q(self, decode_q_nope, decode_q_pe):
+        if self.dcp_size == self.pcp_size:
+            return decode_q_nope, decode_q_pe
+        split_sizes = (decode_q_nope.shape[-1], decode_q_pe.shape[-1])
+        fused_q = torch.cat((decode_q_nope, decode_q_pe), dim=-1)
+        gathered_q = self.tp_group.all_gather(fused_q.contiguous(), dim=1)
+        return torch.split(gathered_q, split_sizes, dim=-1)
+
+    def _merge_dcp_attention_output(
+        self,
+        attn_output: torch.Tensor,
+        softmax_lse: torch.Tensor,
+        head_size: int,
+    ) -> torch.Tensor:
+        attn_output = self._merge_dcp_replicated_attention_output(
+            attn_output,
+            softmax_lse,
+            head_size,
+        )
+        if self.dcp_size > self.pcp_size:
+            tp_rank = self.tp_group.rank_in_group
+            head_start = tp_rank * self.num_heads
+            attn_output = attn_output[:, head_start : head_start + self.num_heads]
+        return attn_output

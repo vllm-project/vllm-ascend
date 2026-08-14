@@ -227,6 +227,7 @@ def build_attn_metadata(
             seq_lens_cpu=seq_lens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
+            dcp_local_seq_lens=(dcp_local_seq_lens[:num_reqs] if dcp_local_seq_lens is not None else None),
             num_reqs=num_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,

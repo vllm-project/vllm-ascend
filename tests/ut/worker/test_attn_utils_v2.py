@@ -328,3 +328,39 @@ def test_build_attn_metadata_propagates_prefill_state():
     )
 
     assert metadata["layer.0"] is is_prefilling
+
+
+class _DcpLocalSeqLensBuilder:
+    def build(self, common_prefix_len, common_attn_metadata):
+        assert common_prefix_len == 0
+        return common_attn_metadata.dcp_local_seq_lens
+
+
+def test_build_attn_metadata_propagates_dcp_local_seq_lens():
+    attn_group = SimpleNamespace(
+        layer_names=["layer.0"],
+        get_metadata_builder=lambda _: _DcpLocalSeqLensBuilder(),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
+    )
+    dcp_local_seq_lens = torch.tensor([9, 5, 0], dtype=torch.int32)
+
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[[attn_group]],
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([17, 10], dtype=torch.int32),
+        max_seq_len=17,
+        block_tables=(torch.zeros((2, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(2, dtype=torch.int64),),
+        kv_cache_config=kv_cache_config,
+        dcp_local_seq_lens=dcp_local_seq_lens,
+        seq_lens_np=np.array([17, 10], dtype=np.int32),
+        positions=torch.tensor([16, 9], dtype=torch.int64),
+    )
+
+    assert torch.equal(metadata["layer.0"], dcp_local_seq_lens[:2])

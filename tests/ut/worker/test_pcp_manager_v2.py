@@ -24,7 +24,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager, maybe_build_pcp_manager
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -192,49 +192,9 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
 
 
 def test_npu_model_runner_uses_ascend_pcp_manager():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=4,
-        ),
-        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
-    )
-    pcp_group = SimpleNamespace(rank_in_group=1)
-    dcp_group = SimpleNamespace(rank_in_group=0)
-    req_states = MagicMock()
     runner = NPUModelRunner.__new__(NPUModelRunner)
 
     assert runner.pcp_manager_cls is AscendPCPManager
-
-    with (
-        patch.object(PCPManager, "validate_config") as validate_config,
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.get_pcp_group",
-            return_value=pcp_group,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.get_dcp_group",
-            return_value=dcp_group,
-        ),
-    ):
-        manager = maybe_build_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=req_states,
-            block_tables=None,
-            cls=runner.pcp_manager_cls,
-        )
-
-    assert isinstance(manager, AscendPCPManager)
-    assert manager.vllm_config is None
-    assert manager.pcp_world_size == 2
-    assert manager.pcp_rank == 1
-    assert manager.dcp_world_size == 2
-    assert manager.dcp_rank == 0
-    assert manager.cp_interleave == 4
-    validate_config.assert_called_once_with(vllm_config, False)
 
 
 def test_npu_model_runner_upgrades_vllm_027_base_pcp_manager():
@@ -272,6 +232,10 @@ def _make_pcp_config(
     speculative_config=None,
     cudagraph_mode=CUDAGraphMode.NONE,
     sparse_mla: bool = False,
+    tp_size: int = 1,
+    dcp_size: int = 1,
+    use_mla: bool = True,
+    dcp_comm_backend: str = "ag_rs",
 ):
     hf_text_config = SimpleNamespace()
     if sparse_mla:
@@ -279,12 +243,15 @@ def _make_pcp_config(
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=2,
-            decode_context_parallel_size=1,
+            decode_context_parallel_size=dcp_size,
+            tensor_parallel_size=tp_size,
             pipeline_parallel_size=1,
+            dcp_comm_backend=dcp_comm_backend,
         ),
         model_config=SimpleNamespace(
             is_encoder_decoder=False,
             hf_text_config=hf_text_config,
+            use_mla=use_mla,
         ),
         lora_config=None,
         speculative_config=speculative_config,
@@ -296,6 +263,14 @@ def test_ascend_pcp_validation_accepts_dense_eager_mode():
     AscendPCPManager.validate_config(_make_pcp_config(), supports_mm_inputs=False)
 
 
+@pytest.mark.parametrize(("tp_size", "dcp_size"), [(1, 2), (2, 4)])
+def test_ascend_pcp_validation_accepts_dense_eager_combined_topologies(tp_size, dcp_size):
+    AscendPCPManager.validate_config(
+        _make_pcp_config(tp_size=tp_size, dcp_size=dcp_size),
+        supports_mm_inputs=False,
+    )
+
+
 @pytest.mark.parametrize(
     ("config", "message"),
     [
@@ -305,14 +280,30 @@ def test_ascend_pcp_validation_accepts_dense_eager_mode():
         ),
         (
             _make_pcp_config(cudagraph_mode=CUDAGraphMode.FULL),
-            "supports PIECEWISE ACL graphs only",
+            "supports PIECEWISE",
         ),
         (
             _make_pcp_config(
                 sparse_mla=True,
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
             ),
-            "sparse MLA PCP does not support ACL graphs",
+            "sparse MLA PCP does not support",
+        ),
+        (
+            _make_pcp_config(tp_size=2, dcp_size=3),
+            r"requires DCP to equal PCP or TP \* PCP",
+        ),
+        (
+            _make_pcp_config(dcp_size=2, sparse_mla=True),
+            "supports dense MLA only",
+        ),
+        (
+            _make_pcp_config(dcp_size=2, cudagraph_mode=CUDAGraphMode.PIECEWISE),
+            "supports eager mode only",
+        ),
+        (
+            _make_pcp_config(dcp_size=2, dcp_comm_backend="a2a"),
+            "does not support the A2A DCP backend",
         ),
     ],
 )

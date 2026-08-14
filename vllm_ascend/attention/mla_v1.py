@@ -83,7 +83,9 @@ class AscendMLABackend(AttentionBackend):
         dcp_enabled = enable_dcp()
         pcp_enabled = enable_pcp()
         if dcp_enabled and pcp_enabled:
-            raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
+            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaPCPDCPMetadataBuilder
+
+            return AscendMlaPCPDCPMetadataBuilder
         if dcp_enabled:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
@@ -107,7 +109,9 @@ class AscendMLABackend(AttentionBackend):
         dcp_enabled = enable_dcp()
         pcp_enabled = enable_pcp()
         if dcp_enabled and pcp_enabled:
-            raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
+            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaPCPDCPImpl
+
+            return AscendMlaPCPDCPImpl
         if dcp_enabled:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 

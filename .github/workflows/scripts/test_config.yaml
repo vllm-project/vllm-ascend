@@ -810,6 +810,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 1790
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
   tests/e2e/pull_request/two_card/model_runner_v2/test_mla_pcp.py: 900
+  tests/e2e/pull_request/four_card/model_runner_v2/test_mla_pcp_dcp.py: 900
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520

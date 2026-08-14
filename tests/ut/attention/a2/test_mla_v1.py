@@ -95,15 +95,18 @@ class TestAscendMLABackend(TestBase):
         self.assertIsNotNone(impl_cls)
 
     @patch("vllm_ascend.attention.mla_v1.enable_dcp")
-    def test_pcp_and_dcp_are_rejected(self, mock_enable_dcp):
+    def test_pcp_and_dcp_select_combined_backend(self, mock_enable_dcp):
+        from vllm_ascend.attention.context_parallel.mla_cp import (
+            AscendMlaPCPDCPImpl,
+            AscendMlaPCPDCPMetadataBuilder,
+        )
+
         mock_enable_dcp.return_value = True
         self.mock_parallel_config.prefill_context_parallel_size = 2
         self.enable_pcp.cache_clear()
 
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_builder_cls()
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_impl_cls()
+        self.assertIs(AscendMLABackend.get_builder_cls(), AscendMlaPCPDCPMetadataBuilder)
+        self.assertIs(AscendMLABackend.get_impl_cls(), AscendMlaPCPDCPImpl)
 
 
 def _make_pcp_metadata(

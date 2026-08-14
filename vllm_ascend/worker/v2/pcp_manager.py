@@ -35,33 +35,28 @@ class AscendPCPManager(PCPManager):
         vllm_config: VllmConfig,
         supports_mm_inputs: bool,
     ) -> None:
-        """Validate the Ascend MRV2 MLA and GQA PCP implementations."""
+        """Validate Ascend MRV2 PCP and the supported PCP+DCP layouts."""
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
         if parallel_config.prefill_context_parallel_size <= 1:
             return
 
-        if parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
-        if parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError("Ascend MRV2 PCP does not support PP yet.")
-        if model_config.is_encoder_decoder:
-            raise NotImplementedError("Ascend MRV2 PCP does not support encoder-decoder models yet.")
-        if supports_mm_inputs:
-            raise NotImplementedError("Ascend MRV2 PCP does not support MM inputs yet.")
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("Ascend MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError("Ascend MRV2 PCP does not support speculative decoding yet.")
+        PCPManager.validate_config(vllm_config, supports_mm_inputs)
 
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         is_sparse_mla = hasattr(getattr(model_config, "hf_text_config", None), "index_topk")
-        if is_sparse_mla and cudagraph_mode != CUDAGraphMode.NONE:
-            raise NotImplementedError(
-                "Ascend MRV2 sparse MLA PCP does not support ACL graphs yet. Set -cc.cudagraph_mode=NONE."
-            )
-        if cudagraph_mode.has_full_cudagraphs():
-            raise NotImplementedError("Ascend MRV2 PCP supports PIECEWISE ACL graphs only.")
+        pcp_size = parallel_config.prefill_context_parallel_size
+        dcp_size = parallel_config.decode_context_parallel_size
+        if dcp_size > 1:
+            tp_size = parallel_config.tensor_parallel_size
+            if dcp_size not in (pcp_size, tp_size * pcp_size):
+                raise NotImplementedError("Ascend MRV2 PCP+DCP requires DCP to equal PCP or TP * PCP.")
+            if is_sparse_mla:
+                raise NotImplementedError("Ascend MRV2 PCP+DCP supports dense MLA only.")
+            if cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError("Ascend MRV2 PCP+DCP supports eager mode only. Set -cc.cudagraph_mode=NONE.")
+            if getattr(parallel_config, "dcp_comm_backend", "ag_rs") == "a2a":
+                raise NotImplementedError("Ascend MRV2 PCP+DCP does not support the A2A DCP backend.")
 
     def __init__(
         self,
