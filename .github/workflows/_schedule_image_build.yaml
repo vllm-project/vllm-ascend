@@ -134,6 +134,12 @@ on:
         QUAY_TEMP_PASSWORD:
             description: 'Quay password for pushing temp tag digests'
             required: false
+        SWR_USERNAME: 
+            description: 'SWR username for pushing images'
+            required: false
+        SWR_PASSWORD:
+            description: 'SWR password for pushing images'
+            required: false
 
 defaults:
   run:
