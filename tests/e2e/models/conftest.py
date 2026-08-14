@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 def pytest_addoption(parser):
@@ -66,3 +67,37 @@ def pytest_generate_tests(metafunc):
             single_config = metafunc.config.getoption("--config")
             config_path = Path(single_config).resolve()
             metafunc.parametrize("config_filename", [config_path])
+
+
+def _report_path_for_config(config_path: Path, report_dir: str) -> Path:
+    return Path(report_dir) / f"{config_path.stem}.md"
+
+
+def _write_missing_report_stub(config_path: Path, report_dir: str) -> None:
+    report_path = _report_path_for_config(config_path, report_dir)
+    if report_path.exists():
+        return
+
+    try:
+        eval_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        model_name = eval_config.get("model_name", config_path.stem)
+    except Exception:
+        model_name = config_path.stem
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        f"# {model_name}\n\n"
+        "- **Status**: accuracy report was not generated\n"
+        "- **Note**: The test may have failed during collection or setup.\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    if session.config.getoption("--config-list-file"):
+        return
+
+    config_path = Path(session.config.getoption("--config")).resolve()
+    report_dir = session.config.getoption("report_dir")
+    _write_missing_report_stub(config_path, report_dir)
