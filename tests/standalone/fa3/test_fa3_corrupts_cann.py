@@ -108,8 +108,14 @@ def make_prefill_inputs(seqlen: int):
     k = torch.randn(num_blocks, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE, dtype=DTYPE).npu()
     v = torch.randn_like(k)
     block_table = torch.arange(num_blocks, dtype=torch.int32).npu().unsqueeze(0)
-    actual_q = torch.tensor([seqlen], dtype=torch.int32).npu()
-    actual_kv = torch.tensor([seqlen], dtype=torch.int32).npu()
+    # actual_seq_lengths / actual_seq_lengths_kv MUST be Python lists (CPU):
+    # npu_fused_infer_attention_score reads these scalars on the host to decide
+    # whether to split KV across cores.  Passing device tensors makes it do a
+    # copy_stream sync (LocalScalarDenseNpu) which is illegal during graph
+    # capture ("stream is captured").  vllm-ascend passes seq_lens_list (a
+    # Python list) for exactly this reason.
+    actual_q = [seqlen]  # cumulative WITHOUT leading 0
+    actual_kv = [seqlen]  # per-sequence KV length
     return q, k, v, block_table, actual_q, actual_kv
 
 
