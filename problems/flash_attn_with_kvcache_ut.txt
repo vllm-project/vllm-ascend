@@ -1,17 +1,48 @@
 python tests/standalone/fa3/test_fa3_corrupts_cann.py 
-[W813 22:05:07.293807085 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[W813 22:13:54.298915899 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-prefill_seqlen=8192  decode_kv_seqlen=8192  n_replays=3
+prefill_seqlen=16384  decode_kv_seqlen=16384  n_replays=3
 ========================================================================
-[W813 22:05:13.526332508 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[0] prefill self-consistency max_abs_diff = 0.000000 (should be ~0)
-[1] baseline prefill captured (shape=(8192, 32, 128))
-[2] after FA3 EAGER        : prefill diff = 0.000000 (should be ~0)
-[3] after FA3 CAPTURE      : prefill diff = 0.000000
-[4] after FA3 REPLAY x3  : prefill diff = 0.000000 (mean 0.000000)
-------------------------------------------------------------------------
-VERDICT: NOT reproduced.
-  Try a larger PREILL_SEQLEN / DECODE_KV_SEQLEN so the kernels
-  actually split KV across cores (and thus use FFTS).
-------------------------------------------------------------------------
+[W813 22:14:01.742160163 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+NPUGraph: ERROR — capture failed: RuntimeError: operator():../torch_npu/csrc/aten/common/LocalScalarDenseNpu.cpp:23 NPU function error: c10_npu::acl::AclrtSynchronizeStreamWithTimeout(copy_stream), error code is 107027
+[ERROR] 2026-08-13-22:14:03 (PID:88999, Device:0, RankID:-1) ERR00100 PTA call acl api failed.
+[PID: 88999] 2026-08-13-22:14:03.444.151 Not_Supported(EE1016): Synchronizing a stream failed. Reason: Stream (stream_id=43) during the capture stage is not supported.
+TraceBack (most recent call last):
+        rtStreamSynchronizeWithTimeout execution failed, reason=stream is captured[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+, graph_id=281470687416240, stream=<torch_npu.npu.Stream device=npu:0 npu_stream=0xfffec6094408>, pool=(), device=0
+NPUGRAPH DFX common causes: default stream, CPU ops, multi-device tensors, dynamic control flow on tensor values
+Traceback (most recent call last):
+  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_corrupts_cann.py", line 154, in capture_prefill_graph
+    _fia_out(inp, out_buf, lse_buf)
+  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_corrupts_cann.py", line 118, in _fia_out
+    torch_npu.npu_fused_infer_attention_score.out(
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_ops.py", line 819, in __call__
+    return self._op(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: operator():../torch_npu/csrc/aten/common/LocalScalarDenseNpu.cpp:23 NPU function error: c10_npu::acl::AclrtSynchronizeStreamWithTimeout(copy_stream), error code is 107027
+[ERROR] 2026-08-13-22:14:03 (PID:88999, Device:0, RankID:-1) ERR00100 PTA call acl api failed.
+[PID: 88999] 2026-08-13-22:14:03.444.151 Not_Supported(EE1016): Synchronizing a stream failed. Reason: Stream (stream_id=43) during the capture stage is not supported.
+TraceBack (most recent call last):
+        rtStreamSynchronizeWithTimeout execution failed, reason=stream is captured[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_corrupts_cann.py", line 306, in <module>
+    main()
+  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_corrupts_cann.py", line 236, in main
+    prefill_graph, prefill_out, _, handle = capture_prefill_graph(prefill_inp)
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_corrupts_cann.py", line 151, in capture_prefill_graph
+    with torch.npu.graph(graph):
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/graphs.py", line 890, in __exit__
+    self.npu_graph.capture_end()
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/graphs.py", line 636, in capture_end
+    super().capture_end()
+RuntimeError: capture_end:../torch_npu/csrc/core/npu/NPUGraph.cpp:240 NPU function error: c10_npu::acl::AclmdlRICaptureEnd(capture_stream_, &model_ri), error code is 107033
+[ERROR] 2026-08-13-22:14:03 (PID:88999, Device:0, RankID:-1) ERR00100 PTA call acl api failed.
+EE9999: Inner Error!
+EE9999[PID: 88999] 2026-08-13-22:14:03.447.761 (EE9999):  rtStreamEndCapture execution failed, reason=task group status error[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+TraceBack (most recent call last):
