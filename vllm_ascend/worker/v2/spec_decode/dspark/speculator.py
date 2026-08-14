@@ -138,7 +138,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.input_batch = input_batch
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(self.input_buffers.positions, self.max_num_tokens),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+            ),
         ):
             return super().propose(
                 input_batch,
