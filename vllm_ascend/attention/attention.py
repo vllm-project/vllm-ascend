@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -81,6 +81,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        # FIA uses host-side sequence-length lists. Eager draft decode must
+        # rebuild metadata for every step, while full graphs update each
+        # captured FIA task through UpdatableGraph.
+        self.supports_draft_decode_metadata_update = (
+            cudagraph_mode is not None
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        )
         self.model_config = vllm_config.model_config
         self.max_num_blocks_per_req = cdiv(
             self.model_config.max_model_len,
@@ -115,9 +123,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             block_table=common_attn_metadata.block_table_tensor,
         )
 
+    def update_draft_decode_metadata(self, metadata: AscendMetadata) -> None:
+        pass
+
 
 @dataclass(frozen=True, slots=True)
-class FIARuntimeParameterProvider:
+class FIAParamProvider:
     layer_name: str
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
@@ -233,6 +244,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "workspace": workspace,
                 "out": [output_view, softmax_lse],
             },
-            FIARuntimeParameterProvider(layer.layer_name),
+            FIAParamProvider(layer.layer_name),
         )
         return output
