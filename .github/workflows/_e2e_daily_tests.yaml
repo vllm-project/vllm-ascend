@@ -101,10 +101,26 @@ jobs:
           ref: ${{ inputs.vllm_ascend_branch }}
           fetch-depth: 1
 
-      - name: Set MAX_JOBS based on runner
+      - name: Set MAX_JOBS and SOC_VERSION based on runner
         run: |
           CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
+          # Set SOC_VERSION if not already set by the image (setup.py:141-154
+          # calls npu-smi to auto-detect chip type, which can fail in containers
+          # without device access -- e.g. when pip install runs in the metadata
+          # phase before any NPU init). The nightly-ci base image sets it via
+          # Dockerfile ENV, but guard against missing env here.
+          if [ -z "${SOC_VERSION:-}" ]; then
+            RUNNER="${{ inputs.runner }}"
+            if echo "$RUNNER" | grep -q "a2b3"; then
+              echo "SOC_VERSION=ascend910b1" >> $GITHUB_ENV
+            elif echo "$RUNNER" | grep -q "a3-"; then
+              echo "SOC_VERSION=ascend910_9391" >> $GITHUB_ENV
+            elif echo "$RUNNER" | grep -q "310p"; then
+              echo "SOC_VERSION=ascend310p1" >> $GITHUB_ENV
+            fi
+            echo "SOC_VERSION was not set in image, auto-detected: ${SOC_VERSION}"
+          fi
 
       - name: Install vllm-ascend from main HEAD
         working-directory: ${{ github.workspace }}
@@ -115,9 +131,9 @@ jobs:
           echo "=== Installing from checkout (main HEAD, full compile) ==="
           # Normal compile (NOT COMPILE_CUSTOM_KERNELS=0) -- the nightly-ci image
           # has cmake/pybind11/CANN build deps. COMPILE_CUSTOM_KERNELS=0 would skip
-          # all C extensions (setup.py:462 ext_modules=[]), leaving vllm_ascend_C.so
-          # missing and causing E2E failures on NPU (see worker.py:102 warning).
-          pip install -e . --no-build-isolation 2>&1 | tail -10
+          # all C extensions (setup.py:434 ext_modules=[]), leaving vllm_ascend_C.so
+          # missing and causing E2E failures on NPU (see worker.py:110 warning).
+          pip install -e . --no-build-isolation 2>&1 | tee /tmp/install.log
           echo "=== Verify C extension ==="
           python3 -c "import vllm_ascend.vllm_ascend_C; print('vllm_ascend_C OK')"
           echo "=== main HEAD under test ==="
