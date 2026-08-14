@@ -4,7 +4,6 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit(
     do_not_specialize=[
-        "hidden_state_stride_bs",
         "total_batch",
     ]
 )

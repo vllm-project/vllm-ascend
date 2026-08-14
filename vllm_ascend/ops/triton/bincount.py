@@ -31,11 +31,8 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 @triton.jit(
     do_not_specialize=[
         "tokens_batch_stride",
-        "tokens_seq_stride",
         "batch_size",
         "seq_len",
-        "tp_rank",
-        "counts_batch_stride",
         "total_blocks",
     ]
 )
