@@ -321,6 +321,7 @@ jobs:
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -363,6 +364,7 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
