@@ -87,9 +87,9 @@ class AscendInputBatch(InputBatch):
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
         # Upstream vLLM main (after #51256) added max_query_len to
-        # InputBatch.make_dummy; v0.26.0 / v0.27.1 have no such parameter, so
-        # only forward it on the main lane.
-        if vllm_version_is("0.26.0") or vllm_version_is("0.27.1"):
+        # InputBatch.make_dummy; v0.27.1 has no such parameter, so only forward
+        # it on the main lane.
+        if vllm_version_is("0.27.1"):
             input_batch = InputBatch.make_dummy(
                 num_reqs,
                 num_tokens,

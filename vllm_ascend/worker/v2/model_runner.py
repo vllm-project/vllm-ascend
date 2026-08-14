@@ -233,15 +233,15 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
     ):
         # Upstream vLLM main (after #51256) passes context_len to execute_model
-        # for dummy-run context setup; v0.26.0 / v0.27.1's execute_model has no
-        # such parameter, so only forward it on the main lane.
+        # for dummy-run context setup; v0.27.1's execute_model has no such
+        # parameter, so only forward it on the main lane.
         execute_kwargs: dict = dict(
             intermediate_tensors=intermediate_tensors,
             dummy_run=dummy_run,
             skip_attn_for_dummy_run=skip_attn_for_dummy_run,
             is_profile=is_profile,
         )
-        if not vllm_version_is("0.26.0") and not vllm_version_is("0.27.1"):
+        if not vllm_version_is("0.27.1"):
             execute_kwargs["context_len"] = context_len
 
         with flashcomm_dispatch_wrapper(self.vllm_config):
@@ -301,10 +301,10 @@ class NPUModelRunner(GPUModelRunner):
         so we need to prepare seq_lens_cpu here.
 
         Upstream vLLM main (after #51256) passes an extra batch_req_state arg
-        (scheduler_output, batch_req_state, batch_desc); v0.26.0 / v0.27.1 pass
-        only (scheduler_output, batch_desc).
+        (scheduler_output, batch_req_state, batch_desc); v0.27.1 passes only
+        (scheduler_output, batch_desc).
         """
-        if vllm_version_is("0.26.0") or vllm_version_is("0.27.1"):
+        if vllm_version_is("0.27.1"):
             (batch_desc,) = args
         else:
             _batch_req_state, batch_desc = args
@@ -626,9 +626,9 @@ def graph_manager_wrapper(model_runner):
         varlen_decode: bool = False,
     ):
         # Upstream vLLM main (after #51256) passes varlen_decode to the graph
-        # manager factory; v0.26.0 / v0.27.1 have no such parameter, so only
-        # forward it on the main lane.
-        if vllm_version_is("0.26.0") or vllm_version_is("0.27.1"):
+        # manager factory; v0.27.1 has no such parameter, so only forward it on
+        # the main lane.
+        if vllm_version_is("0.27.1"):
             return ModelAclGraphManager(
                 vllm_config,
                 device,

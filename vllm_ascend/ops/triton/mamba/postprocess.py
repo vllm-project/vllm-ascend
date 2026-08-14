@@ -196,7 +196,7 @@ def postprocess_mamba_fused_kernel(
     # only state_idx == 0 writes). Guard on tile_idx == 0 so tiles > 0
     # (when TEMPORAL_TILES > 1) do not duplicate the store. The write target
     # depends on the caller: main (after vLLM #50432) passes a non-null output
-    # buffer and reads from a snapshot; v0.26.0 passes None for the output and
+    # buffer and reads from a snapshot; v0.27.1 passes None for the output and
     # updates the input buffer in place under HAS_IDX_MAPPING.
     if src_block_idx == dest_block_idx and state_idx == 0 and tile_idx == 0:
         if num_accepted_tokens_out_ptr is None:
