@@ -30,6 +30,7 @@ def test_a2_packed_w8a8_gmm_swiglu_uses_torch_npu_v2():
         mock.patch(
             "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
             return_value=expected,
+            create=True,
         ) as system_v2,
     ):
         output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**_packed_w8a8_gmm_swiglu_kwargs())
