@@ -28,7 +28,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -295,12 +294,20 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
-        batch_desc: BatchExecutionDescriptor,
+        *args,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
+
+        Upstream vLLM main (after #51256) passes an extra batch_req_state arg
+        (scheduler_output, batch_req_state, batch_desc); v0.26.0 / v0.27.1 pass
+        only (scheduler_output, batch_desc).
         """
+        if vllm_version_is("0.26.0") or vllm_version_is("0.27.1"):
+            (batch_desc,) = args
+        else:
+            _batch_req_state, batch_desc = args
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
