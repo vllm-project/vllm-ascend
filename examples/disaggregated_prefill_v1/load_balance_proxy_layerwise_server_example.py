@@ -515,9 +515,10 @@ async def _handle_completions(api: str, request: Request):
                             retry_count += 1
                             if chat_flag:
                                 messages[0]["content"] = (
-                                    origin_prompt + [{"type": "text", "text": generated_token}]
+                                    origin_prompt
+                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
                                     if isinstance(origin_prompt, list)
-                                    else origin_prompt + generated_token
+                                    else (origin_prompt or "") + generated_token
                                 )
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
