@@ -500,11 +500,6 @@ class KVCacheRecvingThread(threading.Thread):
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
         self.model_config = self.vllm_config.model_config
-        self.num_speculative_tokens = (
-            self.vllm_config.speculative_config.num_speculative_tokens
-            if self.vllm_config.speculative_config is not None
-            else 0
-        )
         self.use_mla = self.model_config.is_deepseek_mla
         self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
         self.is_hma_required = is_hma_required
@@ -836,10 +831,14 @@ class KVCacheRecvingThread(threading.Thread):
                         )
                     )
             else:
-                # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
-                # as the D-node requires dynamic allocation based on its specific cache hit rate.
-                transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
-                grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
+                if len(remote_group_block_ids) != 1:
+                    raise RuntimeError(
+                        "Mooncake Mamba transfer requires exactly one normalized remote state block; "
+                        f"request_id={remote_request_id}, group_idx={group_idx}, "
+                        f"remote_block_count={len(remote_group_block_ids)}, "
+                        f"local_block_count={len(local_group_block_ids)}."
+                    )
+                grouped_remote_block_ids = [[remote_group_block_ids[0]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
 
             if is_mamba_group:
@@ -1658,9 +1657,11 @@ class MooncakeConnectorScheduler:
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return blocks that contain prompt KV, dropping MTP extra blocks.
 
-        State groups such as Mamba are not context-block aligned with attention
-        KV, so keep them unchanged and only clip attention-like groups here.
-        SWA tail clipping is handled as a separate step after this.
+        In aligned Mamba mode, normalize each state group to the single block
+        containing the final prompt state. This prevents the receiver from
+        inferring a block index from a speculative *token* count. Non-aligned
+        state groups keep their existing behavior. SWA tail clipping is handled
+        as a separate step after this.
         """
         if len(block_ids) == 0:
             return block_ids
@@ -1670,8 +1671,23 @@ class MooncakeConnectorScheduler:
         transfer_block_ids = []
         cp_size = max(1, self.pcp_size * self.dcp_size)
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            if group_info.is_state_group:
+            is_aligned_state_group = group_info.is_state_group and (
+                getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
+            )
+            if group_info.is_state_group and not is_aligned_state_group:
                 transfer_block_ids.append(blocks)
+            elif is_aligned_state_group:
+                # Mamba state is not CP-sharded like attention KV. Its aligned
+                # block index is derived from the actual (already truncated)
+                # prompt length, without multiplying by the CP size.
+                num_prompt_state_blocks = cdiv(prompt_len, group_info.tokens_per_block)
+                if num_prompt_state_blocks <= 0 or num_prompt_state_blocks > len(blocks):
+                    raise RuntimeError(
+                        "Invalid aligned Mamba state block metadata: "
+                        f"prompt_len={prompt_len}, tokens_per_block={group_info.tokens_per_block}, "
+                        f"required_block_count={num_prompt_state_blocks}, available_block_count={len(blocks)}."
+                    )
+                transfer_block_ids.append(blocks[num_prompt_state_blocks - 1 : num_prompt_state_blocks])
             else:
                 # In context parallelism, each scheduler-visible block id is a
                 # CP-grouped/virtual block shared by all CP ranks. It therefore
