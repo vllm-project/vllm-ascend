@@ -342,8 +342,44 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         block_size = self.kernel_block_size
 
-        cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
-        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        # TODO: Revisit this logic after ModelRunner V1 is fully removed,
+        # and remove it if ModelRunner V2 no longer depends on these per-step buffers.
+        if draft_index is not None:
+            assert self.spec_actual_seq_lengths_query is not None
+            assert self.spec_actual_seq_lengths_key is not None
+            actual_seq_lengths_query = self.spec_actual_seq_lengths_query[draft_index - 1]
+            actual_seq_lengths_key = self.spec_actual_seq_lengths_key[draft_index - 1]
+        else:
+            actual_seq_lengths_query = actual_seq_lengths_query
+            actual_seq_lengths_key = actual_seq_lengths_key
+
+        runtime_cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
+        actual_seq_lengths_query.zero_()
+        actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)
+        if (
+            common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and num_input_tokens > num_reqs
+        ):
+            num_dummy_reqs = num_input_tokens - num_reqs
+            dummy_query_lens = runtime_cum_query_lens[-1] + torch.arange(
+                1,
+                num_dummy_reqs + 1,
+                device=runtime_cum_query_lens.device,
+                dtype=runtime_cum_query_lens.dtype,
+            )
+            actual_seq_lengths_query[num_reqs:num_input_tokens].copy_(
+                dummy_query_lens
+            )
+        cum_query_lens = actual_seq_lengths_query[:num_reqs]
+        runtime_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        actual_seq_lengths_key.zero_()
+        actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
+        if (
+            common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and num_input_tokens > num_reqs
+        ):
+            actual_seq_lengths_key[num_reqs:num_input_tokens].fill_(1)
+        seq_lens = actual_seq_lengths_key[:num_reqs]
 
         # Prefer _seq_lens_cpu (always available, updated during draft
         # iterations) over seq_lens_cpu (None in async spec decode mode).
