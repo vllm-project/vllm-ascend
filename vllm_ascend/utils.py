@@ -1179,7 +1179,8 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
-    a non-zero global_bs and must NOT receive mc2_mask.
+    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
+    uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
@@ -1202,21 +1203,23 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     if not is_kv_consumer:
         return False
 
-    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ascend_forward_context import _MEGA_MOE_SUPPORTED, select_moe_comm_method
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
-
-    def needs_mc2(n: int) -> bool:
-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    decode_must_use_mc2 = needs_mc2(get_potential_max_tokens())
+    decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config)
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
-    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    prefill_comm_method = select_moe_comm_method(scheduler_config.max_num_batched_tokens, vllm_config)
+
+    if _MEGA_MOE_SUPPORTED and MoECommType.FUSED_MC2 in {decode_comm_method, prefill_comm_method}:
+        return False
+
+    mc2_comm_methods = {MoECommType.MC2, MoECommType.FUSED_MC2}
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (
-        prefill_must_use_mc2 or get_ascend_config().scheduler_config.recompute_scheduler_enable
+    return decode_comm_method in mc2_comm_methods and (
+        prefill_comm_method in mc2_comm_methods or get_ascend_config().scheduler_config.recompute_scheduler_enable
     )
 
 
