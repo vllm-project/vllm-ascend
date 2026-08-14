@@ -101,6 +101,9 @@ jobs:
           ref: ${{ inputs.vllm_ascend_branch }}
           fetch-depth: 1
 
+      - name: Configure git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Set MAX_JOBS and SOC_VERSION based on runner
         run: |
           CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
