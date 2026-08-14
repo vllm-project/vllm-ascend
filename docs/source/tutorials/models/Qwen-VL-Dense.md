@@ -46,6 +46,8 @@ It is recommended to download the model weight to the shared directory of multip
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
+For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
+
 === "Ascend950DT series"
 
     Start the docker image on your each node.
