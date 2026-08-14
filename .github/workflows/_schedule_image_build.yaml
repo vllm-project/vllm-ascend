@@ -362,7 +362,7 @@ jobs:
         esac
 
     - name: Login to SWR
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: swr.cn-southwest-2.myhuaweicloud.com
         username: ${{ secrets.SWR_USERNAME }}
