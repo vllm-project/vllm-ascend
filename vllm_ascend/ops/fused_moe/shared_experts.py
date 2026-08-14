@@ -223,6 +223,17 @@ class AscendSharedExperts:
             if evt is not None:
                 torch.npu.current_stream().wait_event(evt)
 
+        # The packed W8A8 grouped_matmul_swiglu_quant_v2 kernel on A2 must
+        # finish before the shared gate/up QuantMatmul starts. Overlapping the
+        # two cube kernels can make the multi-stream result diverge from the
+        # single-stream path. A3 does not need this barrier and keeps the full
+        # overlap.
+        serialize_shared_gate_up = (
+            self.multistream_overlap
+            and self.quant_type == QuantType.W8A8
+            and get_ascend_device_type() == AscendDeviceType.A2
+        )
+
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON:
                 # Full activations + replicated weights: shard tokens locally,
@@ -254,6 +265,8 @@ class AscendSharedExperts:
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
+                if serialize_shared_gate_up:
+                    maybe_wait_event(fused_moe_evts.before_gmm2)
                 hidden_states = torch_npu.npu_quant_matmul(
                     quantized_x,
                     self.layer.gate_up_proj.weight,
@@ -264,7 +277,8 @@ class AscendSharedExperts:
                 )
                 # Execute activation concurrently with gmm2.
 
-                maybe_wait_event(fused_moe_evts.before_gmm2)
+                if not serialize_shared_gate_up:
+                    maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                     x=hidden_states,
                     weight_scale=self.layer.gate_up_proj.weight_scale_fp32,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -28,6 +28,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import AscendDeviceType
 
 
 def _build_weight_layer():
@@ -923,6 +924,81 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     dynamic_quant.assert_not_called()
     shared_experts.part1.assert_called_once_with(hidden_states)
     shared_experts.part2.assert_called_once_with(hidden_states, part1_out)
+
+
+def test_a2_w8a8_multistream_waits_for_routed_gmm1_before_shared_gate(monkeypatch):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.layer = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(
+            weight=torch.ones(4, 8),
+            weight_scale=torch.ones(8),
+            weight_scale_fp32=torch.ones(8),
+        ),
+        down_proj=SimpleNamespace(
+            weight=torch.ones(4, 4),
+            weight_scale=torch.ones(4),
+        ),
+    )
+    shared_experts.multistream_overlap = True
+    shared_experts.quant_type = QuantType.W8A8
+    shared_experts.lora_context = None
+
+    hidden_states = torch.randn(2, 4)
+    quantized_x = torch.zeros(2, 4, dtype=torch.int8)
+    pertoken_scale = torch.ones(2)
+    gate_up_output = torch.zeros(2, 8, dtype=torch.int32)
+    activated = torch.zeros(2, 4, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    shared_out = torch.randn(2, 4)
+    current_stream = MagicMock()
+    before_routed_experts = MagicMock(name="before_routed_experts")
+    before_gmm2 = MagicMock(name="before_gmm2")
+    before_combine = MagicMock(name="before_combine")
+    events = SimpleNamespace(
+        before_routed_experts=before_routed_experts,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=before_gmm2,
+        before_combine=before_combine,
+    )
+
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(shared_experts_module, "get_ascend_device_type", lambda: AscendDeviceType.A2)
+    monkeypatch.setattr(
+        shared_experts_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+    )
+
+    with (
+        patch.object(
+            shared_experts_module.torch_npu,
+            "npu_dynamic_quant",
+            return_value=(quantized_x, pertoken_scale),
+            create=True,
+        ),
+        patch.object(
+            shared_experts_module.torch_npu,
+            "npu_quant_matmul",
+            side_effect=(gate_up_output, shared_out),
+            create=True,
+        ),
+        patch(
+            "torch.ops._C_ascend.npu_dequant_swiglu_quant",
+            return_value=(activated, activated_scale),
+            create=True,
+        ),
+    ):
+        output = shared_experts.forward(hidden_states, events)
+
+    assert output is shared_out
+    assert current_stream.wait_event.call_args_list == [
+        call(before_routed_experts),
+        call(before_gmm2),
+        call(before_combine),
+    ]
 
 
 @pytest.mark.parametrize("has_shared_experts", [False, True])
