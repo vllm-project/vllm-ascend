@@ -208,11 +208,38 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
-            if self.pcp_manager is not None:
-                assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
+            self._ensure_ascend_pcp_manager()
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def _ensure_ascend_pcp_manager(self) -> None:
+        """Use the Ascend manager with both released and main vLLM APIs."""
+        manager = self.pcp_manager
+        if manager is None:
+            return
+
+        if not isinstance(manager, AscendPCPManager):
+            # vLLM v0.27.1 predates the ``pcp_manager_cls`` factory hook.
+            # Replace its freshly-created base manager before it can partition
+            # a batch. Main builds take the property path above and skip this
+            # compatibility branch.
+            AscendPCPManager.validate_config(self.vllm_config, self.supports_mm_inputs)
+            manager = AscendPCPManager(
+                pcp_world_size=manager.pcp_world_size,
+                pcp_rank=manager.pcp_rank,
+                device=self.device,
+                vllm_config=self.vllm_config,
+                req_states=self.req_states,
+                max_num_reqs=self.max_num_reqs,
+                max_num_tokens=self.max_num_tokens,
+                block_tables=self.block_tables,
+                dcp_world_size=manager.dcp_world_size,
+                dcp_rank=manager.dcp_rank,
+                cp_interleave=manager.cp_interleave,
+            )
+            self.pcp_manager = manager
+
+        manager.vllm_config = self.vllm_config
 
     @torch.inference_mode()
     def execute_model(

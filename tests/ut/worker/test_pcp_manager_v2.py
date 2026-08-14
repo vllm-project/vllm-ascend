@@ -237,6 +237,36 @@ def test_npu_model_runner_uses_ascend_pcp_manager():
     validate_config.assert_called_once_with(vllm_config, False)
 
 
+def test_npu_model_runner_upgrades_vllm_027_base_pcp_manager():
+    """Keep compatibility until the released vLLM factory accepts ``cls``."""
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = object()
+    runner.supports_mm_inputs = False
+    runner.device = torch.device("cpu")
+    runner.req_states = MagicMock()
+    runner.max_num_reqs = 8
+    runner.max_num_tokens = 32
+    runner.block_tables = None
+    runner.pcp_manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=1,
+        device=runner.device,
+        dcp_world_size=1,
+        dcp_rank=0,
+        cp_interleave=4,
+    )
+
+    with patch.object(AscendPCPManager, "validate_config") as validate_config:
+        runner._ensure_ascend_pcp_manager()
+
+    assert isinstance(runner.pcp_manager, AscendPCPManager)
+    assert runner.pcp_manager.vllm_config is runner.vllm_config
+    assert runner.pcp_manager.pcp_world_size == 2
+    assert runner.pcp_manager.pcp_rank == 1
+    assert runner.pcp_manager.cp_interleave == 4
+    validate_config.assert_called_once_with(runner.vllm_config, False)
+
+
 def _make_pcp_config(
     *,
     speculative_config=None,
