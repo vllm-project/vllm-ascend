@@ -12,7 +12,7 @@ test_cases:
       - "--max_num_seqs"
       - "32"
       - "--max-model-len"
-      - "20480"
+      - "67584"
       - "--gpu_memory_utilization"
       - "0.90"
       - "--dtype"
