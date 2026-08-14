@@ -146,10 +146,10 @@ defaults:
     shell: bash -el {0}
 
 env:
-  QUAY_REPO: ${{ inputs.quay_repo }}
-  QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
+  # QUAY_REPO: ${{ inputs.quay_repo }}
+  # QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
   # Use this repo's own GHCR namespace so forks (e.g. du-ping1-merge) can write build cache.
-  CACHE_REPO: ghcr.io/${{ github.repository }}
+  # CACHE_REPO: ghcr.io/${{ github.repository }}
 
 jobs:
   build-push-digest:
@@ -364,7 +364,7 @@ jobs:
     - name: Login to SWR
       uses: docker/login-action@v3
       with:
-        registry: swr.cn-north-12.myhuaweicloud.com
+        registry: swr.cn-southwest-2.myhuaweicloud.com
         username: ${{ secrets.SWR_USERNAME }}
         password: ${{ secrets.SWR_PASSWORD }}
 
@@ -381,7 +381,7 @@ jobs:
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
-          CANN_QUAY_URL=swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann
+          CANN_QUAY_URL=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann
           APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
           PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
@@ -405,8 +405,11 @@ jobs:
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
         # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
-        cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
-        cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
+        # push地址 tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
+        # cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
+        # cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
+        cache-from: type=registry,ref=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ steps.cache-tag.outputs.value }}
+        cache-to: ${{ inputs.should_push && format('type=registry,ref=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:{0},mode=max', steps.cache-tag.outputs.value) || '' }}
 
     # Quay.io automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
     # Add temporary tags to digests to prevent them from being removed.
