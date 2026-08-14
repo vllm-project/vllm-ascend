@@ -976,6 +976,7 @@ class TestCoreFunctionality(unittest.TestCase):
     def test_transfer_mamba_uses_normalized_prompt_state_block(self, mock_get_meta):
         # Pure metadata/address arithmetic: no NPU tensor or torch.npu call.
         self._configure_mock_mamba_transfer()
+        self.thread.mamba_cache_mode = "align"
         req = dict(self.test_req)
         req["local_block_ids"] = [[2]]
         req["remote_block_ids"] = [[3]]
@@ -994,6 +995,7 @@ class TestCoreFunctionality(unittest.TestCase):
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_mamba_rejects_unnormalized_remote_blocks(self, mock_get_meta):
         self._configure_mock_mamba_transfer()
+        self.thread.mamba_cache_mode = "align"
         req = dict(self.test_req)
         req["local_block_ids"] = [[2]]
         # The old token-count based selector crashed for one to three blocks
@@ -1006,6 +1008,27 @@ class TestCoreFunctionality(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exactly one normalized remote state block"):
             self.thread._transfer_kv_cache_all_groups(req)
         self.engine.batch_transfer_sync_read.assert_not_called()
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_mamba_non_aligned_selects_prompt_state_before_draft_blocks(self, mock_get_meta):
+        # Pure metadata/address arithmetic: no NPU tensor or torch.npu call.
+        self._configure_mock_mamba_transfer()
+        self.thread.mamba_cache_mode = "none"
+        self.thread.num_speculative_tokens = 7
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[2, 20, 21, 22, 23, 24, 25, 26]]
+        req["remote_block_ids"] = [[3, 30, 31, 32, 33, 34, 35, 36]]
+        req["group_pulls"] = [
+            GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)
+        ]
+
+        self.thread._transfer_kv_cache_all_groups(req)
+
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(call_args[1], [0x1000 + 2 * 128, 0x2000 + 2 * 256])
+        self.assertEqual(call_args[2], [0x3000 + 3 * 160, 0x4000 + 3 * 512])
+        self.assertEqual(call_args[3], [100, 200])
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")

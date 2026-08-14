@@ -500,6 +500,12 @@ class KVCacheRecvingThread(threading.Thread):
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
         self.model_config = self.vllm_config.model_config
+        self.mamba_cache_mode = getattr(self.vllm_config.cache_config, "mamba_cache_mode", None)
+        self.num_speculative_tokens = (
+            self.vllm_config.speculative_config.num_speculative_tokens
+            if self.vllm_config.speculative_config is not None
+            else 0
+        )
         self.use_mla = self.model_config.is_deepseek_mla
         self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
         self.is_hma_required = is_hma_required
@@ -831,14 +837,26 @@ class KVCacheRecvingThread(threading.Thread):
                         )
                     )
             else:
-                if len(remote_group_block_ids) != 1:
-                    raise RuntimeError(
-                        "Mooncake Mamba transfer requires exactly one normalized remote state block; "
-                        f"request_id={remote_request_id}, group_idx={group_idx}, "
-                        f"remote_block_count={len(remote_group_block_ids)}, "
-                        f"local_block_count={len(local_group_block_ids)}."
-                    )
-                grouped_remote_block_ids = [[remote_group_block_ids[0]]]
+                if self.mamba_cache_mode == "align":
+                    if len(remote_group_block_ids) != 1:
+                        raise RuntimeError(
+                            "Mooncake Mamba transfer requires exactly one normalized remote state block; "
+                            f"request_id={remote_request_id}, group_idx={group_idx}, "
+                            f"remote_block_count={len(remote_group_block_ids)}, "
+                            f"local_block_count={len(local_group_block_ids)}."
+                        )
+                    remote_state_block_id = remote_group_block_ids[0]
+                else:
+                    transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
+                    if transfer_block_idx < 0:
+                        raise RuntimeError(
+                            "Invalid non-aligned Mamba state block metadata: "
+                            f"request_id={remote_request_id}, group_idx={group_idx}, "
+                            f"remote_block_count={len(remote_group_block_ids)}, "
+                            f"num_speculative_tokens={self.num_speculative_tokens}."
+                        )
+                    remote_state_block_id = remote_group_block_ids[transfer_block_idx]
+                grouped_remote_block_ids = [[remote_state_block_id]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
 
             if is_mamba_group:
