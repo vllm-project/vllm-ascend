@@ -60,6 +60,15 @@ paths = [
 ]
 rules = ["generic-api-key"]
 
+# Allow monkey-patch identifier false positives in patch_qwen3_5.py
+# (generic-api-key matches long class/function names like
+#  Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward)
+[[allowlists]]
+paths = [
+    "^vllm_ascend/patch/worker/patch_qwen3_5.py"
+]
+rules = ["generic-api-key"]
+
 # Placeholder allowlist for syntax validation; does not permit any files
 [[allowlists]]
 paths = ["^$"]

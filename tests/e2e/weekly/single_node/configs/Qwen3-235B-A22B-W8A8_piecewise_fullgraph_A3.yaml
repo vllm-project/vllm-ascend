@@ -63,7 +63,7 @@ _benchmarks: &benchmarks
 
 test_cases:
   - name: "Qwen3_235B_Accuracy_PIECEWISE_gsm8k_lite"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -78,7 +78,7 @@ test_cases:
       <<: *benchmarks
 
   - name: "Qwen3_235B_Accuracy_FULL_Graph_gsm8k_lite"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -92,7 +92,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks
   - name: "Qwen3_235B_Accuracy_EPLB_gsm8k_lite"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
       DYNAMIC_EPLB: "true"
@@ -102,3 +102,4 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
       <<: *benchmarks
+

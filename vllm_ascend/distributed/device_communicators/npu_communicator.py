@@ -44,14 +44,16 @@ class NPUCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: dist.ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
-        # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
-        # init device according to rank
+        super().__init__(
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            use_all2all=use_all2all,
+        )
         self.device = torch.npu.current_device()
-
-        # For compatibility (mainly for reusing graph capturing code in vllm),
-        # init custom all-reduce implementation interface as in CUDACommunicator.
         self.ca_comm = None
         self.all2all_manager = _NpuAll2AllManager()
 

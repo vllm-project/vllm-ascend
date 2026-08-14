@@ -79,6 +79,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for Eagle."""
+
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             if self.is_draft_model_prefill:
                 super().capture(
@@ -108,13 +109,15 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                     block_tables,
                     attn_groups,
                     kv_cache_config,
-                    skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                    full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
                 )
+                seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 return lambda cg_mode: forward_fn(
                     num_reqs,
                     cg_mode == CUDAGraphMode.PIECEWISE,
                     BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
                     num_tokens_across_dp,
+                    seq_lens_cpu_upper_bound,
                 )
 
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
@@ -128,10 +131,9 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
-
+        self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
-        positions = self.speculator.input_buffers.positions[:num_tokens]
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
@@ -154,12 +156,11 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],
-                self.speculator.update_stream,
+                self.update_stream,
                 forward_context,
                 num_tokens,
                 self.vllm_config,
                 self.speculator.speculative_config,
-                positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret

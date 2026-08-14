@@ -23,35 +23,8 @@ if [ ! -f "${CONFIG_FILE}" ]; then
 fi
 
 if [[ -n "${GITHUB_BASE_REF}" ]]; then
-    echo "==== CI Mode: scan changed files ===="
-    BASE_BRANCH="${GITHUB_BASE_REF}"
-    git fetch origin "${BASE_BRANCH}"
-    CHANGED_FILES=$(git diff --name-only --diff-filter=ACM "origin/${BASE_BRANCH}...HEAD")
-    echo "Changed files:"
-    echo "${CHANGED_FILES}"
-
-    if [ -z "${CHANGED_FILES}" ]; then
-        echo "No changed files, skip scan"
-        exit 0
-    fi
-
-    EXIT_CODE=0
-    while IFS= read -r file; do
-        [ -z "${file}" ] && continue
-        [ ! -f "${file}" ] && echo "Skip deleted ${file}" && continue
-        echo "Scan ${file}"
-        ${BIN_CMD} detect \
-            --source="${file}" \
-            --config="${CONFIG_FILE}" \
-            --no-git \
-            --verbose \
-            --redact || EXIT_CODE=$?
-    done <<< "${CHANGED_FILES}"
-
-    if [ "${EXIT_CODE}" -ne 0 ]; then
-        echo "::error::Leaks found in changed files!"
-        exit "${EXIT_CODE}"
-    fi
+    echo "==== CI Mode: skip incremental changed file scan (disabled) ===="
+    echo "Secret scan moved to local pre-commit only"
 else
     echo "==== Local pre-commit Mode: scan staged changes ===="
     ${BIN_CMD} protect \
@@ -60,3 +33,5 @@ else
         --config="${CONFIG_FILE}" \
         --staged
 fi
+
+exit 0

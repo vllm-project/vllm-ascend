@@ -60,11 +60,6 @@ msgstr "## 2. 安装依赖"
 msgid "## 3. Run basic benchmarks"
 msgstr "## 3. 运行基本基准测试"
 
-msgid ""
-"This section introduces how to perform performance testing using the "
-"benchmark suite built into VLLM."
-msgstr "本节介绍如何使用 VLLM 内置的基准测试套件进行性能测试。"
-
 msgid "### 3.1 Dataset"
 msgstr "### 3.1 数据集"
 
@@ -187,3 +182,8 @@ msgstr ""
 
 msgid "| Custom | ✅ | ✅ | Local file: `data.jsonl` |"
 msgstr "| 自定义 | ✅ | ✅ | 本地文件：`data.jsonl` |"
+
+msgid ""
+"This section introduces how to perform performance testing using the "
+"benchmark suite built into vLLM."
+msgstr "本节介绍如何使用 vLLM 内置的基准测试套件进行性能测试。"

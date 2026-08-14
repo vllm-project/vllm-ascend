@@ -44,7 +44,7 @@ The `flash_attn_with_kvcache` interface on NPU is semantically consistent with t
 
 ## Hardware Requirements
 
-FA3 currently requires Ascend Atlas A2 and A3 inference products NPUs.
+FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.
 We will support other NPUs in the future.
 
 ## Software Requirements
@@ -53,7 +53,7 @@ FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_npu_v3
 
 ### Installation
 
-Install the `flash_attn_npu` wheel package refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
+To install the `flash_attn_npu` wheel package, refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
 
 ## Enabling Flash Attention 3
 

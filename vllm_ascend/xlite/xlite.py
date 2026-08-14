@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from typing import Any, TypeAlias, cast
@@ -27,14 +28,16 @@ import torch.nn as nn
 import torch_npu
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size, get_world_group
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import AttnMeta, AttnMHA, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
+from xlite._C import AttnDSA, AttnMeta, AttnMHA, AttnMLA, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.xlite.utils import (
     AttnMetadataRouter,
@@ -67,7 +70,7 @@ class XliteModelBase(ABC):
         xlite_model (XModel): Native xlite model container populated by subclasses.
     """
 
-    _attn_metadata_type: type | tuple[type, ...]
+    _attn_metadata_type: type | tuple[type, ...] = AscendMetadata
     """The expected type of attention metadata in the forward context for this architecture. Used for runtime checks
     before forwarding. See :meth:`XliteWrapper.__call__` for usage."""
     _supported_architectures: Sequence[str] | str
@@ -271,7 +274,6 @@ class StandardXliteModel(XliteModelBase):
     architecture has unique configuration needs.
     """
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = [
         "LlamaForCausalLM",
         "Qwen2ForCausalLM",
@@ -300,7 +302,7 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.softmax_scale = xlite_config.head_dim**-0.5
         xlite_config.n_dense_layers = hf_config.num_hidden_layers
         xlite_config.intermediate_size = hf_config.intermediate_size
-        xlite_config.def_tp_size = get_tensor_model_parallel_world_size()
+        xlite_config.def_tp_size = tp_size = get_tensor_model_parallel_world_size()
         xlite_config.def_dp_size = vllm_config.parallel_config.data_parallel_size
         try:
             ep_word_size = get_ep_group().world_size
@@ -314,7 +316,7 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.scoring_func = ScoringFuncSoftmax
         xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
         xlite_config.max_m = (
-            vllm_config.scheduler_config.max_num_batched_tokens
+            math.ceil(vllm_config.scheduler_config.max_num_batched_tokens / tp_size) * tp_size
             if get_ascend_config().xlite_graph_config.full_mode
             else vllm_config.scheduler_config.max_num_seqs
         )
@@ -454,7 +456,6 @@ class StandardXliteModel(XliteModelBase):
 class QwenMoeXliteModel(StandardXliteModel):
     """xlite adapter for Qwen MoE architectures."""
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = ["Qwen3MoeForCausalLM", "Qwen3VLMoeForConditionalGeneration"]
 
     def _build_model_config(self) -> None:
@@ -472,7 +473,6 @@ class QwenMoeXliteModel(StandardXliteModel):
 class Glm4MoeXliteModel(StandardXliteModel):
     """xlite adapter for GLM4 MoE architectures."""
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = ["Glm4MoeForCausalLM"]
 
     def _build_model_config(self) -> None:
@@ -495,10 +495,143 @@ class Glm4MoeXliteModel(StandardXliteModel):
         xlite_config.gate_captured = False
 
 
+class DeepseekV3XliteModel(Glm4MoeXliteModel):
+    """xlite adapter for DeepseekV3 MoE architectures with MLA attention."""
+
+    _attn_metadata_type = AscendMLAMetadata  # type: ignore[assignment]
+    _supported_architectures = ["DeepseekV3ForCausalLM"]
+
+    def _build_model_config(self) -> None:
+        super()._build_model_config()
+        xlite_config, hf_config = self.xlite_config, self.hf_text_config
+
+        # MLA attention type
+        xlite_config.attn_type = AttnMLA
+        xlite_config.n_kv_heads = 1  # MLA uses latent cache
+        xlite_config.head_dim = 0  # Ignored by MLA
+
+        # MLA dimensions (override Llama's head_dim-based rope_head_dim)
+        xlite_config.rope_head_dim = hf_config.qk_rope_head_dim
+        xlite_config.nope_head_dim = hf_config.qk_nope_head_dim
+        xlite_config.q_lora_rank = hf_config.q_lora_rank
+        xlite_config.kv_lora_rank = hf_config.kv_lora_rank
+        xlite_config.v_head_dim = hf_config.v_head_dim
+        xlite_config.softmax_scale = (hf_config.qk_rope_head_dim + hf_config.qk_nope_head_dim) ** -0.5
+        # correct softmax_scale for yarn-style RoPE if max_seq_len > original_max_position_embeddings
+        rope_params: dict[str, int | float | str] = getattr(hf_config, "rope_parameters", {})
+        original_max_len = rope_params.get("original_max_position_embeddings", hf_config.max_position_embeddings)
+        if xlite_config.max_seq_len > original_max_len and "mscale" in rope_params and "factor" in rope_params:
+            mscale: float = 1.0 + 0.1 * rope_params["mscale"] * math.log(rope_params["factor"])  # type: ignore[operator,arg-type]
+            xlite_config.softmax_scale *= mscale**2
+
+        # MoE configuration (from Glm4MoeXliteModel, adapted for DeepseekV3)
+        xlite_config.n_expert_groups = getattr(hf_config, "n_group", 1)
+        xlite_config.n_limited_groups = getattr(hf_config, "topk_group", 1)
+
+    def _build_model(self) -> None:
+        super()._build_model()
+        xlite_model = self.xlite_model
+        layers, _ = self._get_layers_and_model_prefix()
+
+        # MLA attention weights
+        self.init_matmul_weights(layers, "mla_qkv_a", "self_attn.fused_qkv_a_proj")
+        self.init_matmul_weights(layers, "mla_q_b", "self_attn.q_b_proj")
+        xlite_model.mla_q_norm = get_layer_weights(layers, "self_attn.q_a_layernorm.weight")
+        xlite_model.mla_kv_norm = get_layer_weights(layers, "self_attn.kv_a_layernorm.weight")
+        xlite_model.mla_wuv = get_layer_weights(layers, "self_attn.mla_attn.mla_attn.impl.W_UV")
+        xlite_model.mla_wuk_t = get_layer_weights(layers, "self_attn.mla_attn.mla_attn.impl.W_UK_T")
+
+        if not self.quantization:
+            return
+
+        self.xlite_config.quant_attn_weight_nz = bool(wt_lst := xlite_model.mla_qkv_a) and self.is_tensor_nz(wt_lst[0])
+        self.xlite_config.quant_attn_weight_transpose = True
+        with xlite_model.condition(lambda tensors: not self.all_tensors_zero(tensors)):
+            xlite_model.mla_q_norm_bias = get_layer_weights(layers, "self_attn.q_a_layernorm.bias")
+            xlite_model.mla_kv_norm_bias = get_layer_weights(layers, "self_attn.kv_a_layernorm.bias")
+
+    def _precompute_freqs_cis(self) -> torch.Tensor:
+        """Precompute Yarn-style RoPE frequency cache for DeepseekV3 MLA attention.
+
+        Returns complex exponential tensor for rotary positional embeddings.
+        Format: [max_seq_len, rope_head_dim//2] complex tensor (torch.polar).
+        """
+        xlite_config, hf_config = self.xlite_config, self.hf_text_config
+
+        # Extract Yarn parameters from rope_parameters
+        rope_params = getattr(hf_config, "rope_parameters", {})
+        base = rope_params.get("rope_theta", getattr(hf_config, "rope_theta", 10000.0))
+        factor = rope_params.get("factor", 1.0)
+        original_seq_len = rope_params.get("original_max_position_embeddings", hf_config.max_position_embeddings)
+        beta_fast = rope_params.get("beta_fast", 32)
+        beta_slow = rope_params.get("beta_slow", 1)
+
+        dim = xlite_config.rope_head_dim  # qk_rope_head_dim (64 for DeepseekV3)
+        seqlen = xlite_config.max_seq_len
+
+        # Helper functions for Yarn frequency correction
+        def find_correction_dim(num_rotations, dim, base, max_seq_len):
+            return dim * math.log(max_seq_len / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
+
+        def find_correction_range(low_rot, high_rot, dim, base, max_seq_len):
+            low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
+            high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
+            return max(low, 0), min(high, dim - 1)
+
+        def linear_ramp_factor(min_val, max_val, dim):
+            if min_val == max_val:
+                max_val += 0.001
+            linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
+            return torch.clamp(linear_func, 0, 1)
+
+        # Compute base frequencies on CPU
+        freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu") / dim))
+
+        # Apply Yarn scaling if sequence length exceeds original
+        if seqlen > original_seq_len:
+            low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_seq_len)
+            smooth = 1 - linear_ramp_factor(low, high, dim // 2)
+            freqs = freqs / factor * (1 - smooth) + freqs * smooth
+
+        # Create position indices and compute outer product
+        t = torch.arange(seqlen, dtype=torch.float32, device="cpu")
+        freqs = torch.outer(t, freqs)
+
+        # Return complex exponential format (as expected by xlite MLA forward)
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        return freqs_cis.to(device="npu")
+
+
+class DeepseekV32XliteModel(DeepseekV3XliteModel):
+    """xlite adapter for Deepseek-V3.2/GLM-5/GLM-5.1 architectures with Deepseek sparse attention (DSA)."""
+
+    _attn_metadata_type = AscendSFAMetadata  # type: ignore[assignment]
+    _supported_architectures = ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]
+
+    def _build_model_config(self) -> None:
+        super()._build_model_config()
+        xlite_config, hf_config = self.xlite_config, self.hf_text_config
+
+        xlite_config.attn_type = AttnDSA
+        xlite_config.index_head_dim = hf_config.index_head_dim
+        xlite_config.index_n_heads = hf_config.index_n_heads
+        xlite_config.index_topk = hf_config.index_topk
+        xlite_config.index_rope_interleaved = getattr(hf_config, "indexer_rope_interleave", False)
+
+    def _build_model(self) -> None:
+        super()._build_model()
+        xlite_model = self.xlite_model
+        layers, _ = self._get_layers_and_model_prefix()
+
+        self.init_matmul_weights(layers, "index_q_b", "self_attn.indexer.wq_b")
+        xlite_model.index_k_weights_proj = get_layer_weights(layers, "self_attn.indexer.wk_weights_proj.weight")
+        xlite_model.index_k_norm = get_layer_weights(layers, "self_attn.indexer.k_norm.weight")
+        xlite_model.index_k_norm_bias = get_layer_weights(layers, "self_attn.indexer.k_norm.bias")
+
+
 class MiniMaxM2XliteModel(StandardXliteModel):
     """xlite adapter for MiniMax M2 architectures."""
 
-    _attn_metadata_type = AscendMetadata
     _supported_architectures = ["MiniMaxM2ForCausalLM"]
     _decoder_layer_mlp_module = "block_sparse_moe"
 
@@ -515,6 +648,7 @@ class MiniMaxM2XliteModel(StandardXliteModel):
         xlite_config.norm_topk_prob = True
         xlite_config.qk_norm_full = True
         xlite_config.scoring_func = ScoringFuncSigmoid
+        xlite_config.gate_captured = False
 
 
 def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> XliteModelBase:
@@ -553,19 +687,16 @@ class XliteWrapper:
         """
         self.runnable = runnable
         self.device = device
-        self.full_mode = get_ascend_config().xlite_graph_config.full_mode
+        self.full_mode: bool = get_ascend_config().xlite_graph_config.full_mode
 
-        rank = torch.distributed.get_rank()
-        local_rank = get_world_group().local_rank
         self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
-
         self.adapter_xlite_model = get_adapter_xlite_model(runnable, vllm_config)
         (self.xlite_model, self.freq_cis, hidden_size, dtype) = self.adapter_xlite_model.initialize()
         xlite_config = self.adapter_xlite_model.xlite_config
         self.xlite_rt = Runtime(
-            devid=local_rank,
+            devid=device.index,
             size=0,
-            rank=rank,
+            rank=torch.distributed.get_rank(),
             tp_size=xlite_config.def_tp_size,
             dp_size=xlite_config.def_dp_size,
             moe_tp_size=xlite_config.moe_tp_size,
@@ -573,7 +704,7 @@ class XliteWrapper:
         )
 
         rt_pool_size = self.xlite_model.get_tensor_pool_size()
-        if rank == 0:
+        if torch.distributed.get_rank() == 0:
             logger.info("xlite runtime pool size: %s MB", rt_pool_size)
         if self.xlite_rt.init_tensor_pool(rt_pool_size) != 0:
             raise ValueError(f"xlite wrapper init failed! runtime pool size: {rt_pool_size} MB")
@@ -615,6 +746,10 @@ class XliteWrapper:
         Args:
             kv_caches (Any): Runtime KV cache handles or tensors.
         """
+        if len(kv_caches) == 2 * self.adapter_xlite_model.xlite_config.n_layers:
+            # For DSA, the kv_caches are passed as [(indexer_k_cache,), (k_nope_cache, pe_cache), ...]
+            # TODO: consider the compatibility with `enable_sparse_sfa_c8` and `enable_sparse_li_c8`
+            kv_caches = [main_c[:2] + indexer_c[:1] for main_c, indexer_c in zip(kv_caches[1::2], kv_caches[::2])]
         self.kv_caches = kv_caches
 
     def __call__(
@@ -653,7 +788,7 @@ class XliteWrapper:
             return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
         attn_metadata = attn_metadata[0] if isinstance(attn_metadata, list) else attn_metadata
-        attn_metadata = next(iter(attn_metadata.values()), None)
+        attn_metadata = attn_metadata.get("model.layers.0.self_attn.attn", next(iter(attn_metadata.values()), None))
         if not isinstance(attn_metadata, self.adapter_xlite_model._attn_metadata_type):
             return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
@@ -678,12 +813,13 @@ class XliteWrapper:
 
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         seq_lens = attn_metadata_router.seq_lens
-        cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :].to(device=seq_lens.device)
+        cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :]
         query_lens = torch.diff(cum_query_lens, prepend=seq_lens.new_zeros(1))
         cached_lens = torch.clamp(seq_lens - query_lens, min=0)
 
-        num_tokens = forward_context.batch_descriptor.num_tokens
-        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_actual_tokens = attn_metadata_router.num_actual_tokens
+        num_tokens = forward_context.max_tokens_across_dp
+
         xlite_attn_metadata = AttnMeta()
         xlite_attn_metadata.lens = query_lens.tolist()
         xlite_attn_metadata.cached_lens = cached_lens.tolist()
@@ -694,7 +830,7 @@ class XliteWrapper:
         else:
             xlite_attn_metadata.positions = positions
 
-        # Compatibility between DP and Non-DP scenarios
+        # under DP, `num_tokens` is the max number of tokens across all DP ranks for data alignment
         h = self.hidden_states[:num_tokens]
         stream = torch.npu.current_stream().npu_stream
         if inputs_embeds is None:

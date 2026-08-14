@@ -148,8 +148,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         extra_attn_metadata_args: dict[str, Any] = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
-                prefill_ratio_to_sas_metadata=dict(),
-                decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
@@ -230,15 +228,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-        if (
-            self.pcp_size * self.dcp_size > 1
-            and self.use_cuda_graph
-            and not is_profile
-            and self.block_table_tensor_clone is None
-        ):
+        if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
-                    self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs,
+                    self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
                     self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
                 ),
                 dtype=torch.int32,
@@ -276,8 +269,8 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
             )
-            if self.pcp_size * self.dcp_size > 1:
-                common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
+            if self.dcp_size > 1:
+                common_attn_metadata.context_parallel_metadata = self.runner.dcp_manager.long_seq_metadata
 
             common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
             common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
@@ -328,6 +321,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
     def _propose(
         self,
+        num_speculative_tokens: int,
         target_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
@@ -345,8 +339,19 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Dynamic SD: honor the scheduled per-step K, unified with
+        # ``AscendSpecDecodeBaseProposer._propose`` (this override does not call
+        # ``super()``, so it sets the value itself).
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
+
+        # Dynamic SD may schedule K == 0: return an empty [batch_size, 0] draft
+        # (mirrors AscendSpecDecodeBaseProposer._propose) so the downstream
+        # copy/unpack paths -- which key off ``draft_token_ids.shape[1]`` -- stay
+        # consistent. This override does not inherit the base's early return.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(batch_size, 0, device=target_token_ids.device, dtype=torch.int64)
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
@@ -364,7 +369,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
-        if self.pcp_size * self.dcp_size > 1:
+        if self.dcp_size > 1:
             assert long_seq_args is not None
         assert self.runner is not None
 
@@ -410,9 +415,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
-            slicing_length = (
-                num_reqs_padded * self.decode_threshold if self.pcp_size * self.dcp_size > 1 else num_reqs_padded
-            )
+            slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
@@ -427,23 +430,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
 
-            if self.pcp_size > 1:
-                pcp_allgather_restore_idx = (
-                    common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
-                )
-                index = torch.arange(
-                    pcp_allgather_restore_idx.shape[0],
-                    device=pcp_allgather_restore_idx.device,
-                )
-                mask = (index % (self.pcp_size * self.decode_threshold)) >= self.decode_threshold
-                pcp_allgather_restore_idx[mask] = 0
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: pcp_allgather_restore_idx.shape[0]] = (
-                    pcp_allgather_restore_idx
-                )
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[pcp_allgather_restore_idx.shape[0] :] = 0
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
-            if not self.vllm_config.model_config.use_mla and self.pcp_size * self.dcp_size == 1:
+            if not self.vllm_config.model_config.use_mla and self.dcp_size == 1:
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
@@ -576,10 +565,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                     -1, self.num_speculative_tokens, draft_probs.shape[-1]
                 ).contiguous()
             return draft_token_ids.view(-1, self.num_speculative_tokens)
-
-        if self.pcp_size * self.dcp_size > 1 and is_prefill:
-            draft_token_ids_list = [draft_token_ids for _ in range(self.num_speculative_tokens)]
-            return torch.stack(draft_token_ids_list, dim=1)
 
         return self._run_window_draft_steps(
             first_draft_token_ids=draft_token_ids,

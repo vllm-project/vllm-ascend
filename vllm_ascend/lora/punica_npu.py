@@ -49,6 +49,25 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
 
+    def update_metadata(
+        self,
+        mapping,
+        lora_index_to_id,
+        max_loras,
+        vocab_size,
+        **kwargs,
+    ) -> None:
+        super().update_metadata(
+            mapping,
+            lora_index_to_id,
+            max_loras,
+            vocab_size,
+            **kwargs,
+        )
+        # PunicaWrapperBase computes this only for prefill. Decode must also
+        # choose between the active-LoRA and base-only quantized MoE paths.
+        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+
     def _shrink_prefill(
         self,
         y: torch.Tensor,

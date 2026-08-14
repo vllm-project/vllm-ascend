@@ -25,12 +25,6 @@ msgid "## Getting Started"
 msgstr "## 快速开始"
 
 msgid ""
-"vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide "
-"provides step-by-step instructions to verify this features in resource-"
-"constrained environments."
-msgstr "vLLM-Ascend 现已支持预填充-解码（PD）分离。本指南提供在资源受限环境中验证此功能的分步说明。"
-
-msgid ""
 "Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend "
 "{{vllm_ascend_version}} (with vLLM {{vllm_version}}) on 1 Atlas 800T A2 "
 "server to deploy the \"1P1D\" architecture (one Prefiller and one Decoder on"
@@ -87,12 +81,6 @@ msgstr ""
 "Mooncake 是 Kimi（Moonshot AI 提供的领先 LLM 服务）的服务平台。安装与编译指南：<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>。\n"
 "首先，我们需要获取 Mooncake 项目。请参考以下命令："
 
-msgid "(Optional) Replace go install url if the network is poor."
-msgstr "（可选）如果网络状况不佳，请替换 go install 的 URL。"
-
-msgid "Install mpi."
-msgstr "安装 mpi。"
-
 msgid ""
 "Install the relevant dependencies. The installation of Go is not required."
 msgstr "安装相关依赖。无需安装 Go。"
@@ -127,11 +115,6 @@ msgstr "=== \"预填充器\""
 msgid "=== \"Decoder\""
 msgstr "=== \"解码器\""
 
-msgid ""
-"If you want to run \"2P1D\", please set ASCEND_RT_VISIBLE_DEVICES and port "
-"to different values for each P process."
-msgstr "如果要运行“2P1D”，请为每个 P 进程设置不同的 ASCEND_RT_VISIBLE_DEVICES 和端口值。"
-
 msgid "## Example Proxy for Deployment"
 msgstr "## 部署示例代理"
 
@@ -155,11 +138,29 @@ msgstr "使用代理服务器端点检查服务健康状态。"
 msgid "|Parameter  | Meaning |"
 msgstr "|参数 | 含义 |"
 
-msgid "| --port | Port of proxy |"
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide "
+"provides step-by-step instructions to verify this feature in resource-"
+"constrained environments."
+msgstr "vLLM-Ascend 现已支持预填充-解码（PD）分离。本指南提供在资源受限环境中验证此功能的分步说明。"
+
+msgid "(Optional) Replace go install URL if the network is poor."
+msgstr "（可选）如果网络状况不佳，请替换 go install 的 URL。"
+
+msgid "Install MPI."
+msgstr "安装 MPI。"
+
+msgid ""
+"If you want to run \"2P1D\" (two Prefiller and one Decoder), please set "
+"ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process."
+msgstr ""
+"如果您想运行“2P1D”（两个预填充进程和一个解码进程），请为每个 P 进程设置不同的 ASCEND_RT_VISIBLE_DEVICES 和端口值。"
+
+msgid "| --port | Proxy port |"
 msgstr "| --port | 代理端口 |"
 
-msgid "| --prefiller-port | All ports of prefill |"
-msgstr "| --prefiller-port | 预填充的所有端口 |"
+msgid "| --prefiller-port | All prefiller ports |"
+msgstr "| --prefiller-port | 所有预填充端口 |"
 
-msgid "| --decoder-ports | All ports of decoder |"
-msgstr "| --decoder-ports | 解码器的所有端口 |"
+msgid "| --decoder-ports | All decoder ports |"
+msgstr "| --decoder-ports | 所有解码端口 |"

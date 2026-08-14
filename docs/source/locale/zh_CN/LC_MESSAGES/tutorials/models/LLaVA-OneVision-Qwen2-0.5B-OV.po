@@ -81,14 +81,6 @@ msgid ""
 " directly."
 msgstr "您可以直接使用官方 Docker 镜像运行 `LLaVA-OneVision-Qwen2-0.5B-OV`。"
 
-msgid ""
-"Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
-"docker)."
-msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
-"using-docker)。"
-
 msgid "## Deployment"
 msgstr "## 部署"
 
@@ -148,3 +140,11 @@ msgstr ""
 
 msgid "| dataset | platform | metric | value |"
 msgstr "| 数据集 | 平台 | 指标 | 值 |"
+
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node. Refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在您的节点上启动docker镜像。请参阅[使用docker](../../installation.md#set-up-"
+"using-docker)。"

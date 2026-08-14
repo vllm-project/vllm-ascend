@@ -21,6 +21,8 @@ import torch
 import vllm_ascend.model_loader.rfork.transfer_backend as transfer_backend
 from vllm_ascend.model_loader.rfork.transfer_backend import (
     RForkTransferBackend,
+    _collect_checkpoint_layout_tensors,
+    _collect_processed_layout_tensors,
     _parse_weight_info,
     _reshape_tensor_to_seed_shape,
     get_remote_instance_transfer_engine_info,
@@ -65,7 +67,11 @@ def test_recv_from_source_refreshes_registered_shape_after_reshape(monkeypatch):
     )
     backend.rfork_transfer_engine_weights_shape_dict = {"weight": (2, 3)}
 
-    monkeypatch.setattr(transfer_backend, "_iter_transferable_tensors", lambda model: iter([("weight", tensor)]))
+    monkeypatch.setattr(
+        transfer_backend,
+        "_iter_transferable_tensors",
+        lambda model, processed_layout: iter([("weight", tensor)]),
+    )
     monkeypatch.setattr(
         transfer_backend,
         "get_remote_instance_transfer_engine_info",
@@ -76,7 +82,7 @@ def test_recv_from_source_refreshes_registered_shape_after_reshape(monkeypatch):
         ),
     )
 
-    assert backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key")
+    assert backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)
     assert tuple(tensor.shape) == (1, 2, 3)
     assert backend.rfork_transfer_engine_weights_shape_dict["weight"] == (1, 2, 3)
 
@@ -90,7 +96,7 @@ def test_recv_from_source_reuses_registered_transferable_tensors(monkeypatch):
     backend.rfork_transfer_engine_weights_shape_dict = {"weight": (2, 3)}
     backend._registered_transferable_tensors = [("weight", tensor)]
 
-    def fail_if_rescanned(model):
+    def fail_if_rescanned(model, processed_layout):
         raise AssertionError("recv_from_source should reuse the registered tensor cache")
 
     monkeypatch.setattr(transfer_backend, "_iter_transferable_tensors", fail_if_rescanned)
@@ -104,8 +110,31 @@ def test_recv_from_source_reuses_registered_transferable_tensors(monkeypatch):
         ),
     )
 
-    assert backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key")
+    assert backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)
     assert backend._registered_transferable_tensors is None
+
+
+def test_transferable_tensor_scan_depends_on_runtime_layout(monkeypatch):
+    class _RuntimeImpl:
+        def __init__(self):
+            self.runtime_weight = torch.ones(2)
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(2))
+            self.register_buffer("buffer", torch.ones(2))
+            self.runtime_constant = torch.ones(2)
+            self.impl = _RuntimeImpl()
+
+    monkeypatch.setattr(transfer_backend, "_is_transferable_tensor", lambda tensor: True)
+    model = _Model()
+
+    processed_names = {name for name, _ in _collect_processed_layout_tensors(model)}
+    checkpoint_names = {name for name, _ in _collect_checkpoint_layout_tensors(model)}
+
+    assert processed_names == {"weight", "buffer", "runtime_constant", "impl.runtime_weight"}
+    assert checkpoint_names == {"weight", "buffer", "impl.runtime_weight"}
 
 
 def test_get_remote_instance_transfer_engine_info_non_200_returns_three_values(monkeypatch):

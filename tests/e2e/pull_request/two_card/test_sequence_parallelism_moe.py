@@ -47,6 +47,7 @@ from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
 from tests.e2e.pull_request.one_card.compile.backend import TestBackend as CompileTestBackend
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.sequence_parallelism_moe import (
     SequenceParallelismMoePass,
 )
@@ -95,6 +96,7 @@ class AllGatherRMSNormModel(BaseAllGatherRMSNormModel):
         num_tokens_helper: torch.Tensor,
     ) -> torch.Tensor:
         sliced = self._all_gather_sliced(x, num_tokens_helper)
+        residual = torch.ops.vllm.maybe_chunk_residual(sliced, residual)
         rms_out = torch.ops._C_ascend.npu_add_rms_norm_bias(sliced, residual, self.norm_w, None, self.eps)
         return rms_out[0]
 
@@ -102,6 +104,7 @@ class AllGatherRMSNormModel(BaseAllGatherRMSNormModel):
     def ops_in_model_before() -> tuple[tuple[OpOverload, int], ...]:
         return (
             (torch.ops.vllm.all_gather.default, 1),
+            (torch.ops.vllm.maybe_chunk_residual.default, 1),
             (torch.ops._C_ascend.npu_add_rms_norm_bias.default, 1),
         )
 
@@ -117,17 +120,19 @@ class Qwen3VLAllGatherRMSNormModel(BaseAllGatherRMSNormModel):
         deepstack_input_embeds: torch.Tensor,
     ) -> torch.Tensor:
         sliced = self._all_gather_sliced(x, num_tokens_helper)
+        residual = torch.ops.vllm.maybe_chunk_residual(sliced, residual)
         add_ = sliced + deepstack_input_embeds
         result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, self.norm_w, None, self.eps)
         # Keep the residual output live so the traced graph preserves the full pattern.
-        result = result - residual
+        result = result + residual.sum() * 0
         return result
 
     @staticmethod
     def ops_in_model_before() -> tuple[tuple[OpOverload, int], ...]:
         return (
             (torch.ops.vllm.all_gather.default, 1),
-            (torch.ops.aten.add.Tensor, 1),
+            (torch.ops.aten.add.Tensor, 2),
+            (torch.ops.vllm.maybe_chunk_residual.default, 1),
             (torch.ops._C_ascend.npu_add_rms_norm_bias.default, 1),
         )
 
@@ -309,9 +314,10 @@ def _run_single_pattern_case(
     for dynamic_input_index in case.dynamic_input_indices:
         torch._dynamo.mark_dynamic(inputs[dynamic_input_index], 0)
 
-    unfused = model(*inputs)
     compiled = torch.compile(model, backend=backend)
-    fused = compiled(*inputs)
+    with set_ascend_forward_context(attn_metadata=None, vllm_config=vllm_config, num_tokens=inputs[0].shape[0]):
+        unfused = model(*inputs)
+        fused = compiled(*inputs)
     assert unfused.shape == fused.shape
 
     assert sp_moe_pass.matched_count == 1

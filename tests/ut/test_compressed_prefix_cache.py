@@ -22,7 +22,6 @@ from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
-from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.cpu_test
 
@@ -108,7 +107,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
-    hit_blocks = hit_result[0] if vllm_version_is("0.25.1") else hit_result[0][0]
+    hit_blocks = hit_result[0][0]
 
     assert hit_blocks == []
 
@@ -136,7 +135,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
-    hit_blocks = hit_result[0] if vllm_version_is("0.25.1") else hit_result[0][0]
+    hit_blocks = hit_result[0][0]
 
     assert hit_blocks == manager.req_to_blocks[request.request_id]
 
@@ -181,6 +180,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=block_size,
+        scheduler_block_size=logical_block_size,
         max_num_batched_tokens=logical_block_size,
     )
 
@@ -204,10 +204,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         request_b.block_hashes,
         max_cache_hit_length=logical_block_size,
     )
-    if vllm_version_is("0.25.1"):
-        hit_blocks, hit_length = hit_result
-    else:
-        hit_blocks, hit_length, _ = hit_result
+    hit_blocks, hit_length, _ = hit_result
 
     assert hit_length == 0
     assert hit_blocks == ([], [])

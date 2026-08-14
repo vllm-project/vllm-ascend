@@ -23,13 +23,11 @@ from unittest.mock import patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import get_block_hashes
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
 )
-from vllm_ascend.utils import vllm_version_is
-
 # isort: on
 
 
@@ -80,7 +78,7 @@ class _FakeCompressedManager:
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
         logical_block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
-        if not vllm_version_is("0.25.1") and logical_block_size != block_pool.hash_block_size:
+        if logical_block_size != block_pool.hash_block_size:
             scale_factor = logical_block_size // block_pool.hash_block_size
             block_hashes = [
                 block_hashes[index + scale_factor - 1]
@@ -93,8 +91,6 @@ class _FakeCompressedManager:
                 break
             for blocks, block in zip(computed, cached):
                 blocks.append(block)
-        if vllm_version_is("0.25.1"):
-            return computed
         return computed, len(computed[0]) * logical_block_size
 
 
@@ -181,6 +177,24 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             masks = coord.store_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
+
+    def test_lookup_mask_uses_reachability_without_retention(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
+            scheduler_block_size=512,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+            retention_interval=256,
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, False, False, True],
+        ) as reachable:
+            masks = coord.lookup_mask(512)
+
+        self.assertEqual(masks, ([False, False, False, True],))
+        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
 
     def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
         calls = []

@@ -39,7 +39,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
-from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -253,7 +253,7 @@ class AscendParallelLMHead(ParallelLMHead):
     """
     Register ParallelLMHead as a custom op for Ascend."""
 
-    def __init__(
+    def __init__(  # type: ignore[misc]
         self,
         num_embeddings: int,
         embedding_dim: int,
@@ -263,9 +263,20 @@ class AscendParallelLMHead(ParallelLMHead):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
+        self.disable_tp = disable_tp
+
         AscendVocabParallelEmbedding.__init__(
-            self, num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
+            self,
+            num_embeddings,
+            embedding_dim,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
         )
 
         self.quant_config = quant_config
@@ -294,8 +305,6 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        if vllm_version_is("0.25.1"):
-            return lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
         return super()._apply_head(lm_head, hidden_states, embedding_bias)
 
     def _get_logits(

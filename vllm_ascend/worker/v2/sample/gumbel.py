@@ -60,6 +60,9 @@ def apply_temperature(
         temperature: Tensor containing the temperature value for each request.
     """
     num_tokens, vocab_size = logits.shape
+    # BLOCK_SIZE fits the FP32 working vector within the Ascend A2/A3 UB limit
+    # (192 KB). Upstream restores the FP32 logit upcast (vllm #49033), so on
+    # main / v0.27.1 the kernel gets FP32 logits and 44032 * 32 bits fits.
     BLOCK_SIZE = 44032
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _temperature_kernel[(num_tokens, num_blocks)](
