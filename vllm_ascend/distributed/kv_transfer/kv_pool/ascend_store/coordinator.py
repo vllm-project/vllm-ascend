@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
+    get_cache_family_granularity,
 )
 
 _CACHE_MISSING = object()
@@ -82,10 +83,9 @@ class AscendStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
         self.retention_interval = retention_interval
-        self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = [
-            _cache_family_granularity(block_size, family)
+            get_cache_family_granularity(block_size, family)
             for block_size, family in zip(group_block_sizes, group_cache_families, strict=True)
         ]
         for effective_block_size in self.group_effective_block_sizes:
@@ -170,7 +170,7 @@ class AscendStoreCoordinator:
             apply_eagle=False,
         )
         return tuple(
-            [True] * _num_chunks(token_len, self.group_effective_block_sizes[group_id])
+            [True] * cdiv(token_len, self.group_effective_block_sizes[group_id])
             if not _uses_reachable_mask(self.group_cache_families[group_id])
             else mask
             for group_id, mask in enumerate(masks)
@@ -417,16 +417,5 @@ def _reachable_block_mask(
         return reachable_block_mask(**kwargs)
 
 
-def _cache_family_granularity(block_size: int, cache_family: str | None) -> int:
-    if not cache_family or not cache_family.startswith("c"):
-        return block_size
-    ratio = cache_family[1:]
-    return block_size * int(ratio) if ratio.isdigit() else block_size
-
-
 def _uses_reachable_mask(cache_family: str | None) -> bool:
     return cache_family in (None, "default", "c1")
-
-
-def _num_chunks(token_len: int, block_size: int) -> int:
-    return (token_len + block_size - 1) // block_size
