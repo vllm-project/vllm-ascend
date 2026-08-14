@@ -65,7 +65,7 @@ python -c "import vllm_ascend; print(vllm_ascend.__version__)"
 
 Expected result: the command prints the installed vLLM Ascend version without errors.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 

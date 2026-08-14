@@ -26,12 +26,11 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
+from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass
 
@@ -311,8 +310,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         input_ids,
     ):
         if not self.replace_allreduce:
-            forward_context = get_forward_context()
-            target_pad_length = forward_context.padded_num_tokens
+            target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
             if pad_size > 0 and not self.enable_shared_expert_dp:
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))

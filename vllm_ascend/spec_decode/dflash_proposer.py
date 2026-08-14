@@ -3,13 +3,38 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
+from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+_COPY_EXPAND_TILE_SIZE = 256
+
+
+def _compute_num_programs(num_context_total: int, num_query_total: int) -> int:
+    """Number of programs to launch for copy_and_expand_dflash_and_dspark_inputs_kernel:
+    one program per TILE_SIZE chunk of the larger work range, capped at the
+    vector-core count (the kernel grid-strides, so any count fully covers the work).
+
+    ``init_device_properties_triton`` is idempotent (guarded by an unset
+    sentinel), so calling it here keeps the helper self-contained for unit
+    tests that bypass worker startup.
+    """
+    init_device_properties_triton()
+    # The kernel runs two independent grid-stride loops, over
+    # [0, num_context_total) and [0, num_query_total); each is fully covered for
+    # any program count (a too-small count just iterates more). Only the larger
+    # bound decides how many programs do real work, so size on max(...). Using
+    # the sum would launch extra programs that are idle in *both* loops.
+    num_blocks_needed = triton.cdiv(max(num_context_total, num_query_total), _COPY_EXPAND_TILE_SIZE)
+    return min(num_blocks_needed, get_vectorcore_num())
 
 
 class AscendDflashProposer(AscendEagleProposer):
@@ -60,6 +85,18 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self.parallel_drafting_hidden_state_tensor = None
 
+        dynamic_spec_config = get_ascend_config().dynamic_spec_config
+        self.dynamic_spec = None
+
+        if dynamic_spec_config.method == "dflash":
+            self.dynamic_spec = DynamicSpecScheduler(
+                method="dflash",
+                method_params=dynamic_spec_config.method_params,
+                max_batch_size=self.max_batch_size,
+                num_speculative_tokens=self.num_speculative_tokens,
+                device=device,
+            )
+
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -92,7 +129,7 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
-        copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+        copy_and_expand_dflash_and_dspark_inputs_kernel[(_compute_num_programs(num_context, num_query_total),)](
             # Inputs
             next_token_ids_ptr=next_token_ids,
             target_positions_ptr=target_positions,
@@ -229,8 +266,8 @@ class AscendDflashProposer(AscendEagleProposer):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)
                 self.model(
-                    input_ids=self.input_ids[:num_query_total],
-                    positions=self._get_positions(num_query_total),
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self._get_positions(num_input_tokens),
                     inputs_embeds=None,
                 )
 

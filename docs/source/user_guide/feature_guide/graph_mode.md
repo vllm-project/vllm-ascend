@@ -227,7 +227,7 @@ For more details about Npugraph_ex, see the [npugraph_ex guide](https://www.hias
 
 ## Using XliteGraph {: #using-xlitegraph }
 
-XliteGraph is an optional path for Llama, Qwen dense series models, Qwen MoE series models, and Qwen3-VL. It requires Xlite to be installed and configured through `xlite_graph_config`.
+XliteGraph is an optional graph path for the Llama and Qwen dense series, the Qwen MoE series, Qwen3-VL, and DeepSeek-V3 / V3.2-class MoE models (including GLM-4 / GLM-5 / GLM-5.1 and MiniMax-M2). It requires the `xlite` package to be installed and is configured through the `xlite_graph_config` additional-config key (see the `xlite_graph_config` table under [Configuration options](../configuration/additional_config.md#configuration-options)).
 
 Install Xlite first:
 
@@ -235,22 +235,56 @@ Install Xlite first:
 pip install xlite
 ```
 
+### Decode-only vs. full mode
+
+XliteGraph has two modes, selected by `xlite_graph_config.full_mode`:
+
+| Mode | `full_mode` | Prefill | Decode |
+|---|---|---|---|
+| **Decode-only** (default) | `False` | Falls back to the runnable / ACLGraph | Handled by the xlite runtime |
+| **Full** | `True` | Handled by the xlite runtime | Handled by the xlite runtime |
+
+In **decode-only mode**, xlite only owns the decode batches; prefill (and any mixed batch that exceeds the graph capacity) falls back to the native runnable, captured/replayed by ACLGraph. This is the default and is the recommended option — `Xlite` is still evolving, and decode-only mode is more performant and robust for most workloads.
+
+In **full mode**, the xlite runtime drives both prefill and decode. Because xlite itself manages the full forward, ACLGraph capture should be disabled, especially under memory constraints, for higher concurrency and better performance.
+
+### Supported models
+
+The xlite adapter registers architectures by their `config.json` `architectures` field. The currently supported set:
+
+| Architecture | Attention | Adapter |
+|---|---|---|
+| `LlamaForCausalLM`, `Qwen2ForCausalLM`, `Qwen3ForCausalLM` | MHA | `StandardXliteModel` |
+| `Qwen3VLForConditionalGeneration` | MHA (multimodal) | `StandardXliteModel` |
+| `Qwen3MoeForCausalLM`, `Qwen3VLMoeForConditionalGeneration` | MHA + MoE | `QwenMoeXliteModel` |
+| `Glm4MoeForCausalLM` | MHA + MoE | `Glm4MoeXliteModel` |
+| `DeepseekV3ForCausalLM` | MLA + MoE | `DeepseekV3XliteModel` |
+| `DeepseekV32ForCausalLM`, `GlmMoeDsaForCausalLM` | DSA + MoE | `DeepseekV32XliteModel` |
+| `MiniMaxM2ForCausalLM` | MHA + MoE | `MiniMaxM2XliteModel` |
+
+### Example
+
+Serving `Qwen3-30B-A3B` (`Qwen3MoeForCausalLM`, MHA + MoE) on 4 NPU cards with tensor parallelism of 4, and expert parallelism enabled. Full mode is shown; drop `"full_mode": true` for decode-only.
+
 Offline example:
 
 ```python
+import os
+
 from vllm import LLM
 
-# Xlite supports decode-only mode by default.
-# Full mode can be enabled with "full_mode": True.
+os.environ["HCCL_BUFFSIZE"] = "1024"
+os.environ["TASK_QUEUE_ENABLE"] = "1"
+os.environ["OMP_PROC_BIND"] = "false"
+os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
+
 llm = LLM(
-    model="path/to/Qwen3-32B",
-    tensor_parallel_size=8,
-    additional_config={
-        "xlite_graph_config": {
-            "enabled": True,
-            "full_mode": True,
-        }
-    },
+    model="path/to/Qwen3-30B-A3B",
+    tensor_parallel_size=4,
+    enable_expert_parallel=True,
+    enforce_eager=True,  # recommended in xlite full mode without speculative decoding
+    additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}},
 )
 outputs = llm.generate("Hello, how are you?")
 ```
@@ -258,8 +292,16 @@ outputs = llm.generate("Hello, how are you?")
 Online example:
 
 ```bash
-vllm serve path/to/Qwen3-32B \
-  --tensor-parallel-size 8 \
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export OMP_PROC_BIND=false
+export HCCL_OP_EXPANSION_MODE=AIV
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve path/to/Qwen3-30B-A3B \
+  --tensor-parallel-size 4 \
+  --enable-expert-parallel \
+  --enforce-eager \
   --additional-config '{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
 ```
 

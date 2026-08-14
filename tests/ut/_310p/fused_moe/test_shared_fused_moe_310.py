@@ -15,7 +15,7 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
 )
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
 
 
 def _build_runner() -> AscendMoERunner310:
@@ -31,20 +31,67 @@ def _build_weight_layer():
     )
 
 
-def test_routed_experts_310_owns_specialized_unquantized_method(monkeypatch):
-    routed_experts = AscendRoutedExperts310.__new__(AscendRoutedExperts310)
-    routed_experts.tid2eid = object()
+def test_routed_experts_310_uses_parent_unquantized_method_during_init(monkeypatch):
     moe_config = MagicMock()
+    parent_method = MagicMock()
+    specialized_method = object()
+
+    def parent_init(layer, *args, **kwargs):
+        nn.Module.__init__(layer)
+        layer.quant_config = None
+        layer.moe_config = moe_config
+        layer.quant_method = parent_method
+        layer.custom_routing_function = None
+        layer.e_score_correction_bias = None
+
+    monkeypatch.setattr(fused_moe_310_module.AscendRoutedExperts, "__init__", parent_init)
+    specialized_method_factory = MagicMock(return_value=specialized_method)
     monkeypatch.setattr(
-        AscendUnquantizedFusedMoEMethod310,
-        "dispatch_forward",
-        lambda self, compile_native=False: self.forward_native,
+        fused_moe_310_module,
+        "AscendUnquantizedFusedMoEMethod310",
+        specialized_method_factory,
     )
 
-    method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
+    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
 
-    assert isinstance(method, AscendUnquantizedFusedMoEMethod310)
-    assert method.moe is moe_config
+    assert routed_experts.quant_method is specialized_method
+    specialized_method_factory.assert_called_once_with(moe_config)
+
+
+@pytest.mark.parametrize("quant_config", [None, object()])
+def test_routed_experts_310_replaces_only_unquantized_method_after_parent_init(monkeypatch, quant_config):
+    moe_config = MagicMock()
+    parent_method = object()
+    specialized_method = object()
+    init_kwargs = {}
+
+    def parent_init(layer, *args, **kwargs):
+        nn.Module.__init__(layer)
+        init_kwargs.update(kwargs)
+        layer.quant_config = quant_config
+        layer.moe_config = moe_config
+        layer.quant_method = parent_method
+        layer.custom_routing_function = None
+        layer.e_score_correction_bias = None
+
+    specialized_method_factory = MagicMock(return_value=specialized_method)
+    monkeypatch.setattr(fused_moe_310_module.AscendRoutedExperts, "__init__", parent_init)
+    monkeypatch.setattr(
+        fused_moe_310_module,
+        "AscendUnquantizedFusedMoEMethod310",
+        specialized_method_factory,
+    )
+
+    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
+
+    assert init_kwargs["tid2eid"] == "tid2eid"
+    assert init_kwargs["n_shared_experts"] == 3
+    if quant_config is None:
+        assert routed_experts.quant_method is specialized_method
+        specialized_method_factory.assert_called_once_with(moe_config)
+    else:
+        assert routed_experts.quant_method is parent_method
+        specialized_method_factory.assert_not_called()
 
 
 def test_runner_310_installs_specialized_comm():
@@ -98,6 +145,52 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
     assert layer.w2_weight.is_contiguous() is True
 
 
+def test_unquantized_apply_310_uses_preselected_experts():
+    method = AscendUnquantizedFusedMoEMethod310.__new__(AscendUnquantizedFusedMoEMethod310)
+    expert_map = torch.tensor([0, 1], dtype=torch.int32)
+    layer = SimpleNamespace(
+        w13_weight=torch.randn(2, 4, 6),
+        w2_weight=torch.randn(2, 6, 4),
+        ascend_expert_map=expert_map,
+        global_redundant_expert_num=0,
+        ascend_mc2_mask=None,
+        apply_router_weight_on_input=True,
+        log2phy=None,
+        ascend_pertoken_scale=None,
+        activation="silu",
+        swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
+    )
+    hidden_states = torch.randn(3, 6)
+    topk_weights = torch.rand(3, 2)
+    topk_ids = torch.tensor([[0, 1], [1, 0], [0, 1]], dtype=torch.int32)
+    expected_output = object()
+    comm_method = MagicMock()
+    comm_method.fused_experts.return_value = expected_output
+
+    with patch.object(
+        fused_moe_310_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_method=comm_method),
+    ):
+        output = method.apply(
+            layer=layer,
+            x=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
+        )
+
+    assert output is expected_output
+    fused_experts_input = comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+    assert fused_experts_input.topk_weights is topk_weights
+    assert fused_experts_input.topk_ids is topk_ids
+    assert fused_experts_input.routing.expert_map is expert_map
+    assert fused_experts_input.routing.apply_router_weight_on_input is True
+
+
 class _Projection(nn.Module):
     def forward(self, hidden_states):
         return hidden_states * 2.0 + 1.0, None
@@ -136,15 +229,15 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
     ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
-    routed_result = SimpleNamespace(
-        routed_out=routed_out,
-        before_dispatch_evt=None,
-        before_gmm2_evt=None,
-        before_combine_evt=None,
-        swiglu_limit=0.0,
+    routed_events = FusedMoEEvents(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
     )
     runner.routed_experts = SimpleNamespace(
-        forward_impl=MagicMock(return_value=routed_result if has_shared_experts else routed_out)
+        forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
     )
     runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
@@ -159,6 +252,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            input_ids=None,
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
@@ -167,6 +261,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            input_ids=None,
         )
         assert result is routed_out
         ascend_shared_experts.forward.assert_not_called()

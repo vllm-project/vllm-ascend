@@ -26,7 +26,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -102,44 +101,24 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                     if self.dp_size > 1
                     else None
                 )
-                if vllm_version_is("0.26.0"):
-                    prepare_inputs_to_capture(
-                        num_reqs,
-                        num_tokens,
-                        model_state,
-                        input_buffers,
-                        block_tables,
-                        attn_groups,
-                        kv_cache_config,
-                        skip_attn=(desc.cg_mode != CUDAGraphMode.PIECEWISE),
-                    )
-                else:
-                    prepare_inputs_to_capture(
-                        num_reqs,
-                        num_tokens,
-                        model_state,
-                        input_buffers,
-                        block_tables,
-                        attn_groups,
-                        kv_cache_config,
-                        full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
-                    )
+                prepare_inputs_to_capture(
+                    num_reqs,
+                    num_tokens,
+                    model_state,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
+                )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
-                if vllm_version_is("0.26.0"):
-                    return lambda cg_mode: forward_fn(
-                        num_reqs,
-                        cg_mode == CUDAGraphMode.PIECEWISE,
-                        BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
-                        num_tokens_across_dp,
-                    )
-                else:
-                    return lambda cg_mode: forward_fn(
-                        num_reqs,
-                        cg_mode == CUDAGraphMode.PIECEWISE,
-                        BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
-                        num_tokens_across_dp,
-                        seq_lens_cpu_upper_bound,
-                    )
+                return lambda cg_mode: forward_fn(
+                    num_reqs,
+                    cg_mode == CUDAGraphMode.PIECEWISE,
+                    BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
+                    num_tokens_across_dp,
+                    seq_lens_cpu_upper_bound,
+                )
 
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
 
@@ -152,7 +131,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
-
+        self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
@@ -177,7 +156,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],
-                self.speculator.update_stream,
+                self.update_stream,
                 forward_context,
                 num_tokens,
                 self.vllm_config,

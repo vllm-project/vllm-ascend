@@ -210,7 +210,7 @@ llm_kwargs = dict(
     max_model_len=8192,
     distributed_executor_backend="ray",
     gpu_memory_utilization=0.75,
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),
+    weight_transfer_config=WeightTransferConfig(backend="hccl"),
 )
 
 # Launch the vLLM inference engine.

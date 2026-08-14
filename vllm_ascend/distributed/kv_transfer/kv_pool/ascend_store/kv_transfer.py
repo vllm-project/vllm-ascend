@@ -13,10 +13,10 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 # isort: off
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     infer_cache_family_ratio,
     LayerBatchReqMeta,
@@ -59,11 +59,13 @@ class LayerBatchBuilder:
         )
         group_block_stride = token_database.group_block_stride.get(group_id, token_database.group_block_len[group_id])
         self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
-        # group_block_len[group_id] / kv_caches_base_addr[group_id] are laid out flat as
-        # [layer0_caches..., layer1_caches..., ...]; the per-layer stride is the
-        # total length divided by the number of layers (mirrors
-        # ChunkedTokenDatabase caches_per_layer computation).
-        self._caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
+        layer_cache_entry_offsets = token_database.group_layer_cache_entry_offsets.get(group_id)
+        if layer_cache_entry_offsets is None:
+            caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
+            layer_cache_entry_offsets = [
+                min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)
+            ]
+        self._layer_cache_entry_offsets_np = np.asarray(layer_cache_entry_offsets, dtype=np.int64)
         self._block_ids_buf: np.ndarray | None = None
         self._block_gvas_buf: np.ndarray | None = None
 
@@ -102,20 +104,16 @@ class LayerBatchBuilder:
         base_gvas_arr: np.ndarray,
         layer_id: int,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        caches_per_layer = self._caches_per_layer
-        # group_* arrays are laid out flat as [layer0_caches..., layer1_caches...];
-        # slice the per-layer window for ``layer_id``. Using the full length as the
-        # stride (the old behaviour) overshoots for layer_id >= 1 and yields empty
-        # slices -> broadcast errors.
-        base_offset = layer_id * caches_per_layer
-        layer_base_addrs = self._kv_caches_base_addr_np[base_offset : base_offset + caches_per_layer]
-        layer_block_len = self._block_len_np[base_offset : base_offset + caches_per_layer]
-        layer_block_stride = self._block_stride_np[base_offset : base_offset + caches_per_layer]
+        base_offset = int(self._layer_cache_entry_offsets_np[layer_id])
+        end_offset = int(self._layer_cache_entry_offsets_np[layer_id + 1])
+        layer_base_addrs = self._kv_caches_base_addr_np[base_offset:end_offset]
+        layer_block_len = self._block_len_np[base_offset:end_offset]
+        layer_block_stride = self._block_stride_np[base_offset:end_offset]
         # Per-cache inner offsets within one layer's page: [0, len0, len0+len1, ...].
         layer_inner_offsets = np.concatenate(
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
         )
-        rank_layer_offset = layer_id * self.page_size_bytes
+        rank_layer_offset = int(self._block_len_np[:base_offset].sum())
         if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
             zero_count = int(np.sum(base_gvas_arr <= 0))
             logger.warning(
@@ -131,7 +129,7 @@ class LayerBatchBuilder:
             "base_gvas=%s",
             layer_id,
             self.page_size_bytes,
-            caches_per_layer,
+            end_offset - base_offset,
             rank_layer_offset,
             layer_block_len.tolist(),
             layer_inner_offsets.tolist(),
@@ -240,9 +238,17 @@ class LayerBatchBuilder:
                 offset = end
 
             if block_range.partial_block_index is not None:
-                assert request.last_block_gva is not None
+                partial_block_gva = None
+                partial_gva_per_group = (
+                    request.partial_save_gva_per_group if is_save else request.partial_load_gva_per_group
+                )
+                if task.group_id < len(partial_gva_per_group):
+                    partial_block_gva = partial_gva_per_group[task.group_id]
+                if partial_block_gva is None:
+                    partial_block_gva = request.last_block_gva
+                assert partial_block_gva is not None
                 block_ids_arr[offset] = block_ids_np[block_range.partial_block_index]
-                block_gvas_arr[offset] = request.last_block_gva
+                block_gvas_arr[offset] = partial_block_gva
                 offset += 1
 
         block_ids_slice = block_ids_arr[:offset]
@@ -329,6 +335,7 @@ class KVTransferThread(threading.Thread):
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
+        self._fatal_error: BaseException | None = None
 
     def _get_block_size(self, kv_cache_group_id: int = 0) -> int:
         if isinstance(self.block_size, list):
@@ -364,6 +371,10 @@ class KVTransferThread(threading.Thread):
     def discard_finished_requests(self, req_ids: set[str]) -> None:
         with self.done_task_lock:
             self.finished_requests -= req_ids
+
+    def raise_if_failed(self) -> None:
+        if self._fatal_error is not None:
+            raise RuntimeError(f"{self.name} failed during asynchronous transfer") from self._fatal_error
 
     def set_finished_request(self, req_id):
         with self.done_task_lock:
@@ -497,14 +508,14 @@ class KVTransferThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                if request_data is not None:
-                    self._handle_request_exception(request_data)
+                self._fatal_error = e
                 logger.error(
                     "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
                     self.name,
                     type(e).__name__,
                     e,
                 )
+                return
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -1387,6 +1398,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         all_sizes = []
         all_req_ids = []
         all_save_keys: list[str] = []
+        write_finish_keys: list[str] = []
         for task in transfer_tasks:
             shared = task.shared_block_data
             if shared is None:
@@ -1398,6 +1410,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.dec_stored_request(req_id)
                 all_req_ids.append(req_id)
             all_save_keys.extend(shared.save_keys)
+            write_finish_keys.extend(task.write_finish_keys)
             all_gvas.append(req_meta.gvas_array)
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
@@ -1414,23 +1427,21 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             )
-            if physical_layer <= 2 or res != 0:
-                logger.info(
-                    "save_thread: layer=%d groups=%d blocks=%d res=%d",
-                    physical_layer,
-                    len(all_gvas),
-                    len(gvas_array),
-                    res,
-                )
             if res != 0:
-                logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
+                raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
             if all_save_keys:
                 save_keys = list(dict.fromkeys(all_save_keys))
                 for key in save_keys:
                     self.write_results[key] = self.write_results.get(key, 0) or res
-                if physical_layer == self.final_layer_id:
-                    results = [self.write_results.pop(key) for key in save_keys]
-                    self.m_store.batch_write_finish(save_keys, results)
+            if write_finish_keys:
+                finish_keys = list(dict.fromkeys(write_finish_keys))
+                results = [self.write_results.pop(key) for key in finish_keys]
+                finish_results = self.m_store.batch_write_finish(finish_keys, results)
+                if len(finish_results) != len(finish_keys) or any(result != 0 for result in finish_results):
+                    raise RuntimeError(
+                        f"Layerwise save batch_write_finish failed: "
+                        f"expected={len(finish_keys)}, results={finish_results}"
+                    )
             for req_id in all_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
@@ -1466,6 +1477,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         get_event: threading.Event,
         layer_load_finished_events: list[threading.Event],
         layer_save_finished_events: list[threading.Event],
+        sync_save_events: list[torch.npu.Event],
         num_layers: int,
         h2d_stagger_us: int = 0,
         max_transfer_blocks: int = 0,
@@ -1485,6 +1497,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.get_event = get_event
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
+        self.sync_save_events = sync_save_events
         self.final_layer_id = num_layers - 1
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
@@ -1537,20 +1550,24 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
 
+        if wait_for_save is not None:
+            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
+                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+            # Non-saving TP ranks have no D2H task to synchronize the event.
+            # Their CPU save-finished signal only means the event was recorded;
+            # wait for the NPU work before reusing the local HBM buffer.
+            self.sync_save_events[wait_for_save].synchronize()
+            logger.debug("Layer save event cleared: layer %d", wait_for_save)
+            self.layer_save_finished_events[wait_for_save].clear()
+
         if len(transfer_tasks) == 0:
-            if wait_for_save is not None:
-                while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                    logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-                logger.debug("Layer save event cleared: layer %d", wait_for_save)
-                self.layer_save_finished_events[wait_for_save].clear()
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
 
-        # Build req_meta for all tasks first; if all are None, early return
-        # before wait_for_save (matches original single-task behavior).
+        # Build req_meta for all tasks first; if all are None, early return.
         task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
         for task in transfer_tasks:
             shared = task.shared_block_data
@@ -1568,12 +1585,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
-
-        if wait_for_save is not None:
-            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
 
         if attention_start_gate is not None:
             while not attention_start_gate.wait(timeout=10):
@@ -1617,12 +1628,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 res,
             )
         if res != 0:
-            logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
+            raise RuntimeError(f"Layerwise {layer_id} load batch_copy failed with return code {res}")
 
         if layer_id == self.final_layer_id and all_load_keys:
             unique_load_keys = list(dict.fromkeys(all_load_keys))
             self.m_store.batch_remove_lease(unique_load_keys)
-            logger.info(
+            logger.debug(
                 "[KVPOOL] load_thread released %d leases after final layer %d",
                 len(unique_load_keys),
                 layer_id,
@@ -1634,7 +1645,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
         logger.debug("Layer load event set: layer %d", layer_id)
         self.layer_load_finished_events[layer_id].set()
-        transfer_tasks.clear()
+        # transfer_tasks aliases KVPoolWorker.layer_load_tasks[layer_id]. Do
+        # not mutate the worker-owned list from this asynchronous thread. The
+        # worker replaces all per-layer lists at the beginning of every step.
         self.request_queue.task_done()
         self.get_event.set()
 
