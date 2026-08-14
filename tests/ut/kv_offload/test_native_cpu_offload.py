@@ -6,6 +6,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.kv_offload.base import CanonicalKVCaches
 from vllm.v1.kv_offload.config import (
@@ -24,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu import NPUOffloadingSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
+    AscendOffloadingConnector,
     AscendOffloadingConnectorWorker,
     _canonicalize_split_attention_cache,
 )
@@ -119,6 +124,41 @@ def test_npu_spec_caches_worker_without_upstream_platform_gate(monkeypatch) -> N
     assert spec.get_worker(kv_caches) is worker
     assert spec.get_worker(kv_caches) is worker
     assert create_calls == 1
+
+
+def test_ascend_connector_replaces_worker_with_current_vllm_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vllm_config = object()
+    kv_cache_config = object()
+    spec = SimpleNamespace(
+        replicated_layout=False,
+        config=SimpleNamespace(parallel=SimpleNamespace(rank=0)),
+    )
+
+    def fake_upstream_init(
+        self,
+        init_vllm_config,
+        role,
+        init_kv_cache_config,
+    ) -> None:
+        assert init_vllm_config is vllm_config
+        assert role == KVConnectorRole.WORKER
+        assert init_kv_cache_config is kv_cache_config
+        self.connector_worker = SimpleNamespace(spec=spec)
+
+    monkeypatch.setattr(OffloadingConnector, "__init__", fake_upstream_init)
+
+    connector = AscendOffloadingConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+
+    assert isinstance(connector.connector_worker, AscendOffloadingConnectorWorker)
+    assert connector.connector_worker.spec is spec
+    assert connector.connector_worker.vllm_config is vllm_config
+    assert connector.connector_worker.kv_cache_config is kv_cache_config
 
 
 def test_split_kv_cache_is_canonicalized_without_copy() -> None:

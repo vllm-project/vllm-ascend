@@ -333,5 +333,6 @@ class AscendOffloadingConnector(OffloadingConnector):
         if connector_worker is not None:
             self.connector_worker = AscendOffloadingConnectorWorker(
                 connector_worker.spec,
+                vllm_config,
                 kv_cache_config,
             )
