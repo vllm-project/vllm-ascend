@@ -867,7 +867,13 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
 
 class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
     def test_a2_w8a8_graph_capture_uses_split_kernels(self):
-        mock_ctx = SimpleNamespace(moe_comm_type=-1, capturing=True)
+        self._assert_a2_w8a8_graph_uses_split_kernels(capturing=True, compiling=False)
+
+    def test_a2_w8a8_graph_compilation_uses_split_kernels(self):
+        self._assert_a2_w8a8_graph_uses_split_kernels(capturing=False, compiling=True)
+
+    def _assert_a2_w8a8_graph_uses_split_kernels(self, *, capturing: bool, compiling: bool):
+        mock_ctx = SimpleNamespace(moe_comm_type=-1, capturing=capturing)
         gate_up_output = torch.zeros(3, 8, dtype=torch.bfloat16)
         activated = torch.zeros(3, 4, dtype=torch.bfloat16)
         quantized_activated = torch.zeros(3, 4, dtype=torch.int8)
@@ -895,6 +901,7 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
             patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
             patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A2),
             patch(f"{MOE_MLP}.HAS_TRITON", False),
+            patch("torch.compiler.is_compiling", return_value=compiling),
             patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_output], create=True) as mock_gmm1,
             patch("torch_npu.npu_swiglu", return_value=activated, create=True) as mock_activation,
             patch(

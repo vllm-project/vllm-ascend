@@ -52,9 +52,15 @@ def _gmm_swiglu_quant_fusion_enabled(use_mxfp_quant, fusion, dynamic_eplb, activ
 
 
 def _use_a2_w8a8_graph_fallback(use_mxfp_quant: bool, act_quant_type: torch.dtype) -> bool:
-    """Keep A2 W8A8 ACLGraph capture on the replay-safe split kernels."""
+    """Keep A2 W8A8 compiled graphs on the replay-safe split kernels.
+
+    The model is compiled before ACLGraph capture, so checking ``capturing``
+    alone is too late: Dynamo has already specialized this Python branch to
+    the V2 path. Select the split path while Dynamo is tracing as well as for
+    direct graph capture.
+    """
     return (
-        _EXTRA_CTX.capturing is True
+        (_EXTRA_CTX.capturing is True or torch.compiler.is_compiling())
         and ASCEND_DEVICE_TYPE == AscendDeviceType.A2
         and not use_mxfp_quant
         and act_quant_type == torch.int8
