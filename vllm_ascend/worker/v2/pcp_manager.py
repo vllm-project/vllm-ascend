@@ -17,13 +17,17 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from dataclasses import replace
+
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
+from vllm.utils.math_utils import round_up
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
+from vllm_ascend.utils import enable_sp
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -59,10 +63,81 @@ class AscendPCPManager(PCPManager):
         )
         self.vllm_config = vllm_config
 
+    def _pad_for_sequence_parallelism(self, local_batch: AscendInputBatch) -> AscendInputBatch:
+        """Pad each PCP rank's token stride for FlashComm SP collectives.
+
+        PCP=2 and TP=4 example:
+
+            PCP gathered: [A B _ | C D E]
+            SP gathered:  [A B _ _ | C D E _]
+
+        The bar separates PCP ranks. SP rounds each rank's stride up to a
+        TP-size multiple, so the gather and restore metadata must use the new
+        stride.
+        """
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if not enable_sp(self.vllm_config) or tp_size <= 1:
+            return local_batch
+
+        # Align the per-rank token stride for SP.
+        pcp_padded_num_tokens = local_batch.num_tokens_after_padding
+        sp_padded_num_tokens = round_up(pcp_padded_num_tokens, tp_size)
+        if sp_padded_num_tokens == pcp_padded_num_tokens:
+            return local_batch
+
+        assert self._input_buffers is not None
+        assert self._hidden_restore_idx is not None
+        assert self._padded_gather_idx is not None
+        assert self._gathered_kv_write_mask is not None
+        input_buffers = self._input_buffers
+
+        # Expand rank-major gather metadata to the new aligned stride.
+        pcp_hidden_restore_idx = self._hidden_restore_idx
+        pcp_padded_gather_idx = self._padded_gather_idx
+        pcp_gathered_kv_write_mask = self._gathered_kv_write_mask
+        num_expanded_tokens = sp_padded_num_tokens * self.pcp_world_size
+        sp_padded_gather_idx = pcp_padded_gather_idx.new_zeros(num_expanded_tokens)
+        sp_gathered_kv_write_mask = pcp_gathered_kv_write_mask.new_zeros(num_expanded_tokens)
+        for rank in range(self.pcp_world_size):
+            pcp_rank_start = rank * pcp_padded_num_tokens
+            sp_rank_start = rank * sp_padded_num_tokens
+            sp_padded_gather_idx[sp_rank_start : sp_rank_start + pcp_padded_num_tokens].copy_(
+                pcp_padded_gather_idx[pcp_rank_start : pcp_rank_start + pcp_padded_num_tokens]
+            )
+            sp_gathered_kv_write_mask[sp_rank_start : sp_rank_start + pcp_padded_num_tokens].copy_(
+                pcp_gathered_kv_write_mask[pcp_rank_start : pcp_rank_start + pcp_padded_num_tokens]
+            )
+
+        # Rebase restore indices from the PCP stride to the SP-aligned stride.
+        restore_pcp_rank = torch.div(
+            pcp_hidden_restore_idx,
+            pcp_padded_num_tokens,
+            rounding_mode="floor",
+        )
+        self._hidden_restore_idx = restore_pcp_rank * sp_padded_num_tokens + torch.remainder(
+            pcp_hidden_restore_idx, pcp_padded_num_tokens
+        )
+        self._padded_gather_idx = sp_padded_gather_idx
+        self._gathered_kv_write_mask = sp_gathered_kv_write_mask
+
+        # Initialize the appended local tokens as padding and return the aligned
+        # batch view.
+        input_buffers.input_ids[pcp_padded_num_tokens:sp_padded_num_tokens].zero_()
+        input_buffers.positions[pcp_padded_num_tokens:sp_padded_num_tokens].zero_()
+        input_buffers.is_padding[pcp_padded_num_tokens:sp_padded_num_tokens].fill_(True)
+        return replace(
+            local_batch,
+            num_tokens_after_padding=sp_padded_num_tokens,
+            input_ids=input_buffers.input_ids[:sp_padded_num_tokens],
+            positions=input_buffers.positions[:sp_padded_num_tokens],
+            is_padding=input_buffers.is_padding[:sp_padded_num_tokens],
+        )
+
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         local_batch = super().partition_batch(input_batch)
         assert isinstance(local_batch, AscendInputBatch)
+        local_batch = self._pad_for_sequence_parallelism(local_batch)
 
         local_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         local_batch.seq_lens_np = local_seq_lens_np
