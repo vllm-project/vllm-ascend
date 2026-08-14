@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import bisect
+from statistics import median
 
 
 class DynamicSpeculativeDecodingManager:
@@ -91,6 +94,42 @@ class DynamicSpeculativeDecodingManager:
                 ranges.append([range_start, range_end, optimal_k])
 
         return ranges
+
+    def get_hardware_profile(
+        self,
+        *,
+        fingerprint: dict[str, object] | None = None,
+        confidence_temperatures: list[float] | None = None,
+    ) -> dict[str, object]:
+        """Build a profile consumable by Ascend's hardware-aware policy.
+
+        The sweep records ITL for a uniform request batch and draft length K.
+        Since the runtime policy needs one target-step latency, ITL is converted
+        with the measured expected acceptance length (the same goodput model
+        used by this manager). The runtime policy then indexes cost by target
+        verification token count and projects each observation to
+        ``batch_size * (1 + K)``. If multiple sweep points map to the same token
+        count, their median is used to avoid depending on sweep order.
+        """
+        latency_samples: dict[int, list[float]] = {}
+        for batch_size, stats in self.batch_stats.items():
+            for num_drafts, itl_ms in stats.items():
+                token_batch_size = int(batch_size) * (1 + int(num_drafts))
+                step_latency_ms = float(itl_ms) * self._compute_accepted_length(int(num_drafts))
+                latency_samples.setdefault(token_batch_size, []).append(step_latency_ms)
+
+        latency_ms = {
+            str(token_batch_size): float(median(samples))
+            for token_batch_size, samples in sorted(latency_samples.items())
+        }
+        profile: dict[str, object] = {
+            "schema_version": 1,
+            "fingerprint": fingerprint or {},
+            "latency_ms": latency_ms,
+        }
+        if confidence_temperatures is not None:
+            profile["confidence_temperatures"] = confidence_temperatures
+        return profile
 
     def _compute_accepted_length(self, k: int) -> float:
         """Compute expected accepted length for given K using unconditional rates."""

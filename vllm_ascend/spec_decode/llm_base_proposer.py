@@ -1370,8 +1370,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 # Dynamic verify-length path for head-free DFlash only.
                 if hasattr(self, "dynamic_spec") and self.dynamic_spec is not None:
+                    current_k = max(int(self.num_speculative_tokens), 1)
                     self.dynamic_spec.update(
                         logits=logits,
+                        num_reqs=logits.shape[0] // current_k,
                     )
 
         # Early exit if there is only one draft token to be generated.

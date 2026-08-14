@@ -1716,6 +1716,9 @@ class NPUModelRunner(GPUModelRunner):
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
         self._log_propose_draft_token_ids_entry(spec_decode_metadata, num_scheduled_tokens)
+        # Lengths from the previous step have already been consumed by
+        # ``_sample`` on the async path.  Replace them with this step's result.
+        self._proposal_lengths_by_req: dict[str, int] | None = None
 
         # Reset cached draft probs from the previous step so that stale data
         # is never used when the drafter does not produce fresh probabilities.
@@ -1927,7 +1930,40 @@ class NPUModelRunner(GPUModelRunner):
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
+        self._capture_dynamic_proposal_lengths(
+            scheduler_output.num_spec_tokens_to_schedule
+        )
         return draft_token_ids
+
+    def _capture_dynamic_proposal_lengths(self, scheduled_k: int) -> None:
+        """Copy dynamic K to host once and key it by request id.
+
+        The drafter tensor stays graph-padded to the configured maximum width.
+        Only CPU-side bookkeeping and async input-batch updates use these
+        logical lengths, so no device shape mutation is introduced.
+        """
+
+        if scheduled_k <= 0:
+            self._proposal_lengths_by_req = {
+                req_id: 0 for req_id in self.input_batch.req_ids
+            }
+            return
+
+        dynamic_spec = getattr(self.drafter, "dynamic_spec", None)
+        if dynamic_spec is None or dynamic_spec.num_verify_tokens is None:
+            return
+        lengths = dynamic_spec.num_verify_tokens
+        if torch.is_tensor(lengths):
+            lengths = lengths.detach().to("cpu").tolist()
+        else:
+            lengths = list(lengths)
+        max_width = max(int(self.num_spec_tokens), 0)
+        self._proposal_lengths_by_req = {
+            req_id: max(0, min(int(lengths[idx]), max_width))
+            if idx < len(lengths)
+            else max_width
+            for idx, req_id in enumerate(self.input_batch.req_ids)
+        }
 
     def _log_propose_draft_token_ids_entry(
         self,
@@ -2012,24 +2048,30 @@ class NPUModelRunner(GPUModelRunner):
         out = super().take_draft_token_ids()
         if out is None:
             return None
-        dynamic_spec = getattr(self.drafter, "dynamic_spec", None)
-        if dynamic_spec is None:
-            return out
-        per_req_k = dynamic_spec.num_verify_tokens
-        if per_req_k is None:
-            return out
-        per_req_k = [
-            max(0, min(int(k), self.num_spec_tokens))
-            for k in per_req_k
+        lengths = [
+            self._proposal_lengths_by_req.get(req_id, len(tokens))
+            if getattr(self, "_proposal_lengths_by_req", None) is not None
+            else len(tokens)
+            for req_id, tokens in zip(out.req_ids, out.draft_token_ids)
         ]
-        cut_tokens = DraftTokenIds(
+        return DraftTokenIds(
             req_ids=out.req_ids,
             draft_token_ids=[
-                tokens[:k]
-                for tokens, k in zip(out.draft_token_ids, per_req_k)
+                tokens[: max(0, min(int(k), len(tokens)))]
+                for tokens, k in zip(out.draft_token_ids, lengths)
             ],
+            proposal_lengths=lengths,
         )
-        return cut_tokens
+
+    def _get_draft_token_ids_cpu(self) -> tuple[list[list[int]], list[str]]:
+        draft_token_ids, req_ids = super()._get_draft_token_ids_cpu()
+        lengths_by_req = getattr(self, "_proposal_lengths_by_req", None)
+        if lengths_by_req is None:
+            return draft_token_ids, req_ids
+        return [
+            tokens[: max(0, min(int(lengths_by_req.get(req_id, len(tokens))), len(tokens)))]
+            for req_id, tokens in zip(req_ids, draft_token_ids)
+        ], req_ids
 
     @torch.inference_mode()
     def execute_model(
@@ -2502,6 +2544,11 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        # The previous step's logical widths were consumed by ``_sample`` on
+        # async scheduling.  Do not accidentally attach them to an output when
+        # this step does not launch a drafter.
+        self._proposal_lengths_by_req = None
+
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
@@ -2596,10 +2643,16 @@ class NPUModelRunner(GPUModelRunner):
                     draft_req_ids = self.input_batch.req_ids
                 if draft_ids_list and draft_req_ids:
                     draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
-                    output_spec_token_ids = [
-                        draft_by_req_id.get(req_id, [])
-                        for req_id in req_ids_output_copy
-                    ]
+                    proposal_lengths_by_req = getattr(
+                        self, "_proposal_lengths_by_req", {}
+                    ) or {}
+                    output_spec_token_ids = []
+                    for req_id in req_ids_output_copy:
+                        ids = draft_by_req_id.get(req_id, [])
+                        length = proposal_lengths_by_req.get(req_id, len(ids))
+                        output_spec_token_ids.append(
+                            ids[: max(0, min(int(length), len(ids)))]
+                        )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -2613,6 +2666,14 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
+            proposal_lengths=(
+                [
+                    self._proposal_lengths_by_req.get(req_id, self.num_spec_tokens)
+                    for req_id in req_ids_output_copy
+                ]
+                if getattr(self, "_proposal_lengths_by_req", None) is not None
+                else None
+            ),
         )
         if (
             profiling_chunk_config.enabled
@@ -2689,6 +2750,9 @@ class NPUModelRunner(GPUModelRunner):
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
+        if self.use_async_scheduling and self._draft_token_req_ids is not None:
+            draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
+            self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
