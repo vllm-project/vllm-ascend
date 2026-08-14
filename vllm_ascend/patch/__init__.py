@@ -238,20 +238,28 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
 #      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
+#      `vllm.v1.core.kv_cache_utils.BlockHashListWithBlockSize._get_value_at`
 #    Why:
 #       vLLM PR #40860 added a restriction that hybrid KV cache groups with
 #       multiple block sizes do not support context parallelism (dcp/pcp > 1).
 #       This restriction is correct for CUDA but not for Ascend, which
 #       implements context parallelism for MLA and SWA-MLA layers separately.
+#       KV connectors still need fine-grained request hashes when local prefix
+#       caching is disabled.
+#       vLLM v0.23.0 also concatenates fine-grained chained hashes when building
+#       a larger group-block view. vLLM PR #45939 instead reuses the terminal
+#       chained hash, which lets AscendStore avoid a separate rehash key space.
 #    How：
 #       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
 #       + CP case by returning lcm(block_sizes) * dcp * pcp as scheduler_block_size
-#       instead of raising ValueError.
+#       instead of raising ValueError. On v0.23.0, patch the grouped hash view
+#       in place so existing BlockPool imports use the terminal chained hash.
 #    Related PR (if no, explain why):
 #       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
+#       vLLM PR #45939 ([Core] add partial prefix cache primitives).
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
-#       non-CUDA backends, or exposes a platform hook for this behavior.
+#       non-CUDA backends and the supported version includes vLLM PR #45939.
 #
 # ** 10ab. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

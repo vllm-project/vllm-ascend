@@ -113,32 +113,25 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         db.cache_coordinator = coord
         grouped_hash_cache: config_data.GroupedBlockHashCache = {}
 
-        with patch.object(
-            config_data,
-            "_rehash_block_hash_group",
-            wraps=config_data._rehash_block_hash_group,
-        ) as rehash:
-            self.assertEqual(
-                db.load_mask(
-                    block_hashes,
-                    32,
-                    grouped_hash_cache=grouped_hash_cache,
-                ),
-                ([True, True],),
+        self.assertEqual(
+            db.load_mask(
+                block_hashes,
+                32,
+                grouped_hash_cache=grouped_hash_cache,
+            ),
+            ([True, True],),
+        )
+        keys = list(
+            db.process_token_key_strings_with_block_ids(
+                32,
+                block_hashes,
+                [10, 11],
+                grouped_hash_cache=grouped_hash_cache,
             )
-            self.assertEqual(rehash.call_count, 2)
-
-            keys = list(
-                db.process_token_key_strings_with_block_ids(
-                    32,
-                    block_hashes,
-                    [10, 11],
-                    grouped_hash_cache=grouped_hash_cache,
-                )
-            )
+        )
 
         self.assertEqual(len(keys), 2)
-        self.assertEqual(rehash.call_count, 2)
+        self.assertEqual([key[3] for key in keys], [block_hashes[1], block_hashes[3]])
 
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)

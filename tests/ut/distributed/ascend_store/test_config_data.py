@@ -15,9 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import hashlib
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -31,21 +30,30 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    resolve_request_hash_block_size,
 )
 
-_GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
-_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
+class TestRequestHashBlockSize(unittest.TestCase):
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store."
+        "config_data.kv_cache_utils.resolve_kv_cache_block_sizes"
+    )
+    def test_uses_vllm_resolver(self, resolver):
+        vllm_config = object()
+        kv_cache_config = object()
+        resolver.return_value = (128, 8)
 
-def _expected_grouped_hash(*block_hashes):
-    hasher = hashlib.sha256()
-    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
-    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-    for block_hash in block_hashes:
-        hash_bytes = block_hash.encode("utf-8") if isinstance(block_hash, str) else bytes(block_hash)
-        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-        hasher.update(hash_bytes)
-    return hasher.digest()
+        self.assertEqual(resolve_request_hash_block_size(vllm_config, kv_cache_config, 128), 8)
+        resolver.assert_called_once_with(kv_cache_config, vllm_config)
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store."
+        "config_data.kv_cache_utils.resolve_kv_cache_block_sizes"
+    )
+    def test_falls_back_without_kv_cache_config(self, resolver):
+        self.assertEqual(resolve_request_hash_block_size(object(), None, 128), 128)
+        resolver.assert_not_called()
 
 
 class TestKeyMetadata(unittest.TestCase):
@@ -186,12 +194,11 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         result = list(self.db.process_tokens(32, hashes))
         self.assertEqual(len(result), 2)
 
-    def test_process_tokens_rehashes_grouped_hashes(self):
+    def test_process_tokens_uses_terminal_grouped_hashes(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None, hash_block_size=8)
         result = list(db.process_tokens(32, ["a", "b", "c", "d"]))
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
-        self.assertEqual(len(result[0][2].chunk_hash), 64)
+        self.assertEqual([entry[2].chunk_hash for entry in result], ["b", "d"])
 
     def test_key_strings_match_pool_keys(self):
         hashes = ["aaa", "bbb", "ccc"]
@@ -253,15 +260,17 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
 
-    def test_get_block_hashes_rehashes_groups(self):
+    def test_get_block_hashes_uses_terminal_hashes(self):
         for hashes in (["a", "b", "c", "d"], [b"a", b"b", b"c", b"d"]):
             with self.subTest(hash_type=type(hashes[0])):
                 result = get_block_hashes(hashes, group_block_size=32, hash_block_size=16)
-                expected = [
-                    _expected_grouped_hash(hashes[0], hashes[1]),
-                    _expected_grouped_hash(hashes[2], hashes[3]),
-                ]
-                self.assertEqual(list(result), expected)
+                self.assertEqual(list(result), [hashes[1], hashes[3]])
+
+    def test_get_block_hashes_uses_dsv4_compression_boundaries(self):
+        hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+
+        self.assertEqual(get_block_hashes(hashes, group_block_size=128 * 4, hash_block_size=128)[0], hashes[3])
+        self.assertEqual(get_block_hashes(hashes, group_block_size=128 * 128, hash_block_size=128)[0], hashes[127])
 
     def test_prepare_value(self):
         addr, size, block_id = self.db.prepare_value(0, 16, [5, 6, 7])

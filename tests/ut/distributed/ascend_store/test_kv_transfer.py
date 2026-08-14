@@ -17,13 +17,12 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
@@ -276,15 +275,14 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         thread.add_stored_request("r1")
         thread.request_queue.put(request)
 
-        with patch.object(
-            config_data,
-            "_rehash_block_hash_group",
-            wraps=config_data._rehash_block_hash_group,
-        ) as rehash:
-            thread._handle_request(request)
+        thread._handle_request(request)
 
-        self.assertEqual(rehash.call_count, 2)
-        self.assertEqual(len(thread.get_kv_events()), 2)
+        events = thread.get_kv_events()
+        self.assertEqual(len(events), 2)
+        self.assertEqual(
+            [event.block_hashes for event in events],
+            [[maybe_convert_block_hash(b"h1")], [maybe_convert_block_hash(b"h3")]],
+        )
 
     def test_handle_request_consumer_role(self):
         t, store = self._make_thread([0], kv_role="kv_consumer")

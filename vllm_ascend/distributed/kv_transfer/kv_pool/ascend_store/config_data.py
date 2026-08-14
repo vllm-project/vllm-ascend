@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import numpy as np
 import torch
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -15,10 +15,14 @@ from vllm.v1.core.sched.output import NewRequestData
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
 
-_GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
-_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 # ponytail: each operation owns a fresh dict, so block size is the only cache key.
 GroupedBlockHashCache = dict[int, Sequence[BlockHash | str]]
+
+
+def resolve_request_hash_block_size(vllm_config: Any, kv_cache_config: Any | None, fallback: int) -> int:
+    if kv_cache_config is None:
+        return fallback
+    return kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)[1]
 
 
 # Parameters related to the key
@@ -623,7 +627,7 @@ def get_block_hashes(
     return grouped_hash_cache[group_block_size]
 
 
-class _LazyGroupedBlockHashList(Sequence[BlockHash]):
+class _LazyGroupedBlockHashList(Sequence[BlockHash | str]):
     def __init__(
         self,
         block_hashes: Sequence[BlockHash | str],
@@ -632,7 +636,6 @@ class _LazyGroupedBlockHashList(Sequence[BlockHash]):
         self._block_hashes = block_hashes
         self._scale_factor = scale_factor
         self._length = len(block_hashes) // scale_factor
-        self._cache: dict[int, BlockHash] = {}
 
     def __len__(self) -> int:
         return self._length
@@ -644,23 +647,7 @@ class _LazyGroupedBlockHashList(Sequence[BlockHash]):
             index += self._length
         if index < 0 or index >= self._length:
             raise IndexError(index)
-        if index in self._cache:
-            return self._cache[index]
-        start = index * self._scale_factor
-        grouped_hash = _rehash_block_hash_group(self._block_hashes[start : start + self._scale_factor])
-        self._cache[index] = grouped_hash
-        return grouped_hash
-
-
-def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
-    hasher = hashlib.sha256()
-    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
-    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-    for block_hash in block_hashes:
-        hash_bytes = block_hash_to_bytes(block_hash)
-        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-        hasher.update(hash_bytes)
-    return BlockHash(hasher.digest())
+        return self._block_hashes[(index + 1) * self._scale_factor - 1]
 
 
 def block_hash_to_str(block_hash: BlockHash | str) -> str:

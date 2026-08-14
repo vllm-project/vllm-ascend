@@ -23,7 +23,6 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -184,15 +183,11 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 1]
         block_hashes = [b"h0", b"h1", b"h2", b"h3"]
 
-        with patch.object(
-            config_data,
-            "_rehash_block_hash_group",
-            wraps=config_data._rehash_block_hash_group,
-        ) as rehash:
-            hit = worker.lookup(32, block_hashes, [0])
+        hit = worker.lookup(32, block_hashes, [0])
 
         self.assertEqual(hit, 32)
-        self.assertEqual(rehash.call_count, 2)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual([key.rsplit("@", 1)[-1] for key in keys], [b"h1".hex(), b"h3".hex()])
 
     def test_registered_layer_layout_includes_mtp_multi_group_and_pp(self):
         cls = self._make_worker_class()
