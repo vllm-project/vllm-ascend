@@ -504,7 +504,7 @@ jobs:
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
     needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
-    if: ${{ !cancelled() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5')) }}
+    if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
@@ -525,47 +525,53 @@ jobs:
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
 
-          if [ "${PRE_COMMIT_RESULT}" != "success" ] && [ "${PRE_COMMIT_RESULT}" != "skipped" ]; then
+          if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
             exit 1
           fi
 
-          if [ "${SELECT_TESTS_RESULT}" != "success" ] && [ "${SELECT_TESTS_RESULT}" != "skipped" ]; then
+          if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
             echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})"
             exit 1
           fi
 
+          # Even after successful test selection, only explicit true/false
+          # values are valid. A missing output must not mean no tests.
+          if [ "${HAS_TESTS}" != "true" ] && [ "${HAS_TESTS}" != "false" ]; then
+            echo "::error::Invalid or missing has_tests output: '${HAS_TESTS}'"
+            exit 1
+          fi
+
+          if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
+            echo "::error::Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
+            exit 1
+          fi
+
           if [ "${HAS_TESTS}" = "true" ]; then
+            if [ "${HAS_READY_LABEL}" != "true" ]; then
+              echo "::error::Selected tests are required; add the ready label"
+              exit 1
+            fi
+
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${HAS_READY_LABEL}" = "true" ]; then
-              if [ "${TESTS_RESULT}" != "success" ]; then
-                echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
-                exit 1
-              fi
-            else
-              if [ "${TESTS_RESULT}" != "success" ] && [ "${TESTS_RESULT}" != "skipped" ]; then
-                echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
-                exit 1
-              fi
+            if [ "${TESTS_RESULT}" != "success" ]; then
+              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+              exit 1
             fi
           fi
 
           if [ "${HAS_TESTS_A5}" = "true" ]; then
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${HAS_READY_A5_LABEL}" = "true" ]; then
-              if [ "${TESTS_A5_RESULT}" != "success" ]; then
-                echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
-                exit 1
-              fi
-            else
-              if [ "${TESTS_A5_RESULT}" != "success" ] && [ "${TESTS_A5_RESULT}" != "skipped" ]; then
-                echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
-                exit 1
-              fi
+            if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
+              echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
+            elif [ "${TESTS_A5_RESULT}" != "success" ]; then
+              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
+              exit 1
             fi
           fi
+
           echo "=== CI Gate: PASSED ==="
 
   # this job collects failure from uploaded logs

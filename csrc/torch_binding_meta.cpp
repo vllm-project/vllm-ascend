@@ -1003,93 +1003,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_output_tensor(co
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
 }
 
-at::Tensor construct_hc_pre_rsqrt_output_tensor(const at::Tensor& x, float epsilon=1e-6)
-{
-    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
-
-    auto options = x.options();
-    auto xDims = x.dim();
-    c10::SymDimVector yOut_shape;
-    for (size_t i = 0; i < xDims - 2; i++) {
-        yOut_shape.push_back(x.sym_size(i));
-    }
-    yOut_shape.push_back(c10::SymInt(1));
-    at::Tensor yOut = at::empty_symint(yOut_shape, options.dtype(at::kFloat));
-
-    return yOut;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_meta(
     const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
     int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
 {
     auto output_tensors = construct_hc_pre_output_tensor(x, hc_mult);
-    at::Tensor y = std::get<0>(output_tensors);
-    at::Tensor post = std::get<1>(output_tensors);
-    at::Tensor comb_frag = std::get<2>(output_tensors);
-
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
-}
-
-at::Tensor construct_hc_pre_inv_rms_output_tensor(const at::Tensor& x, float epsilon=1e-20)
-{
-    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
-
-    auto options = x.options();
-    auto xDims = x.dim();
-    c10::SymDimVector yOut_shape;
-    for (auto i = 0; i < xDims - 2; i++) {
-        yOut_shape.push_back(x.sym_size(i));
-    }
-    yOut_shape.push_back(c10::SymInt(1));
-    at::Tensor yOut = at::empty_symint(yOut_shape, options.dtype(at::kFloat));
-
-    return yOut;
-}
-
-at::Tensor npu_hc_pre_inv_rms_meta(const at::Tensor& x, double epsilon=1e-20)
-{
-    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
-
-    at::Tensor yOut;
-    yOut = construct_hc_pre_inv_rms_output_tensor(x, epsilon);
-
-    return yOut;
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_sinkhorn_output_tensor(const at::Tensor& mixes, const at::Tensor& x, int64_t hc_mult)
-{
-    auto xDims = x.dim();
-    c10::SymDimVector y_size;
-    c10::SymDimVector post_size;
-    c10::SymDimVector comb_frag_size;
-    if (xDims == 4) {
-        auto batch = x.sym_size(0);
-        auto size = x.sym_size(1);
-        auto d = x.sym_size(3);
-        y_size = {batch, size, d};
-        post_size = {batch, size, c10::SymInt(hc_mult)};
-        comb_frag_size = {batch, size, c10::SymInt(hc_mult), c10::SymInt(hc_mult)};
-    } else if (xDims == 3){
-        auto bs = x.sym_size(0);
-        auto d = x.sym_size(2);
-        y_size = {bs, d};
-        post_size = {bs, c10::SymInt(hc_mult)};
-        comb_frag_size = {bs, c10::SymInt(hc_mult), c10::SymInt(hc_mult)};
-    }
-
-    at::Tensor y = at::empty_symint(y_size, x.options().dtype(at::kBFloat16));
-    at::Tensor post = at::empty_symint(post_size, x.options().dtype(at::kFloat));
-    at::Tensor comb_frag = at::empty_symint(comb_frag_size, x.options().dtype(at::kFloat));
-
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_sinkhorn_meta(
-    const at::Tensor& mixes, const at::Tensor& rsqrt, const at::Tensor& hc_scale, const at::Tensor& hc_base,
-    const at::Tensor& x, int64_t hc_mult, int64_t hc_sinkhorn_iters, double hc_eps)
-{
-    auto output_tensors = construct_hc_pre_sinkhorn_output_tensor(mixes, x, hc_mult);
     at::Tensor y = std::get<0>(output_tensors);
     at::Tensor post = std::get<1>(output_tensors);
     at::Tensor comb_frag = std::get<2>(output_tensors);
@@ -1124,17 +1042,6 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_meta(
     at::Tensor scale_out = at::empty_symint(scale_out_shape, options.dtype(at::kFloat));
 
     return std::make_tuple(y_out, scale_out);
-}
-
-void indexer_compress_epilog_meta(
-    at::Tensor& indexer_compress_cache,
-    at::Tensor& indexer_compress_cache_scale,
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    int64_t quant_mode = 1,
-    bool round_scale = true)
-{
-    return;
 }
 
 void kv_compress_epilog_meta(
@@ -1324,27 +1231,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_swiglu_group_quant_meta(
 {
     int64_t dst_type_code = get_type_code(dst_type);
     return construct_swiglu_group_quant_output_tensor(x, dst_type_code, quant_mode, ue8m0_scale);
-}
-
-std::tuple<at::Tensor, at::Tensor> construct_load_index_kv_cache_output_tensor(
-    const at::Tensor& kv_cache,
-    const at::Tensor& slot_mapping)
-{
-    constexpr int64_t KV_LAST_DIM = 128;
-    auto n = slot_mapping.sym_size(0);
-
-    at::Tensor kv = at::empty_symint(
-        c10::SymDimVector{n, c10::SymInt(KV_LAST_DIM)}, kv_cache.options().dtype(at::kFloat8_e4m3fn));
-    at::Tensor kv_scale = at::empty_symint(c10::SymDimVector{n}, kv_cache.options().dtype(at::kFloat));
-
-    return std::tuple<at::Tensor, at::Tensor>(kv, kv_scale);
-}
-
-std::tuple<at::Tensor, at::Tensor> npu_load_index_kv_cache_meta(
-    const at::Tensor& kv_cache,
-    const at::Tensor& slot_mapping)
-{
-    return construct_load_index_kv_cache_output_tensor(kv_cache, slot_mapping);
 }
 
 void indexer_compress_epilog_v2_meta(
@@ -1604,19 +1490,14 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);
-    ops.impl("npu_hc_pre", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
-    ops.impl("npu_hc_pre_inv_rms", &vllm_ascend::meta::npu_hc_pre_inv_rms_meta);
-    ops.impl("npu_hc_pre_sinkhorn", &vllm_ascend::meta::npu_hc_pre_sinkhorn_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
-    ops.impl("indexer_compress_epilog", &vllm_ascend::meta::indexer_compress_epilog_meta);
     ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv", &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv_metadata",
              &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_swiglu_group_quant", &vllm_ascend::meta::npu_swiglu_group_quant_meta);
-    ops.impl("npu_load_index_kv_cache", &vllm_ascend::meta::npu_load_index_kv_cache_meta);
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
