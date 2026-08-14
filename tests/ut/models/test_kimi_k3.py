@@ -13,6 +13,7 @@ from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3ForConditionalGeneration,
     KimiK3MLP,
     KimiK3MoE,
+    KimiK3MultiModalProjector,
     KimiK3TextModel,
     KimiK3VisionEncoderLayer,
     _move_module_to_device,
@@ -89,6 +90,89 @@ def test_kimi_k3_quantizes_latent_projections_only_for_modelslim(
 
 def test_kimi_k3_unquantized_model_keeps_latent_projections_unquantized():
     assert _routed_latent_quant_config(None) is None
+
+
+def test_kimi_k3_projector_registers_rotation_for_weight_loading(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class StubReplicatedLinear(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+        def forward(self, hidden_states):
+            return hidden_states, None
+
+    monkeypatch.setattr(kimi_k3, "ReplicatedLinear", StubReplicatedLinear)
+    monkeypatch.setattr(kimi_k3, "RMSNorm", lambda *args, **kwargs: nn.Identity())
+    monkeypatch.setattr(kimi_k3, "get_act_fn", lambda *args, **kwargs: nn.Identity())
+    config = KimiK3VisionConfig(
+        mm_hidden_size=2,
+        text_hidden_size=8,
+        merge_kernel_size=(2, 2),
+    )
+    projector = KimiK3MultiModalProjector(config)
+
+    assert projector.rot_proj is not None
+
+
+@pytest.mark.parametrize(
+    ("loaded_weights", "has_rot_proj"),
+    [
+        ({"mm_projector.rot_proj.weight"}, True),
+        ({"mm_projector.linear_1.weight"}, False),
+    ],
+)
+def test_kimi_k3_enables_projector_rotation_only_when_weight_is_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+    loaded_weights: set[str],
+    has_rot_proj: bool,
+):
+    class StubLoader:
+        def __init__(self, model, *, skip_prefixes):
+            assert model is wrapper
+            assert skip_prefixes == []
+
+        def load_weights(self, weights, *, mapper):
+            assert list(weights) == []
+            assert mapper is wrapper.hf_to_vllm_mapper
+            return loaded_weights
+
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
+    wrapper = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
+    nn.Module.__init__(wrapper)
+    wrapper.mm_projector = nn.Module()
+    wrapper.mm_projector.rot_proj = nn.Linear(1, 1, bias=False)
+
+    actual = wrapper.load_weights(iter(()))
+
+    assert actual == loaded_weights
+    assert hasattr(wrapper.mm_projector, "rot_proj") is has_rot_proj
+    assert ("mm_projector.rot_proj.weight" in dict(wrapper.named_parameters())) is has_rot_proj
+
+
+def test_kimi_k3_projector_applies_rotation_only_after_weight_load():
+    class PassthroughLinear(nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states, None
+
+    class ScaleLinear(nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states * 2, None
+
+    projector = KimiK3MultiModalProjector.__new__(KimiK3MultiModalProjector)
+    nn.Module.__init__(projector)
+    projector.input_size = 2
+    projector.linear_1 = PassthroughLinear()
+    projector.linear_2 = PassthroughLinear()
+    projector.act = nn.Identity()
+    projector.post_norm = nn.Identity()
+    image_features = torch.tensor([[1.0, 2.0]])
+
+    del projector.rot_proj
+    torch.testing.assert_close(projector(image_features), image_features)
+
+    projector.rot_proj = ScaleLinear()
+    torch.testing.assert_close(projector(image_features), image_features * 2)
 
 
 @pytest.mark.parametrize(

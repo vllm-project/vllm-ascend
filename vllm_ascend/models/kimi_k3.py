@@ -110,7 +110,7 @@ from vllm_ascend.ops.kimi_kda import uses_kimi_k3_global_inputs_embeds
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3Config, KimiK3TextConfig, KimiK3VisionConfig
 from vllm_ascend.transformers_utils.processors.kimi_k3 import KimiK3Processor
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 
 apply_attn_res: (
     Callable[
@@ -603,12 +603,21 @@ class AscendKimiK3ForConditionalGeneration(
         return AscendKimiK3ForCausalLM.get_mamba_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The ModelSlim rotation is only needed for A3 FP4-to-INT4 conversion.
-        # Other SoCs retain the original projector graph and ignore the extra
-        # checkpoint tensor.
-        skip_prefixes = [] if self.mm_projector.rot_proj is not None else ["mm_projector.rot_proj."]
+        # ModelSlim checkpoints may include an explicit projector rotation.
+        # Build the optional layer before loading so streaming checkpoint
+        # iterators can populate it, then release it when the weight is absent.
+        rot_proj = getattr(self.mm_projector, "rot_proj", None)
+        skip_prefixes = [] if rot_proj is not None else ["mm_projector.rot_proj."]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        rot_proj_weight_names = (
+            {name for name, _ in rot_proj.named_parameters(prefix="mm_projector.rot_proj")}
+            if rot_proj is not None
+            else set()
+        )
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if rot_proj is not None and rot_proj_weight_names.isdisjoint(loaded_weights):
+            del self.mm_projector.rot_proj
+        return loaded_weights
 
 
 class KimiK3MLP(nn.Module):
@@ -1674,15 +1683,13 @@ class KimiK3MultiModalProjector(nn.Module):
         # ModelSlim rotates K3's FP4 activations before INT4 inference. Text
         # embeddings fold this matrix into their input projection, but the
         # vision path ends in RMSNorm, so the rotation must remain explicit.
-        self.rot_proj: ReplicatedLinear | None = None
-        if get_ascend_device_type() == AscendDeviceType.A3:
-            self.rot_proj = ReplicatedLinear(
-                config.text_hidden_size,
-                config.text_hidden_size,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.rot_proj",
-            )
+        self.rot_proj: ReplicatedLinear | None = ReplicatedLinear(
+            config.text_hidden_size,
+            config.text_hidden_size,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.rot_proj",
+        )
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = image_features.reshape(-1, self.input_size)
@@ -1690,8 +1697,9 @@ class KimiK3MultiModalProjector(nn.Module):
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)[0]
         hidden_states = self.post_norm(hidden_states)
-        if self.rot_proj is not None:
-            hidden_states = self.rot_proj(hidden_states)[0]
+        rot_proj = getattr(self, "rot_proj", None)
+        if rot_proj is not None:
+            hidden_states = rot_proj(hidden_states)[0]
         return hidden_states
 
 
