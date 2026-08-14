@@ -139,12 +139,14 @@ Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g.,
 
 ### `/rerun`
 
-Re-run all failed workflow runs on the current PR commit. Useful when CI jobs failed due to infrastructure issues.
+Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
+
+Only jobs that did not complete successfully are re-run (failed, cancelled, timed out, or startup-failed). Jobs that already succeeded are left untouched. Runs with `cancelled` / `timed_out` / `startup_failure` conclusions are re-run per remaining job, and runs whose failure also contains cancelled jobs (e.g. a vLLM matrix leg cancelled by fail-fast) are handled the same way. Tests executed through reusable workflows (e.g. `Selected Tests`) are re-run via their caller job and are not duplicated.
 
 **Examples:**
 
 ```text
-# Re-run all failed CI workflows on this PR
+# Re-run failed / cancelled CI jobs on this PR
 /rerun
 ```
 
