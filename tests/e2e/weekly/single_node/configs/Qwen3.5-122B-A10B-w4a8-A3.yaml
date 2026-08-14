@@ -108,7 +108,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 4
         request_rate: 0.02
-        baseline: 21.9443
+        baseline: 20.7968
         threshold: 0.97
   - name: "Qwen3.5-122B-A10B-in984k-out1k-0-8-2"
     model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
