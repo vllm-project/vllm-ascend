@@ -100,23 +100,25 @@ This chapter provides a single installation method: use the official prebuilt im
 | torch-npu | 2.10.0 | PyTorch NPU operator library, paired with the torch version |
 | CANN | 9.0.0 | Ascend software stack (development kit + operator packages), in-container path `/usr/local/Ascend/cann-9.0.0` |
 
-> This document recommends the official all-in-one image `m.daocloud.io/quay.io/ascend/vllm-ascend:v0.22.1rc1-a3-openeuler`; for domestic networks, use the daocloud image address to accelerate pulling. The image bundles vLLM, vLLM-Ascend, torch-npu, and CANN, so no separate installation is required.
+> This document recommends the all-in-one image `quay.io/ascend/vllm-ascend:dots3-note-prev-a3-openeuler`. The image bundles vLLM, vLLM-Ascend, torch-npu, and CANN, so no separate installation is required.
 
 ### 4.2 Image Acquisition and Build
 
-The runtime uses the official vLLM-Ascend all-in-one image, which already contains vLLM, vLLM-Ascend, torch-npu, CANN, and NNAL. For the A3 series, choose the image with the `-a3` suffix:
+The runtime uses the official vLLM-Ascend all-in-one image, which already contains vLLM, vLLM-Ascend, torch-npu, CANN, and NNAL. Choose the image matching your hardware series and OS:
 
 | Image | Hardware | OS |
 |---|---|---|
-| `quay.io/ascend/vllm-ascend:v0.22.1rc1-a3` | Atlas A3 | Ubuntu |
-| `quay.io/ascend/vllm-ascend:v0.22.1rc1-a3-openeuler` | Atlas A3 | openEuler |
+| `quay.io/ascend/vllm-ascend:dots3-note-prev` | Atlas A2 | Ubuntu |
+| `quay.io/ascend/vllm-ascend:dots3-note-prev-openeuler` | Atlas A2 | openEuler |
+| `quay.io/ascend/vllm-ascend:dots3-note-prev-a3` | Atlas A3 | Ubuntu |
+| `quay.io/ascend/vllm-ascend:dots3-note-prev-a3-openeuler` | Atlas A3 | openEuler |
 
 **Use the official prebuilt image directly (recommended)**
 
-The following commands are all executed on the host. For domestic networks, pull using the daocloud image address:
+The following commands are all executed on the host:
 
 ```bash
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.22.1rc1-a3-openeuler
+export IMAGE=quay.io/ascend/vllm-ascend:dots3-note-prev-a3-openeuler
 docker pull "$IMAGE"
 ```
 
