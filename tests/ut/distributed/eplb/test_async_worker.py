@@ -60,12 +60,13 @@ def test_rebalance_uses_model_owned_policy(monkeypatch):
     assert model_state._ascend_eplb_policy_load is load_window
 
 
-def _run_one_cycle(monkeypatch, old_map, new_map):
+def _run_one_cycle(monkeypatch, old_map, new_map, *, commit_results=True):
     pending_layers: list[int] = []
     completed_cycles: list[int] = []
     transfer_metadata = object()
     transfer_layer = MagicMock(return_value=transfer_metadata)
     all_reduce = MagicMock()
+    cycle_log = MagicMock()
 
     class _ConsumedEvent:
         def wait(self, stream):
@@ -75,6 +76,8 @@ def _run_one_cycle(monkeypatch, old_map, new_map):
                 model_state.rebalanced = False
             else:
                 pending_layers.append(result.layer_idx)
+                if commit_results:
+                    model_state._ascend_eplb_committed_layers += 1
             model_state.pending_result = None
 
     stream = MagicMock()
@@ -84,6 +87,7 @@ def _run_one_cycle(monkeypatch, old_map, new_map):
             num_moe_layers=old_map.shape[0],
             expert_weights=[[object()]] * old_map.shape[0],
         ),
+        model_name="model",
         physical_to_logical_map=old_map,
         expert_buffer=[object()],
         rebalanced=True,
@@ -106,16 +110,17 @@ def _run_one_cycle(monkeypatch, old_map, new_map):
     monkeypatch.setattr(eplb_async_worker, "CpuGpuEvent", _ConsumedEvent)
     monkeypatch.setattr(eplb_async_worker.torch.cuda, "stream", lambda stream: nullcontext())
     monkeypatch.setattr(eplb_async_worker.torch.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(eplb_async_worker.logger, "info", cycle_log)
 
     with pytest.raises(_CycleComplete):
         eplb_async_worker.transfer_run_periodically(cast(AscendEplbState, state), stream)
 
-    return model_state, stream, transfer_layer, all_reduce, pending_layers, completed_cycles
+    return model_state, stream, transfer_layer, all_reduce, pending_layers, completed_cycles, cycle_log
 
 
 def test_async_worker_skips_fully_unchanged_cycle(monkeypatch):
     placement = torch.tensor([[0, 1], [1, 0]], dtype=torch.int32)
-    model_state, stream, transfer_layer, all_reduce, pending_layers, completed_cycles = _run_one_cycle(
+    model_state, stream, transfer_layer, all_reduce, pending_layers, completed_cycles, cycle_log = _run_one_cycle(
         monkeypatch,
         placement,
         placement.clone(),
@@ -127,12 +132,13 @@ def test_async_worker_skips_fully_unchanged_cycle(monkeypatch):
     assert pending_layers == []
     assert completed_cycles == [1]
     assert model_state.rebalanced is False
+    cycle_log.assert_not_called()
 
 
 def test_async_worker_transfers_only_changed_layers(monkeypatch):
     old_map = torch.tensor([[0, 1], [0, 1], [1, 0]], dtype=torch.int32)
     new_map = torch.tensor([[0, 1], [1, 0], [1, 0]], dtype=torch.int32)
-    model_state, stream, transfer_layer, all_reduce, pending_layers, completed_cycles = _run_one_cycle(
+    model_state, stream, transfer_layer, all_reduce, pending_layers, completed_cycles, cycle_log = _run_one_cycle(
         monkeypatch,
         old_map,
         new_map,
@@ -144,3 +150,22 @@ def test_async_worker_transfers_only_changed_layers(monkeypatch):
     all_reduce.assert_called_once()
     assert pending_layers == [1]
     assert completed_cycles == [2]
+    cycle_log.assert_called_once_with(
+        "%s: model=%s, changed_layers=%d",
+        eplb_async_worker.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+        "model",
+        1,
+    )
+
+
+def test_async_worker_does_not_log_acknowledged_but_uncommitted_cycle(monkeypatch):
+    old_map = torch.tensor([[0, 1], [0, 1]], dtype=torch.int32)
+    new_map = torch.tensor([[1, 0], [0, 1]], dtype=torch.int32)
+    *_, cycle_log = _run_one_cycle(
+        monkeypatch,
+        old_map,
+        new_map,
+        commit_results=False,
+    )
+
+    cycle_log.assert_not_called()

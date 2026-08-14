@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
+from vllm_ascend.distributed.eplb.async_worker import ASYNC_EPLB_CYCLE_COMMITTED_LOG
 
 MODEL = os.environ.get("QWEN3_MRV2_EPLB_MODEL_PATH", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 PROMPTS = [
@@ -118,6 +119,8 @@ def _run_dp2_tp2():
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.7, max_wait_seconds=180)
-def test_qwen3_moe_w8a8_dp2_tp2_async_stair_eplb_accuracy():
+def test_qwen3_moe_w8a8_dp2_tp2_async_stair_eplb_accuracy(capfd: pytest.CaptureFixture[str]):
     eplb_outputs = _run_dp2_tp2()
     _assert_expected_answers(eplb_outputs, "MRV2 asynchronous STAIR EPLB")
+    captured = capfd.readouterr()
+    assert ASYNC_EPLB_CYCLE_COMMITTED_LOG in captured.out + captured.err

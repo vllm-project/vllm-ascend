@@ -34,10 +34,28 @@ def _is_npu_platform(platform) -> bool:
     return getattr(platform, "device_type", None) == "npu"
 
 
+def _wrap_parallel_config_post_init(original_post_init):
+    @wraps(original_post_init)
+    def _post_init(self) -> None:
+        if (
+            _is_npu_platform(_parallel_config.current_platform)
+            and self.enable_eplb
+            and self.eplb_config.communicator is None
+        ):
+            self.eplb_config.communicator = "torch_gloo"
+        original_post_init(self)
+
+    setattr(_post_init, _PATCH_MARKER, True)
+    return _post_init
+
+
 def _patch_parallel_config() -> None:
     platform = _parallel_config.current_platform
     if not isinstance(platform, _CudaAlikeEplbPlatformProxy):
         _parallel_config.current_platform = _CudaAlikeEplbPlatformProxy(platform)
+    original_post_init = _parallel_config.ParallelConfig.__post_init__
+    if not getattr(original_post_init, _PATCH_MARKER, False):
+        _parallel_config.ParallelConfig.__post_init__ = _wrap_parallel_config_post_init(original_post_init)
 
 
 def _wrap_communicator_factory(original_factory):
@@ -90,6 +108,8 @@ def _wrap_move_to_workspace(original_move):
             state = getattr(model_state, "_ascend_eplb_state", None)
             if state is not None:
                 state.commit_policy_layer(model_state, layer_idx)
+            committed_layers = getattr(model_state, "_ascend_eplb_committed_layers", 0)
+            model_state._ascend_eplb_committed_layers = committed_layers + 1
         return result
 
     setattr(_move_to_workspace, _PATCH_MARKER, True)

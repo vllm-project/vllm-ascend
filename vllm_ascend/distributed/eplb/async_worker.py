@@ -28,6 +28,7 @@ class NoTransferCycleComplete:
 
 
 NO_TRANSFER_CYCLE_COMPLETE = NoTransferCycleComplete()
+ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 
 
 def start_async_worker(
@@ -111,6 +112,7 @@ def transfer_run_periodically(
         ep_rank = eplb_group.rank()
 
         for model_state in state.model_states.values():
+            model_state._ascend_eplb_committed_layers = 0
             model_state.communicator.set_stream(cuda_stream)
             with torch.cuda.stream(cuda_stream):
                 old_mapping = model_state.physical_to_logical_map.cpu()
@@ -162,3 +164,11 @@ def transfer_run_periodically(
                     NO_TRANSFER_CYCLE_COMPLETE,
                     cuda_stream,
                 )
+                committed_layers = getattr(model_state, "_ascend_eplb_committed_layers", 0)
+                if ep_rank == 0 and committed_layers > 0:
+                    logger.info(
+                        "%s: model=%s, changed_layers=%d",
+                        ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                        model_state.model_name,
+                        committed_layers,
+                    )
