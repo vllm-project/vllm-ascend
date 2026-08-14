@@ -73,9 +73,6 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
-# token count limits within bmm_transpose operator
-BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
-
 
 class PreprocessType(enum.Enum):
     NATIVE = "native"
@@ -1182,17 +1179,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         return ql_nope.transpose(0, 1), q_pe
 
     def _v_up_proj(self, x):
-        num_input_tokens, _, _ = x.shape
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS
-        ):
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
-        elif hasattr(torch_npu, "npu_transpose_batchmatmul"):
+        if hasattr(torch_npu, "npu_transpose_batchmatmul"):
             # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
             x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
             # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
