@@ -784,58 +784,6 @@ msgid ""
 "decoding, HTTP 400, or OOM errors."
 msgstr "通过标准：HTTP 请求成功，响应包含与音频内容相关的有效文本，服务终端没有音频解码、HTTP 400 或 OOM 错误。"
 
-msgid ""
-
-"> This chapter provides an accuracy evaluation guide for reference only. It "
-
-"covers the GSM8K dataset, which is used to evaluate text-only math "
-
-"reasoning. The evaluation commands in this chapter are for reference; the "
-
-"deployment and service startup procedures in Chapters 3-5 are the "
-
-"prerequisite for running them. "
-
-msgstr ""
-
-"> 本章提供精度评测指导，仅供参考。本章覆盖 GSM8K 数据集，用于评测纯文本数学推理。本章中的评测命令仅供参考；第 3～5 "
-
-"章的部署与服务启动流程是运行本章命令的前提。 "
-
-msgid ""
-
-"GSM8K is used to evaluate pure text mathematical reasoning. The `gsm8k` "
-
-"dataset is built into evalscope, downloaded automatically from ModelScope, "
-
-"and includes a 4-shot template and `\boxed{}` answer extraction. Before "
-
-"evaluating, confirm the text-only service in Section 5.2 is running, and the "
-
-"model name in the client requests must be `dots3_note` (the default model "
-
-"name `default` returns 404). "
-
-msgstr ""
-
-"GSM8K 用于评测纯文本数学推理。`gsm8k` 数据集内置于 evalscope，通过 ModelScope 自动下载，并包含 4-shot 模板与 "
-
-"`\boxed{}` 答案提取。评测前确认第 5.2 节的 text-only 服务已运行，且客户端请求中的模型名必须为 "
-
-"`dots3_note`（默认模型名 `default` 会返回 404）。 "
-
-msgid ""
-
-"> The built-in dataset requires access to ModelScope. For domestic networks, "
-
-"set `export MODELSCOPE_API_URL=https://modelscope.cn` before running. "
-
-msgstr ""
-
-"> 内置数据集需要访问 ModelScope。国内网络可在运行前设置 `export "
-
-"MODELSCOPE_API_URL=https://modelscope.cn`。 "
-
 msgid "## 7 Accuracy Evaluation (Reference)"
 msgstr "## 7 精度评测（参考）"
 
