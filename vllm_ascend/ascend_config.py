@@ -34,6 +34,13 @@ class AscendConfig:
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
+        self.premature_eos_policy = additional_config.get("premature_eos_policy", "allow")
+        if self.premature_eos_policy not in ("allow", "mask_in_reasoning"):
+            raise ValueError(
+                "additional_config.premature_eos_policy must be one of "
+                f"['allow', 'mask_in_reasoning'], got {self.premature_eos_policy!r}."
+            )
+
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config, vllm_config)
 

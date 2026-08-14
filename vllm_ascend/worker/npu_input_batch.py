@@ -27,12 +27,14 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
-from vllm.v1.sample.thinking_budget_state import (
-    maybe_create_thinking_budget_state_holder,
-)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
+from vllm_ascend.worker.thinking_budget_state import (
+    PREMATURE_EOS_POLICY_ALLOW,
+    maybe_create_ascend_thinking_budget_state_holder,
+)
 
 
 class NPUInputBatch(InputBatch):
@@ -68,12 +70,16 @@ class NPUInputBatch(InputBatch):
 
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
-        self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
+        premature_eos_policy = PREMATURE_EOS_POLICY_ALLOW
+        if reasoning_config is not None:
+            premature_eos_policy = get_ascend_config().premature_eos_policy
+        self.thinking_budget_state_holder = maybe_create_ascend_thinking_budget_state_holder(
             reasoning_config,
             max_num_reqs,
             num_speculative_tokens,
             device,
             pin_memory,
+            premature_eos_policy=premature_eos_policy,
         )
         self.thinking_token_budget_reqs: set[str] = set()
         self.max_num_reqs = max_num_reqs
