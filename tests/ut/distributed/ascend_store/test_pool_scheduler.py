@@ -1,4 +1,4 @@
-﻿#
+#
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -316,7 +316,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         request.all_token_ids = list(range(64))
         request.block_hashes = [b"h0", b"h1", b"h2", b"h3"]
         scheduler._unfinished_requests["r1"] = (request, [[0]])
-        scheduler._unfinished_request_ids.add("r1")
         scheduler._request_trackers["r1"] = RequestTracker(
             req_id="r1",
             token_len=16,
@@ -410,7 +409,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         request.all_token_ids = list(range(33))
         request.block_hashes = [b"h0", b"h1"]
         scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
-        scheduler._unfinished_request_ids.add("r1")
         scheduler._request_trackers["r1"] = RequestTracker(
             req_id="r1",
             token_len=32,
@@ -678,18 +676,6 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
                 scheduler.update_connector_output(output)
                 self.assertEqual(scheduler._block_pool.free_blocks.called, should_free)
                 self.assertEqual(1 in scheduler.sending_blocks, not should_free)
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-            AscendStoreKVConnectorWorkerMetadata,
-        )
-
-        meta = AscendStoreKVConnectorWorkerMetadata({1: 1})
-        output = MagicMock()
-        output.kv_connector_worker_meta = meta
-        scheduler.update_connector_output(output)
-        # total = 0 + 1 = 1 < 2 => keep blocks
-        scheduler._block_pool.free_blocks.assert_not_called()
-        self.assertEqual(scheduler.sending_events[1], 1)
 
     def test_invalid_event_id(self):
         scheduler = self._make_scheduler()

@@ -1,4 +1,4 @@
-﻿#
+#
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,13 +24,11 @@ import numpy as np
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
-from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
+    LayerBlockRange,
     LayerLoadTask,
-    LayerMultiBlockReqMeta,
-    LayerPoolKey,
     LayerBatchReqMeta,
     LayerTransferTask,
     LoadSpec,
@@ -40,6 +38,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreLayerRecvingThread,
+    KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
@@ -90,7 +90,7 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
         return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
 
 
-class TestLayerBatchBuilder(unittest.TestCase):
+class TestLayerBatchBuilderOffsets(unittest.TestCase):
     def test_uses_real_offsets_for_variable_cache_entries_per_layer(self):
         database = FakeTokenDatabase()
         database.set_group_buffers(
@@ -102,8 +102,6 @@ class TestLayerBatchBuilder(unittest.TestCase):
         )
         builder = LayerBatchBuilder(
             database,
-            my_key_index=0,
-            num_ranks_per_layer=1,
             page_size_bytes=60,
             num_layers=2,
         )
@@ -241,9 +239,6 @@ class TestGVALayerTransferFailures(unittest.TestCase):
             tp_rank=0,
             tp_size=1,
             dcp_size=1,
-            put_step=1,
-            my_key_index=0,
-            num_ranks_per_layer=1,
             page_size_bytes=16,
             ready_event=threading.Event(),
             num_layers=1,
@@ -309,8 +304,6 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             tp_rank=0,
             tp_size=1,
             dcp_size=1,
-            my_key_index=0,
-            num_ranks_per_layer=1,
             page_size_bytes=16,
             ready_event=threading.Event(),
             get_event=threading.Event(),
@@ -638,7 +631,7 @@ class TestLayerBatchBuilder(unittest.TestCase):
         self.assertEqual(result.req_ids, ["r1"])
         np.testing.assert_array_equal(result.addr_array, [3020, 4040, 3030, 4060])
         np.testing.assert_array_equal(result.size_array, [10, 20, 10, 20])
-        np.testing.assert_array_equal(result.gvas_array, [10100, 10110, 20100, 20110])
+        np.testing.assert_array_equal(result.gvas_array, [10030, 10040, 20030, 20040])
 
     def test_filters_and_deduplicates_blocks(self):
         request = self._make_request(

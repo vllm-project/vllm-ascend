@@ -1,4 +1,4 @@
-﻿#
+#
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,6 +31,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 
+def start_patch(test: unittest.TestCase, *args, **kwargs):
+    patcher = patch(*args, **kwargs)
+    mocked = patcher.start()
+    test.addCleanup(patcher.stop)
+    return mocked
+
+
 def make_worker(
     test: unittest.TestCase,
     *,
@@ -46,13 +53,13 @@ def make_worker(
     num_hidden_layers=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
-    test.enterContext(patch(f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank))
-    test.enterContext(patch(f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size))
-    pcp_group = test.enterContext(patch(f"{module}.get_pcp_group"))
+    start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
+    start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
+    pcp_group = start_patch(test, f"{module}.get_pcp_group")
     pcp_group.return_value.world_size = 1
-    test.enterContext(patch(f"{module}.get_decode_context_model_parallel_world_size", return_value=1))
-    test.enterContext(patch(f"{module}.get_decode_context_model_parallel_rank", return_value=0))
-    importlib = test.enterContext(patch(f"{module}.importlib"))
+    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=1)
+    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
+    importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
     config = MagicMock()
@@ -620,8 +627,12 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
 
-    def test_start_load_kv_sync_uses_tail_block_id(self):
-        worker = self._make_worker()
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
+        autospec=True,
+    )
+    def test_async_load_failure_is_reported_by_worker(self, start_thread):
+        worker = self._make_worker(kv_role="kv_consumer", extra_config={"load_async": True})
         worker.m_store.get = MagicMock()
         worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
         worker.m_store.get.return_value = [1]
@@ -951,30 +962,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
     def _make_worker(self):
         return make_worker(self)
-
-        config = MagicMock()
-        config.model_config.model = "org/llama-7b"
-        config.model_config.use_mla = False
-        config.model_config.hf_text_config = MagicMock(spec=[])
-        config.model_config.get_num_layers.return_value = 2
-        config.model_config.get_total_num_kv_heads.return_value = 1
-        config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.rank = 0
-        config.parallel_config.pipeline_parallel_size = 1
-        config.kv_transfer_config.kv_role = "kv_producer"
-        config.kv_transfer_config.kv_connector_extra_config = {"backend": "mooncake"}
-        config.cache_config.block_size = 16
-        config.kv_events_config = None
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        worker = KVPoolWorker(config, use_layerwise=False)
-        self._patches = patches
-        return worker
-
-    def tearDown(self):
-        for p in self._patches.values():
-            p.stop()
 
     def _make_gva_worker(self, num_groups=1):
         worker = self._make_worker()

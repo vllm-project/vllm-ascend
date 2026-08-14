@@ -4,7 +4,6 @@ import importlib
 import threading
 import time
 from collections.abc import Generator
-from typing import Any
 
 import numpy as np
 import torch

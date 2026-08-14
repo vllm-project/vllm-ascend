@@ -1,4 +1,4 @@
-﻿#
+#
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,6 @@ from types import SimpleNamespace
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerPoolKey,

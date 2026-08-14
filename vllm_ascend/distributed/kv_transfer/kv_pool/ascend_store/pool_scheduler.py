@@ -1,4 +1,5 @@
 import importlib
+import math
 from typing import Any, cast
 
 import vllm.envs as envs
@@ -125,6 +126,7 @@ class KVPoolScheduler:
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
+        self.lcm_block_size = math.lcm(*self.grouped_block_size)
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.kv_cache_group_families
         )
