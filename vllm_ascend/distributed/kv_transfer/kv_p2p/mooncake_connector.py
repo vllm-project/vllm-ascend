@@ -837,6 +837,8 @@ class KVCacheRecvingThread(threading.Thread):
                         )
                     )
             else:
+                # Ascend Hybrid Mamba supports "align" (prefix caching) and
+                # "none" (no prefix caching), but not "all".
                 if self.mamba_cache_mode == "align":
                     if len(remote_group_block_ids) != 1:
                         raise RuntimeError(

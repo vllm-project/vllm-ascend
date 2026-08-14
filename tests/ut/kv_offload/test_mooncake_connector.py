@@ -977,8 +977,11 @@ class TestCoreFunctionality(unittest.TestCase):
         # Pure metadata/address arithmetic: no NPU tensor or torch.npu call.
         self._configure_mock_mamba_transfer()
         self.thread.mamba_cache_mode = "align"
+        self.thread.num_speculative_tokens = 7
         req = dict(self.test_req)
-        req["local_block_ids"] = [[2]]
+        # The aligned allocator returns the running-state destination first,
+        # followed by speculative blocks. The transfer must target block 2.
+        req["local_block_ids"] = [[2, 20, 21, 22, 23, 24, 25, 26]]
         req["remote_block_ids"] = [[3]]
         req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)]
 
