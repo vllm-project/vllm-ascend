@@ -1757,15 +1757,6 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
     ):
         if len(kv_cache) <= 1:
             return query, key, value, output
-
-        assert isinstance(attn_metadata, AscendAttentionPCPMetadata)
-        if self.key_cache is None:
-            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-        if self.kv_sharing_target_layer_name is not None:
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
-            return query, key, value, output
-
         expanded_slot_mapping = attn_metadata.slot_mapping
         local_num_input_tokens = attn_metadata.pcp_local_num_input_tokens
         if key.shape[0] < local_num_input_tokens:
@@ -1781,15 +1772,10 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
             expanded_slot_mapping,
             attn_metadata.num_decode_tokens,
         )
-        DeviceOperator.reshape_and_cache(
-            key=cache_key,
-            value=cache_value,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            slot_mapping=cache_slot_mapping,
-        )
-        notify_kv_cache_written()
-        return query, key, value, output
+        attn_metadata.slot_mapping = cache_slot_mapping
+        ret = super().reshape_and_cache(query, cache_key, cache_value, kv_cache, attn_metadata, output)
+        attn_metadata.slot_mapping = expanded_slot_mapping
+        return ret
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
