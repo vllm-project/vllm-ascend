@@ -1,48 +1,42 @@
 # Copyright (c) 2026. Reproduction-only diagnostic, not a correctness test.
 #
-# Standalone repro: does FA3 (flash_attn_with_kvcache) NPUGraph replay corrupt
-# a subsequent CANN V1 attention (npu_fused_infer_attention_score) GRAPH replay?
+# Standalone repro: does capturing an FA3 (flash_attn_with_kvcache) NPUGraph
+# corrupt a SUBSEQUENTLY captured CANN V1 (npu_fused_infer_attention_score)
+# graph_task_group?
 #
 # ---------------------------------------------------------------------------
 # Hypothesis under test
 # ---------------------------------------------------------------------------
-# FA3's SplitFuse::FAInfer kernel UNCONDITIONALLY uses FFTS cross-core sync
-# (AscendC::SetSyncBaseAddr + CrossCoreSetFlag/WaitFlag) whose base address is
-# the DEVICE-GLOBAL C2C control region (rtGetC2cCtrlAddr).  CANN V1 long-sequence
-# prefill also splits KV across AI cores and uses the same FFTS machinery.
+# FA3 is a PyTorch CustomOp invisible to the CANN task-group mechanism.  When
+# vllm-ascend captures the FA3 decode graph with torch.npu.graph() it does NOT
+# wrap it in graph_task_group_begin/End.  That produces an "empty task group"
+# which corrupts CANN runtime state for the NEXT graph capture -- i.e. the
+# prefill CANN V1 graph captured with graph_task_group_begin/End.  The corrupted
+# prefill graph then replays to wrong output.
 #
-#   * eager prefill: the CANN runtime manages/resets the shared FFTS region at
-#     kernel boundaries, so FA3's leftover FFTS state is cleared before prefill.
-#   * graph-replayed prefill (task-group): replay bypasses that per-kernel
-#     management, so FA3's FFTS state leaks into prefill -> wrong result.
-#
-# This is EXACTLY why the first version of this repro (eager prefill) did NOT
-# reproduce: prefill must be graph-replayed too.  This version captures the
-# CANN V1 prefill as a graph_task_group and replays it.
+# This mirrors EXACTLY the comment in vllm-ascend full_graph_fa3:
+#   "an empty task group (FA3 not captured by CANN) corrupts CANN runtime
+#    state for subsequent graph captures (e.g. the prefill CANN V1 graph),
+#    breaking prefill accuracy."
 #
 # ---------------------------------------------------------------------------
 # Sequence
 # ---------------------------------------------------------------------------
-#   [0a] prefill graph-replay == eager prefill (sanity: graph replay works)
-#   [0]  prefill graph-replay deterministic (twice)
-#   [1]  baseline = clean prefill graph-replay
-#   [2]  FA3 EAGER        -> prefill graph-replay (expect ~0)
-#   [3]  FA3 GRAPH CAPTURE -> prefill graph-replay
-#   [4]  FA3 GRAPH REPLAY xN -> prefill graph-replay (expect > 0 = reproduced)
-#   [4b] FA3 GRAPH REPLAY xN -> prefill EAGER      (expect ~0 = control)
+#   [1] capture a CLEAN prefill graph_task_group, replay -> baseline
+#   [2] capture the FA3 decode NPUGraph (no task-group wrapper)  <- the polluter
+#   [3] capture a SECOND prefill graph_task_group, replay -> "polluted"
+#   [4] compare baseline vs polluted.  If they differ, capture-order pollution
+#       is proven (FA3 capture corrupts the later CANN V1 capture).
 #
-#   If [4] > threshold and [4b] ~ 0, the hypothesis holds.
+# Both graphs share ONE graph pool, as vllm-ascend's ACLGraphWrapper does
+# (current_platform.get_global_graph_pool()).
 #
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
 #   python test_fa3_corrupts_cann.py
 #
-#   PREILL_SEQLEN=16384 DECODE_KV_SEQLEN=16384 N_REPLAYS=3 \
-#       python test_fa3_corrupts_cann.py
-#
-#   PREILL_SEQLEN controls whether the CANN V1 prefill splits across cores
-#   (and thus uses FFTS).  If 16384 does not reproduce, try 32768.
+#   PREILL_SEQLEN=16384 DECODE_KV_SEQLEN=16384 python test_fa3_corrupts_cann.py
 
 import os
 from importlib import util as importlib_util
@@ -108,14 +102,11 @@ def make_prefill_inputs(seqlen: int):
     k = torch.randn(num_blocks, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE, dtype=DTYPE).npu()
     v = torch.randn_like(k)
     block_table = torch.arange(num_blocks, dtype=torch.int32).npu().unsqueeze(0)
-    # actual_seq_lengths / actual_seq_lengths_kv MUST be Python lists (CPU):
-    # npu_fused_infer_attention_score reads these scalars on the host to decide
-    # whether to split KV across cores.  Passing device tensors makes it do a
-    # copy_stream sync (LocalScalarDenseNpu) which is illegal during graph
-    # capture ("stream is captured").  vllm-ascend passes seq_lens_list (a
-    # Python list) for exactly this reason.
-    actual_q = [seqlen]  # cumulative WITHOUT leading 0
-    actual_kv = [seqlen]  # per-sequence KV length
+    # MUST be Python lists: npu_fused_infer_attention_score reads these scalars
+    # on host; device tensors would trigger a copy_stream sync (illegal during
+    # capture).
+    actual_q = [seqlen]
+    actual_kv = [seqlen]
     return q, k, v, block_table, actual_q, actual_kv
 
 
@@ -133,28 +124,19 @@ def _fia_out(inp, out_buf, lse_buf):
         num_key_value_heads=NUM_KV_HEADS,
         num_heads=NUM_HEADS,
         scale=SCALE,
-        sparse_mode=0,  # dense, non-causal -> no atten_mask
+        sparse_mode=0,  # dense, non-causal
         out=[out_buf, lse_buf],
     )
 
 
-def run_prefill_eager(inp):
-    """CANN V1 prefill EAGER (control: runtime manages FFTS)."""
-    q, *_ = inp
-    out = torch.empty(q.shape[0], NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
-    lse = torch.empty(1, dtype=torch.float32).npu()
-    _fia_out(inp, out, lse)
-    torch.npu.synchronize()
-    return out.clone()
-
-
-def capture_prefill_graph(inp):
-    """CANN V1 prefill GRAPH (task-group), matching vllm-ascend full_graph_fia."""
+def capture_prefill_graph(inp, pool=None):
+    """CANN V1 prefill as a graph_task_group, matching vllm-ascend full_graph_fia."""
     q, *_ = inp
     out_buf = torch.empty(q.shape[0], NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
     lse_buf = torch.empty(1, dtype=torch.float32).npu()
     graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
+    ctx = torch.npu.graph(graph, pool=pool) if pool is not None else torch.npu.graph(graph)
+    with ctx:
         stream = torch_npu.npu.current_stream()
         torch.npu.graph_task_group_begin(stream)
         _fia_out(inp, out_buf, lse_buf)
@@ -175,7 +157,6 @@ def replay_prefill(graph, out_buf):
 def make_decode_inputs(kv_seqlen: int):
     num_blocks = _ceil_div(kv_seqlen, BLOCK_SIZE)
     q = torch.randn(1, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
-    # FA3 paged layout: (num_blocks, block_size, num_kv_heads, head_size).
     k = torch.randn(num_blocks, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
     v = torch.randn_like(k)
     cache_seqlens = torch.tensor([kv_seqlen], dtype=torch.int32).npu()
@@ -214,97 +195,72 @@ def run_fa3_decode(inp):
     )
 
 
-def capture_fa3_graph(decode_inp):
+def capture_fa3_graph(decode_inp, pool=None):
+    """FA3 decode NPUGraph, NO graph_task_group wrapper (the polluter)."""
     graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
+    ctx = torch.npu.graph(graph, pool=pool) if pool is not None else torch.npu.graph(graph)
+    with ctx:
         _ = run_fa3_decode(decode_inp)
-    torch.npu.synchronize()
+    # NOTE: deliberately do NOT synchronize here -- we want any empty-task-group
+    # residue to leak into the NEXT capture, exactly as vllm-ascend sees.
     return graph
 
 
 def main():
     prefill_seqlen = int(os.environ.get("PREILL_SEQLEN", "16384"))
     kv_seqlen = int(os.environ.get("DECODE_KV_SEQLEN", "16384"))
-    n_replays = int(os.environ.get("N_REPLAYS", "3"))
+    share_pool = os.environ.get("SHARE_POOL", "1") == "1"
 
     if not torch.npu.is_available():
         raise SystemExit("No NPU device available.")
 
     print("=" * 72)
     print(f"prefill_seqlen={prefill_seqlen}  decode_kv_seqlen={kv_seqlen}  "
-          f"n_replays={n_replays}")
+          f"share_pool={share_pool}")
     print("=" * 72)
 
     prefill_inp = make_prefill_inputs(prefill_seqlen)
     decode_inp = make_decode_inputs(kv_seqlen)
 
-    # Capture the CANN V1 prefill as a task-group graph.
-    prefill_graph, prefill_out, _, handle = capture_prefill_graph(prefill_inp)
+    pool = torch.npu.graph_pool_handle() if share_pool else None
 
-    # ---- [0a] sanity: graph-replayed prefill == eager prefill --------------
-    eager_ref = run_prefill_eager(prefill_inp)
-    g0 = replay_prefill(prefill_graph, prefill_out)
-    print(f"[0a] prefill graph-vs-eager max_abs_diff = "
-          f"{_max_abs_diff(g0, eager_ref):.6f} (should be ~0)")
-
-    # ---- [0] sanity: prefill graph replay is deterministic ----------------
-    r0 = replay_prefill(prefill_graph, prefill_out)
-    r1 = replay_prefill(prefill_graph, prefill_out)
-    print(f"[0]  prefill graph self-consistency   = "
-          f"{_max_abs_diff(r0, r1):.6f} (should be ~0)")
-
-    baseline = r1
-    print(f"[1]  baseline prefill graph-replay captured "
+    # ---- [1] clean prefill graph, captured BEFORE any FA3 capture ----------
+    g_clean, out_clean, _, _ = capture_prefill_graph(prefill_inp, pool=pool)
+    baseline = replay_prefill(g_clean, out_clean)
+    print(f"[1] clean prefill graph replay captured "
           f"(shape={tuple(baseline.shape)})")
 
-    # ---- [2] FA3 EAGER, then prefill graph-replay -------------------------
-    _ = run_fa3_decode(decode_inp)
-    torch.npu.synchronize()
-    r2 = replay_prefill(prefill_graph, prefill_out)
-    print(f"[2]  after FA3 EAGER       -> prefill GRAPH = "
-          f"{_max_abs_diff(baseline, r2):.6f} (should be ~0)")
+    # ---- [2] FA3 decode graph capture (the suspected polluter) -------------
+    fa3_graph = capture_fa3_graph(decode_inp, pool=pool)
+    print("[2] FA3 decode graph captured (no task-group wrapper)")
 
-    # ---- [3] FA3 GRAPH CAPTURE, then prefill graph-replay ------------------
-    fa3_graph = capture_fa3_graph(decode_inp)
-    r3 = replay_prefill(prefill_graph, prefill_out)
-    print(f"[3]  after FA3 CAPTURE     -> prefill GRAPH = "
-          f"{_max_abs_diff(baseline, r3):.6f}")
+    # ---- [3] second prefill graph, captured AFTER FA3 ----------------------
+    g_polluted, out_polluted, _, _ = capture_prefill_graph(prefill_inp, pool=pool)
+    polluted = replay_prefill(g_polluted, out_polluted)
+    d = _max_abs_diff(baseline, polluted)
+    d_mean = _mean_abs_diff(baseline, polluted)
+    print(f"[3] prefill graph captured AFTER FA3 -> diff vs clean = "
+          f"{d:.6f} (mean {d_mean:.6f})")
 
-    # ---- [4] FA3 GRAPH REPLAY xN, then prefill graph-replay ----------------
-    for _ in range(n_replays):
-        fa3_graph.replay()
-    torch.npu.synchronize()
-    r4 = replay_prefill(prefill_graph, prefill_out)
-    d4 = _max_abs_diff(baseline, r4)
-    d4_mean = _mean_abs_diff(baseline, r4)
-    print(f"[4]  after FA3 REPLAY x{n_replays} -> prefill GRAPH = "
-          f"{d4:.6f} (mean {d4_mean:.6f})")
-
-    # ---- [4b] FA3 GRAPH REPLAY xN, then prefill EAGER (control) ------------
-    for _ in range(n_replays):
-        fa3_graph.replay()
-    torch.npu.synchronize()
-    r4b = run_prefill_eager(prefill_inp)
-    d4b = _max_abs_diff(baseline, r4b)
-    print(f"[4b] after FA3 REPLAY x{n_replays} -> prefill EAGER  = "
-          f"{d4b:.6f} (should be ~0)")
+    # ---- [4] control: replay the clean graph again (still clean?) ----------
+    baseline2 = replay_prefill(g_clean, out_clean)
+    print(f"[4] clean graph re-replay self-consistency = "
+          f"{_max_abs_diff(baseline, baseline2):.6f}")
 
     # ---- verdict -----------------------------------------------------------
     print("-" * 72)
-    threshold = 1e-2  # well above bf16 rounding for identical inputs
-    if d4 > threshold and d4b < threshold:
+    threshold = 1e-2
+    if d > threshold:
         print("VERDICT: REPRODUCED.")
-        print("  FA3 graph replay corrupted the CANN V1 prefill GRAPH replay")
-        print("  but NOT the eager prefill -> FFTS state leaks only across")
-        print("  graph replay (matches vllm-ascend 'eager ok, graph broken').")
-    elif d4 <= threshold:
-        print("VERDICT: NOT reproduced.")
-        print("  Try a larger PREILL_SEQLEN / DECODE_KV_SEQLEN so the kernels")
-        print("  actually split KV across cores (and thus use FFTS).")
+        print("  Capturing the FA3 decode graph corrupted the LATER CANN V1")
+        print("  prefill graph capture -> its replay output diverges.  This is")
+        print("  the 'empty task group corrupts CANN runtime state' mechanism.")
     else:
-        print("VERDICT: INCONCLUSIVE.")
-        print("  Eager prefill was also affected; the corruption is not specific")
-        print("  to graph replay. Investigate FFTS sharing in eager mode too.")
+        print("VERDICT: NOT reproduced.")
+        print("  The FA3 capture did NOT change a later prefill capture.  Next")
+        print("  levers: (a) larger PREILL_SEQLEN, (b) also replay the FA3 graph")
+        print("  before capturing the second prefill graph, (c) add the")
+        print("  graph_task_update_begin/End replay path used by vllm-ascend.")
     print("-" * 72)
 
 
