@@ -134,6 +134,12 @@ on:
         QUAY_TEMP_PASSWORD:
             description: 'Quay password for pushing temp tag digests'
             required: false
+        swr_username:
+            description: 'SWR username for pulling CANN base images'
+            required: false
+        swr_password:
+            description: 'SWR password for pulling CANN base images'
+            required: false
 
 defaults:
   run:
@@ -359,8 +365,8 @@ jobs:
       uses: docker/login-action@v4
       with:
         registry: swr.cn-southwest-2.myhuaweicloud.com
-        username: ${{ secrets.SWR_USERNAME }}
-        password: ${{ secrets.SWR_PASSWORD }}
+        username: ${{ secrets.swr_username }}
+        password: ${{ secrets.swr_password }}
 
     - name: Build and push
       uses: docker/build-push-action@v7
