@@ -78,11 +78,11 @@ spec:
                   "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             ports:
@@ -184,7 +184,7 @@ spec:
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             volumeMounts:
