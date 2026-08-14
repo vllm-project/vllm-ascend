@@ -25,8 +25,14 @@ from vllm_ascend.attention.utils import (
     notify_kv_cache_written,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.worker.v2.updatable_graph import register_task
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.worker.v2.updatable_graph import (
+    get_capture_resource,
+    register_task,
+)
+
+
+_FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 
 
 @dataclass
@@ -210,20 +216,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = value_cache.view(num_blocks, block_size, -1)
 
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
-        workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_metadata.attn_mask,
-            block_table=attn_metadata.block_table,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=attn_metadata.query_start_loc,
-            actual_seq_lengths_kv=attn_metadata.seq_lens,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            sparse_mode=3,
+        workspace = get_capture_resource(
+            _FIA_WORKSPACE_KEY,
+            lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=attn_metadata.block_table,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=attn_metadata.query_start_loc,
+                actual_seq_lengths_kv=attn_metadata.seq_lens,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                sparse_mode=3,
+            ),
         )
         register_task(
             torch_npu.npu_fused_infer_attention_score.out,
