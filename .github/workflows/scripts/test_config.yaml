@@ -544,7 +544,7 @@
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dflash.py
 
-- name: spec_decode_dspark
+- name: spec_decode_dspark_one_card
   optional: false
   base: spec_decode_base
   source_file_dependencies:
