@@ -273,6 +273,7 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         lora_b_stacked=lora_context.w13_lora_b_stacked,
         expert_ids=expert_per_row,
         adapter_enabled=lora_context.adapter_enabled,
+        fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
     )
 
@@ -288,6 +289,10 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     # kernel crashes with empty tensors.
     if expert_per_row.numel() == 0:
         return
+    offset = 0
+    if lora_context.fully_sharded:
+        shard_size = lora_context.w2_lora_b_stacked[0].shape[-2]
+        offset = shard_size * lora_context.tp_rank
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=down_out,
         x=silu_out,
@@ -295,6 +300,8 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         lora_b_stacked=lora_context.w2_lora_b_stacked,
         expert_ids=expert_per_row,
         adapter_enabled=lora_context.adapter_enabled,
+        fully_sharded=lora_context.fully_sharded,
+        offset=offset,
         token_lora_mapping=lora_per_row,
     )
     # Clear per-forward intermediate indices now that the LoRA delta
