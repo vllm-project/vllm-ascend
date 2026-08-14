@@ -768,8 +768,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         qli_metadata = self._build_qli_metadata(
             query_start_loc=local_query_start_loc,
             seq_lens=local_seq_lens,
-            seq_lens_q=local_seq_lens_q,
             num_reqs=num_reqs,
+            max_seqlen_q=max(1, int(local_seq_lens_q_cpu.max().item())),
+            max_seqlen_k=max(1, int(local_seq_lens_cpu.max().item())),
         )
 
         cp_metadata = DSACPMetadata(
@@ -988,7 +989,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.req_sas_metadata[:1024] = metadata
         return self.req_sas_metadata[:1024]
 
-    def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, num_reqs):
+    def _build_qli_metadata(
+        self,
+        query_start_loc,
+        seq_lens,
+        num_reqs,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+    ):
         if self.compressor_ratio != 4:
             return None
 
@@ -996,8 +1004,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
-            max_seqlen_q = max(1, int(seq_lens_q.max().item()))
-            max_seqlen_k = max(1, int(seq_lens.max().item()))
             metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=seq_lens.clone(),
