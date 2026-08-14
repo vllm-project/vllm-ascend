@@ -153,7 +153,7 @@ jobs:
       - name: Verify custom ops loadable
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
-          python3 -c "from vllm_ascend import ops; print('ops OK ->', [x for x in dir(op) if not x.startswith('_')][:10])"
+          python3 -c "from vllm_ascend import ops; print('ops OK ->', [x for x in dir(ops) if not x.startswith('_')][:10])"
       - name: Report image build provenance
         run: |
           echo "Image: ${{ needs.setup-vars.outputs.a2_image }}"
