@@ -44,6 +44,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
 )
+from vllm_ascend.utils import enable_dsa_cp
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -162,7 +163,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             kv_sharing_target_layer_name,
             **kwargs,
         )
-        if self.enable_dsa_cp:
+        if enable_dsa_cp():
             raise NotImplementedError("Sparse KV offload currently requires TP without context parallelism")
         if self.enable_sparse_sfa_c8:
             raise NotImplementedError(

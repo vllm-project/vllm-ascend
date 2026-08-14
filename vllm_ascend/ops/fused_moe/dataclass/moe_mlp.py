@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from vllm.model_executor.layers.fused_moe import FusedMoEConfig, MoEActivation
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput, MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams

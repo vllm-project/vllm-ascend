@@ -160,9 +160,10 @@ def _mock_npu_env():
         # backend's routing check.
         patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
         patch(
-            "vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer",
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
             return_value=False,
         ),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False),
         patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False),
     ):
         yield

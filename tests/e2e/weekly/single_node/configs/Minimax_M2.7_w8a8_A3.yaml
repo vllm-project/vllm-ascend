@@ -34,8 +34,8 @@ _server_cmd: &server_cmd
   - "--enable-auto-tool-choice"
   - "--tool-call-parser"
   - "minimax_m2"
-  - "--speculative_config"
-  - '{"method":"eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short,"num_speculative_tokens":3}'
+  - "--speculative-config"
+  - '{"method":"eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--additional-config"

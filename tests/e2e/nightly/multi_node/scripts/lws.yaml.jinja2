@@ -49,6 +49,26 @@ spec:
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
+              - name: BISECT_GOOD_COMMIT
+                value: {{ bisect_good_commit | default("") | tojson }}
+              - name: BISECT_BAD_COMMIT
+                value: {{ bisect_bad_commit | default("HEAD") | tojson }}
+              - name: BISECT_FAIL_CONFIRM_RETRIES
+                value: {{ bisect_fail_confirm_retries | default("") | tojson }}
+              - name: BISECT_TRIAL_TIMEOUT
+                value: {{ bisect_trial_timeout | default("") | tojson }}
+              - name: BISECT_BARRIER_TIMEOUT
+                value: {{ bisect_barrier_timeout | default("") | tojson }}
+              - name: BISECT_NO_VERIFY_GOOD
+                value: {{ bisect_no_verify_good | default("") | tojson }}
+              - name: BISECT_NO_VERIFY_BAD
+                value: {{ bisect_no_verify_bad | default("") | tojson }}
+              - name: BISECT_FORCE_INITIAL_BUILD
+                value: {{ bisect_force_initial_build | default("") | tojson }}
+              - name: BISECT_CONFIG_BASE_PATH
+                value: {{ bisect_config_base_path | default("") | tojson }}
+              - name: OPENLIBING_SECRET
+                value: "{{ openlibing_secret | default("") }}"
             command:
               - sh
               - -c
@@ -84,9 +104,16 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 512Gi
+{% if shared_volume_path %}
+        - name: shared-volume
+          hostPath:
+            path: {{ shared_volume_path }}
+            type: DirectoryOrCreate
+{% else %}
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
+{% endif %}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
@@ -126,6 +153,24 @@ spec:
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
+              - name: BISECT_GOOD_COMMIT
+                value: {{ bisect_good_commit | default("") | tojson }}
+              - name: BISECT_BAD_COMMIT
+                value: {{ bisect_bad_commit | default("HEAD") | tojson }}
+              - name: BISECT_FAIL_CONFIRM_RETRIES
+                value: {{ bisect_fail_confirm_retries | default("") | tojson }}
+              - name: BISECT_TRIAL_TIMEOUT
+                value: {{ bisect_trial_timeout | default("") | tojson }}
+              - name: BISECT_BARRIER_TIMEOUT
+                value: {{ bisect_barrier_timeout | default("") | tojson }}
+              - name: BISECT_NO_VERIFY_GOOD
+                value: {{ bisect_no_verify_good | default("") | tojson }}
+              - name: BISECT_NO_VERIFY_BAD
+                value: {{ bisect_no_verify_bad | default("") | tojson }}
+              - name: BISECT_FORCE_INITIAL_BUILD
+                value: {{ bisect_force_initial_build | default("") | tojson }}
+              - name: BISECT_CONFIG_BASE_PATH
+                value: {{ bisect_config_base_path | default("") | tojson }}
             command:
               - sh
               - -c
@@ -135,7 +180,7 @@ spec:
                   "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
@@ -146,6 +191,16 @@ spec:
               - mountPath: /root/.cache
                 name: shared-volume
               - mountPath: /usr/local/Ascend/driver/tools
+{% if shared_volume_path %}
+        - name: shared-volume
+          hostPath:
+            path: {{ shared_volume_path }}
+            type: DirectoryOrCreate
+{% else %}
+        - name: shared-volume
+          persistentVolumeClaim:
+            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
+{% endif %}
                 name: driver-tools
               - mountPath: /dev/shm
                 name: dshm

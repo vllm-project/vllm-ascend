@@ -26,12 +26,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
-from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
-    MoEFusedExpertsInput,
-    build_token_dispatch_input,
-)
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,

@@ -20,6 +20,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
 )
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as fused_topk_router_module
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -389,6 +390,81 @@ def test_routed_experts_select_experts_validates_router_logits(monkeypatch):
     torch.testing.assert_close(result_weights, topk_weights.to(hidden_states.dtype))
     assert torch.equal(result_ids, topk_ids)
     assert routed_experts.router._select_experts.call_args.kwargs["input_ids"] is input_ids
+
+
+def _build_routing_replay_experts(router, log2phy):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.router = router
+    routed_experts.moe_config = SimpleNamespace(num_experts=4)
+    routed_experts.global_redundant_expert_num = 0
+    routed_experts.n_shared_experts = 0
+    routed_experts.log2phy = log2phy
+    return routed_experts
+
+
+def test_routing_replay_captures_logical_ids_before_ascend_mapping(monkeypatch):
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=None,
+        topk_group=None,
+    )
+    capturer = MagicMock()
+    router.set_capture_fn(lambda topk_ids: capturer.capture(2, topk_ids))
+    log2phy = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
+    routed_experts = _build_routing_replay_experts(router, log2phy)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_moe_num_logical_experts",
+        lambda *args, **kwargs: 4,
+    )
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.tensor(
+        [[0.1, 0.9, 0.2, 0.8], [0.7, 0.2, 0.6, 0.1]],
+        dtype=torch.float32,
+    )
+
+    _, physical_ids = routed_experts._select_experts(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        enable_force_load_balance=False,
+    )
+
+    logical_ids = capturer.capture.call_args.args[1]
+    capturer.capture.assert_called_once()
+    torch.testing.assert_close(physical_ids, log2phy[logical_ids])
+    assert torch.all(logical_ids < log2phy.numel())
+
+
+def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=None,
+        topk_group=None,
+    )
+    log2phy = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
+    routed_experts = _build_routing_replay_experts(router, log2phy)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_moe_num_logical_experts",
+        lambda *args, **kwargs: 4,
+    )
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.tensor(
+        [[0.1, 0.9, 0.2, 0.8], [0.7, 0.2, 0.6, 0.1]],
+        dtype=torch.float32,
+    )
+
+    _, physical_ids = routed_experts._select_experts(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        enable_force_load_balance=False,
+    )
+
+    assert router.capture_fn is None
+    expected_logical_ids = torch.tensor([[1, 3], [0, 2]], dtype=torch.int64)
+    torch.testing.assert_close(physical_ids, log2phy[expected_logical_ids])
 
 
 def test_hash_router_uses_explicit_input_ids(monkeypatch):
