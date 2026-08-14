@@ -137,7 +137,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # Multi-module MTP with prefix caching requires the scheduler block to
         # hold the whole prefill lookahead, mirroring the upstream coordinator
-        # contract from vllm-project/vllm#50062.
+        # contract from vllm-project/vllm#50062. The scheduler always supplies a
+        # real block size, mirroring upstream's required `scheduler_block_size`.
+        assert scheduler_block_size is not None
         if enable_caching and self.eagle_group_ids and scheduler_block_size < num_prefill_lookahead:
             raise ValueError(
                 "Multi-module MTP with prefix caching requires scheduler_block_size"
