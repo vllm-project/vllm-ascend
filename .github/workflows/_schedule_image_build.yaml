@@ -146,10 +146,10 @@ defaults:
     shell: bash -el {0}
 
 env:
-  # QUAY_REPO: ${{ inputs.quay_repo }}
-  # QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
+  QUAY_REPO: ${{ inputs.quay_repo }}
+  QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
   # Use this repo's own GHCR namespace so forks (e.g. du-ping1-merge) can write build cache.
-  # CACHE_REPO: ghcr.io/${{ github.repository }}
+  CACHE_REPO: ghcr.io/${{ github.repository }}
 
 jobs:
   build-push-digest:
