@@ -268,13 +268,9 @@ jobs:
           runner="${{ inputs.soc_version }}"
           echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
-          if [ "${{ inputs.soc_version }}" = "a5" ]; then
-              npu_per_node=8
-              npu_resource_name=huawei.com/npu
-              shared_volume_path=/mnt/share
-          elif [ "${{ inputs.soc_version }}" = "a3" ]; then
-              npu_per_node=16
-              pvc_name=gy005-az5-vllm-ascend
+          if [ "${{ inputs.soc_version }}" = "a3" ]; then
+            npu_per_node=16
+            pvc_name=gy005-az5-vllm-ascend
           else
             npu_per_node=8
             pvc_name=vllm-project-hk001
@@ -295,15 +291,13 @@ jobs:
             -D is_pr_test="$is_pr_test" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
-            -D pvc_name="${pvc_name:-}" \
+            -D pvc_name="$pvc_name" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
             -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
             -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
             -D openlibing_secret="$OPENLIBING_SECRET" \
             -D soc_version="${{ inputs.soc_version }}" \
-            -D npu_resource_name="${npu_resource_name:-}" \
-            -D shared_volume_path="${shared_volume_path:-}" \
             -D max_good_age_days="${{ inputs.test_frequency == 'weekly' && 8 || 3 }}" \
             -D bisect_good_commit="$BISECT_GOOD_COMMIT" \
             -D bisect_bad_commit="$BISECT_BAD_COMMIT" \
