@@ -82,7 +82,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_cls:
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
@@ -102,10 +102,14 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 cache_config=self.mock_cache_config,
                 quant_config=self.mock_quant_config,
                 prefix=self.prefix,
+                non_causal_multi_token_decode=True,
+                sliding_window=511,
             )
 
             self.assertEqual(attn.tp_size, 2)
             self.assertIsNotNone(attn.mla_attn)
+            self.assertTrue(mock_mla_cls.call_args.kwargs["non_causal_multi_token_decode"])
+            self.assertEqual(mock_mla_cls.call_args.kwargs["sliding_window"], 511)
 
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
@@ -160,3 +164,89 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         output = attn.forward(positions, hidden_states)
 
         self.assertEqual(output.shape, (3, self.hidden_size))
+
+    def _run_vl_first_layer_flashcomm_forward(
+        self,
+        input_ids,
+        num_tokens,
+        is_draft_model=False,
+        is_dots3_note_model=True,
+        is_vl_first_layer=True,
+    ):
+        attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+        nn.Module.__init__(attn)
+        attn.hidden_size = self.hidden_size
+        attn.tp_size = 16
+        attn.is_dots3_note_model = is_dots3_note_model
+        attn.is_vl_first_layer = is_vl_first_layer
+        attn.prefix = self.prefix
+
+        forward_context = MagicMock()
+        forward_context.flash_comm_v1_enabled = True
+        forward_context.is_draft_model = is_draft_model
+        forward_context.input_ids = input_ids
+        hidden_states = torch.randn(num_tokens, self.hidden_size)
+
+        with (
+            patch("vllm_ascend.ops.mla.get_forward_context", return_value=forward_context),
+            patch(
+                "vllm_ascend.ascend_forward_context.get_forward_context",
+                return_value=forward_context,
+            ),
+            patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward") as mock_mla_forward,
+        ):
+            output = attn.forward(torch.arange(num_tokens), hidden_states)
+
+        return output, mock_mla_forward.call_args.args[1]
+
+    def test_vl_first_layer_flashcomm_with_input_ids_keeps_sharded_tokens(self):
+        output, need_gather_q_kv = self._run_vl_first_layer_flashcomm_forward(
+            input_ids=torch.tensor([1, 2]),
+            num_tokens=2,
+        )
+
+        self.assertEqual(output.shape, (2, self.hidden_size))
+        self.assertTrue(need_gather_q_kv)
+
+    def test_vl_first_layer_flashcomm_with_inputs_embeds_scatters_tokens(self):
+        output, need_gather_q_kv = self._run_vl_first_layer_flashcomm_forward(
+            input_ids=None,
+            num_tokens=32,
+        )
+
+        self.assertEqual(output.shape, (2, self.hidden_size))
+        self.assertFalse(need_gather_q_kv)
+
+    def test_vl_flashcomm_draft_layer_scatters_full_embeddings(self):
+        output, need_gather_q_kv = self._run_vl_first_layer_flashcomm_forward(
+            input_ids=None,
+            num_tokens=32,
+            is_draft_model=True,
+            is_vl_first_layer=False,
+        )
+
+        self.assertEqual(output.shape, (2, self.hidden_size))
+        self.assertFalse(need_gather_q_kv)
+
+    def test_vl_flashcomm_draft_layer_ceil_divides_small_batch(self):
+        output, need_gather_q_kv = self._run_vl_first_layer_flashcomm_forward(
+            input_ids=None,
+            num_tokens=5,
+            is_draft_model=True,
+            is_vl_first_layer=False,
+        )
+
+        self.assertEqual(output.shape, (1, self.hidden_size))
+        self.assertFalse(need_gather_q_kv)
+
+    def test_non_dots3_note_vl_flashcomm_draft_layer_keeps_sharded_tokens(self):
+        output, need_gather_q_kv = self._run_vl_first_layer_flashcomm_forward(
+            input_ids=None,
+            num_tokens=2,
+            is_draft_model=True,
+            is_dots3_note_model=False,
+            is_vl_first_layer=False,
+        )
+
+        self.assertEqual(output.shape, (2, self.hidden_size))
+        self.assertTrue(need_gather_q_kv)

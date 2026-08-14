@@ -28,7 +28,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -219,6 +219,8 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    Dots3NoteMLAAttentionSpec,
+    Dots3NoteSlidingWindowMLASpec,
 )
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -369,6 +371,11 @@ class NPUModelRunner(GPUModelRunner):
         self.need_accepted_tokens: bool = False
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
+        hf_text_config = getattr(self.model_config, "hf_text_config", None)
+        self.is_dots3_note_model = "dots3_note" in {
+            getattr(hf_text_config, "model_type", None),
+            getattr(hf_text_config, "original_model_type", None),
+        }
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = enable_sfa(vllm_config)
@@ -458,6 +465,12 @@ class NPUModelRunner(GPUModelRunner):
         self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
             self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
         )
+        if self.is_dots3_note_model and not self._needs_seq_lens_cpu_sync:
+            from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+            self._needs_seq_lens_cpu_sync = issubclass(
+                self.attn_backend, AscendSFABackend
+            )
 
         # kv role
         self.is_kv_producer = False
@@ -3793,7 +3806,10 @@ class NPUModelRunner(GPUModelRunner):
         return layer_kv_cache_spec
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
-        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+        if isinstance(
+            kv_cache_spec,
+            (AscendMLAAttentionSpec, Dots3NoteSlidingWindowMLASpec),
+        ):
             attn_layers = get_layers_from_vllm_config(
                 self.vllm_config,
                 AttentionLayerBase,
@@ -3812,6 +3828,13 @@ class NPUModelRunner(GPUModelRunner):
 
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
+
+    def _is_sparse_mla_cache_spec(self, kv_cache_spec: KVCacheSpec) -> bool:
+        if not self.use_sparse:
+            return False
+        if not self.is_dots3_note_model:
+            return True
+        return isinstance(kv_cache_spec, Dots3NoteMLAAttentionSpec)
 
     @staticmethod
     def _align_up(value: int, alignment: int) -> int:
@@ -4034,7 +4057,10 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
-                    current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
+                    current_sparse = self._is_sparse_mla_cache_spec(
+                        current_kv_cache_spec
+                    )
+                    current_sparse_sfa_c8 = current_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
 
@@ -4048,7 +4074,7 @@ class NPUModelRunner(GPUModelRunner):
                             k_dim,
                             v_dim,
                         ]
-                        if not self.use_sparse and enable_fa_quant(self.vllm_config):
+                        if not current_sparse and enable_fa_quant(self.vllm_config):
                             k_tensor_split_factor, v_tensor_split_factor = (
                                 self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
                             )
@@ -4056,8 +4082,8 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
-                    if self.sparse_kv_offload_enabled:
-                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                    if getattr(current_kv_cache_spec, "store_on_host", False):
+                        assert current_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         assert v_tensor_size is not None
                         raw_tensors = allocate_kv_cache_tensors_for_sparse_kv_offload(
@@ -4162,6 +4188,9 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
+                current_sparse = self._is_sparse_mla_cache_spec(
+                    current_kv_cache_spec
+                )
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
@@ -4262,11 +4291,11 @@ class NPUModelRunner(GPUModelRunner):
                     # _allocate_kv_cache_tensors; route them to the dedicated
                     # elif branch below before the sparse branch tries to
                     # unpack them as a K/V tuple.
-                    current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
+                    current_sparse_sfa_c8 = current_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
-                    if self.sparse_kv_offload_enabled:
-                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                    if getattr(current_kv_cache_spec, "store_on_host", False):
+                        assert current_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         reshaped_tensors = reshape_kv_cache_tensors_for_sparse_kv_offload(
                             kv_cache_raw_tensors[layer_name],
@@ -4278,7 +4307,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         kv_caches[layer_name] = reshaped_tensors
                         continue
-                    if self.use_sparse and "cache_only_layers" not in layer_name:
+                    if current_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)
                         if current_sparse_sfa_c8:
@@ -4365,7 +4394,13 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
+                            if not isinstance(
+                                current_kv_cache_spec,
+                                (
+                                    AscendMLAAttentionSpec,
+                                    Dots3NoteSlidingWindowMLASpec,
+                                ),
+                            ):
                                 attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                     current_kv_cache_spec.dtype
                                 )
@@ -4392,7 +4427,13 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                    if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
+                    if not isinstance(
+                        current_kv_cache_spec,
+                        (
+                            AscendMLAAttentionSpec,
+                            Dots3NoteSlidingWindowMLASpec,
+                        ),
+                    ):
                         k_shape = kv_cache_shape[1:]
                         if hasattr(current_kv_cache_spec, "head_size_v"):
                             v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
@@ -4721,7 +4762,12 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
-                if self.use_sparse:
+                is_dots3_note_layer = getattr(
+                    attn_module, "_vllm_ascend_dots3_note", False
+                )
+                if self.use_sparse and (
+                    not self.is_dots3_note_model or attn_module.use_sparse
+                ):
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
                         getattr(impl, "enable_sparse_sfa_c8", False)
@@ -4734,32 +4780,59 @@ class NPUModelRunner(GPUModelRunner):
                         dtype = self.c8_k_cache_dtype
                     else:
                         head_size = (
-                            self.model_config.hf_text_config.kv_lora_rank
-                            + self.model_config.hf_text_config.qk_rope_head_dim
+                            attn_module.kv_lora_rank
+                            + attn_module.qk_rope_head_dim
                         )
                         dtype = self.kv_cache_dtype
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
-                        block_size=self.block_size,
-                        num_kv_heads=1,
-                        head_size=head_size,
-                        dtype=dtype,
-                        cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
-                        cache_sparse_sfa_c8=cache_sparse_sfa_c8,
-                        store_on_host=self.sparse_kv_offload_enabled,
-                    )
+                    if is_dots3_note_layer:
+                        spec = attn_module.get_kv_cache_spec(self.vllm_config)
+                        assert isinstance(spec, Dots3NoteMLAAttentionSpec)
+                        kv_cache_spec[layer_name] = replace(
+                            cast(Any, spec),
+                            head_size=head_size,
+                            dtype=dtype,
+                            cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
+                            cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                            store_on_host=self.sparse_kv_offload_enabled,
+                        )
+                    else:
+                        kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                            block_size=self.block_size,
+                            num_kv_heads=1,
+                            head_size=head_size,
+                            dtype=dtype,
+                            cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
+                            cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                            store_on_host=self.sparse_kv_offload_enabled,
+                        )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
                     else:
                         head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
-                        block_size=spec.block_size,
-                        num_kv_heads=spec.num_kv_heads,
-                        head_size=head_size,
-                        dtype=dtype,
-                        cache_dtype_str=cache_dtype_str,
-                    )
+                    if is_dots3_note_layer:
+                        assert isinstance(
+                            spec,
+                            (
+                                Dots3NoteMLAAttentionSpec,
+                                Dots3NoteSlidingWindowMLASpec,
+                            ),
+                        )
+                        kv_cache_spec[layer_name] = replace(
+                            cast(Any, spec),
+                            head_size=head_size,
+                            dtype=dtype,
+                            cache_dtype_str=cache_dtype_str,
+                        )
+                    else:
+                        kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                            block_size=spec.block_size,
+                            num_kv_heads=spec.num_kv_heads,
+                            head_size=head_size,
+                            dtype=dtype,
+                            cache_dtype_str=cache_dtype_str,
+                        )
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, DeepseekV32IndexerCache):

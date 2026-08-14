@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -337,6 +338,39 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
+
+    def test_dots3_note_metadata_uses_layer_local_mla_dimensions(self):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 576
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.model_config.hf_text_config.model_type = "dots3_note"
+        mock_vllm_config.model_config.hf_text_config.original_model_type = None
+        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_vllm_config.speculative_config = None
+        layer = SimpleNamespace(
+            q_lora_rank=1024,
+            kv_lora_rank=1024,
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        mock_vllm_config.compilation_config.static_forward_context = {"layer": layer}
+
+        builder = AscendMLAMetadataBuilder(
+            None,
+            ["layer"],
+            mock_vllm_config,
+            "cpu",
+        )
+
+        self.assertEqual(builder.mla_dims.kv_lora_rank, 1024)
+        self.assertEqual(builder.mla_dims.qk_nope_head_dim, 192)
+        self.assertEqual(builder.mla_dims.v_head_dim, 128)
+        self.assertEqual(builder.chunked_prefill_workspace.shape[-1], 1088)
 
     def test_ascend_mla_metadata_builder_spec_decode(self):
         mock_vllm_config = MagicMock()
@@ -981,7 +1015,7 @@ class TestAscendMLAImpl(TestBase):
             "rotary_emb": MagicMock(),
         }
 
-        self.impl = AscendMLAImpl(
+        self.impl_init_kwargs = dict(
             num_heads=num_heads,
             head_size=head_size,
             scale=scale,
@@ -995,6 +1029,7 @@ class TestAscendMLAImpl(TestBase):
             kv_sharing_target_layer_name=None,
             **kwargs,
         )
+        self.impl = AscendMLAImpl(**self.impl_init_kwargs)
         self.impl.fa_quant_layer = False
 
     def test_init(self):
@@ -1017,6 +1052,23 @@ class TestAscendMLAImpl(TestBase):
         # 256 is power of 2, so padding should be 0
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
+
+    def test_dots3_note_all_layers_use_layer_rotary_emb(self):
+        global_layer_kwargs = dict(self.impl_init_kwargs)
+        global_layer_kwargs["dots3_note_model"] = True
+        global_layer_kwargs["sliding_window"] = None
+        with patch(
+            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
+            return_value=self.impl.vllm_config,
+        ):
+            global_layer = AscendMLAImpl(**global_layer_kwargs)
+
+            sliding_layer_kwargs = dict(global_layer_kwargs)
+            sliding_layer_kwargs["sliding_window"] = 511
+            sliding_layer = AscendMLAImpl(**sliding_layer_kwargs)
+
+        self.assertTrue(global_layer.use_layer_rotary_emb)
+        self.assertTrue(sliding_layer.use_layer_rotary_emb)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):

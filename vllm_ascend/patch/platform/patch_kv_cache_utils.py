@@ -61,7 +61,7 @@ def group_and_unify_kv_cache_specs(
 ) -> list[UniformTypeKVCacheSpecs] | None:
     """
     Group the KV cache specs and unify each group into one UniformTypeKVCacheSpecs.
-    Currently, this is only used for DeepseekV4.
+    This is used for MLA models with mixed full and sliding-window attention.
     """
     if not any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()):
         return None
@@ -97,20 +97,24 @@ def _get_kv_cache_groups_uniform_groups(
     Generate the KV cache groups from the grouped specs.
     """
     assert len(grouped_specs) > 0 and all(isinstance(spec, UniformTypeKVCacheSpecs) for spec in grouped_specs)
-    # For now, we restrict the first grouped_spec to be UniformTypeKVCacheSpecs
-    # containing only MLAAttentionSpec.
-    full_mla_spec = grouped_specs[0]
-    full_mla_c128_spec = grouped_specs[1]
-
-    assert all(isinstance(spec, MLAAttentionSpec) for spec in full_mla_spec.kv_cache_specs.values())
-    full_mla_group = KVCacheGroupSpec(
-        layer_names=list(full_mla_spec.kv_cache_specs.keys()),
-        kv_cache_spec=full_mla_spec,
-    )
-    full_mla_c128_group = KVCacheGroupSpec(
-        layer_names=list(full_mla_c128_spec.kv_cache_specs.keys()),
-        kv_cache_spec=full_mla_c128_spec,
-    )
+    full_mla_specs: list[UniformTypeKVCacheSpecs] = []
+    swa_mla_specs: list[UniformTypeKVCacheSpecs] = []
+    for grouped_spec in grouped_specs:
+        specs = grouped_spec.kv_cache_specs.values()
+        if all(isinstance(spec, SlidingWindowMLASpec) for spec in specs):
+            swa_mla_specs.append(grouped_spec)
+        else:
+            assert all(isinstance(spec, MLAAttentionSpec) for spec in specs)
+            full_mla_specs.append(grouped_spec)
+    assert full_mla_specs
+    full_mla_spec = full_mla_specs[0]
+    full_mla_groups = [
+        KVCacheGroupSpec(
+            layer_names=list(spec.kv_cache_specs.keys()),
+            kv_cache_spec=spec,
+        )
+        for spec in full_mla_specs
+    ]
 
     # We define a layer tuple as a group of layers with different page sizes, and
     # one UniformTypeKVCacheSpecs contains a list of layer tuples.
@@ -125,18 +129,22 @@ def _get_kv_cache_groups_uniform_groups(
     # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
     num_layer_tuples_per_group = [round_up(x, num_layer_tuples) for x in num_layer_tuples_per_group]
 
-    # TODO(cmq): this is not general enough
-    swa_mla_specs = grouped_specs[2:]
-
-    assert all(
-        isinstance(spec, SlidingWindowMLASpec) for group in swa_mla_specs for spec in group.kv_cache_specs.values()
-    )
-
     # Split each SWA UniformKV group into smaller groups to align their #(layer tuples)
     # Possibly padding layer tuples for this.
     # Additionally, we also pad KV blocks in each SWA layer, to align the page size
     # with the corresponding layer in the full-MLA group.
     all_page_sizes = full_mla_spec.get_page_sizes()
+    max_full_page_size = max(all_page_sizes)
+    all_page_sizes.extend(
+        sorted(
+            {
+                page_size
+                for spec in swa_mla_specs
+                for page_size in spec.get_page_sizes()
+                if page_size > max_full_page_size
+            }
+        )
+    )
     swa_mla_groups = []
     for sm_spec in swa_mla_specs:
         sm_page_sizes = sm_spec.get_page_sizes()
@@ -179,7 +187,7 @@ def _get_kv_cache_groups_uniform_groups(
                 )
             )
 
-    return [full_mla_group, full_mla_c128_group, *swa_mla_groups]
+    return [*full_mla_groups, *swa_mla_groups]
 
 
 def _get_kv_cache_config_deepseek_v4(
@@ -187,21 +195,23 @@ def _get_kv_cache_config_deepseek_v4(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
-    """DeepseekV4 KV cache tensor layout planning.
+    """Ascend mixed-MLA KV cache tensor layout planning.
 
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
+    Every group must use UniformTypeKVCacheSpecs. Smaller sliding-window pages
+    are padded by _get_kv_cache_groups_uniform_groups, while larger pages keep
+    their own physical bucket.
 
     For each group, bucket its layers by page_size_bytes and place each
     layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
     per (tuple_idx, bucket) whose shared_by is the union of per-group
     layers at that slot.
     """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
+    assert kv_cache_groups
+    page_size_set = set()
+    for group in kv_cache_groups:
+        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        page_size_set.update(group.kv_cache_spec.get_page_sizes())
+    page_sizes = sorted(page_size_set)
     layer_tuple_page_bytes = sum(page_sizes)
 
     # Pre-bucket each group's layers by page_size (registration order within

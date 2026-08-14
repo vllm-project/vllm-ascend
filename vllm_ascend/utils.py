@@ -745,6 +745,16 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
         REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
+    if vllm_config is not None and vllm_config.model_config is not None:
+        hf_config = vllm_config.model_config.hf_config
+        architectures = getattr(hf_config, "architectures", ()) or ()
+        if getattr(hf_config, "model_type", None) == "dots3_note" or "Dots3NoteForCausalLM" in architectures:
+            from vllm_ascend.ops.dots3_note_audio_attention import (
+                AscendDots3NoteAudioAttentionBackend,
+            )
+
+            REGISTERED_ASCEND_OPS["Dots3NoteAudioAttentionBackend"] = AscendDots3NoteAudioAttentionBackend
+
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
