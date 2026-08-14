@@ -37,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
     ConsumerReadState,
     MembPullReadThread,
+    MooncakeKVConnectorStats,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (  # noqa: E402
     SFAPDRD2HProducerScheduler,
@@ -168,6 +169,7 @@ def _make_read_thread() -> MembPullReadThread:
         dest_blocks_by_req={"req-0": ([3, 4], [8])},
         get_offload_layer_id=lambda _: 0,
     )
+    thread.xfer_stats = MooncakeKVConnectorStats()
     return thread
 
 
@@ -1337,3 +1339,104 @@ def test_discard_requests_clears_partial_contributor_state():
     thread.discard_requests({"req-0"})
     assert "req-0" not in thread._done_contributors
     assert "req-0" not in thread._expected_ratio
+
+
+def test_read_batch_records_transfer_stats():
+    thread = _make_read_thread()
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.return_value = 0
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+    thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
+
+    thread._do_read_batch(
+        layer["layer_name"],
+        [("req-0", [1, 2], [], 0, 0)],
+        p_session="p-session",
+        p_layer_meta={},
+    )
+
+    _, local_ptrs, _, lengths = thread.engine.batch_transfer_sync_read.call_args[0]
+    stats_data = thread.xfer_stats.data
+    assert len(stats_data["transfer_duration"]) == 1
+    assert stats_data["transfer_duration"][0] >= 0
+    assert stats_data["bytes_transferred"] == [sum(lengths)]
+    assert stats_data["num_descriptors"] == [len(local_ptrs)]
+    assert stats_data["num_failed_transfers"] == []
+
+
+def test_read_batch_failure_records_failed_transfer():
+    thread = _make_read_thread()
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.return_value = -1
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+    thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        thread._do_read_batch(
+            layer["layer_name"],
+            [("req-0", [1, 2], [], 0, 0)],
+            p_session="p-session",
+            p_layer_meta={},
+        )
+
+    assert thread.xfer_stats.data["num_failed_transfers"] == [1]
+    assert thread.xfer_stats.data["transfer_duration"] == []
+
+
+def test_read_thread_uses_the_stats_object_it_is_given():
+    shared = MooncakeKVConnectorStats()
+    thread = MembPullReadThread(
+        tp_rank=0,
+        side_channel_port=5555,
+        engine=MagicMock(),
+        state=_make_read_thread()._state,
+        xfer_stats=shared,
+    )
+    assert thread.xfer_stats is shared
+
+
+def test_consumer_worker_drains_stats():
+    worker = object.__new__(SFAPDRD2HConsumerWorker)
+    worker.xfer_stats = MooncakeKVConnectorStats()
+
+    assert worker.get_kv_connector_stats() is None
+
+    worker.xfer_stats.record_transfer(duration_s=0.25, total_bytes=2**20, num_descs=6)
+    worker.xfer_stats.record_failed_recv()
+    snapshot = worker.get_kv_connector_stats()
+
+    assert snapshot is not None
+    assert snapshot.data["transfer_duration"] == [0.25]
+    assert snapshot.data["num_failed_recvs"] == [1]
+    reduced = snapshot.reduce()
+    assert reduced["Num successful transfers"] == 1
+    assert reduced["Num failed recvs"] == 1
+    # A second call in the same interval has nothing new to report.
+    assert worker.get_kv_connector_stats() is None
+
+
+def test_connector_stats_only_reported_by_the_consumer_side():
+    connector = object.__new__(SfaRemoteD2HConnector)
+    connector.is_consumer = True
+    connector.connector_worker = None
+    assert connector.get_kv_connector_stats() is None
+
+    sentinel = MooncakeKVConnectorStats()
+    worker = MagicMock()
+    worker.get_kv_connector_stats.return_value = sentinel
+    connector.connector_worker = worker
+    assert connector.get_kv_connector_stats() is sentinel
+
+    # P holds no transfer stats: its send thread only notifies readiness.
+    connector.is_consumer = False
+    assert connector.get_kv_connector_stats() is None
+
+
+def test_connector_builds_stats_from_wire_data():
+    built = SfaRemoteD2HConnector.build_kv_connector_stats()
+    assert isinstance(built, MooncakeKVConnectorStats)
+    assert built.is_empty()
+
+    rebuilt = SfaRemoteD2HConnector.build_kv_connector_stats({"transfer_duration": [0.1]})
+    assert rebuilt is not None
+    assert rebuilt.data["transfer_duration"] == [0.1]

@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,7 @@ from typing import Any
 import msgspec
 import numpy as np
 import zmq
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import MooncakeKVConnectorStats
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
@@ -88,12 +90,14 @@ class MembPullReadThread(threading.Thread):
         side_channel_port: int,
         engine: Any,
         state: ConsumerReadState,
+        xfer_stats: MooncakeKVConnectorStats | None = None,
     ):
         super().__init__(daemon=True, name=f"MembPullReadThread-TP{tp_rank}")
         self.tp_rank = tp_rank
         self.side_channel_port = side_channel_port
         self.engine = engine
         self._state = state
+        self.xfer_stats = xfer_stats if xfer_stats is not None else MooncakeKVConnectorStats()
         self.ready_event = threading.Event()
         self._p_session: str | None = None
         self._p_layer_meta: dict[str, Any] = {}
@@ -280,6 +284,9 @@ class MembPullReadThread(threading.Thread):
                             failed_ids.update(done_ext_ids)
                             with self._lock:
                                 self._failed_requests.update(failed_ids)
+                            # Counted per failed batch; an engine error also
+                            # counts once as a failed transfer before raising.
+                            self.xfer_stats.record_failed_recv()
                         if succeeded and done_ext_ids:
                             self._record_chunk_done(done_ext_ids, group_member_idx, ratio)
 
@@ -747,8 +754,16 @@ class MembPullReadThread(threading.Thread):
                 len(all_local_ptrs),
                 atomic_total,
             )
+        read_start_time = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(p_session, all_local_ptrs, all_peer_ptrs, all_lengths)
+        read_duration = time.perf_counter() - read_start_time
         if ret != 0:
+            self.xfer_stats.record_failed_transfer()
             raise RuntimeError(f"memfabric batch read failed for layer {layer_name}, ret={ret}")
+        self.xfer_stats.record_transfer(
+            duration_s=read_duration,
+            total_bytes=sum(all_lengths),
+            num_descs=len(all_local_ptrs),
+        )
         for read_info in read_infos:
             self._log_read_result(read_info)

@@ -25,6 +25,8 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import MooncakeKVConnectorStats
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -144,6 +146,10 @@ class SFAPDRD2HConsumerWorker:
         # rank has finished the same request. This is scheduler readiness state,
         # not a per-layer barrier.
         self._terminal_ext_ids: set[str] = set()
+        # Transfer stats shared with the read thread, drained periodically via
+        # get_kv_connector_stats. The container is upstream's Mooncake one: the
+        # transport here is memfabric, but the recorded series are identical.
+        self.xfer_stats = MooncakeKVConnectorStats()
 
     # ------------------------------------------------------------------
     # Common
@@ -292,6 +298,13 @@ class SFAPDRD2HConsumerWorker:
         self._invalid_block_ids = set()
         return result
 
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return transfer stats collected since the last call, or None
+        if nothing has been recorded in this interval."""
+        if self.xfer_stats.is_empty():
+            return None
+        return self.xfer_stats.clone_and_reset()
+
     def get_num_cpu_blocks(self, req_ids: list[str]) -> dict[str, int] | None:
         """Per-req actual main-MLA CPU-block count for the solution-1 threshold."""
         if self.offload_manager is None:
@@ -403,6 +416,7 @@ class SFAPDRD2HConsumerWorker:
             side_channel_port=self.side_channel_port,
             engine=self.engine,
             state=read_state,
+            xfer_stats=self.xfer_stats,
         )
         self._mf_read_thread.start()
         if not self._mf_read_thread.ready_event.wait(timeout=CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS):
