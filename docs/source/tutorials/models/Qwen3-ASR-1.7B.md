@@ -28,6 +28,8 @@ Download the weights to a directory that is accessible from the deployment envir
 
 Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the model-weight mount with the path used in your environment.
 
+For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
+
 :::::{tab-set}
 ::::{tab-item} Atlas A2 inference products
 :sync: A2

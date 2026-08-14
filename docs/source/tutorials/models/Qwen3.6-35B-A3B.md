@@ -29,6 +29,8 @@ It is recommended to download the model weight to `/root/.cache/`.
 
 Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p` for Atlas 300I DUO.
 
+For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
+
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
 :::::{tab-set}
