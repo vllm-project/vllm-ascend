@@ -191,6 +191,14 @@ spec:
               - mountPath: /root/.cache
                 name: shared-volume
               - mountPath: /usr/local/Ascend/driver/tools
+                name: driver-tools
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Gi
 {% if shared_volume_path %}
         - name: shared-volume
           hostPath:
@@ -201,17 +209,6 @@ spec:
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
 {% endif %}
-                name: driver-tools
-              - mountPath: /dev/shm
-                name: dshm
-        volumes:
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 512Gi
-        - name: shared-volume
-          persistentVolumeClaim:
-            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
