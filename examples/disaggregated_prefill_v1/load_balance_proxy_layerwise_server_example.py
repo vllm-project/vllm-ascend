@@ -99,7 +99,6 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from proxy_utils import append_generated_text_to_chat_content
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -515,8 +514,10 @@ async def _handle_completions(api: str, request: Request):
                             retry = True
                             retry_count += 1
                             if chat_flag:
-                                messages[0]["content"] = append_generated_text_to_chat_content(
-                                    origin_prompt, generated_token
+                                messages[0]["content"] = (
+                                    origin_prompt + [{"type": "text", "text": generated_token}]
+                                    if isinstance(origin_prompt, list)
+                                    else origin_prompt + generated_token
                                 )
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
