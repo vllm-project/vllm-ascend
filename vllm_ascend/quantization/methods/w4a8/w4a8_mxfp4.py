@@ -26,6 +26,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.utils import FP8_METHOD
 
 from ..base import (
     AscendLinearScheme,
@@ -196,16 +197,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
 
 
-@register_scheme("FP8", "w4a8_moe")
+@register_scheme(FP8_METHOD, "ds_w4a8_moe")
 class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod):
     """FusedMoe method for DS original w4a8 mxfp quantization."""
 
     model_dtype = None
     quant_type: QuantType = QuantType.W4A8MXFP
-
-    def __init__(self, quant_config, tid2eid=None):
-        super().__init__()
-        self.tid2eid = tid2eid
 
     def get_dynamic_quant_param(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
