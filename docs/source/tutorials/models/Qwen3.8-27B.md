@@ -4,6 +4,7 @@
 
 #TODO
 
+
 This document describes the main validation steps for the model, including supported features, prerequisites, installation, multi-node deployment, functional verification, accuracy and performance evaluation, performance tuning, and FAQs. All configurations in this document are for Atlas 800 A3.
 
 This document is validated and written based on **vLLM-Ascend 0.23.0**. The current model (Qwen3.8-27B) is first supported in this version.
