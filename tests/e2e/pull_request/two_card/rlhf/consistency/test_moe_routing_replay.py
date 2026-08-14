@@ -17,6 +17,9 @@ from vllm.sampling_params import RequestOutputKind
 
 from tests.e2e.conftest import VllmRunner
 
+# MRV2 support for Qwen3.5-35B-A3B is not available yet (linear attention
+# layers are not wired through the V2 model runner), so the MRV2 case only
+# covers Qwen3-30B-A3B.
 MODELS = [
     "Qwen/Qwen3.5-35B-A3B",
     "Qwen/Qwen3-30B-A3B",
@@ -28,6 +31,9 @@ MODELS = [
 @patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
 def test_moe_routing_replay(model, use_v2):
     """Routed experts output is valid and non-empty for MoE models."""
+    if use_v2 and model == "Qwen/Qwen3.5-35B-A3B":
+        pytest.skip("MRV2 support for Qwen3.5-35B-A3B is not available yet")
+
     env_vars = {"OMP_NUM_THREADS": "1"}
     if use_v2:
         env_vars["VLLM_USE_V2_MODEL_RUNNER"] = "1"
