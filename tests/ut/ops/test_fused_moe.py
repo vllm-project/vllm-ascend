@@ -942,6 +942,9 @@ def test_a2_w8a8_multistream_waits_for_routed_gmm1_before_shared_gate(monkeypatc
     shared_experts.multistream_overlap = True
     shared_experts.quant_type = QuantType.W8A8
     shared_experts.lora_context = None
+    shared_experts.swiglu_limit = 0.0
+    shared_experts.swiglu_alpha = 1.0
+    shared_experts.swiglu_beta = 0.0
 
     hidden_states = torch.randn(2, 4)
     quantized_x = torch.zeros(2, 4, dtype=torch.int8)
