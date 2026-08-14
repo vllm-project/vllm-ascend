@@ -55,7 +55,7 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("Ascend MRV2 PCP does not support speculative decoding yet.")
 
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        is_sparse_mla = hasattr(getattr(model_config, "hf_text_config", None), "index_topk")
         if is_sparse_mla and cudagraph_mode != CUDAGraphMode.NONE:
             raise NotImplementedError(
                 "Ascend MRV2 sparse MLA PCP does not support ACL graphs yet. Set -cc.cudagraph_mode=NONE."

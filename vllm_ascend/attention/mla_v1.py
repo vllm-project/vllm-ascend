@@ -1918,7 +1918,7 @@ class AscendMLAPCPImpl(AscendMLAImpl):
         padded_sin = self._pad_tokens(sin, local_prefill_capacity)
 
         pcp_group = get_pcp_group()
-        rank_slot_mappings = attn_metadata.slot_mapping.view(
+        rank_slot_mappings = attn_metadata.slot_mapping.reshape(
             pcp_group.world_size,
             local_num_input_tokens,
         )

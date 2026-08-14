@@ -154,11 +154,12 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 def test_mla_pcp_prefill_pads_and_gathers_cache_inputs() -> None:
     impl = AscendMLAPCPImpl.__new__(AscendMLAPCPImpl)
     captured: dict[str, object] = {}
+    gather_inputs: list[torch.Tensor] = []
 
     def fake_all_gather(tensor, dim):
         assert dim == 0
         assert tensor.is_contiguous()
-        captured.setdefault("gather_inputs", []).append(tensor)
+        gather_inputs.append(tensor)
         return torch.cat((tensor + 100, tensor), dim=0)
 
     def fake_exec_kv_prefill(self, kv, cos, sin, kv_cache, slots):
@@ -200,13 +201,13 @@ def test_mla_pcp_prefill_pads_and_gathers_cache_inputs() -> None:
         )
 
     expected_slots = torch.tensor([10, 11, -1, 20, 21, -1])
-    gather_inputs = captured["gather_inputs"]
-    assert isinstance(gather_inputs, list)
     assert len(gather_inputs) == 3
     torch.testing.assert_close(gather_inputs[0][:2], kv)
     torch.testing.assert_close(gather_inputs[0][2], torch.zeros(3))
     torch.testing.assert_close(gather_inputs[1][-1], torch.zeros(1))
-    assert captured["gathered_kv"].shape[0] == 6
+    gathered_kv = captured["gathered_kv"]
+    assert isinstance(gathered_kv, torch.Tensor)
+    assert gathered_kv.shape[0] == 6
     torch.testing.assert_close(captured["cache_slots"], expected_slots)
     torch.testing.assert_close(k_pe, cos)
     torch.testing.assert_close(k_nope, kv[:, :2])
