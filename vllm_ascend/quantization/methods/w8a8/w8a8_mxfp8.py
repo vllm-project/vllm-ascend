@@ -29,6 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.utils import FP8_METHOD
 
 from ..base import (
     AscendLinearScheme,
@@ -408,7 +409,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer._mxfp8_transformed = False
 
 
-@register_scheme("FP8", "ds_linear")
+@register_scheme(FP8_METHOD, "ds_linear")
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
 
@@ -426,9 +427,9 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     )
     supports_tp_weight_switch = True
 
-    def __init__(self, quant_config):
+    def __init__(self, weight_block_size):
         super().__init__()
-        self.block_size = quant_config.get("weight_block_size", [128, 128])[0]
+        self.block_size = weight_block_size[0]
         vllm_config = get_current_vllm_config()
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         hf_config = vllm_config.model_config.hf_config

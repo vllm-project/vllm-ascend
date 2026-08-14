@@ -8,7 +8,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.fp8_config import AscendDeepseekV4FP8Config, AscendFp8Config
+from vllm_ascend.quantization.configs.fp8_config import AscendDeepseekV4FP8Config, AscendFp8Config
 
 
 class TestAscendDeepseekV4FP8Config(TestBase):
