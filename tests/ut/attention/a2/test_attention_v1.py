@@ -27,6 +27,19 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    def tearDown(self):
+        needs_layer_aware_fia_graph_replay.cache_clear()
+
+    def test_minimax_m3_uses_layer_aware_fia_graph_replay(self):
+        for model_type in ("minimax_m3", "minimax_m3_vl"):
+            config = MagicMock()
+            config.model_config.hf_config = SimpleNamespace(model_type=model_type)
+            config.model_config.hf_text_config = None
+            needs_layer_aware_fia_graph_replay.cache_clear()
+
+            with patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=config):
+                self.assertTrue(needs_layer_aware_fia_graph_replay())
+
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
         candidate_workspace = torch.empty(8)

@@ -80,6 +80,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -287,6 +288,112 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+def _get_dspark_aux_hidden_state_layers(hf_config) -> tuple[int, ...] | None:
+    layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
+    if layer_ids is None:
+        layer_ids = getattr(hf_config, "target_layer_ids", None)
+    if layer_ids is None:
+        dflash_config = getattr(hf_config, "dflash_config", None) or {}
+        layer_ids = dflash_config.get("target_layer_ids")
+    if not layer_ids:
+        return None
+    return tuple(layer_id + 1 for layer_id in layer_ids)
+
+
+def _normalize_sfa_indexer_cache_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    """Rebuild an indexer spec that was created before KV-cache patching.
+
+    MiniMax-M3 registers its indexer layers while the model module is loaded.
+    If that happens before ``patch_kv_cache_interface`` replaces the upstream
+    cache classes, the returned spec has the right fields but fails the
+    runner's ``isinstance`` checks and is allocated as a regular K/V cache.
+    """
+    if spec.__class__.__name__ != AscendSFAIndexerCacheSpec.__name__:
+        return spec
+    return AscendSFAIndexerCacheSpec(
+        block_size=spec.block_size,
+        num_kv_heads=spec.num_kv_heads,
+        head_size=spec.head_size,
+        dtype=spec.dtype,
+        cache_dtype_str=spec.cache_dtype_str,
+        scale_dim=spec.scale_dim,
+        scale_dtype=spec.scale_dtype,
+        cache_sparse_li_c8=spec.cache_sparse_li_c8,
+        sfa_dcp_replicated_indexer_size=spec.sfa_dcp_replicated_indexer_size,
+    )
+
+
+def _is_sfa_indexer_cache_spec(spec: KVCacheSpec) -> bool:
+    return (
+        isinstance(spec, AscendSFAIndexerCacheSpec)
+        or spec.__class__.__name__ == AscendSFAIndexerCacheSpec.__name__
+    )
+
+
+def _get_unpacked_kv_cache_tensor_size(
+    kv_cache_tensor: KVCacheTensor,
+    layer_kv_cache_spec: dict[str, KVCacheSpec],
+) -> int:
+    """Return the bytes needed for one contiguous packed-layout slice.
+
+    vLLM's packed KV-cache planner emits one descriptor per page-size slot.
+    ``size`` describes the shared packed backing, while ``block_stride`` is
+    the byte size of a complete physical block across every slot. Ascend
+    kernels currently require each layer slice to be contiguous, so allocate
+    the descriptor's slice independently instead of treating the whole packed
+    backing as that layer's cache.
+
+    The sum of all returned slice sizes equals the packed backing size, so
+    this changes layout rather than total KV-cache capacity.
+    """
+    block_stride = getattr(kv_cache_tensor, "block_stride", 0)
+    if block_stride <= 0:
+        return kv_cache_tensor.size
+
+    if kv_cache_tensor.size % block_stride != 0:
+        raise ValueError(
+            "Packed KV cache size must be divisible by block stride: "
+            f"size={kv_cache_tensor.size}, block_stride={block_stride}"
+        )
+    page_sizes = {
+        layer_kv_cache_spec[layer_name].page_size_bytes
+        for layer_name in kv_cache_tensor.shared_by
+    }
+    if len(page_sizes) != 1:
+        raise ValueError(
+            "Layers sharing a packed KV cache tensor must have the same page "
+            f"size, got {page_sizes} for {kv_cache_tensor.shared_by}"
+        )
+    page_size = page_sizes.pop()
+    offset = getattr(kv_cache_tensor, "offset", 0)
+    if offset + page_size > block_stride:
+        raise ValueError(
+            "Packed KV cache slice exceeds block stride: "
+            f"offset={offset}, page_size={page_size}, "
+            f"block_stride={block_stride}"
+        )
+    num_physical_blocks = kv_cache_tensor.size // block_stride
+    return num_physical_blocks * page_size
+
+
+def _get_sfa_indexer_kernel_num_blocks(
+    num_physical_blocks: int,
+    physical_block_size: int,
+    kernel_block_size: int,
+    replicated_size: int,
+) -> int:
+    if kernel_block_size <= 0 or physical_block_size % kernel_block_size != 0:
+        raise ValueError(
+            "SFA indexer kernel block size must divide the physical block "
+            f"size: physical={physical_block_size}, kernel={kernel_block_size}"
+        )
+    return (
+        num_physical_blocks
+        * (physical_block_size // kernel_block_size)
+        * replicated_size
+    )
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -650,14 +757,7 @@ class NPUModelRunner(GPUModelRunner):
             return layer_ids
         if self.speculative_config.use_dspark():
             hf_config = self.speculative_config.draft_model_config.hf_config
-            # deepseek v4 dspark
-            dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
-            if dspark_layer_ids:
-                return tuple(i + 1 for i in dspark_layer_ids)
-            # gqa backend dspark
-            dspark_layer_ids = getattr(hf_config, "target_layer_ids", None)
-            if dspark_layer_ids:
-                return tuple(i + 1 for i in dspark_layer_ids)
+            return _get_dspark_aux_hidden_state_layers(hf_config)
         return None
 
     def _use_aclgraph(self) -> bool:
@@ -3921,6 +4021,9 @@ class NPUModelRunner(GPUModelRunner):
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            tensor_size = _get_unpacked_kv_cache_tensor_size(
+                kv_cache_tensor, layer_kv_cache_spec
+            )
             use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
@@ -3950,11 +4053,11 @@ class NPUModelRunner(GPUModelRunner):
                         for ln in kv_cache_tensor.shared_by
                     )
                     if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                        tensor = torch.zeros(tensor_size, dtype=torch.int8, device=self.device)
                     else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
+                        cache_size_aligned = tensor_size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+                        tensor = self._align_memory(tensor, alignment)[:tensor_size]
 
                     if has_mamba and has_hidden:
                         # Allocate separate tensor for HiddenStateCacheSpec layers
@@ -3976,23 +4079,23 @@ class NPUModelRunner(GPUModelRunner):
 
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size,
+                        tensor = torch.zeros(tensor_size,
                                                 dtype=torch.int8,
                                                 device=self.device)
                     else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
+                        cache_size_aligned = tensor_size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+                        tensor = self._align_memory(tensor, alignment)[:tensor_size]
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif (
-                    isinstance(layer_kv_cache_spec[layer_name], AscendSFAIndexerCacheSpec)
-                    and layer_name not in kv_cache_raw_tensors
+                    _is_sfa_indexer_cache_spec(layer_kv_cache_spec[layer_name])
+                    and (idx == 0 or layer_name not in kv_cache_raw_tensors)
                 ):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     raw_cache: tuple[torch.Tensor, ...]
-                    num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
+                    num_blocks = tensor_size // current_kv_cache_spec.page_size_bytes
                     k_tensor_size = (
                         num_blocks
                         * current_kv_cache_spec.sfa_dcp_replicated_indexer_size
@@ -4039,7 +4142,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
 
                     if current_sparse_sfa_c8:
-                        k_tensor_size = kv_cache_tensor.size
+                        k_tensor_size = tensor_size
                         v_tensor_size = None
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
@@ -4054,8 +4157,8 @@ class NPUModelRunner(GPUModelRunner):
                             )
                         else:
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
-                        k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
-                        v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                        k_tensor_size = int(tensor_size // k_tensor_split_factor)
+                        v_tensor_size = int(tensor_size // v_tensor_split_factor)
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
@@ -4153,6 +4256,13 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
+        # Uniform hybrid cache groups can expose the same pair of raw K/V
+        # tensors through multiple indexer and padding layers. Rejoining that
+        # pair once per layer retains a full-size duplicate for every alias and
+        # can exhaust device memory while initializing long-context caches.
+        # Cache the joined storage by the shared tensor objects so all aliases
+        # only create views of one concatenated buffer.
+        joined_indexer_raw_caches: dict[tuple[int, ...], torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
@@ -4219,14 +4329,25 @@ class NPUModelRunner(GPUModelRunner):
                                            )
 
                     kv_caches[layer_name] = kv_cache
-                elif isinstance(current_kv_cache_spec, AscendSFAIndexerCacheSpec):
+                elif _is_sfa_indexer_cache_spec(current_kv_cache_spec):
                     raw_cache = kv_cache_raw_tensors[layer_name]
                     assert isinstance(raw_cache, tuple)
                     if current_kv_cache_spec.scale_dim:
                         raw_k_tensor, raw_scale_tensor = raw_cache
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_scale_tensor.numel()
                     else:
-                        (raw_k_tensor,) = raw_cache
+                        # A uniform hybrid cache group may initially allocate
+                        # this single-tensor indexer spec through the generic
+                        # K/V path. Rejoin the two byte buffers before applying
+                        # the indexer layout.
+                        if len(raw_cache) == 1:
+                            raw_k_tensor = raw_cache[0]
+                        else:
+                            raw_cache_key = tuple(id(tensor) for tensor in raw_cache)
+                            raw_k_tensor = joined_indexer_raw_caches.get(raw_cache_key)
+                            if raw_k_tensor is None:
+                                raw_k_tensor = torch.cat(raw_cache)
+                                joined_indexer_raw_caches[raw_cache_key] = raw_k_tensor
                         raw_scale_tensor = None
                         sum_page_size_bytes = raw_k_tensor.numel()
 
@@ -4234,9 +4355,36 @@ class NPUModelRunner(GPUModelRunner):
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
 
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        num_blocks * current_kv_cache_spec.sfa_dcp_replicated_indexer_size,
+                    kv_cache_group_id = getattr(group, "kv_cache_group_id", None)
+                    kernel_block_size = current_kv_cache_spec.block_size
+                    if (
+                        kv_cache_group_id is not None
+                        and hasattr(self, "kernel_block_sizes")
+                    ):
+                        kernel_block_size = self.kernel_block_sizes[
+                            kv_cache_group_id
+                        ][0]
+                    kernel_num_blocks = _get_sfa_indexer_kernel_num_blocks(
+                        num_blocks,
                         current_kv_cache_spec.block_size,
+                        kernel_block_size,
+                        current_kv_cache_spec.sfa_dcp_replicated_indexer_size,
+                    )
+                    min_kernel_num_blocks = _get_sfa_indexer_kernel_num_blocks(
+                        kv_cache_config.num_blocks,
+                        current_kv_cache_spec.block_size,
+                        kernel_block_size,
+                        current_kv_cache_spec.sfa_dcp_replicated_indexer_size,
+                    )
+                    assert kernel_num_blocks >= min_kernel_num_blocks, (
+                        "SFA indexer cache has fewer logical blocks than the "
+                        "scheduler can allocate: "
+                        f"cache={kernel_num_blocks}, "
+                        f"required={min_kernel_num_blocks}"
+                    )
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        kernel_num_blocks,
+                        kernel_block_size,
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size,
                     )
@@ -4245,8 +4393,8 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = (indexer_k_cache,)
                     else:
                         indexer_scale_cache_shape = attn_backend.get_kv_cache_shape(
-                            num_blocks * current_kv_cache_spec.sfa_dcp_replicated_indexer_size,
-                            current_kv_cache_spec.block_size,
+                            kernel_num_blocks,
+                            kernel_block_size,
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.scale_dim,
                         )
@@ -4582,6 +4730,8 @@ class NPUModelRunner(GPUModelRunner):
         """
         Initialize the attention backends and attention metadata builders.
         """
+        from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+
         assert len(self.attn_groups) == 0, "Attention backends are already initialized"
 
         class AttentionGroupKey(NamedTuple):
@@ -4624,6 +4774,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_backend = layers[layer_name].get_attn_backend()
                 if (
                     isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec)
+                    and isinstance(layers[layer_name], DeepseekV32IndexerCache)
                     and not backend_supports_kernel_block_size(
                         attn_backend,
                         layer_kv_cache_spec.block_size,
@@ -4803,6 +4954,7 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                spec = _normalize_sfa_indexer_cache_spec(spec)
                 kv_cache_spec[layer_name] = spec
                 if isinstance(spec, AttentionSpec):
                     attn_layer_names.add(layer_name)
