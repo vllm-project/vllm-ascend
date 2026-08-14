@@ -23,7 +23,7 @@ import functools
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -529,11 +529,272 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+# ---------------------------------------------------------------------------
+# DP fault tolerance: handle peer disconnection in DP mode
+# ---------------------------------------------------------------------------
+
+_GLOO_DISCONNECT_PATTERNS = [
+    "Connection closed by peer",
+    "Connection reset by peer",
+]
+
+_HCCL_DISCONNECT_PATTERNS = [
+    "HCCL error",
+    "EI9999",
+    "EJ0001",
+    "notify wait timeout",
+]
+
+
+def _is_dp_peer_disconnect_error(e: Exception) -> bool:
+    """Check if an exception indicates a DP peer disconnection.
+
+    Covers both gloo TCP transport errors and HCCL/NPU errors.
+    """
+    if not isinstance(e, RuntimeError):
+        return False
+    msg = str(e)
+    return any(p in msg for p in _GLOO_DISCONNECT_PATTERNS + _HCCL_DISCONNECT_PATTERNS)
+
+
+def _patch_sync_dp_state():
+    """Monkey-patch ParallelConfig.sync_dp_state to handle DP peer disconnection.
+
+    This covers the second all_reduce path (core.py -> parallel.py:703)
+    that the dummy batch try/except cannot reach.
+    """
+    from vllm.config.parallel import ParallelConfig
+
+    if getattr(ParallelConfig.__dict__.get("sync_dp_state"), "_ascend_dp_patched", False):
+        return
+
+    _original_sync_dp_state = ParallelConfig.sync_dp_state
+
+    def _patched_sync_dp_state(dp_group, has_unfinished, pending_pause):  # type: ignore[no-redef]
+        try:
+            return _original_sync_dp_state(dp_group, has_unfinished, pending_pause)
+        except RuntimeError as e:
+            if _is_dp_peer_disconnect_error(e):
+                logger.warning(
+                    "DP peer disconnected during sync_dp_state. "
+                    "Returning (False, False) to trigger graceful exit. "
+                    "Error: %s",
+                    e,
+                )
+                if has_unfinished:
+                    logger.warning(
+                        "DP peer disconnected while local engine has "
+                        "unfinished requests. These requests may hang "
+                        "until client timeout. The engine will exit "
+                        "the busy loop but local in-flight requests "
+                        "cannot be completed without the DP peer."
+                    )
+                return False, False
+            raise
+
+    _patched_sync_dp_state._ascend_dp_patched = True  # type: ignore[attr-defined]
+    ParallelConfig.sync_dp_state = _patched_sync_dp_state  # type: ignore[assignment]
+
+
+def _patch_has_unfinished_dp():
+    """Monkey-patch ParallelConfig.has_unfinished_dp to handle DP peer disconnection.
+
+    This covers the all_reduce at parallel.py:678 (ReduceOp.MAX).
+    Called by resume_scheduler (core.py) during DP barrier.
+    """
+    from vllm.config.parallel import ParallelConfig
+
+    if getattr(ParallelConfig.__dict__.get("has_unfinished_dp"), "_ascend_dp_patched", False):
+        return
+
+    _original_has_unfinished_dp = ParallelConfig.has_unfinished_dp
+
+    def _patched_has_unfinished_dp(dp_group, has_unfinished):  # type: ignore[no-redef]
+        try:
+            return _original_has_unfinished_dp(dp_group, has_unfinished)
+        except RuntimeError as e:
+            if _is_dp_peer_disconnect_error(e):
+                logger.warning(
+                    "DP peer disconnected during has_unfinished_dp. "
+                    "Returning True (conservative: assume unfinished). "
+                    "Error: %s",
+                    e,
+                )
+                return True
+            raise
+
+    _patched_has_unfinished_dp._ascend_dp_patched = True  # type: ignore[attr-defined]
+    ParallelConfig.has_unfinished_dp = _patched_has_unfinished_dp  # type: ignore[assignment]
+
+
+def _patch_monitor_engine_liveness():
+    """Monkey-patch CoreEngineProcManager.monitor_engine_liveness to prevent
+    cascade shutdown when one EngineCore dies in DP mode.
+
+    Original behavior: any EngineCore death triggers self.shutdown() which
+    SIGTERMs all surviving engines. In DP mode, this causes the cascade crash.
+
+    Patched behavior: in DP mode, log the dead engine but do NOT set
+    failed_proc_name and do NOT call self.shutdown() while surviving engines
+    remain. When ALL engines are dead, shutdown is called even in DP mode.
+    """
+    from multiprocessing import connection as mp_connection
+    from typing import cast as t_cast
+
+    from vllm.v1.engine.utils import CoreEngineProcManager
+
+    if getattr(CoreEngineProcManager.__dict__.get("monitor_engine_liveness"), "_ascend_dp_patched", False):
+        return
+
+    _original_init = CoreEngineProcManager.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _original_init(self, *args, **kwargs)
+        vllm_config = kwargs.get("vllm_config")
+        if vllm_config is None and len(args) >= 4:
+            vllm_config = args[3]
+        if vllm_config is not None:
+            self._dp_size = vllm_config.parallel_config.data_parallel_size
+        else:
+            self._dp_size = len(self.processes)
+
+    CoreEngineProcManager.__init__ = _patched_init
+
+    def _tolerant_monitor_engine_liveness(self):
+        """Monitor engine liveness with DP fault tolerance."""
+        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+        sentinels = set(sentinel_to_proc.keys())
+        dp_size = getattr(self, "_dp_size", 0)
+        if not isinstance(dp_size, int):
+            dp_size = 0
+        is_dp = dp_size > 1 if dp_size > 0 else len(self.processes) > 1
+
+        while sentinels and not self.manager_stopped.is_set():
+            died_sentinels = mp_connection.wait(sentinels, timeout=1)
+
+            for sentinel in died_sentinels:
+                sentinels.discard(sentinel)
+                proc = sentinel_to_proc.pop(t_cast(int, sentinel))
+                exitcode = proc.exitcode
+                if exitcode not in (0, None) and not self.manager_stopped.is_set():
+                    if is_dp:
+                        logger.warning(
+                            "DP fault tolerance: Engine core process %s died "
+                            "(exitcode=%s). %d surviving engines alive.",
+                            proc.name,
+                            exitcode,
+                            len(sentinels),
+                        )
+                    else:
+                        self.failed_proc_name = proc.name
+
+        if self.manager_stopped.is_set():
+            return
+        if is_dp and len(sentinels) > 0:
+            return
+        self.shutdown()
+
+    _tolerant_monitor_engine_liveness._ascend_dp_patched = True  # type: ignore[attr-defined]
+    CoreEngineProcManager.monitor_engine_liveness = _tolerant_monitor_engine_liveness  # type: ignore[assignment]
+
+
+def _patch_wait_for_completion_or_failure():
+    """Monkey-patch wait_for_completion_or_failure to tolerate API server
+    death in DP mode.
+
+    When one EngineCore dies in DP mode, its paired API server eventually
+    crashes because the core client loses connection. The original
+    wait_for_completion_or_failure raises RuntimeError on any process death,
+    triggering a global shutdown. This patch allows API server deaths in DP
+    mode to be logged as warnings instead of fatal errors.
+    """
+    import multiprocessing.connection as mp_connection
+    import threading
+
+    import vllm.v1.utils as vllm_utils_mod
+
+    if getattr(vllm_utils_mod.__dict__.get("wait_for_completion_or_failure"), "_ascend_dp_patched", False):
+        return
+
+    def _tolerant_wait_for_completion_or_failure(
+        api_server_manager,
+        engine_manager=None,
+        coordinator=None,
+    ):
+        """Wait for processes with DP fault tolerance."""
+        is_dp = False
+        if engine_manager is not None:
+            with suppress(TypeError, AttributeError):
+                is_dp = len(engine_manager.processes) > 1
+
+        try:
+            logger.info("Waiting for API servers to complete ...")
+            sentinel_to_proc = {proc.sentinel: proc for proc in api_server_manager.processes}
+
+            if coordinator:
+                sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
+
+            if engine_manager:
+                core_shutdown_recv, core_shutdown_send = mp_connection.Pipe(duplex=False)
+
+                def monitor_engines():
+                    try:
+                        engine_manager.monitor_engine_liveness()
+                    finally:
+                        core_shutdown_send.close()
+                        core_shutdown_recv.close()
+
+                threading.Thread(target=monitor_engines, daemon=True).start()
+                sentinel_to_proc[core_shutdown_recv] = None
+
+            while sentinel_to_proc:
+                ready_sentinels = mp_connection.wait(sentinel_to_proc)
+
+                for sentinel in ready_sentinels:
+                    proc = sentinel_to_proc.pop(sentinel)
+
+                    if proc is not None and proc.exitcode != 0:
+                        if is_dp:
+                            logger.warning(
+                                "DP fault tolerance: Process %s (PID: %s) "
+                                "died with exit code %s. "
+                                "Continuing with remaining processes.",
+                                proc.name,
+                                proc.pid,
+                                proc.exitcode,
+                            )
+                            continue
+                        raise RuntimeError(f"Process {proc.name} (PID: {proc.pid}) died with exit code {proc.exitcode}")
+                    if engine_manager and engine_manager.failed_proc_name is not None:
+                        raise RuntimeError(f"Engine core process {engine_manager.failed_proc_name} died unexpectedly.")
+
+        except KeyboardInterrupt:
+            logger.info("Received KeyboardInterrupt, shutting down API servers...")
+        except Exception as e:
+            logger.exception("Exception occurred while running API servers: %s", str(e))
+            raise
+
+    vllm_utils_mod.wait_for_completion_or_failure = _tolerant_wait_for_completion_or_failure  # type: ignore[assignment]
+
+    _tolerant_wait_for_completion_or_failure._ascend_dp_patched = True  # type: ignore[attr-defined]
+
+    try:
+        import vllm.entrypoints.cli.serve as serve_mod
+
+        serve_mod.wait_for_completion_or_failure = _tolerant_wait_for_completion_or_failure  # type: ignore[assignment]
+    except ImportError:
+        pass
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
+    _patch_sync_dp_state()
+    _patch_has_unfinished_dp()
+    _patch_monitor_engine_liveness()
+    _patch_wait_for_completion_or_failure()
 
 
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
