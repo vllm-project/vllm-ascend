@@ -1,19 +1,18 @@
 python tests/standalone/fa3/test_fa3_corrupts_cann.py 
-[W814 15:20:41.963278551 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[W814 16:03:21.937615430 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-prefill_seqlen=16384  decode_kv_seqlen=16384  n_replays=3
+prefill_seqlen=16384  decode_kv_seqlen=16384  share_pool=True
 ========================================================================
-[W814 15:20:49.346955752 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[0a] prefill graph-vs-eager max_abs_diff = 0.000000 (should be ~0)
-[0]  prefill graph self-consistency   = 0.000000 (should be ~0)
-[1]  baseline prefill graph-replay captured (shape=(16384, 32, 128))
-[2]  after FA3 EAGER       -> prefill GRAPH = 0.000000 (should be ~0)
-[3]  after FA3 CAPTURE     -> prefill GRAPH = 0.000000
-[4]  after FA3 REPLAY x3 -> prefill GRAPH = 0.000000 (mean 0.000000)
-[4b] after FA3 REPLAY x3 -> prefill EAGER  = 0.000000 (should be ~0)
+[W814 16:03:29.330050444 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[1] clean prefill graph replay captured (shape=(16384, 32, 128))
+[2] FA3 decode graph captured (no task-group wrapper)
+[3] prefill graph captured AFTER FA3 -> diff vs clean = 0.000000 (mean 0.000000)
+[4] clean graph re-replay self-consistency = 0.000000
 ------------------------------------------------------------------------
 VERDICT: NOT reproduced.
-  Try a larger PREILL_SEQLEN / DECODE_KV_SEQLEN so the kernels
-  actually split KV across cores (and thus use FFTS).
+  The FA3 capture did NOT change a later prefill capture.  Next
+  levers: (a) larger PREILL_SEQLEN, (b) also replay the FA3 graph
+  before capturing the second prefill graph, (c) add the
+  graph_task_update_begin/End replay path used by vllm-ascend.
 ------------------------------------------------------------------------
