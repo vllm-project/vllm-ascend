@@ -9,8 +9,8 @@ from vllm_ascend.quantization.methods.w4a4.w4a4_flatquant import (
     KRONECKER_QUANT_MAX_BATCH_SIZE,
     AscendW4A4FlatQuantDynamicLinearMethod,
     batched_kronecker_quant,
-    get_decompose_dim,
     pack_int4_weights,
+    solve_kronecker_decompose,
 )
 
 
@@ -29,14 +29,14 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
     ## Test Helper Functions
     ## --------------------
 
-    def test_get_decompose_dim(self):
+    def test_solve_kronecker_decompose(self):
         """
-        Tests the get_decompose_dim function with various inputs.
+        Tests the solve_kronecker_decompose function with various inputs.
         """
-        self.assertEqual(get_decompose_dim(1024), (32, 32))
-        self.assertEqual(get_decompose_dim(768), (24, 32))
-        self.assertEqual(get_decompose_dim(100), (10, 10))
-        self.assertEqual(get_decompose_dim(99), (9, 11))
+        self.assertEqual(solve_kronecker_decompose(1024), (32, 32))
+        self.assertEqual(solve_kronecker_decompose(768), (24, 32))
+        self.assertEqual(solve_kronecker_decompose(100), (10, 10))
+        self.assertEqual(solve_kronecker_decompose(99), (9, 11))
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.torch_npu")
     def test_pack_int4_weights_npu_success(self, mock_torch_npu):
@@ -109,7 +109,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         """Tests the get_pertensor_param static method."""
         self.method.get_weight(self.input_size, self.output_size, self.params_dtype)
         params = self.method.get_pertensor_param(self.params_dtype)
-        left_dim, right_dim = get_decompose_dim(self.input_size)
+        left_dim, right_dim = solve_kronecker_decompose(self.input_size)
         self.assertIn("left_trans", params)
         self.assertIn("right_trans", params)
         self.assertIn("clip_ratio", params)
@@ -137,7 +137,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
     def _prepare_apply_mocks_and_layer(self, batch_size):
         """Helper to create a mock layer and input tensor for apply tests."""
         layer = nn.Module()
-        m, n = get_decompose_dim(self.input_size)
+        m, n = solve_kronecker_decompose(self.input_size)
         layer.left_trans = torch.randn(m, m, dtype=self.params_dtype)
         layer.right_trans = torch.randn(n, n, dtype=self.params_dtype)
         layer.aclnn_clip_ratio = 0.95
