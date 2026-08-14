@@ -29,7 +29,7 @@ on:
         description: 'Quay username for pushing images'
         required: false
         type: string
-      quay_temp_username:
+      QUAY_TEMP_USERNAME:
         description: 'Quay username for pushing temp tag digests'
         required: false
         type: string
@@ -260,7 +260,7 @@ jobs:
       uses: docker/login-action@v4
       with:
         registry: quay.io
-        username: ${{ inputs.quay_temp_username }}
+        username: ${{ inputs.QUAY_TEMP_USERNAME }}
         password: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
     - name: Set up Docker Buildx
@@ -604,7 +604,7 @@ jobs:
           DATE=$(date +'%Y%m%d')
           for arch in amd64 arm64; do
             TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${arch}-${DATE}-temp"
-            skopeo delete --creds "${{ inputs.quay_temp_username }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
+            skopeo delete --creds "${{ inputs.QUAY_TEMP_USERNAME }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
               "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
           done
 
@@ -632,7 +632,7 @@ jobs:
         uses: docker/login-action@v4
         with:
           registry: quay.io
-          username: ${{ inputs.quay_temp_username }}
+          username: ${{ inputs.QUAY_TEMP_USERNAME }}
           password: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
       - name: Set up Docker Buildx
@@ -685,6 +685,6 @@ jobs:
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           for arch in amd64 arm64; do
             TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${arch}-temp"
-            skopeo delete --creds "${{ inputs.quay_temp_username }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
+            skopeo delete --creds "${{ inputs.QUAY_TEMP_USERNAME }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
               "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
           done
