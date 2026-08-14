@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.gdn_attn import (
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
+    PAD_SLOT_ID,
     compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
@@ -71,6 +72,9 @@ class GDNCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     initial_state_mode: torch.Tensor | None
+    query_start_loc_host: tuple[int, ...] | None = None
+    cache_indices_host: tuple[int, ...] | None = None
+    initial_state_mode_host: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -302,6 +306,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata: GDNAttentionMetadata,
         chunk_metadata: GDNChunkedPrefillMetadata | None,
         non_spec_cache_indices: torch.Tensor | None,
+        non_spec_query_start_loc_cpu: torch.Tensor | None,
+        non_spec_cache_indices_cpu: torch.Tensor | None,
+        initial_state_mode_cpu: torch.Tensor | None,
     ) -> GDNAttentionMetadata:
         attn_metadata.non_spec_prefill_metadata = None
         if attn_metadata.num_prefills <= 0:
@@ -324,11 +331,43 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             prefill_seq_offset = max(0, prefill_num_rows - attn_metadata.num_prefills)
             initial_state_mode = initial_state_mode.clone()
             initial_state_mode[prefill_seq_offset:] = True
+
+        if non_spec_query_start_loc_cpu is None:
+            raise RuntimeError("Expected CPU query_start_loc for Ascend GDN prefill conv1d path.")
+        if non_spec_cache_indices_cpu is None:
+            raise RuntimeError("Expected CPU cache_indices for Ascend GDN prefill conv1d path.")
+        if initial_state_mode_cpu is None:
+            raise RuntimeError("Expected CPU initial_state_mode for Ascend GDN prefill conv1d path.")
+
+        query_start_loc_host = tuple(
+            int(value) for value in non_spec_query_start_loc_cpu[: prefill_num_rows + 1].tolist()
+        )
+        cache_indices_cpu = non_spec_cache_indices_cpu[:prefill_num_rows]
+        if cache_indices_cpu.dim() > 1:
+            cache_indices_cpu = cache_indices_cpu[:, 0]
+        cache_indices_host_list = [int(value) for value in cache_indices_cpu.tolist()]
+        initial_state_mode_host_list = [
+            int(value) for value in initial_state_mode_cpu[:prefill_num_rows].tolist()
+        ]
+        if pcp_rank > 0 and attn_metadata.num_prefills > 0:
+            prefill_seq_offset = max(0, prefill_num_rows - attn_metadata.num_prefills)
+            initial_state_mode_host_list[prefill_seq_offset:] = [1] * (
+                prefill_num_rows - prefill_seq_offset
+            )
+        for seq_idx in range(prefill_num_rows):
+            if query_start_loc_host[seq_idx] == query_start_loc_host[seq_idx + 1]:
+                cache_indices_host_list[seq_idx] = PAD_SLOT_ID
+                initial_state_mode_host_list[seq_idx] = 0
+        cache_indices_host = tuple(cache_indices_host_list)
+        initial_state_mode_host = tuple(initial_state_mode_host_list)
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
                 cache_indices=non_spec_cache_indices[:prefill_num_rows],
                 initial_state_mode=initial_state_mode,
+                query_start_loc_host=query_start_loc_host,
+                cache_indices_host=cache_indices_host,
+                initial_state_mode_host=initial_state_mode_host,
             ),
             chunk=chunk_metadata,
         )
@@ -425,11 +464,30 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )
+        block_table_tensor_cpu = getattr(m, "block_table_tensor_cpu", None)
+        if block_table_tensor_cpu is None and m.block_table_tensor.device.type == "cpu":
+            block_table_tensor_cpu = m.block_table_tensor
+        if block_table_tensor_cpu is not None:
+            seq_lens_cpu = getattr(m, "_seq_lens_cpu", None)
+            if seq_lens_cpu is None:
+                seq_lens_cpu = getattr(m, "seq_lens_cpu", None)
+            if seq_lens_cpu is None:
+                block_table_tensor_cpu = None
+            else:
+                block_table_tensor_cpu = mamba_get_block_table_tensor(
+                    block_table_tensor_cpu,
+                    seq_lens_cpu,
+                    self.kv_cache_spec,
+                    self.vllm_config.cache_config.mamba_cache_mode,
+                )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
+        spec_sequence_indices_cpu: torch.Tensor | None = None
+        non_spec_sequence_indices_cpu: torch.Tensor | None = None
         spec_sequence_indices: torch.Tensor | None = None
         non_spec_sequence_indices: torch.Tensor | None = None
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
+        non_spec_conv1d_cache_indices_cpu: torch.Tensor | None = None
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
@@ -452,6 +510,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     spec_sequence_masks_cpu,
                     num_spec_decodes,
                 )
+                spec_sequence_indices_cpu = self.spec_sequence_indices_cpu[:num_spec_decodes]
+                non_spec_sequence_indices_cpu = self.non_spec_sequence_indices_cpu[
+                    : num_reqs - num_spec_decodes
+                ]
 
         if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
@@ -465,6 +527,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_state_indices_tensor = None
             non_spec_state_indices_tensor = block_table_tensor[:, 0]
             non_spec_conv1d_cache_indices = block_table_tensor
+            non_spec_conv1d_cache_indices_cpu = block_table_tensor_cpu
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             non_spec_query_start_loc_cpu = query_start_loc_cpu
@@ -536,6 +599,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     non_spec_sequence_indices,
                 )
                 non_spec_conv1d_cache_indices = non_spec_state_indices_tensor
+                if block_table_tensor_cpu is not None:
+                    assert non_spec_sequence_indices_cpu is not None
+                    non_spec_conv1d_cache_indices_cpu = torch.index_select(
+                        block_table_tensor_cpu,
+                        0,
+                        non_spec_sequence_indices_cpu,
+                    )
                 spec_query_lens = torch.index_select(
                     query_lens,
                     0,
@@ -631,12 +701,24 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 query_start_loc=query_start_loc,
             )
             assert has_initial_state is not None
+            context_lens_cpu = getattr(m, "num_computed_tokens_cpu", None)
+            if context_lens_cpu is None:
+                context_lens_cpu = getattr(m, "_num_computed_tokens_cpu", None)
+            initial_state_mode_cpu = None if context_lens_cpu is None else context_lens_cpu > 0
+            if initial_state_mode_cpu is not None and spec_sequence_masks_cpu is not None:
+                assert non_spec_sequence_indices_cpu is not None
+                initial_state_mode_cpu = torch.index_select(
+                    initial_state_mode_cpu,
+                    0,
+                    non_spec_sequence_indices_cpu,
+                )
             if spec_sequence_masks is None and num_decodes > 0:
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
         else:
             has_initial_state = None
+            initial_state_mode_cpu = None
 
         assert not (num_decodes > 0 and num_spec_decodes > 0), (
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
@@ -754,6 +836,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             attn_metadata,
             non_spec_chunked_prefill_metadata,
             non_spec_conv1d_cache_indices,
+            non_spec_query_start_loc_cpu,
+            non_spec_conv1d_cache_indices_cpu,
+            initial_state_mode_cpu,
         )
         attn_metadata = self._attach_spec_decode_metadata(
             attn_metadata,

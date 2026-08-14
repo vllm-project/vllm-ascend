@@ -2925,6 +2925,11 @@ class NPUModelRunner(GPUModelRunner):
                     dtype=torch.int32,
                     device=self.device,
                 )
+                blk_table_tensor_cpu = torch.zeros(
+                    (num_reqs_padded, 1),
+                    dtype=torch.int32,
+                    device="cpu",
+                )
                 slot_mapping = torch.zeros(
                     (num_tokens_padded,),
                     dtype=torch.int64,
@@ -2934,10 +2939,12 @@ class NPUModelRunner(GPUModelRunner):
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
+                blk_table_tensor_cpu = blk_table.get_cpu_tensor()[:num_reqs_padded]
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                 blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
+                blk_table_tensor_cpu[num_reqs:num_reqs_padded].fill_(0)
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
                 if self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device
@@ -2947,9 +2954,13 @@ class NPUModelRunner(GPUModelRunner):
                     self.routed_experts_slot_mapping_device[:n].copy_(
                         slot_mapping
                     )
-            return blk_table_tensor, slot_mapping
+            return blk_table_tensor, blk_table_tensor_cpu, slot_mapping
 
-        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        (
+            block_table_gid_0,
+            block_table_gid_0_cpu,
+            slot_mapping_gid_0,
+        ) = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_dcp_metadata(block_table_gid_0)
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
@@ -2980,11 +2991,15 @@ class NPUModelRunner(GPUModelRunner):
             # TODO
             # num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded],
             num_computed_tokens_cpu=num_computed_tokens_cpu,
+            _num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ],
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
             block_table_tensor=block_table_gid_0,
+            block_table_tensor_cpu=block_table_gid_0_cpu,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
@@ -3102,9 +3117,11 @@ class NPUModelRunner(GPUModelRunner):
                     cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
 
             if kv_cache_gid > 0:
-                cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
-                    kv_cache_gid
-                )
+                (
+                    cm.block_table_tensor,
+                    cm.block_table_tensor_cpu,
+                    cm.slot_mapping,
+                ) = _get_block_table_and_slot_mapping(kv_cache_gid)
             if self.speculative_config and isinstance(self.drafter, (AscendStep3p5MTPProposer, AscendDSparkProposer)):
                 # step3p5 MTP draft layers span multiple KV cache groups; capture
                 # each group's block table / slot mapping so the proposer can

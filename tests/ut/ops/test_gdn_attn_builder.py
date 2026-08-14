@@ -9,6 +9,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -323,6 +324,18 @@ def _assert_non_spec_conv1d_args_match_metadata(attn_metadata) -> None:
         attn_metadata.non_spec_state_indices_tensor,
     )
     assert torch.equal(conv1d_meta.initial_state_mode, attn_metadata.has_initial_state)
+    query_start_loc_host = tuple(int(value) for value in conv1d_meta.query_start_loc.tolist())
+    cache_indices_host = [
+        int(value) for value in _cache_index_first_column(conv1d_meta.cache_indices).tolist()
+    ]
+    initial_state_mode_host = [int(value) for value in conv1d_meta.initial_state_mode.tolist()]
+    for seq_idx in range(len(cache_indices_host)):
+        if query_start_loc_host[seq_idx] == query_start_loc_host[seq_idx + 1]:
+            cache_indices_host[seq_idx] = PAD_SLOT_ID
+            initial_state_mode_host[seq_idx] = 0
+    assert conv1d_meta.query_start_loc_host == query_start_loc_host
+    assert conv1d_meta.cache_indices_host == tuple(cache_indices_host)
+    assert conv1d_meta.initial_state_mode_host == tuple(initial_state_mode_host)
 
 
 @pytest.mark.parametrize(
