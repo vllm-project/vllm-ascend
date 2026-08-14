@@ -223,15 +223,7 @@ class AscendSharedExperts:
             if evt is not None:
                 torch.npu.current_stream().wait_event(evt)
 
-        # The packed W8A8 grouped_matmul_swiglu_quant_v2 path on A2 must not
-        # overlap with shared-expert computation. Keeping the shared expert on
-        # the default stream preserves operation ordering with the complete
-        # routed MLP. A3 keeps the independent shared-expert stream.
-        use_shared_expert_stream = self.multistream_overlap and not (
-            self.quant_type == QuantType.W8A8 and get_ascend_device_type() == AscendDeviceType.A2
-        )
-
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=use_shared_expert_stream):
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON:
                 # Full activations + replicated weights: shard tokens locally,
                 # run the MLP, then gather its complete output.
@@ -340,7 +332,7 @@ class AscendSharedExperts:
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
-        if use_shared_expert_stream:
+        if self.multistream_overlap:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
         if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON:

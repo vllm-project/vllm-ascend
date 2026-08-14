@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
-from vllm_ascend.utils import AscendDeviceType
 
 
 def _packed_w8a8_gmm_swiglu_kwargs(*, swiglu_limit=0.0):
@@ -20,45 +19,104 @@ def _packed_w8a8_gmm_swiglu_kwargs(*, swiglu_limit=0.0):
     }
 
 
-def test_a2_packed_w8a8_gmm_swiglu_uses_torch_npu_v2():
+def test_gmm_swiglu_normalizes_single_tensor_inputs_for_custom_v2():
     expected = (torch.zeros(2, 4, dtype=torch.int8), torch.ones(2))
     with (
-        mock.patch(
-            "vllm_ascend.device.device_op.get_ascend_device_type",
-            return_value=AscendDeviceType.A2,
-        ),
-        mock.patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
-            return_value=expected,
-            create=True,
-        ) as system_v2,
-    ):
-        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**_packed_w8a8_gmm_swiglu_kwargs())
-
-    assert output is expected
-    call_kwargs = system_v2.call_args.kwargs
-    assert len(call_kwargs["weight"]) == 1
-    assert len(call_kwargs["weight_scale"]) == 1
-    assert call_kwargs["group_list_type"] == 0
-
-
-def test_a2_packed_w8a8_with_swiglu_limit_uses_custom_v2():
-    expected = (torch.zeros(2, 4, dtype=torch.int8), torch.ones(2))
-    with (
-        mock.patch(
-            "vllm_ascend.device.device_op.get_ascend_device_type",
-            return_value=AscendDeviceType.A2,
-        ),
         mock.patch(
             "vllm_ascend.device.device_op.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
             return_value=expected,
             create=True,
         ) as custom_v2,
     ):
-        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**_packed_w8a8_gmm_swiglu_kwargs(swiglu_limit=1.0))
+        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**_packed_w8a8_gmm_swiglu_kwargs())
+
+    assert output[0] is expected[0]
+    assert output[1] is expected[1]
+    call_kwargs = custom_v2.call_args.kwargs
+    assert len(call_kwargs["weight"]) == 1
+    assert len(call_kwargs["weight_scale"]) == 1
+    assert call_kwargs["weight_assist_matrix"] is None
+    assert call_kwargs["dequant_mode"] == 0
+    assert call_kwargs["group_list_type"] == 0
+
+
+@pytest.mark.parametrize(
+    ("single_tensor", "per_group", "expected_group_list_type"),
+    [(True, False, 0), (True, True, 0), (False, False, 1), (False, True, 1)],
+)
+def test_gmm_swiglu_custom_v2_covers_tensor_and_scale_layouts(single_tensor, per_group, expected_group_list_type):
+    num_experts, hidden_size, intermediate_size = 3, 4, 8
+    if single_tensor:
+        weight = torch.zeros(num_experts, hidden_size, intermediate_size, dtype=torch.int8)
+        scale_shape = (num_experts, 2, intermediate_size) if per_group else (num_experts, intermediate_size)
+        weight_scale = torch.ones(scale_shape)
+        bias = torch.zeros(num_experts, intermediate_size)
+    else:
+        weight = [torch.zeros(hidden_size, intermediate_size, dtype=torch.int8) for _ in range(num_experts)]
+        scale_shape = (2, intermediate_size) if per_group else (intermediate_size,)
+        weight_scale = [torch.ones(scale_shape) for _ in range(num_experts)]
+        bias = [torch.zeros(intermediate_size) for _ in range(num_experts)]
+
+    expected = (torch.zeros(2, 4, dtype=torch.int8), torch.ones(2))
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
+        return_value=expected,
+        create=True,
+    ) as custom_v2:
+        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            x=torch.zeros(2, hidden_size, dtype=torch.int8),
+            weight=weight,
+            group_list=torch.tensor([1, 1, 0] if expected_group_list_type == 1 else [1, 2, 2]),
+            group_list_type=expected_group_list_type,
+            weight_scale=weight_scale,
+            x_scale=torch.ones(2),
+            bias=bias,
+            act_quant_type=torch.int8,
+            swiglu_limit=1.0,
+        )
 
     assert output is expected
-    assert custom_v2.call_args.kwargs["swiglu_limit"] == 1.0
+    call_kwargs = custom_v2.call_args.kwargs
+    assert len(call_kwargs["weight"]) == (1 if single_tensor else num_experts)
+    assert len(call_kwargs["weight_scale"]) == len(call_kwargs["weight"])
+    assert len(call_kwargs["weight_assist_matrix"]) == len(call_kwargs["weight"])
+    assert call_kwargs["dequant_mode"] == int(per_group)
+    assert call_kwargs["group_list_type"] == 0
+    torch.testing.assert_close(call_kwargs["group_list"], torch.tensor([1, 2, 2]))
+    assert call_kwargs["swiglu_limit"] == 1.0
+
+
+@pytest.mark.parametrize("use_mxfp_quant", [False, True], ids=["pertoken", "mx"])
+def test_a5_gmm_swiglu_routes_supported_quant_modes_to_custom_v2(use_mxfp_quant):
+    num_tokens, num_experts, hidden_size, intermediate_size = 2, 3, 4, 8
+    expected = (torch.zeros(num_tokens, intermediate_size // 2), torch.ones(num_tokens))
+    with (
+        mock.patch("vllm_ascend.device.device_op.enable_gmm_swiglu_quant_v2_custom_op", return_value=True),
+        mock.patch.object(BaseDeviceAdaptor, "npu_grouped_matmul_swiglu_quant", return_value=expected) as custom_v2,
+        mock.patch.object(A5DeviceAdaptor, "maybe_normalize_mxfp_scale_layout", side_effect=lambda scale: scale),
+    ):
+        output = A5DeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            x=torch.zeros(num_tokens, hidden_size),
+            weight=torch.zeros(num_experts, hidden_size, intermediate_size),
+            group_list=torch.tensor([1, 0, 1]),
+            group_list_type=1,
+            weight_scale=torch.ones(num_experts, 1, intermediate_size, 2)
+            if use_mxfp_quant
+            else torch.ones(num_experts, intermediate_size),
+            x_scale=torch.ones(num_tokens, 1, 2) if use_mxfp_quant else torch.ones(num_tokens),
+            use_mxfp_quant=use_mxfp_quant,
+            act_quant_type=torch.float8_e4m3fn,
+            weight_quant_type=torch.float8_e4m3fn,
+        )
+
+    assert output[0] is expected[0]
+    assert output[1] is expected[1]
+    call_kwargs = custom_v2.call_args.kwargs
+    expected_mode = 2 if use_mxfp_quant else 0
+    assert call_kwargs["dequant_mode"] == expected_mode
+    assert call_kwargs["quant_mode"] == expected_mode
+    assert call_kwargs["dequant_dtype"] == torch.float32
+    assert call_kwargs["quant_dtype"] == torch.float8_e4m3fn
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():

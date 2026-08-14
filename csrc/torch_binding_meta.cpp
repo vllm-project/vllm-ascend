@@ -123,9 +123,9 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
     const c10::optional<at::TensorList> weight_assist_matrix,
     const c10::optional<at::Tensor> & bias,
     c10::optional<int64_t> dequant_mode,
-    c10::optional<int64_t> dequant_dtype,
+    c10::optional<at::ScalarType> dequant_dtype,
     c10::optional<int64_t> quant_mode,
-    c10::optional<int64_t> quant_dtype,
+    c10::optional<at::ScalarType> quant_dtype,
     bool transpose_weight,
     int64_t group_list_type,
     at::IntArrayRef tuning_config,
@@ -133,12 +133,21 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
 {
 
     auto m = x.sym_size(0);
-    auto n = weight_scale[0].sym_size(weight_scale[0].dim() - 1);
+    const int64_t quant_mode_real = quant_mode.value_or(0);
+    auto n = quant_mode_real == 2
+        ? weight[0].sym_size(transpose_weight ? 1 : 2)
+        : weight_scale[0].sym_size(weight_scale[0].dim() - 1);
 
     c10::SymDimVector output_shape = {m, n / c10::SymInt(2)};
-    c10::SymDimVector scale_shape = {m};
-    at::Tensor output =  at::empty_symint(output_shape, x.options().dtype(at::kChar));
-    at::Tensor output_scale =  at::empty_symint(scale_shape, x.options().dtype(at::kFloat));
+    at::Tensor output = at::empty_symint(output_shape, x.options().dtype(quant_dtype.value_or(at::kChar)));
+    at::Tensor output_scale;
+    if (quant_mode_real == 2) {
+        c10::SymDimVector scale_shape = {m, (n / c10::SymInt(2) + c10::SymInt(63)) / c10::SymInt(64), 2};
+        output_scale = at::empty_symint(scale_shape, x.options().dtype(at::kFloat8_e8m0fnu));
+    } else {
+        c10::SymDimVector scale_shape = {m};
+        output_scale = at::empty_symint(scale_shape, x.options().dtype(at::kFloat));
+    }
 
 
 

@@ -61,6 +61,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
+_GMM_SWIGLU_QUANT_V2_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
@@ -457,6 +458,52 @@ def enable_custom_op():
                 e,
             )
     return _CUSTOM_OP_ENABLED
+
+
+def enable_gmm_swiglu_quant_v2_custom_op():
+    """Load the cross-generation GMM SwiGLU quant V2 binding.
+
+    A5 keeps the global custom-op feature gate disabled because not every
+    repository operator supports that platform. This V2 operator has a
+    dedicated A5 kernel and is packaged separately, so it can be loaded
+    without enabling unrelated custom-op call sites.
+    """
+    global _GMM_SWIGLU_QUANT_V2_ENABLED
+
+    if _GMM_SWIGLU_QUANT_V2_ENABLED is not None:
+        return _GMM_SWIGLU_QUANT_V2_ENABLED
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        _GMM_SWIGLU_QUANT_V2_ENABLED = enable_custom_op()
+        return _GMM_SWIGLU_QUANT_V2_ENABLED
+
+    try:
+        if not torch.compiler.is_compiling():
+            bootstrap_custom_op_env()
+        # isort: off
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+        import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+
+        # isort: on
+
+        _GMM_SWIGLU_QUANT_V2_ENABLED = hasattr(torch.ops._C_ascend, "grouped_matmul_swiglu_quant_v2")
+    except ImportError as exc:
+        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(exc):
+            try:
+                bootstrap_custom_op_env(include_vendor_lib=True)
+                # isort: off
+                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+                import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+
+                # isort: on
+
+                _GMM_SWIGLU_QUANT_V2_ENABLED = hasattr(torch.ops._C_ascend, "grouped_matmul_swiglu_quant_v2")
+            except ImportError:
+                _GMM_SWIGLU_QUANT_V2_ENABLED = False
+        else:
+            _GMM_SWIGLU_QUANT_V2_ENABLED = False
+        if not _GMM_SWIGLU_QUANT_V2_ENABLED:
+            logger.warning("Failed to register grouped_matmul_swiglu_quant_v2 on A5: %s", exc)
+    return _GMM_SWIGLU_QUANT_V2_ENABLED
 
 
 def find_hccl_library() -> str:

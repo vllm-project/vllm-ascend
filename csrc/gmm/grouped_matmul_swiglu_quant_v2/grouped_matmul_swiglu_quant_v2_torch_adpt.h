@@ -27,9 +27,9 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2(
     const c10::optional<at::TensorList> weight_assist_matrix,
     const c10::optional<at::Tensor> & bias,
     c10::optional<int64_t> dequant_mode,
-    c10::optional<int64_t> dequant_dtype,
+    c10::optional<at::ScalarType> dequant_dtype,
     c10::optional<int64_t> quant_mode,
-    c10::optional<int64_t> quant_dtype,
+    c10::optional<at::ScalarType> quant_dtype,
     bool transpose_weight,
     int64_t group_list_type,
     at::IntArrayRef tuning_config,
@@ -37,37 +37,67 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2(
 {
 
     auto x_size = x.sizes();
-    int n = weight_scale[0].sizes().back();
-    int m = x_size[0];
-    int k = x_size[1];
-
-    at::Tensor output =  at::empty({m, n/2}, x.options().dtype(at::kChar));
-    at::Tensor output_scale =  at::empty({m}, x.options().dtype(at::kFloat));
-    int64_t dequant_mode_real = dequant_mode.value_or(0);
-    int64_t dequant_dtype_real = dequant_dtype.value_or(0);
+    int64_t m = x_size[0];
     int64_t quant_mode_real = quant_mode.value_or(0);
+    int64_t n = quant_mode_real == 2
+        ? weight[0].size(transpose_weight ? 1 : 2)
+        : weight_scale[0].sizes().back();
+
+    at::ScalarType output_dtype = quant_dtype.value_or(at::kChar);
+    at::Tensor output = at::empty({m, n / 2}, x.options().dtype(output_dtype));
+    at::Tensor output_scale;
+    if (quant_mode_real == 2) {
+        output_scale = at::empty({m, (n / 2 + 63) / 64, 2}, x.options().dtype(at::kFloat8_e8m0fnu));
+    } else {
+        output_scale = at::empty({m}, x.options().dtype(at::kFloat));
+    }
+    int64_t dequant_mode_real = dequant_mode.value_or(0);
+    int64_t dequant_dtype_real = static_cast<int64_t>(ConvertType(dequant_dtype.value_or(at::kFloat)));
     auto bias_real = bias.value_or(at::Tensor());
     auto smooth_scale_real = smooth_scale.value_or(at::Tensor());
     double swiglu_limit_f = static_cast<double>(swiglu_limit);
-    auto ws=weight[0].sizes();
-    EXEC_NPU_CMD(
-        aclnnGroupedMatmulSwigluQuantWeightNzV2,
-        x,
-        weight,
-        weight_scale,
-        weight_assist_matrix,
-        bias_real,
-        x_scale,
-        smooth_scale_real,
-        group_list,
-        dequant_mode_real,
-        dequant_dtype_real,
-        quant_mode_real,
-        group_list_type,
-        tuning_config,
-        swiglu_limit_f,
-        output,
-        output_scale);
+    if (quant_dtype.has_value()) {
+        // A5 consumes the public ND V2 contract and supports per-token and MX
+        // quantization. A2/A3 omit quant_dtype and retain the Weight-NZ bridge
+        // required by their packed W8A8/W4A8 layouts.
+        EXEC_NPU_CMD(
+            aclnnGroupedMatmulSwigluQuantV2,
+            x,
+            weight,
+            weight_scale,
+            weight_assist_matrix,
+            bias_real,
+            x_scale,
+            smooth_scale_real,
+            group_list,
+            dequant_mode_real,
+            dequant_dtype_real,
+            quant_mode_real,
+            group_list_type,
+            tuning_config,
+            swiglu_limit_f,
+            output,
+            output_scale);
+    } else {
+        EXEC_NPU_CMD(
+            aclnnGroupedMatmulSwigluQuantWeightNzV2,
+            x,
+            weight,
+            weight_scale,
+            weight_assist_matrix,
+            bias_real,
+            x_scale,
+            smooth_scale_real,
+            group_list,
+            dequant_mode_real,
+            dequant_dtype_real,
+            quant_mode_real,
+            group_list_type,
+            tuning_config,
+            swiglu_limit_f,
+            output,
+            output_scale);
+    }
     return std::tuple<at::Tensor, at::Tensor>(output, output_scale);
 }
 

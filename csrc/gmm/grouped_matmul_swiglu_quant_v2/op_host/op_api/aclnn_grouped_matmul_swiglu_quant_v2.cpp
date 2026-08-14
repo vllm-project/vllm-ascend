@@ -22,6 +22,27 @@ using namespace op;
 using namespace gmm_dsq;
 using namespace gmm_dsq_base;
 
+namespace {
+constexpr int64_t NZ_K_BLOCK = 16;
+constexpr int64_t NZ_N_BLOCK_INT8 = 32;
+constexpr int64_t NZ_N_BLOCK_INT4 = 64;
+// torch_npu carries packed INT4 values in INT32 storage. The last physical
+// dimension is expanded by INT4_PER_INT32 later in gmm_dsq_base::UnpackInt32ToInt4.
+constexpr int64_t NZ_STORAGE_LAST_DIM_PACKED_INT4 = 8;
+
+op::Shape GetWeightNzStorageShape(const aclTensor *weight, int64_t expertNum, int64_t k, int64_t n,
+                                  bool singleTensor)
+{
+    const bool isA8W8 = weight->GetDataType() == op::DataType::DT_INT8;
+    const int64_t nBlock = isA8W8 ? NZ_N_BLOCK_INT8 : NZ_N_BLOCK_INT4;
+    const int64_t lastDim = isA8W8 ? NZ_N_BLOCK_INT8 : NZ_STORAGE_LAST_DIM_PACKED_INT4;
+    if (singleTensor) {
+        return {expertNum, n / nBlock, k / NZ_K_BLOCK, NZ_K_BLOCK, lastDim};
+    }
+    return {n / nBlock, k / NZ_K_BLOCK, NZ_K_BLOCK, lastDim};
+}
+} // namespace
+
 class GmmDsqHandlerFactory {
 private:
     std::unordered_map<NpuArch, std::unique_ptr<GroupedMatmulSwigluQuantHandler>> handlers_;
@@ -126,11 +147,17 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(const aclTen
         auto n = weightScaleStorageShape[weightScaleStorageShape.GetDimNum() - 1];
         auto xViewShape = x->GetViewShape();
         auto k = xViewShape[1];
-        storageShape = {expertNum, n / 64, k / 16, 16, 8};
+        storageShape = GetWeightNzStorageShape(w, expertNum, k, n, true);
         w->SetStorageShape(storageShape);
-        CHECK_COND((storgeShape.GetDimNum() == WEIGHT_NZ_DIM_LIMIT), ACLNN_ERR_PARAM_INVALID,
+        // A2 may expose FRACTAL_NZ allocation as a flat physical storage
+        // shape while A3 exposes its rank-5 blocked shape. Both describe the
+        // same allocation, so accept the flat form when its element count
+        // matches the blocked shape we bind below.
+        const bool isValidSingleStorageShape = storgeShape.GetDimNum() == WEIGHT_NZ_DIM_LIMIT ||
+            (storgeShape.GetDimNum() == 1 && storgeShape.GetShapeSize() == storageShape.GetShapeSize());
+        CHECK_COND(isValidSingleStorageShape, ACLNN_ERR_PARAM_INVALID,
                    "aclnnGroupedMatmulSwigluQuantWeightNzV2, The dimnum of storageShape for second input (weight)"
-                 "must be 5. \n But StorageShape got %s , and dimNum is %lu.",
+                 "must be 5, or 1 with the equivalent flattened size. \n But StorageShape got %s , and dimNum is %lu.",
                    op::ToString(storgeShape).GetString(), storgeShape.GetDimNum());
         // weight的StorageFormat无条件视为NZ
         weightNZ->SetStorageFormat(op::Format::FORMAT_FRACTAL_NZ);
@@ -155,11 +182,13 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(const aclTen
             auto n = weightScaleStorageShape[weightScaleStorageShape.GetDimNum() - 1];
             auto xViewShape = x->GetViewShape();
             auto k = xViewShape[1];
-            storageShape = {n / 64, k / 16, 16, 8};
+            storageShape = GetWeightNzStorageShape(w, 0, k, n, false);
             w->SetStorageShape(storageShape);
-            CHECK_COND((storgeShape.GetDimNum() == MULTI_WEIGHT_NZ_DIM_LIMIT), ACLNN_ERR_PARAM_INVALID,
+            const bool isValidMultiStorageShape = storgeShape.GetDimNum() == MULTI_WEIGHT_NZ_DIM_LIMIT ||
+                (storgeShape.GetDimNum() == 1 && storgeShape.GetShapeSize() == storageShape.GetShapeSize());
+            CHECK_COND(isValidMultiStorageShape, ACLNN_ERR_PARAM_INVALID,
                        "aclnnGroupedMatmulSwigluQuantWeightNzV2, The dimnum of storageShape for second input (weight)"
-                     "must be 4. \n But StorageShape got %s , and dimNum is %lu.",
+                     "must be 4, or 1 with the equivalent flattened size. \n But StorageShape got %s , and dimNum is %lu.",
                        op::ToString(storgeShape).GetString(), storgeShape.GetDimNum());
             // weight的StorageFormat无条件视为NZ
             weightNZ->SetStorageFormat(op::Format::FORMAT_FRACTAL_NZ);

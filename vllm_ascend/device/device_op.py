@@ -29,7 +29,7 @@ from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES, get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, enable_gmm_swiglu_quant_v2_custom_op, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
@@ -209,12 +209,17 @@ class BaseDeviceAdaptor:
     def npu_grouped_matmul_swiglu_quant(
         *,
         x: torch.Tensor,
-        weight: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
         group_list: torch.Tensor,
         group_list_type: int,
-        weight_scale: torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
         x_scale: torch.Tensor,
-        bias=None,
+        bias: list[torch.Tensor] | torch.Tensor | None = None,
+        dequant_mode: int | None = None,
+        dequant_dtype: torch.dtype | None = None,
+        quant_mode: int | None = None,
+        quant_dtype: torch.dtype | None = None,
+        transpose_weight: bool = False,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
@@ -224,33 +229,41 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        # The custom Weight-NZ V2 bridge is not replay-safe for packed W8A8
-        # weights on A2. Use torch-npu's V2 binding for that layout; it exposes
-        # the same TensorList ABI and keeps the fused kernel in ACLGraph.
-        if (
-            get_ascend_device_type() == AscendDeviceType.A2
-            and act_quant_type == torch.int8
-            and weight.dtype == torch.int8
-            and swiglu_limit == 0.0
-        ):
-            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                x=x,
-                weight=[weight],
-                weight_scale=[weight_scale],
-                x_scale=x_scale,
-                group_list=group_list,
-                weight_assist_matrix=[bias] if bias is not None else None,
-                group_list_type=group_list_type,
-            )
+        weights = weight if isinstance(weight, list) else [weight]
+        weight_scales = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+        if len(weights) != len(weight_scales):
+            raise ValueError("weight and weight_scale must contain the same number of tensors.")
+        weight_assist_matrix = bias if isinstance(bias, list) else ([bias] if bias is not None else None)
+        if weight_assist_matrix is not None and len(weights) != len(weight_assist_matrix):
+            raise ValueError("weight and bias must contain the same number of tensors.")
+
+        if dequant_mode is None:
+            # Per-group scales add one K-group dimension compared with the
+            # corresponding per-channel single-/multi-tensor layout.
+            per_channel_scale_dim = 2 if len(weights) == 1 else 1
+            dequant_mode = int(weight_scales[0].dim() > per_channel_scale_dim)
+
+        if group_list_type == 1:
+            # Keep one custom-op attribute signature across ACLGraph captures.
+            # The device-side cumsum remains replayable when expert token
+            # counts change between requests.
+            group_list = group_list.cumsum(dim=0)
+        elif group_list_type != 0:
+            raise ValueError(f"group_list_type must be 0 or 1, but got {group_list_type}.")
 
         return torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
             x=x,
-            weight=[weight],
-            weight_scale=[weight_scale],
+            weight=weights,
+            weight_scale=weight_scales,
             x_scale=x_scale,
             group_list=group_list,
-            weight_assist_matrix=[bias] if bias is not None else None,
-            group_list_type=group_list_type,
+            weight_assist_matrix=weight_assist_matrix,
+            dequant_mode=dequant_mode,
+            dequant_dtype=dequant_dtype,
+            quant_mode=quant_mode,
+            quant_dtype=quant_dtype,
+            transpose_weight=transpose_weight,
+            group_list_type=0,
             swiglu_limit=swiglu_limit,
         )
 
@@ -1187,10 +1200,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_grouped_matmul_swiglu_quant(
         *,
         x: torch.Tensor,
-        weight: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
         group_list: torch.Tensor,
         group_list_type: int,
-        weight_scale: torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
@@ -1199,31 +1212,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         swiglu_limit: float = 0.0,
         mxfp_quant_dtype: QuantType | None = None,
     ):
+        if bias is not None:
+            raise NotImplementedError("grouped_matmul_swiglu_quant_v2 on A5 does not support bias.")
+
         if not use_mxfp_quant:
-            if act_quant_type == torch.float8_e4m3fn:
-                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=[weight],
-                    weight_scale=[weight_scale],
-                    x_scale=x_scale,
-                    group_list=group_list,
-                    group_list_type=group_list_type,
-                    quant_dtype=torch.float8_e4m3fn,
-                    dequant_dtype=torch.float32,
-                )
-                return out, out_scale
-            else:
-                return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=weight,
-                    group_list=group_list,
-                    weight_scale=weight_scale,
-                    x_scale=x_scale,
-                    bias=bias,
-                    group_list_type=group_list_type,
-                    swiglu_limit=swiglu_limit,
-                    use_mxfp_quant=False,
-                )
+            if not enable_gmm_swiglu_quant_v2_custom_op():
+                raise RuntimeError("The custom grouped_matmul_swiglu_quant_v2 operator is unavailable on A5.")
+            return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+                x=x,
+                weight=weight,
+                weight_scale=weight_scale,
+                x_scale=x_scale,
+                group_list=group_list,
+                group_list_type=group_list_type,
+                dequant_mode=0,
+                dequant_dtype=torch.float32,
+                quant_mode=0,
+                quant_dtype=act_quant_type,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                swiglu_limit=swiglu_limit,
+            )
 
         # W4A8 mxfp
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
@@ -1266,21 +1275,21 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             out = torch_npu.npu_swiglu(hidden_states)
             out_scale = None
         else:
-            out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            if not enable_gmm_swiglu_quant_v2_custom_op():
+                raise RuntimeError("The custom grouped_matmul_swiglu_quant_v2 operator is unavailable on A5.")
+            out, out_scale = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
                 x=x,
-                weight=[weight],
+                weight=weight,
                 group_list=group_list,
-                weight_scale=[weight_scale],
+                weight_scale=weight_scale,
                 x_scale=x_scale,
                 group_list_type=group_list_type,
                 dequant_mode=2,
                 quant_mode=2,
                 dequant_dtype=torch.float32,
                 quant_dtype=act_quant_type,
-                x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
-                weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-                weight_scale_dtype=torch_npu.float8_e8m0fnu,
-                x_scale_dtype=torch_npu.float8_e8m0fnu,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
             )
         return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale)
 

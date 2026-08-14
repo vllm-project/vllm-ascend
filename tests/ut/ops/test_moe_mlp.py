@@ -22,7 +22,6 @@ from vllm_ascend.ops.fused_moe.moe_mlp import (
     unquant_apply_mlp,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
@@ -866,21 +865,7 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
 
 
 class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
-    def test_a2_w8a8_eager_uses_split_kernels(self):
-        self._assert_a2_w8a8_uses_split_kernels(capturing=False, compiling=False)
-
-    def test_a2_w8a8_graph_capture_uses_split_kernels(self):
-        self._assert_a2_w8a8_uses_split_kernels(capturing=True, compiling=False)
-
-    def test_a2_w8a8_graph_compilation_uses_split_kernels(self):
-        self._assert_a2_w8a8_uses_split_kernels(capturing=False, compiling=True)
-
-    def _assert_a2_w8a8_uses_split_kernels(self, *, capturing: bool, compiling: bool):
-        mock_ctx = SimpleNamespace(moe_comm_type=-1, capturing=capturing)
-        gate_up_output = torch.zeros(3, 8, dtype=torch.bfloat16)
-        activated = torch.zeros(3, 4, dtype=torch.bfloat16)
-        quantized_activated = torch.zeros(3, 4, dtype=torch.int8)
-        activated_scale = torch.ones(3, dtype=torch.float32)
+    def test_w8a8_all_execution_modes_use_custom_v2(self):
         final_output = torch.zeros(3, 2)
         kwargs = self._common_w8a8_kwargs(
             activation="silu",
@@ -900,29 +885,26 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
             }
         )
 
-        with (
-            patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
-            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A2),
-            patch(f"{MOE_MLP}.HAS_TRITON", False),
-            patch("torch.compiler.is_compiling", return_value=compiling),
-            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_output], create=True) as mock_gmm1,
-            patch("torch_npu.npu_swiglu", return_value=activated, create=True) as mock_activation,
-            patch(
-                "torch_npu.npu_dynamic_quant",
-                return_value=(quantized_activated, activated_scale),
-                create=True,
-            ),
-            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
-            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=final_output),
-            patch(f"{MOE_MLP}.dispose_tensor"),
-            _patch_npu_stream()[0],
-        ):
-            output, _ = quant_apply_mlp(**kwargs)
+        for capturing, compiling in ((False, False), (True, False), (False, True)):
+            with self.subTest(capturing=capturing, compiling=compiling):
+                mock_ctx = SimpleNamespace(moe_comm_type=-1, capturing=capturing)
+                fused_output = torch.zeros(3, 4, dtype=torch.int8)
+                fused_scale = torch.ones(3, dtype=torch.float32)
+                with (
+                    patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
+                    patch("torch.compiler.is_compiling", return_value=compiling),
+                    patch.object(
+                        DeviceOperator,
+                        "npu_grouped_matmul_swiglu_quant",
+                        return_value=(fused_output, fused_scale),
+                    ) as mock_fused,
+                    patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=final_output),
+                    _patch_npu_stream()[0],
+                ):
+                    output, _ = quant_apply_mlp(**kwargs)
 
-        mock_fused.assert_not_called()
-        mock_gmm1.assert_called_once()
-        mock_activation.assert_called_once()
-        self.assertIs(output, final_output)
+                mock_fused.assert_called_once()
+                self.assertIs(output, final_output)
 
     def test_multi_tensor_fused_paths_pass_expert_counts_to_v2(self):
         expected_group_list = torch.tensor([1, 2, 0], dtype=torch.int64)
@@ -973,12 +955,11 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
 
         with (
             patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
-            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A3),
             patch(f"{MOE_MLP}._custom_gmm_swiglu_enabled", return_value=True),
-            patch(
-                "torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
+            patch.object(
+                DeviceOperator,
+                "npu_grouped_matmul_swiglu_quant",
                 return_value=(fused_output, fused_scale),
-                create=True,
             ) as mock_gmm_swiglu,
             patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=final_output),
             _patch_npu_stream()[0],
@@ -1041,7 +1022,6 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
 
         with (
             patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
-            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A3),
             patch.object(
                 DeviceOperator,
                 "npu_grouped_matmul_swiglu_quant",
