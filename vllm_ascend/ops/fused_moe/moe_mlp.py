@@ -263,8 +263,8 @@ def quant_apply_mlp(
             hidden_states, swiglu_out_scale = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
-                group_list=cumsum_group_list(group_list, group_list_type, 1),
-                group_list_type=1,
+                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                group_list_type=0,
                 weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
                 x_scale=pertoken_scale,
                 bias=None,
@@ -473,8 +473,8 @@ def quant_apply_mlp(
             hidden_states, swiglu_out_scale = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
-                group_list=cumsum_group_list(group_list, group_list_type, 1),
-                group_list_type=1,
+                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                group_list_type=0,
                 weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
                 x_scale=pertoken_scale,
                 bias=bias1,
