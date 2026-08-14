@@ -161,15 +161,6 @@ jobs:
 
     strategy:
       matrix:
-        dockerfile:
-          - Dockerfile
-          - Dockerfile.310p
-          - Dockerfile.310p.openEuler
-          - Dockerfile.a3
-          - Dockerfile.a3.openEuler
-          - Dockerfile.openEuler
-          - Dockerfile.a5
-          - Dockerfile.a5.openEuler
         runner_info:
           - {runner: linux-aarch64-cpu-4, arch: arm64, tag: arm64}
           - {runner: linux-amd64-cpu-4, arch: amd64, tag: amd64}
@@ -267,7 +258,7 @@ jobs:
         install: true
         driver: docker-container
         use: true
-
+    #TODO SWR需要这个步骤吗？
     - name: Login to GitHub Container Registry (for cache)
       uses: docker/login-action@v4
       with:
@@ -338,7 +329,7 @@ jobs:
     - name: Determine SOC_VERSION
       id: vars
       run: |
-        case "${{ matrix.dockerfile }}" in
+        case "${{ inputs.dockerfile }}" in
           Dockerfile|Dockerfile.openEuler)
             echo "soc_version=ascend910b1" >> $GITHUB_OUTPUT
             ;;
@@ -369,6 +360,7 @@ jobs:
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
+        # TODO: outputs: type=image,name=${QUAY_TEMP_REPO},push-by-digest=true,name-canonical=true,push=... ：以 digest 形式推送到 temp 仓库（不直接打 tag）
         outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
@@ -397,7 +389,7 @@ jobs:
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
         # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
-        # push地址 tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
+        # push地址 tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ inputs.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
         # cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
         # cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
         cache-from: type=registry,ref=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ steps.cache-tag.outputs.value }}
@@ -405,28 +397,28 @@ jobs:
 
     # Quay.io automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
     # Add temporary tags to digests to prevent them from being removed.
-    - name: Tag digest to prevent GC
-      if: ${{ inputs.should_push }}
-      run: |
-        SUFFIX=""
-        if [ -n "${{ inputs.suffix }}" ]; then
-          SUFFIX="-${{ inputs.suffix }}"
-        fi
-        if [ "${{ inputs.temp_only }}" = "true" ]; then
-          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
-          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
-        else
-          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            DATE=$(date +'%Y%m%d')
-            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
-          fi
-        fi
-        echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
-        docker buildx imagetools create \
-          -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
-          "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
+    # - name: Tag digest to prevent GC
+    #   if: ${{ inputs.should_push }}
+    #   run: |
+    #     SUFFIX=""
+    #     if [ -n "${{ inputs.suffix }}" ]; then
+    #       SUFFIX="-${{ inputs.suffix }}"
+    #     fi
+    #     if [ "${{ inputs.temp_only }}" = "true" ]; then
+    #       VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+    #       ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
+    #       TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
+    #     else
+    #       TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
+    #       if [ "${{ inputs.build_type }}" = "daily" ]; then
+    #         DATE=$(date +'%Y%m%d')
+    #         TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
+    #       fi
+    #     fi
+    #     echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
+    #     docker buildx imagetools create \
+    #       -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
+    #       "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
 
 
     - name: Export digest
@@ -554,13 +546,19 @@ jobs:
             # =============================================
           flavor:
             latest=false
-
-      - name: Login to Quay
+      # TODO: 应该登录华为云吧
+      - name: Login to SWR
         uses: docker/login-action@v4
         with:
-          registry: quay.io
-          username: ${{ inputs.quay_username }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          registry: swr.cn-southwest-2.myhuaweicloud.com
+          username: ${{ secrets.swr_username }}
+          password: ${{ secrets.swr_password }}
+      # - name: Login to Quay
+      #   uses: docker/login-action@v4
+      #   with:
+      #     registry: quay.io
+      #     username: ${{ inputs.quay_username }}
+      #     password: ${{ secrets.QUAY_PASSWORD }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
