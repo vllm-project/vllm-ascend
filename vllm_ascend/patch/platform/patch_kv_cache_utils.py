@@ -2,11 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 
+import vllm.v1.core.block_pool
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import (
+    FreeKVCacheBlockQueue,
+    KVCacheBlock,
+    _approximate_gcd,
+    may_override_num_blocks,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -18,6 +27,86 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.utils import vllm_version_is
+
+logger = init_logger(__name__)
+
+
+def _queue_block_summary(block: KVCacheBlock) -> str:
+    prev_id = block.prev_free_block.block_id if block.prev_free_block is not None else None
+    next_id = block.next_free_block.block_id if block.next_free_block is not None else None
+    return (
+        f"block_id={block.block_id} ref_cnt={block.ref_cnt} "
+        f"is_null={block.is_null} prev_free_block={prev_id} next_free_block={next_id}"
+    )
+
+
+def _swa_block_diag(kind: str, block: KVCacheBlock, where: str) -> None:
+    msg = f"SWA_BLOCK_DIAG {kind} where={where} {_queue_block_summary(block)}"
+    logger.warning(msg)
+
+
+def _dedupe_free_blocks(blocks: Iterable[KVCacheBlock], where: str) -> list[KVCacheBlock]:
+    deduped_blocks: list[KVCacheBlock] = []
+    seen_block_ids: set[int] = set()
+    for block in blocks:
+        if not block.is_null and block.block_id in seen_block_ids:
+            _swa_block_diag("duplicate_free_batch", block, where)
+            continue
+        if not block.is_null:
+            seen_block_ids.add(block.block_id)
+        deduped_blocks.append(block)
+    return deduped_blocks
+
+
+def _filter_queue_insert_blocks(blocks: list[KVCacheBlock], where: str) -> list[KVCacheBlock]:
+    filtered_blocks: list[KVCacheBlock] = []
+    seen_block_ids: set[int] = set()
+    for block in blocks:
+        if block.is_null:
+            _swa_block_diag("null_free_queue_insert", block, where)
+            continue
+        if block.block_id in seen_block_ids:
+            _swa_block_diag("duplicate_free_queue_insert", block, where)
+            continue
+        if block.ref_cnt != 0:
+            _swa_block_diag("nonzero_ref_cnt_free_queue_insert", block, where)
+            continue
+        if block.prev_free_block is not None or block.next_free_block is not None:
+            _swa_block_diag("linked_free_queue_insert", block, where)
+            continue
+        seen_block_ids.add(block.block_id)
+        filtered_blocks.append(block)
+    return filtered_blocks
+
+
+_orig_block_pool_free_blocks = BlockPool.free_blocks
+
+
+def _ascend_free_blocks(
+    self: BlockPool,
+    ordered_blocks: Iterable[KVCacheBlock],
+    prepend: bool = False,
+) -> None:
+    filtered_blocks: list[KVCacheBlock] = []
+    for block in _dedupe_free_blocks(ordered_blocks, "BlockPool.free_blocks"):
+        if not block.is_null and block.ref_cnt <= 0:
+            _swa_block_diag("ref_cnt_underflow_free_blocks", block, "BlockPool.free_blocks")
+            continue
+        filtered_blocks.append(block)
+    _orig_block_pool_free_blocks(self, filtered_blocks, prepend)
+
+
+_orig_free_queue_prepend_n = FreeKVCacheBlockQueue.prepend_n
+_orig_free_queue_append_n = FreeKVCacheBlockQueue.append_n
+
+
+def _ascend_free_queue_prepend_n(self: FreeKVCacheBlockQueue, blocks: list[KVCacheBlock]) -> None:
+    _orig_free_queue_prepend_n(self, _filter_queue_insert_blocks(blocks, "FreeKVCacheBlockQueue.prepend_n"))
+
+
+def _ascend_free_queue_append_n(self: FreeKVCacheBlockQueue, blocks: list[KVCacheBlock]) -> None:
+    _orig_free_queue_append_n(self, _filter_queue_insert_blocks(blocks, "FreeKVCacheBlockQueue.append_n"))
+
 
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 
@@ -249,6 +338,12 @@ def _get_kv_cache_config_deepseek_v4(
     return num_blocks, kv_cache_tensors
 
 
+BlockPool.free_blocks = _ascend_free_blocks
+vllm.v1.core.block_pool.BlockPool.free_blocks = _ascend_free_blocks
+FreeKVCacheBlockQueue.prepend_n = _ascend_free_queue_prepend_n
+FreeKVCacheBlockQueue.append_n = _ascend_free_queue_append_n
+vllm.v1.core.kv_cache_utils.FreeKVCacheBlockQueue.prepend_n = _ascend_free_queue_prepend_n
+vllm.v1.core.kv_cache_utils.FreeKVCacheBlockQueue.append_n = _ascend_free_queue_append_n
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
