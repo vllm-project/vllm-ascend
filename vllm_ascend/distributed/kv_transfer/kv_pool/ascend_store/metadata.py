@@ -11,7 +11,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
@@ -293,7 +292,6 @@ class ChunkedTokenDatabase:
         metadata: list[KeyMetadata],
         block_size: list[int],
         partitions: list[int] | None,
-        use_hybrid: bool = False,
         hash_block_size: int | None = None,
     ):
         self.metadata = metadata
@@ -311,7 +309,6 @@ class ChunkedTokenDatabase:
             "state": {},
         }
         self.partitions = partitions
-        self.use_hybrid = use_hybrid
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
         self._key_prefix_cache: dict[tuple[int, str, str], str] = {}
         self.cache_coordinator: Any | None = None
@@ -466,16 +463,6 @@ class ChunkedTokenDatabase:
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
-
-    def prepare_block_info(self, start: int, end: int, block_ids: list[int]) -> tuple[int, list[int]]:
-        block_size = self.block_size[0]
-        block_id = block_ids[start // block_size]
-        block_len = self.group_block_len.get(0, [])
-        size_list = []
-        for i in range(len(block_len)):
-            size = int(block_len[i] / block_size * (end - start))
-            size_list.append(size)
-        return block_id, size_list
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)
@@ -755,15 +742,6 @@ class RequestTracker:
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
-    block_keys: list[str] = field(default_factory=list)
-
-    starts: list[int] | None = None
-    ends: list[int] | None = None
-
-    sizes_per_chunk: list[list[int]] | None = None
-
-    last_block_key: str | None = None
-
     mamba_group_ids: list[int] | None = None
 
     # spec blocks for mamba cache group
@@ -784,11 +762,6 @@ class RequestTracker:
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
-        block_keys: list[str] | None = None,
-        starts: list[int] | None = None,
-        ends: list[int] | None = None,
-        sizes_per_chunk: list[list[int]] | None = None,
-        last_block_key: str | None = None,
         mamba_group_ids: list[int] | None = None,
         num_speculative_blocks: int = 0,
         block_sizes: list[int] | None = None,
@@ -808,11 +781,6 @@ class RequestTracker:
         self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
-        self.block_keys = [] if block_keys is None else block_keys
-        self.starts = starts
-        self.ends = ends
-        self.sizes_per_chunk = sizes_per_chunk
-        self.last_block_key = last_block_key
         self.block_sizes = block_sizes
 
     @property
@@ -822,21 +790,6 @@ class RequestTracker:
     @allocated_block_ids.setter
     def allocated_block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.allocated_block_ids_by_group = normalize_block_ids_by_group(block_ids)
-
-    @staticmethod
-    def from_new_request(
-        new_request: NewRequestData,
-        num_tokens_to_compute: int,
-    ) -> RequestTracker:
-        """Create the request tracker from a new request."""
-        return RequestTracker(
-            req_id=new_request.req_id,
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
-            token_len=num_tokens_to_compute,
-            allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
-            num_saved_tokens=0,
-            num_prompt_tokens=len(new_request.prompt_token_ids),
-        )
 
     def update(
         self,
@@ -890,7 +843,6 @@ class ReqMeta:
     save_end_token: int
     # Token length after this scheduled step finishes.
     target_token_len: int
-
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
@@ -906,7 +858,6 @@ class ReqMeta:
 
     current_event: torch.npu.Event | None = None
     kv_cache_group_ids: list[int] | None = None
-    kv_cache_families_by_group: list[str] | None = None
     skip_null_blocks_by_group: list[bool] | None = None
     num_prompt_tokens: int | None = None
 
@@ -928,7 +879,6 @@ class ReqMeta:
         is_last_chunk: bool | None = None,
         current_event: torch.npu.Event | None = None,
         kv_cache_group_ids: list[int] | None = None,
-        kv_cache_families_by_group: list[str] | None = None,
         skip_null_blocks_by_group: list[bool] | None = None,
         num_prompt_tokens: int | None = None,
         token_ids: list[int] | None = None,
@@ -940,9 +890,6 @@ class ReqMeta:
         save_start_token: int = 0,
         last_block_gva: int | None = None,
         partial_block_index: int | None = None,
-        starts: list[int] | None = None,
-        ends: list[int] | None = None,
-        sizes_per_chunk: list[list[int]] | None = None,
         block_ids_np: np.ndarray | None = None,
         block_ids_by_group_np: list[np.ndarray] | None = None,
         block_gvas_np: np.ndarray | None = None,
@@ -970,7 +917,6 @@ class ReqMeta:
         self.is_last_chunk = is_last_chunk
         self.current_event = current_event
         self.kv_cache_group_ids = kv_cache_group_ids
-        self.kv_cache_families_by_group = kv_cache_families_by_group
         self.skip_null_blocks_by_group = skip_null_blocks_by_group
         self.num_prompt_tokens = num_prompt_tokens
         self.token_ids = token_ids
@@ -978,9 +924,6 @@ class ReqMeta:
         self.event_id = event_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
-        self.starts = starts
-        self.ends = ends
-        self.sizes_per_chunk = sizes_per_chunk
         self.block_ids_np = block_ids_np
         self.block_ids_by_group_np = block_ids_by_group_np
         self.block_gvas_np = block_gvas_np
@@ -1004,11 +947,6 @@ class ReqMeta:
     partial_block_index: int | None = None
     save_keys: list[str] | None = None
     load_keys: list[str] | None = None
-
-    starts: list[int] | None = None
-    ends: list[int] | None = None
-
-    sizes_per_chunk: list[list[int]] | None = None
 
     block_ids_np: np.ndarray | None = None
     block_ids_by_group_np: list[np.ndarray] | None = None
@@ -1129,20 +1067,17 @@ class ReqMeta:
             else None,
             gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
-            kv_cache_families_by_group=kv_cache_group_families,
         )
 
 
 class AscendConnectorMetadata(KVConnectorMetadata):
     def __init__(
         self,
-        unfinished_request_ids,
         preempted_req_ids,
         loading_req_ids: set[str] | None = None,
         delayed_free_req_ids: set[str] | None = None,
     ):
         self.requests: list[ReqMeta] = []
-        self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
         self.delayed_free_req_ids = delayed_free_req_ids or set()
@@ -1265,10 +1200,6 @@ class LayerMultiBlockReqMeta:
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
-
-    def mark_completed_events(self, event_id: int | None) -> None:
-        if event_id is not None:
-            self.completed_events[event_id] = 1
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
