@@ -31,6 +31,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import MooncakeKVConnectorStats
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -125,9 +127,10 @@ class SizedDict(OrderedDict):
 
 
 class KVCacheTaskTracker:
-    def __init__(self):
+    def __init__(self, xfer_stats: MooncakeKVConnectorStats | None = None):
         super().__init__()
 
+        self.xfer_stats = xfer_stats
         self.done_task_lock = threading.Lock()
         self.finished_requests: set[str] = set()
         # Only used in prefill node. Tracks requests whose kv blocks freeing is
@@ -191,6 +194,8 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
+                if self.xfer_stats is not None:
+                    self.xfer_stats.record_kv_expired_req()
                 logger.info(
                     "Force freed expired request: %s. "
                     "Reason: Request exceeded timeout threshold (%s seconds). "
@@ -215,6 +220,7 @@ class KVCacheSendingThread(threading.Thread):
         metadata: MooncakeAgentMetadata,
         ready_event: threading.Event,
         kv_caches: dict[str, Any],
+        xfer_stats: MooncakeKVConnectorStats | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingThread")
         self.tp_rank = tp_rank
@@ -230,7 +236,7 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.port_send_num: dict[str, int] = {}
 
-        self.task_tracker = KVCacheTaskTracker()
+        self.task_tracker = KVCacheTaskTracker(xfer_stats)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -385,6 +391,7 @@ class KVCacheRecvingThread(threading.Thread):
         kv_cache_config: KVCacheConfig,
         kv_caches: dict[str, Any],
         prefill_pp_layer_partition: str | None = None,
+        xfer_stats: MooncakeKVConnectorStats | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -425,7 +432,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.finished_request_markers: set[str] = set()
         self.request_task_counts_lock = threading.Lock()
 
-        self.task_tracker = KVCacheTaskTracker()
+        self.xfer_stats = xfer_stats if xfer_stats is not None else MooncakeKVConnectorStats()
+        self.task_tracker = KVCacheTaskTracker(self.xfer_stats)
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
@@ -604,6 +612,9 @@ class KVCacheRecvingThread(threading.Thread):
                 self._transfer_kv_cache_all_groups(req_meta)
             logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
         except Exception:
+            # Counted per failed receive task; an engine failure also counts
+            # once as a failed transfer op before raising here.
+            self.xfer_stats.record_failed_recv()
             logger.exception("Failed to transfer KV cache for request %s.", remote_request_id)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
@@ -696,14 +707,22 @@ class KVCacheRecvingThread(threading.Thread):
                     dst_list.append(dst)
                     length_list.append(length)
 
+        xfer_start_time = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        xfer_duration = time.perf_counter() - xfer_start_time
         if ret < 0:
+            self.xfer_stats.record_failed_transfer()
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
                 req_meta["remote_request_id"],
                 ret,
             )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+        self.xfer_stats.record_transfer(
+            duration_s=xfer_duration,
+            total_bytes=sum(length_list),
+            num_descs=len(src_list),
+        )
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
@@ -796,14 +815,22 @@ class KVCacheRecvingThread(threading.Thread):
                 dst_list.append(dst)
                 length_list.append(length)
 
+        xfer_start_time = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        xfer_duration = time.perf_counter() - xfer_start_time
         if ret < 0:
+            self.xfer_stats.record_failed_transfer()
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
                 req_meta["remote_request_id"],
                 ret,
             )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+        self.xfer_stats.record_transfer(
+            duration_s=xfer_duration,
+            total_bytes=sum(length_list),
+            num_descs=len(src_list),
+        )
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
@@ -1153,6 +1180,22 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_save(self):
         """MooncakeConnector does not save explicitly."""
         pass
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return worker-local transfer stats since the last call.
+
+        Note the P/D asymmetry: this connector is D-pull (the decode worker
+        calls batch_transfer_sync_read), so D records successful transfer
+        latency, bytes and descriptor counts as well as failed pulls, while
+        P only records requests whose KV expired before being fetched.
+        """
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats | None:
+        return MooncakeKVConnectorStats(data=data or {})
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
@@ -1569,6 +1612,10 @@ class MooncakeConnectorWorker:
         self.kv_send_thread: KVCacheSendingThread | None = None
         self.kv_recv_thread: KVCacheRecvingThread | None = None
 
+        # Transfer stats shared with the sending/receiving thread; drained
+        # periodically via get_kv_connector_stats.
+        self.xfer_stats = MooncakeKVConnectorStats()
+
         # Handshake metadata of this worker
         self.xfer_handshake_metadata: MooncakeAgentMetadata | None = None
 
@@ -1714,6 +1761,7 @@ class MooncakeConnectorWorker:
                 metadata,
                 ready_event,
                 self.kv_caches,
+                xfer_stats=self.xfer_stats,
             )
             self.kv_send_thread.start()
         else:
@@ -1738,6 +1786,7 @@ class MooncakeConnectorWorker:
                 self.kv_cache_config,
                 self.kv_caches,
                 self._prefill_pp_layer_partition,
+                xfer_stats=self.xfer_stats,
             )
             self.kv_recv_thread.start()
 
@@ -1771,6 +1820,13 @@ class MooncakeConnectorWorker:
                 len(done_recving),
             )
         return done_sending, done_recving
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return transfer stats collected since the last call, or None
+        if nothing has been recorded in this interval."""
+        if self.xfer_stats.is_empty():
+            return None
+        return self.xfer_stats.clone_and_reset()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
