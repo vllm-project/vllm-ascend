@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
@@ -13,6 +14,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    _make_modelslim_moe_weight_loader,
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
@@ -124,6 +126,74 @@ class TestAscendModelSlimConfig(TestBase):
             self.assertIs(method, None)
             method = self.ascend_config.get_quant_method(attention_layer, "layers.1.attn")
             self.assertIs(method, mock_ascend_kvcache.return_value)
+
+    def test_modelslim_moe_weight_loader_maps_scale_bias_to_scale_path(self):
+        upstream_loader = MagicMock(return_value=True)
+        weight_loader = _make_modelslim_moe_weight_loader(upstream_loader)
+        param = torch.nn.Parameter(torch.empty(1))
+        loaded_weight = torch.empty(1)
+
+        result = weight_loader(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w2_scale_bias",
+            shard_id="w2",
+            expert_id=0,
+            return_success=True,
+        )
+
+        self.assertTrue(result)
+        upstream_loader.assert_called_once_with(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w2_scale",
+            shard_id="w2",
+            expert_id=0,
+            return_success=True,
+        )
+
+    def test_get_quant_method_for_moe_installs_modelslim_weight_loader(self):
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = MagicMock()
+        upstream_loader = MagicMock(return_value=True)
+        layer.weight_loader = upstream_loader
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "qwen3_5_moe"
+        mock_scheme = MagicMock()
+
+        with (
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
+            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
+                return_value=MagicMock(),
+            ) as mock_ascend_fused_moe,
+        ):
+            method = self.ascend_config.get_quant_method(layer, "model.layers.0.mlp.experts")
+
+        self.assertIs(method, mock_ascend_fused_moe.return_value)
+        mock_ascend_fused_moe.assert_called_once_with(mock_scheme, layer.moe_config, None)
+
+        param = torch.nn.Parameter(torch.empty(1))
+        loaded_weight = torch.empty(1)
+        layer.weight_loader(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w13_scale_bias",
+            shard_id="w1",
+            expert_id=0,
+            return_success=True,
+        )
+        upstream_loader.assert_called_once_with(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w13_scale",
+            shard_id="w1",
+            expert_id=0,
+            return_success=True,
+        )
 
     def test_get_quant_method_for_c8_kv_cache_attention(self):
         c8_config = AscendModelSlimConfig(

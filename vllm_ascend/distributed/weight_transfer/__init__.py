@@ -20,8 +20,6 @@ from vllm.distributed.weight_transfer.factory import (
     WeightTransferTrainerFactory,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def register_engine():
     """Register Ascend weight transfer engines as vLLM plugins."""
@@ -35,13 +33,8 @@ def register_engine():
         "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
         "NPUIPCWeightTransferEngine",
     )
-    # main2main compat: the stateful `IPCTrainerWeightTransferEngine` path was
-    # introduced in vllm main after 0.26.0; on 0.26.0 the trainer still uses
-    # the static `IPCWeightTransferEngine.trainer_send_weights(...)` path, so
-    # the trainer-side factory has nothing to register.
-    if not vllm_version_is("0.26.0"):
-        WeightTransferTrainerFactory.register_engine(
-            "npu_ipc",
-            "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
-            "NPUIPCTrainerWeightTransferEngine",
-        )
+    WeightTransferTrainerFactory.register_engine(
+        "npu_ipc",
+        "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
+        "NPUIPCTrainerWeightTransferEngine",
+    )

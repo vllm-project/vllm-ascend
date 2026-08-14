@@ -41,7 +41,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -391,7 +391,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def _index_qk_norm(self, idx_q: torch.Tensor, idx_k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         idx_q_shape = idx_q.shape
         idx_k_shape = idx_k.shape
-        idx_q = idx_q.reshape(-1, self.index_q_size)
+        idx_q = idx_q.reshape(-1, self.idx_head_dim)
         idx_k = idx_k.reshape(-1, self.idx_head_dim)
         idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
         idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
@@ -546,7 +546,7 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,

@@ -19,8 +19,6 @@ import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class _NpuAll2AllManager:
     """No-op all2all_manager for NPU. Used by vLLM main's fault-tolerance
@@ -40,45 +38,24 @@ class _NpuAll2AllManager:
 
 
 class NPUCommunicator(DeviceCommunicatorBase):
-    # main2main compat: `use_all2all` was added to upstream
-    # DeviceCommunicatorBase.__init__() in vllm main after 0.26.0.
-    # NPU does not support all2all (uses mc2 / all_gather for MoE),
-    # so the parameter is only accepted for interface alignment.
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
-
-        def __init__(
-            self,
-            cpu_group: dist.ProcessGroup,
-            device: torch.device | None = None,
-            device_group: dist.ProcessGroup | None = None,
-            unique_name: str = "",
-        ):
-            super().__init__(cpu_group, device, device_group, unique_name)
-            self.device = torch.npu.current_device()
-            self.ca_comm = None
-            self.all2all_manager = _NpuAll2AllManager()
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            cpu_group: dist.ProcessGroup,
-            device: torch.device | None = None,
-            device_group: dist.ProcessGroup | None = None,
-            unique_name: str = "",
-            use_all2all: bool = False,
-        ):
-            super().__init__(
-                cpu_group,
-                device,
-                device_group,
-                unique_name,
-                use_all2all=use_all2all,
-            )
-            self.device = torch.npu.current_device()
-            self.ca_comm = None
-            self.all2all_manager = _NpuAll2AllManager()
+    def __init__(
+        self,
+        cpu_group: dist.ProcessGroup,
+        device: torch.device | None = None,
+        device_group: dist.ProcessGroup | None = None,
+        unique_name: str = "",
+        use_all2all: bool = False,
+    ):
+        super().__init__(
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            use_all2all=use_all2all,
+        )
+        self.device = torch.npu.current_device()
+        self.ca_comm = None
+        self.all2all_manager = _NpuAll2AllManager()
 
     def all_to_all(
         self,

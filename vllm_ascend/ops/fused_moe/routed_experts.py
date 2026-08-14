@@ -295,7 +295,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         eplb_config = get_ascend_config().eplb_config
 
-        # The upstream FusedMoE factory has already included redundant expert
+        # The upstream FusedMoEFactory factory has already included redundant expert
         # slots in moe_config and allocated RoutedExperts weights accordingly.
         # Ascend's placement builder operates on logical expert IDs, so give it
         # a shallow config view with the logical count.
@@ -449,17 +449,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         )
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
-
-        try:
-            _vllm_config = get_current_vllm_config()
-
-            model_config = None if _vllm_config is None else _vllm_config.model_config
-            if model_config is not None and model_config.enable_return_routed_experts:
-                capturer = getattr(self, "_ascend_routed_experts_capturer", None)
-                if capturer is not None:
-                    capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
-        except Exception:
-            pass
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
