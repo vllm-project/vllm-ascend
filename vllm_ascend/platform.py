@@ -264,6 +264,13 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        if parser is not None:
+            from vllm_ascend.patch.platform.patch_reasoning_eos import (
+                update_reasoning_config_cli,
+            )
+
+            update_reasoning_config_cli(parser)
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".

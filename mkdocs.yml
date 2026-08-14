@@ -266,6 +266,7 @@ nav:
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
         - user_guide/feature_guide/speculative_decoding.md
+        - user_guide/feature_guide/reasoning_eos_policy.md
         - user_guide/feature_guide/context_parallel.md
         - user_guide/feature_guide/sequence_parallelism.md
         - user_guide/feature_guide/batch_invariance.md
