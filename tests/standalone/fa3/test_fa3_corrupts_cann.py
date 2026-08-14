@@ -1,42 +1,39 @@
 # Copyright (c) 2026. Reproduction-only diagnostic, not a correctness test.
 #
-# Standalone repro: does capturing an FA3 (flash_attn_with_kvcache) NPUGraph
-# corrupt a SUBSEQUENTLY captured CANN V1 (npu_fused_infer_attention_score)
-# graph_task_group?
+# Standalone repro: does capturing/replaying an FA3 (flash_attn_with_kvcache)
+# NPUGraph corrupt the CANN graph_task_group machinery that a LATER CANN V1
+# prefill graph depends on?
 #
 # ---------------------------------------------------------------------------
-# Hypothesis under test
+# Hypothesis
 # ---------------------------------------------------------------------------
-# FA3 is a PyTorch CustomOp invisible to the CANN task-group mechanism.  When
-# vllm-ascend captures the FA3 decode graph with torch.npu.graph() it does NOT
-# wrap it in graph_task_group_begin/End.  That produces an "empty task group"
-# which corrupts CANN runtime state for the NEXT graph capture -- i.e. the
-# prefill CANN V1 graph captured with graph_task_group_begin/End.  The corrupted
-# prefill graph then replays to wrong output.
+# In vllm-ascend, the CANN V1 prefill graph is captured with
+# graph_task_group_begin/End and, on every replay, re-bound via
+# graph_task_update_begin/End BEFORE aclgraph.replay().  The FA3 decode graph
+# (a PyTorch CustomOp invisible to task-group) is captured in the SAME graph
+# pool.  That FA3 capture/replay leaves residue in the CANN task-group runtime
+# state, which corrupts the LATER prefill graph's task_group_update + replay.
 #
-# This mirrors EXACTLY the comment in vllm-ascend full_graph_fa3:
-#   "an empty task group (FA3 not captured by CANN) corrupts CANN runtime
-#    state for subsequent graph captures (e.g. the prefill CANN V1 graph),
-#    breaking prefill accuracy."
+# Earlier standalone attempts used a bare graph.replay() for the prefill and
+# never reproduced, because the task_group_update path (the actual corruption
+# carrier) was missing.  This version replicates the full
+#   capture -> graph_task_update_begin/End -> replay
+# cycle, matching vllm-ascend full_graph_fia + update_graph_params.
 #
 # ---------------------------------------------------------------------------
 # Sequence
 # ---------------------------------------------------------------------------
-#   [1] capture a CLEAN prefill graph_task_group, replay -> baseline
-#   [2] capture the FA3 decode NPUGraph (no task-group wrapper)  <- the polluter
-#   [3] capture a SECOND prefill graph_task_group, replay -> "polluted"
-#   [4] compare baseline vs polluted.  If they differ, capture-order pollution
-#       is proven (FA3 capture corrupts the later CANN V1 capture).
-#
-# Both graphs share ONE graph pool, as vllm-ascend's ACLGraphWrapper does
-# (current_platform.get_global_graph_pool()).
+#   [1] capture CLEAN prefill task-group graph; update+replay -> baseline
+#   [2] capture the FA3 decode NPUGraph (no task-group wrapper)  <- polluter
+#   [3] capture SECOND prefill task-group graph; update+replay -> "polluted"
+#   [4] compare baseline vs polluted
 #
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
 #   python test_fa3_corrupts_cann.py
 #
-#   PREILL_SEQLEN=16384 DECODE_KV_SEQLEN=16384 python test_fa3_corrupts_cann.py
+#   PREILL_SEQLEN=16384 DECODE_KV_SEQLEN=16384 REPLAY_FA3=1 python ...
 
 import os
 from importlib import util as importlib_util
@@ -44,9 +41,6 @@ from importlib import util as importlib_util
 import torch
 import torch_npu
 
-# ---------------------------------------------------------------------------
-# FA3 import (name differs across flash-attention-npu versions)
-# ---------------------------------------------------------------------------
 _HAS_FA3 = False
 _fa3_kvcache = None
 _get_scheduler_metadata = None
@@ -64,20 +58,15 @@ for _mod_name in ("flash_attn_npu_v3", "flash_attn_npu_3"):
             print(f"[import] {_mod_name} found but failed: {exc}")
 
 if not _HAS_FA3:
-    raise SystemExit(
-        "flash_attn_with_kvcache (FA3) is not installed. "
-        "Install flash-attention-npu first."
-    )
+    raise SystemExit("flash_attn_with_kvcache (FA3) is not installed.")
 
-# ---------------------------------------------------------------------------
-# Shape / dtype knobs
-# ---------------------------------------------------------------------------
 HEAD_SIZE = 128
 NUM_HEADS = 32
 NUM_KV_HEADS = 8
 BLOCK_SIZE = 128
 DTYPE = torch.bfloat16
 SCALE = 1.0 / (HEAD_SIZE ** 0.5)
+SWA_INT_MAX = 2147483647
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -93,24 +82,41 @@ def _mean_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 # ---------------------------------------------------------------------------
-# CANN V1 prefill inputs (paged, TND, non-causal)
+# CANN V1 prefill (paged, TND, non-causal)
 # ---------------------------------------------------------------------------
 def make_prefill_inputs(seqlen: int):
     num_blocks = _ceil_div(seqlen, BLOCK_SIZE)
     q = torch.randn(seqlen, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
-    # CANN V1 paged layout: (num_blocks, num_kv_heads, block_size, head_size).
     k = torch.randn(num_blocks, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE, dtype=DTYPE).npu()
     v = torch.randn_like(k)
     block_table = torch.arange(num_blocks, dtype=torch.int32).npu().unsqueeze(0)
-    # MUST be Python lists: npu_fused_infer_attention_score reads these scalars
-    # on host; device tensors would trigger a copy_stream sync (illegal during
-    # capture).
-    actual_q = [seqlen]
+    actual_q = [seqlen]  # MUST be Python list (see LocalScalarDenseNpu issue)
     actual_kv = [seqlen]
     return q, k, v, block_table, actual_q, actual_kv
 
 
-def _fia_out(inp, out_buf, lse_buf):
+def get_workspace(inp):
+    q, k, v, block_table, actual_q, actual_kv = inp
+    return torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+        query=q,
+        key=k,
+        value=v,
+        atten_mask=None,
+        block_table=block_table,
+        input_layout="TND",
+        block_size=BLOCK_SIZE,
+        actual_seq_lengths=actual_q,
+        actual_seq_lengths_kv=actual_kv,
+        num_key_value_heads=NUM_KV_HEADS,
+        num_heads=NUM_HEADS,
+        sparse_mode=0,
+        pre_tokens=SWA_INT_MAX,
+        next_tokens=SWA_INT_MAX,
+        scale=SCALE,
+    )
+
+
+def _fia_out(inp, workspace, out_buf, lse_buf):
     q, k, v, block_table, actual_q, actual_kv = inp
     torch_npu.npu_fused_infer_attention_score.out(
         query=q,
@@ -124,14 +130,16 @@ def _fia_out(inp, out_buf, lse_buf):
         num_key_value_heads=NUM_KV_HEADS,
         num_heads=NUM_HEADS,
         scale=SCALE,
-        sparse_mode=0,  # dense, non-causal
+        sparse_mode=0,
+        workspace=workspace,
         out=[out_buf, lse_buf],
     )
 
 
 def capture_prefill_graph(inp, pool=None):
-    """CANN V1 prefill as a graph_task_group, matching vllm-ascend full_graph_fia."""
+    """Capture the prefill FIA as a task-group graph (matches full_graph_fia)."""
     q, *_ = inp
+    workspace = get_workspace(inp)
     out_buf = torch.empty(q.shape[0], NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
     lse_buf = torch.empty(1, dtype=torch.float32).npu()
     graph = torch.npu.NPUGraph()
@@ -139,20 +147,29 @@ def capture_prefill_graph(inp, pool=None):
     with ctx:
         stream = torch_npu.npu.current_stream()
         torch.npu.graph_task_group_begin(stream)
-        _fia_out(inp, out_buf, lse_buf)
+        _fia_out(inp, workspace, out_buf, lse_buf)
         handle = torch.npu.graph_task_group_end(stream)
     torch.npu.synchronize()
-    return graph, out_buf, lse_buf, handle
+    return graph, handle, workspace
 
 
-def replay_prefill(graph, out_buf):
+def replay_prefill(graph, handle, inp, workspace):
+    """Full task-group replay: graph_task_update_begin/End, then graph.replay."""
+    q, *_ = inp
+    out_buf = torch.empty(q.shape[0], NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
+    lse_buf = torch.empty(1, dtype=torch.float32).npu()
+    stream = torch_npu.npu.current_stream()
+    torch.npu.graph_task_update_begin(stream, handle)
+    _fia_out(inp, workspace, out_buf, lse_buf)
+    torch.npu.graph_task_update_end(stream)
+    torch.npu.synchronize()
     graph.replay()
     torch.npu.synchronize()
     return out_buf.clone()
 
 
 # ---------------------------------------------------------------------------
-# FA3 decode (flash_attn_with_kvcache, 1 query token, long cached KV)
+# FA3 decode
 # ---------------------------------------------------------------------------
 def make_decode_inputs(kv_seqlen: int):
     num_blocks = _ceil_div(kv_seqlen, BLOCK_SIZE)
@@ -162,7 +179,6 @@ def make_decode_inputs(kv_seqlen: int):
     cache_seqlens = torch.tensor([kv_seqlen], dtype=torch.int32).npu()
     cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32).npu()
     page_table = torch.arange(num_blocks, dtype=torch.int32).npu().unsqueeze(0)
-
     metadata = _get_scheduler_metadata(
         batch_size=1,
         max_seqlen_q=1,
@@ -196,71 +212,67 @@ def run_fa3_decode(inp):
 
 
 def capture_fa3_graph(decode_inp, pool=None):
-    """FA3 decode NPUGraph, NO graph_task_group wrapper (the polluter)."""
     graph = torch.npu.NPUGraph()
     ctx = torch.npu.graph(graph, pool=pool) if pool is not None else torch.npu.graph(graph)
     with ctx:
         _ = run_fa3_decode(decode_inp)
-    # NOTE: deliberately do NOT synchronize here -- we want any empty-task-group
-    # residue to leak into the NEXT capture, exactly as vllm-ascend sees.
     return graph
 
 
 def main():
     prefill_seqlen = int(os.environ.get("PREILL_SEQLEN", "16384"))
     kv_seqlen = int(os.environ.get("DECODE_KV_SEQLEN", "16384"))
-    share_pool = os.environ.get("SHARE_POOL", "1") == "1"
+    replay_fa3 = os.environ.get("REPLAY_FA3", "0") == "1"
 
     if not torch.npu.is_available():
         raise SystemExit("No NPU device available.")
 
     print("=" * 72)
     print(f"prefill_seqlen={prefill_seqlen}  decode_kv_seqlen={kv_seqlen}  "
-          f"share_pool={share_pool}")
+          f"replay_fa3={replay_fa3}")
     print("=" * 72)
 
     prefill_inp = make_prefill_inputs(prefill_seqlen)
     decode_inp = make_decode_inputs(kv_seqlen)
+    pool = torch.npu.graph_pool_handle()
 
-    pool = torch.npu.graph_pool_handle() if share_pool else None
-
-    # ---- [1] clean prefill graph, captured BEFORE any FA3 capture ----------
-    g_clean, out_clean, _, _ = capture_prefill_graph(prefill_inp, pool=pool)
-    baseline = replay_prefill(g_clean, out_clean)
-    print(f"[1] clean prefill graph replay captured "
+    # ---- [1] clean prefill graph (captured BEFORE FA3) ----------------------
+    g_clean, h_clean, ws_clean = capture_prefill_graph(prefill_inp, pool=pool)
+    baseline = replay_prefill(g_clean, h_clean, prefill_inp, ws_clean)
+    print(f"[1] clean prefill task-group update+replay captured "
           f"(shape={tuple(baseline.shape)})")
 
-    # ---- [2] FA3 decode graph capture (the suspected polluter) -------------
+    # ---- [2] FA3 decode graph capture (+optional replay) --------------------
     fa3_graph = capture_fa3_graph(decode_inp, pool=pool)
-    print("[2] FA3 decode graph captured (no task-group wrapper)")
+    if replay_fa3:
+        for _ in range(3):
+            fa3_graph.replay()
+        torch.npu.synchronize()
+    print(f"[2] FA3 decode graph captured{' and replayed x3' if replay_fa3 else ''}")
 
-    # ---- [3] second prefill graph, captured AFTER FA3 ----------------------
-    g_polluted, out_polluted, _, _ = capture_prefill_graph(prefill_inp, pool=pool)
-    polluted = replay_prefill(g_polluted, out_polluted)
+    # ---- [3] second prefill graph (captured AFTER FA3) ----------------------
+    g_poll, h_poll, ws_poll = capture_prefill_graph(prefill_inp, pool=pool)
+    polluted = replay_prefill(g_poll, h_poll, prefill_inp, ws_poll)
     d = _max_abs_diff(baseline, polluted)
     d_mean = _mean_abs_diff(baseline, polluted)
-    print(f"[3] prefill graph captured AFTER FA3 -> diff vs clean = "
+    print(f"[3] prefill captured AFTER FA3 -> diff vs clean = "
           f"{d:.6f} (mean {d_mean:.6f})")
 
-    # ---- [4] control: replay the clean graph again (still clean?) ----------
-    baseline2 = replay_prefill(g_clean, out_clean)
+    # ---- [4] control: clean graph update+replay again (still clean?) -------
+    baseline2 = replay_prefill(g_clean, h_clean, prefill_inp, ws_clean)
     print(f"[4] clean graph re-replay self-consistency = "
           f"{_max_abs_diff(baseline, baseline2):.6f}")
 
-    # ---- verdict -----------------------------------------------------------
     print("-" * 72)
     threshold = 1e-2
     if d > threshold:
         print("VERDICT: REPRODUCED.")
-        print("  Capturing the FA3 decode graph corrupted the LATER CANN V1")
-        print("  prefill graph capture -> its replay output diverges.  This is")
-        print("  the 'empty task group corrupts CANN runtime state' mechanism.")
+        print("  FA3 capture/replay corrupted the LATER prefill task-group's")
+        print("  graph_task_update + replay -> output diverges.")
     else:
         print("VERDICT: NOT reproduced.")
-        print("  The FA3 capture did NOT change a later prefill capture.  Next")
-        print("  levers: (a) larger PREILL_SEQLEN, (b) also replay the FA3 graph")
-        print("  before capturing the second prefill graph, (c) add the")
-        print("  graph_task_update_begin/End replay path used by vllm-ascend.")
+        print("  Next levers: larger PREILL_SEQLEN, REPLAY_FA3=1, or run the")
+        print("  E48/E53 diagnostics inside vllm-ascend to pin capture-vs-replay.")
     print("-" * 72)
 
 
