@@ -321,7 +321,9 @@ def _warm_rejection_random(
     else:
         rejection_random_sample_kernel[(grid,)](
             *kernel_args,
+            None,  # synthetic_conditional_rates_ptr (unused unless SYNTHETIC_MODE)
             VOCAB_BLOCK_SIZE=_VOCAB_BLOCK_SIZE,
+            SYNTHETIC_MODE=False,
             **constexpr_kwargs,
         )
 
