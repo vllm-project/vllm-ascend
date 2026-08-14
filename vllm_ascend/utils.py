@@ -1179,7 +1179,8 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
-    a non-zero global_bs and must NOT receive mc2_mask.
+    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
+    uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
@@ -1202,24 +1203,22 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_kv_consumer:
         return False
 
-    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ascend_forward_context import _MEGA_MOE_SUPPORTED, select_moe_comm_method
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
-
-    def needs_mc2(n: int) -> bool:
-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    # if mc2 is used in decode max potential tokens case, we can skip allreduce in decode only case.
-    decode_can_skip = needs_mc2(get_potential_max_tokens())
+    decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config)
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
-    # if mc2 is used in prefill max potential tokens case and prefill and decode have the same cudagraph mode,
-    # we can skip allreduce in chunked prefill case.
-    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    prefill_comm_method = select_moe_comm_method(scheduler_config.max_num_batched_tokens, vllm_config)
 
+    if _MEGA_MOE_SUPPORTED and MoECommType.FUSED_MC2 in {decode_comm_method, prefill_comm_method}:
+        return False
+
+    mc2_comm_methods = {MoECommType.MC2, MoECommType.FUSED_MC2}
+    decode_can_skip = decode_comm_method in mc2_comm_methods
     uniform_cudagraph_mode = not vllm_config.compilation_config.cudagraph_mode.separate_routine()
-
-    chunked_prefill_can_skip = prefill_must_use_mc2 and uniform_cudagraph_mode
+    chunked_prefill_can_skip = prefill_comm_method in mc2_comm_methods and uniform_cudagraph_mode
     return decode_can_skip and (
         chunked_prefill_can_skip or get_ascend_config().scheduler_config.recompute_scheduler_enable
     )
