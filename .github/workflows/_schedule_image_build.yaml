@@ -154,21 +154,13 @@ env:
 jobs:
   build-push-digest:
     name: build
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner_info.runner }}
     permissions:
       packages: write
       contents: read
 
     strategy:
       matrix:
-        include:
-          - arch: linux/amd64
-            runner: ubuntu-latest
-            tag: amd64
-
-          - arch: linux/arm64
-            runner: ubuntu-22.04-arm
-            tag: arm64
         dockerfile:
           - Dockerfile
           - Dockerfile.310p
@@ -179,8 +171,8 @@ jobs:
           - Dockerfile.a5
           - Dockerfile.a5.openEuler
         runner_info:
-          - {runner: linux-aarch64-cpu-4, arch: arm64}
-          - {runner: linux-amd64-cpu-4, arch: amd64}
+          - {runner: linux-aarch64-cpu-4, arch: arm64, tag: arm64}
+          - {runner: linux-amd64-cpu-4, arch: amd64, tag: amd64}
 
     steps:
 
@@ -287,9 +279,9 @@ jobs:
       id: cache-tag
       run: |
         if [ -n "${{ inputs.suffix }}" ]; then
-          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}" >> $GITHUB_OUTPUT
         else
-          echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+          echo "value=buildcache-${{ matrix.runner_info.tag }}" >> $GITHUB_OUTPUT
         fi
 
     - name: Get Dockerfile base image tag
@@ -423,12 +415,12 @@ jobs:
         if [ "${{ inputs.temp_only }}" = "true" ]; then
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
+          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
         else
-          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             DATE=$(date +'%Y%m%d')
-            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-${DATE}-temp"
+            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
           fi
         fi
         echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
@@ -446,7 +438,7 @@ jobs:
     - name: Upload digest
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.tag }}
+        name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}
         path: ${{ runner.temp }}/digests/*
         if-no-files-found: error
         retention-days: 1
