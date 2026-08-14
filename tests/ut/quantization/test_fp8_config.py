@@ -25,7 +25,7 @@ class TestAscendDeepseekV4FP8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ),
             patch(
@@ -52,7 +52,7 @@ class TestAscendDeepseekV4FP8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ),
             patch(
@@ -79,7 +79,7 @@ class TestAscendDeepseekV4FP8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ),
             patch(
