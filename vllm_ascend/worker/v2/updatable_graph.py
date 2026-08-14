@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -11,8 +11,40 @@ import torch
 from vllm_ascend.utils import weak_ref_tensors
 
 
-class RuntimeParameterProvider(Protocol):
-    def resolve(self, runtime_context) -> dict[str, Any]: ...
+Params = dict[str, Any]
+
+
+class ParamProvider(Protocol):
+    def resolve(self, context) -> Params: ...
+
+
+class ParamSource(Protocol):
+    def get(
+        self,
+        provider: ParamProvider,
+    ) -> Sequence[Params]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSource:
+    context: Any
+
+    def get(
+        self,
+        provider: ParamProvider,
+    ) -> Sequence[Params]:
+        return (provider.resolve(self.context),)
+
+
+@dataclass(frozen=True, slots=True)
+class SharedSource:
+    params: Sequence[Params]
+
+    def get(
+        self,
+        _provider: ParamProvider,
+    ) -> Sequence[Params]:
+        return self.params
 
 
 _ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar(
@@ -24,12 +56,13 @@ _ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar(
 class GraphUpdateTask:
     operation: Callable[..., Any]
     kwargs: dict[str, Any]
-    provider: RuntimeParameterProvider
+    provider: ParamProvider
+    provider_index: int
     handle: Any
     event: Any
 
-    def resolve(self, runtime_context) -> "GraphUpdateTask":
-        runtime_kwargs = {**self.kwargs, **self.provider.resolve(runtime_context)}
+    def bind(self, params: Params) -> "GraphUpdateTask":
+        runtime_kwargs = {**self.kwargs, **params}
         return replace(self, kwargs=runtime_kwargs)
 
     def apply(self, update_stream) -> None:
@@ -43,6 +76,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
     def __init__(self) -> None:
         super().__init__()
         self.tasks: list[GraphUpdateTask] = []
+        self.provider_sizes: dict[ParamProvider, int] = {}
         self.capture_token: Token[UpdatableGraph | None] | None = None
 
     def capture_begin(self, pool=None, capture_error_mode: str = "global") -> None:
@@ -62,7 +96,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
         self,
         operation: Callable[..., Any],
         kwargs: dict[str, Any],
-        provider: RuntimeParameterProvider,
+        provider: ParamProvider,
     ) -> None:
         stream = torch.npu.current_stream()
         event = torch.npu.ExternalEvent()
@@ -72,12 +106,32 @@ class UpdatableGraph(torch.npu.NPUGraph):
         operation(**kwargs)
         handle = torch.npu.graph_task_group_end(stream)
         weak_kwargs = weak_ref_tensors(kwargs)
+        provider_index = self.provider_sizes.get(provider, 0)
+        self.provider_sizes[provider] = provider_index + 1
         self.tasks.append(
-            GraphUpdateTask(operation, weak_kwargs, provider, handle, event)
+            GraphUpdateTask(
+                operation,
+                weak_kwargs,
+                provider,
+                provider_index,
+                handle,
+                event,
+            )
         )
 
-    def resolve_tasks(self, runtime_context) -> tuple[GraphUpdateTask, ...]:
-        return tuple(task.resolve(runtime_context) for task in self.tasks)
+    def resolve_tasks(
+        self,
+        source: ParamSource,
+    ) -> tuple[GraphUpdateTask, ...]:
+        params_by_provider = {
+            provider: source.get(provider) for provider in self.provider_sizes
+        }
+        for provider, size in self.provider_sizes.items():
+            assert len(params_by_provider[provider]) == size
+        return tuple(
+            task.bind(params_by_provider[task.provider][task.provider_index])
+            for task in self.tasks
+        )
 
     def update(
         self,
@@ -92,7 +146,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
 def register_task(
     operation: Callable[..., Any],
     kwargs: dict[str, Any],
-    provider: RuntimeParameterProvider,
+    provider: ParamProvider,
 ) -> None:
     graph = _ACTIVE_GRAPH.get()
     if graph is None:

@@ -34,7 +34,10 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.worker.v2.updatable_graph import UpdatableGraph
+from vllm_ascend.worker.v2.updatable_graph import (
+    ContextSource,
+    UpdatableGraph,
+)
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -90,7 +93,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # Resolve every provider before replay so a provider failure cannot
         # leave the graph blocked on an update event that will never be recorded.
         resolved_tasks = graph.resolve_tasks(
-            self.model_runner.model_state.attn_metadata
+            ContextSource(self.model_runner.model_state.attn_metadata)
         )
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
