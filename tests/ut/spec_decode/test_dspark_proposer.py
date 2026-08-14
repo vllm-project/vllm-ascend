@@ -41,6 +41,19 @@ _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
 
 
+@pytest.fixture(autouse=True)
+def _stub_device_properties(monkeypatch):
+    """CPU CI has no NPU: ``init_device_properties_triton`` is skipped when
+    ``HAS_TRITON`` is false, leaving ``_NUM_VECTORCORE`` unset, so
+    ``get_vectorcore_num`` asserts. ``set_inputs_first_pass`` sizes the kernel
+    grid via ``_compute_num_programs`` -> ``get_vectorcore_num``; stub the
+    device-property globals so the grid computation runs on CPU. The kernel
+    itself is mocked per-test, and the small inputs here yield a ``(1,)`` grid
+    either way (matching ``test_kernel_called_with_has_num_rejected``)."""
+    monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_AICORE", 8)
+    monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_VECTORCORE", 8)
+
+
 class _DSparkProposerTestBase:
     """Shared helpers for ``AscendDSparkProposer`` tests."""
 
@@ -203,7 +216,7 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     def test_positions_not_pre_sliced(self, monkeypatch, dp_padding):
         """``cad.positions`` must be the full buffer, not ``[:num_query_total]``."""
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -223,7 +236,7 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
         """After set_inputs_first_pass + _pad_draft_buffers, positions[:num_input]
         is full-length and zero-padded in the DP region."""
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -518,7 +531,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
     def _mock_kernel(self, monkeypatch):
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            "copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
 
@@ -629,7 +642,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
     def test_seq_lens_subtracts_rejected(self, monkeypatch):
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            "copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -649,7 +662,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         kernel = MagicMock()
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            "copy_and_expand_dflash_and_dspark_inputs_kernel",
             kernel,
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
