@@ -17,6 +17,7 @@
 import os
 
 import vllm_ascend.patch.platform.patch_async_prefill_recompute  # noqa
+import vllm_ascend.patch.platform.patch_async_swa_kv_lifetime  # noqa
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_thinking  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
