@@ -6,7 +6,7 @@ from functools import wraps
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -16,8 +16,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 _prune_context: ContextVar[tuple[str, int] | None] = ContextVar("ascend_swa_prune_context", default=None)
 

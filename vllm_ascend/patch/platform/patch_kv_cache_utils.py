@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import vllm.v1.core.block_pool
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -27,8 +27,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.utils import vllm_version_is
-
-logger = init_logger(__name__)
 
 
 def _queue_block_summary(block: KVCacheBlock) -> str:
