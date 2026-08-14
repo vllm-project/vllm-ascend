@@ -980,9 +980,7 @@ class TestCoreFunctionality(unittest.TestCase):
         req = dict(self.test_req)
         req["local_block_ids"] = [[2]]
         req["remote_block_ids"] = [[3]]
-        req["group_pulls"] = [
-            GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)
-        ]
+        req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)]
 
         self.thread._transfer_kv_cache_all_groups(req)
 
@@ -1001,9 +999,7 @@ class TestCoreFunctionality(unittest.TestCase):
         # The old token-count based selector crashed for one to three blocks
         # and silently wrapped for four to seven blocks. Reject both forms.
         req["remote_block_ids"] = [[3, 4, 5]]
-        req["group_pulls"] = [
-            GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)
-        ]
+        req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)]
 
         with self.assertRaisesRegex(RuntimeError, "exactly one normalized remote state block"):
             self.thread._transfer_kv_cache_all_groups(req)
@@ -1019,9 +1015,7 @@ class TestCoreFunctionality(unittest.TestCase):
         req = dict(self.test_req)
         req["local_block_ids"] = [[2, 20, 21, 22, 23, 24, 25, 26]]
         req["remote_block_ids"] = [[3, 30, 31, 32, 33, 34, 35, 36]]
-        req["group_pulls"] = [
-            GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)
-        ]
+        req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)]
 
         self.thread._transfer_kv_cache_all_groups(req)
 
