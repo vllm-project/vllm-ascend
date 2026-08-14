@@ -40,6 +40,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
     sort_batch_req_ids,
 )
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -113,6 +114,8 @@ def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
 
 
 class NPUModelRunner(GPUModelRunner):
+    pcp_manager: PCPManager | None
+
     """Model runner for Ascend NPUs."""
 
     execute_model_state: ExecuteModelState | None
