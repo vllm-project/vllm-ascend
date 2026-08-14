@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -30,7 +31,52 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    get_group_block_size,
+    get_group_cache_family,
+    infer_cache_transfer_granularity,
+    infer_group_block_sizes,
+    uses_hybrid_kv_cache,
 )
+
+
+class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_uses_hybrid_kv_cache(self):
+        groups = [
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+        ]
+        scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
+        self.assertTrue(uses_hybrid_kv_cache(scheduler_config, groups))
+        self.assertFalse(uses_hybrid_kv_cache(scheduler_config, None))
+
+    def test_uses_hybrid_kv_cache_disabled(self):
+        groups = [
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+        ]
+        scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=True)
+        self.assertFalse(uses_hybrid_kv_cache(scheduler_config, groups))
+
+    def test_infer_group_block_sizes(self):
+        groups = [
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+        ]
+        self.assertEqual(infer_group_block_sizes(8, groups), [16, 32])
+        self.assertEqual(infer_group_block_sizes(8, None), [8])
+
+    def test_get_group_cache_family(self):
+        self.assertEqual(get_group_cache_family(["c1", "c2"], 1), "c2")
+        self.assertEqual(get_group_cache_family(["c1"], 3), "default")
+
+    def test_get_group_block_size(self):
+        self.assertEqual(get_group_block_size([16, 32], 1), 32)
+
+    def test_get_group_block_size_out_of_range(self):
+        self.assertEqual(get_group_block_size([16, 32], 5), 16)
+
+    def test_infer_cache_transfer_granularity(self):
+        self.assertEqual(infer_cache_transfer_granularity([16, 32], 32, [0, 1]), 32)
 
 
 class TestKeyMetadata(unittest.TestCase):

@@ -847,18 +847,17 @@ class TestKVPoolWorkerStaticHelpers(unittest.TestCase):
     """Test static and standalone helper methods."""
 
     def test_uses_hybrid_kv_cache_none_config(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import uses_hybrid_kv_cache
 
-        self.assertFalse(KVPoolWorker._uses_hybrid_kv_cache(MagicMock(), None))
+        self.assertFalse(uses_hybrid_kv_cache(MagicMock(), None))
 
     def test_uses_hybrid_kv_cache_disabled(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import uses_hybrid_kv_cache
 
-        vllm_config = MagicMock()
-        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
-        kv_cache_config = MagicMock()
-        kv_cache_config.kv_cache_groups = [MagicMock()]
-        self.assertFalse(KVPoolWorker._uses_hybrid_kv_cache(vllm_config, kv_cache_config))
+        scheduler_config = MagicMock()
+        scheduler_config.disable_hybrid_kv_cache_manager = True
+        kv_cache_groups = [MagicMock()]
+        self.assertFalse(uses_hybrid_kv_cache(scheduler_config, kv_cache_groups))
 
     def test_uses_mamba_kv_cache_false_when_not_hybrid(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
@@ -886,14 +885,14 @@ class TestKVPoolWorkerStaticHelpers(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
     def test_get_group_family_out_of_range(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_group_cache_family
 
-        self.assertEqual(KVPoolWorker._get_group_family(["a", "b"], 5), "default")
+        self.assertEqual(get_group_cache_family(["a", "b"], 5), "default")
 
     def test_get_group_family_valid(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_group_cache_family
 
-        self.assertEqual(KVPoolWorker._get_group_family(["a", "b"], 1), "b")
+        self.assertEqual(get_group_cache_family(["a", "b"], 1), "b")
 
 
 class TestKVPoolWorkerGetBlockIdsWithLoadErrors(unittest.TestCase):
@@ -1287,58 +1286,6 @@ class TestKVPoolWorkerInferGroupMethods(unittest.TestCase):
 
         worker = KVPoolWorker(config, use_layerwise=False)
         self.assertEqual(worker.group_uses_align_state, [False])
-
-        for p in patches.values():
-            p.stop()
-
-    def test_get_group_block_size_out_of_range(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        patches = {
-            "tp_rank": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank",
-                return_value=0,
-            ),
-            "tp_size": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size",
-                return_value=1,
-            ),
-            "pcp_group": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group"),
-            "dcp_ws": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size",
-                return_value=1,
-            ),
-            "dcp_rank": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank",
-                return_value=0,
-            ),
-            "importlib": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"),
-        }
-        mocks = {}
-        for name, p in patches.items():
-            mocks[name] = p.start()
-        pcp_group = MagicMock()
-        pcp_group.world_size = 1
-        mocks["pcp_group"].return_value = pcp_group
-        mocks["importlib"].import_module.return_value = MagicMock()
-
-        config = MagicMock()
-        config.model_config.model = "org/llama-7b"
-        config.model_config.use_mla = False
-        config.model_config.hf_text_config = MagicMock(spec=[])
-        config.model_config.get_num_layers.return_value = 2
-        config.model_config.get_total_num_kv_heads.return_value = 1
-        config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.rank = 0
-        config.parallel_config.pipeline_parallel_size = 1
-        config.kv_transfer_config.kv_role = "kv_producer"
-        config.kv_transfer_config.kv_connector_extra_config = {"backend": "mooncake"}
-        config.cache_config.block_size = 16
-        config.kv_events_config = None
-
-        worker = KVPoolWorker(config, use_layerwise=False)
-        # group_id out of range returns first element
-        self.assertEqual(worker._get_group_block_size(5), 16)
 
         for p in patches.values():
             p.stop()
