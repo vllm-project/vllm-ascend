@@ -77,9 +77,9 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
-from vllm.utils.debug.debug_stat import get_vllm_debug_stat
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
 
-work_debug_stat = get_vllm_debug_stat()
+work_debug_stat = get_worker_debug_stat()
 
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],

@@ -20,7 +20,9 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
 
+worker_debug_stat = get_worker_debug_stat()
 
 class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
     """Ascend-adapted ExtractHiddenStatesProposer for NPU devices.
@@ -132,7 +134,7 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
         assert self.runner is not None, (
             "AscendExtractHiddenStatesProposer requires a runner reference for _sync_metadata_across_dp"
         )
-
+        worker_debug_stat.set_call_step(3, 32001)
         # Idle DP ranks must issue the same drafter DP sync that busy ranks
         # issue in _determine_batch_execution_and_padding (mirrors
         # llm_base_proposer.dummy_run); otherwise the DP cpu_group collectives
@@ -142,7 +144,7 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
-
+        worker_debug_stat.set_call_step(3, 32002)
         with set_forward_context(
             None,
             self.vllm_config,
@@ -151,9 +153,11 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
             cudagraph_runtime_mode=aclgraph_runtime_mode or CUDAGraphMode.NONE,
             slot_mapping={},
         ):
+            worker_debug_stat.set_call_step(3, 32003)
             self.model(
                 hidden_states=self.hidden_states[:num_tokens],
             )
+        worker_debug_stat.set_call_step(3, 32004)
 
     def prepare_next_token_ids_padded(
         self,

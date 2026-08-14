@@ -26,7 +26,9 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
 from vllm_ascend.worker.utils import copy_snapshot_to_gpu
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
 
+worker_debug_stat = get_worker_debug_stat()
 
 class AscendStep3p5MTPProposer(AscendEagleProposer):
     """Step3.5 MTP proposer with per-MTP-layer independent KV cache groups.
@@ -221,11 +223,13 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
     ):
+        worker_debug_stat.set_call_step(3, 33001)
         (
             num_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        worker_debug_stat.set_call_step(3, 33002)
 
         multi_steps_attn_metadata: list[dict[str, Any]] = []
         if not self.use_cuda_graph:
@@ -279,6 +283,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             if self.pcp_size * self.dcp_size > 1:
                 common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
 
+            worker_debug_stat.set_call_step(3, 33020)
             common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
             common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
             common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs]
@@ -286,6 +291,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             self._seed_graph_capture_per_group_metadata(num_reqs, num_tokens)
             _, multi_steps_attn_metadata = self._build_step_attn_metadatas(common_attn_metadata, graph_capture=True)
 
+        worker_debug_stat.set_call_step(3, 33030)
         model_positions = self._get_positions(num_tokens)
 
         if self.supports_mm_inputs:
@@ -313,6 +319,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            worker_debug_stat.set_call_step(3, 33050)
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -322,9 +329,11 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
                 num_tokens=num_tokens,
             )
+            worker_debug_stat.set_call_step(3, 33051)
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
+        worker_debug_stat.set_call_step(3, 33090)
 
     def _propose(
         self,
@@ -345,6 +354,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        worker_debug_stat.set_call_step(3, 53001)
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
@@ -372,6 +382,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         uniform_decode = target_model_batch_desc.uniform
 
         if self.use_cuda_graph:
+            worker_debug_stat.set_call_step(3, 53006)
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 uniform_decode=uniform_decode,
@@ -381,13 +392,16 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         else:
             num_input_tokens = num_tokens
 
+        worker_debug_stat.set_call_step(3, 53007)
         (
             num_input_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        worker_debug_stat.set_call_step(3, 53008)
 
         if self.use_cuda_graph:
+            worker_debug_stat.set_call_step(3, 53009)
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens,
                 uniform_decode=uniform_decode,
@@ -399,6 +413,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             batch_descriptor = None
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            worker_debug_stat.set_call_step(3, 53012)
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
                 num_input_tokens,
                 batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
@@ -441,12 +456,14 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 )
                 self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[pcp_allgather_restore_idx.shape[0] :] = 0
         else:
+            worker_debug_stat.set_call_step(3, 53030)
             num_reqs_padded = common_attn_metadata.num_reqs
             if not self.vllm_config.model_config.use_mla and self.pcp_size * self.dcp_size == 1:
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
+        worker_debug_stat.set_call_step(3, 53031)
         if self.supports_mm_inputs:
             inputs_embeds = self.model.embed_input_ids(self.input_ids[:num_tokens])
             self.inputs_embeds[:num_tokens] = inputs_embeds
@@ -480,6 +497,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        worker_debug_stat.set_call_step(3, 53050)
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -505,13 +523,19 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 "num_tokens": num_tokens,
                 "is_prefill": attn_metadata_i.num_prefills,
             }
+            worker_debug_stat.set_call_step(3, 53090)
             run_draft = partial(self._runnable, **model_inputs)
             if self.enable_enpu:
+                worker_debug_stat.set_call_step(3, 53091)
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                worker_debug_stat.set_call_step(3, 53092)
                 draft_token_ids = run_draft()
             else:
+                worker_debug_stat.set_call_step(3, 53093)
                 draft_token_ids = run_draft()
+                worker_debug_stat.set_call_step(3, 53094)
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        worker_debug_stat.set_call_step(3, 53099)
         return draft_token_ids
 
     def _run_merged_draft(
