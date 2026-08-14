@@ -285,7 +285,7 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json ${{ steps.filter.outputs.src_files }}
+            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}'
 
       - name: Set no-tests output when source paths unchanged
         id: noop
