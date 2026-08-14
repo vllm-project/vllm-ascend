@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-07 10:56+0000\n"
+"POT-Creation-Date: 2026-08-13 06:59+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -151,14 +151,6 @@ msgid "Integer (unchanged, field name changed)"
 msgstr "整数（不变，字段名已更改）"
 
 #: ../../source/user_guide/configuration/additional_config.md
-msgid "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
-msgstr "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "`enable_context_parallel`"
-msgstr "`enable_context_parallel`"
-
-#: ../../source/user_guide/configuration/additional_config.md
 msgid "`VLLM_ASCEND_ENABLE_FUSED_MC2`"
 msgstr "`VLLM_ASCEND_ENABLE_FUSED_MC2`"
 
@@ -174,41 +166,41 @@ msgstr "`VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK`"
 msgid "`enable_transpose_kv_cache_by_block`"
 msgstr "`enable_transpose_kv_cache_by_block`"
 
-#: ../../source/user_guide/configuration/additional_config.md:30
+#: ../../source/user_guide/configuration/additional_config.md:29
 msgid "Example Migration"
 msgstr "迁移示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:32
+#: ../../source/user_guide/configuration/additional_config.md:31
 msgid "**Before (environment variable):**"
 msgstr "**之前（环境变量）：**"
 
-#: ../../source/user_guide/configuration/additional_config.md:39
+#: ../../source/user_guide/configuration/additional_config.md:38
 msgid "**After (additional-config):**"
 msgstr "**之后（additional-config）：**"
 
-#: ../../source/user_guide/configuration/additional_config.md:45
+#: ../../source/user_guide/configuration/additional_config.md:44
 msgid "How to use"
 msgstr "使用方法"
 
-#: ../../source/user_guide/configuration/additional_config.md:47
+#: ../../source/user_guide/configuration/additional_config.md:46
 msgid ""
 "With either online mode or offline mode, users can use additional "
 "configuration. Take Qwen3 as an example:"
 msgstr "无论是在线模式还是离线模式，用户均可使用附加配置。以 Qwen3 为例："
 
-#: ../../source/user_guide/configuration/additional_config.md:49
+#: ../../source/user_guide/configuration/additional_config.md:48
 msgid "**Online mode**:"
 msgstr "**在线模式**："
 
-#: ../../source/user_guide/configuration/additional_config.md:55
+#: ../../source/user_guide/configuration/additional_config.md:54
 msgid "**Offline mode**:"
 msgstr "**离线模式**："
 
-#: ../../source/user_guide/configuration/additional_config.md:63
+#: ../../source/user_guide/configuration/additional_config.md:62
 msgid "Configuration options"
 msgstr "配置选项"
 
-#: ../../source/user_guide/configuration/additional_config.md:65
+#: ../../source/user_guide/configuration/additional_config.md:64
 msgid ""
 "The following table lists additional configuration options available in vLLM"
 " Ascend:"
@@ -623,13 +615,6 @@ msgstr "权重NZ模式。迁移期间也可通过`VLLM_ASCEND_ENABLE_NZ`环境�
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"Whether to enable context parallelism. Can also be configured via the "
-"`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the "
-"migration period."
-msgstr "是否启用上下文并行。迁移期间也可通过`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`环境变量配置。"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid ""
 "Fused MC2 configuration. Can also be configured via the "
 "`VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration "
 "period."
@@ -696,11 +681,11 @@ msgstr ""
 "分离场景。(2)当请求采样 logprobs 时必须禁用。启用减少采样后，logprobs 会在分区 logits "
 "上静默计算，而非全词汇表，从而产生错误的 logprob 值和 top-k 排名。(3)不能与 lmhead TP 同时启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:110
+#: ../../source/user_guide/configuration/additional_config.md:108
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细信息如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:112
+#: ../../source/user_guide/configuration/additional_config.md:110
 msgid "**xlite_graph_config**"
 msgstr "**xlite_graph_config**"
 
@@ -724,7 +709,7 @@ msgid ""
 "Xlite is only enabled for the decode stage."
 msgstr "是否在预填充和解码阶段均启用Xlite。默认情况下，Xlite仅在解码阶段启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:119
+#: ../../source/user_guide/configuration/additional_config.md:117
 msgid "**weight_prefetch_config**"
 msgstr "**weight_prefetch_config**"
 
@@ -749,7 +734,7 @@ msgstr ""
 msgid "Prefetch ratio of each weight."
 msgstr "每个权重的预取比例。"
 
-#: ../../source/user_guide/configuration/additional_config.md:126
+#: ../../source/user_guide/configuration/additional_config.md:124
 msgid "**finegrained_tp_config**"
 msgstr "**finegrained_tp_config**"
 
@@ -785,7 +770,7 @@ msgstr "`mlp_tensor_parallel_size`"
 msgid "The custom tensor parallel size of mlp."
 msgstr "mlp 的自定义张量并行大小。"
 
-#: ../../source/user_guide/configuration/additional_config.md:135
+#: ../../source/user_guide/configuration/additional_config.md:133
 msgid "**ascend_compilation_config**"
 msgstr "**ascend_compilation_config**"
 
@@ -843,7 +828,7 @@ msgstr "`fuse_muls_add`"
 msgid "Whether to enable fuse_muls_add pass."
 msgstr "是否启用 fuse_muls_add 优化。"
 
-#: ../../source/user_guide/configuration/additional_config.md:146
+#: ../../source/user_guide/configuration/additional_config.md:144
 msgid "**eplb_config**"
 msgstr "**eplb_config**"
 
@@ -939,7 +924,7 @@ msgstr ""
 "收集 EPLB 热度的阶段：`\"prefill\"` 仅在预填充阶段收集，`\"decode\"` 仅在解码阶段收集，`\"all\"` "
 "在两个阶段都收集。在 PD 共置场景中，预填充和解码请求可能产生不同的专家负载。选择性地在某个阶段收集热度可以更有效地减少专家不均衡。"
 
-#: ../../source/user_guide/configuration/additional_config.md:159
+#: ../../source/user_guide/configuration/additional_config.md:157
 msgid "**profiling_chunk_config**"
 msgstr "**profiling_chunk_config**"
 
@@ -1005,11 +990,11 @@ msgstr "30"
 msgid "Number of chunk-time data for Online Calibration"
 msgstr "在线校准的分块时间数据数量"
 
-#: ../../source/user_guide/configuration/additional_config.md:169
+#: ../../source/user_guide/configuration/additional_config.md:167
 msgid "**rejection_sampler_config**"
 msgstr "**rejection_sampler_config**"
 
-#: ../../source/user_guide/configuration/additional_config.md:171
+#: ../../source/user_guide/configuration/additional_config.md:169
 msgid ""
 "**Note**: Both block verify and entropy verify improve speculative decoding "
 "performance (higher acceptance rate, lower latency) at the cost of reduced "
@@ -1079,10 +1064,22 @@ msgid ""
 "precision."
 msgstr "阈值计算中熵的缩放因子。必须 >= 0。值越大，阈值对熵越敏感——高熵令牌变得更容易接受，从而提高性能但降低精度。"
 
-#: ../../source/user_guide/configuration/additional_config.md:180
+#: ../../source/user_guide/configuration/additional_config.md:178
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:182
+#: ../../source/user_guide/configuration/additional_config.md:180
 msgid "An example of additional configuration is as follows:"
 msgstr "附加配置的示例如下："
+
+#~ msgid "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
+#~ msgstr "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
+
+#~ msgid "`enable_context_parallel`"
+#~ msgstr "`enable_context_parallel`"
+
+#~ msgid ""
+#~ "Whether to enable context parallelism. Can also be configured via the "
+#~ "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the "
+#~ "migration period."
+#~ msgstr "是否启用上下文并行。迁移期间也可通过`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`环境变量配置。"

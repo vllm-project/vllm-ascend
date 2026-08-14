@@ -23,7 +23,6 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 | `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
-| `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` | `enable_context_parallel` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
 | `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
 
@@ -99,7 +98,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
-| `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via the `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the migration period. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FlashComm1. Please ensure that FlashComm1 is enabled before enabling this feature.|
@@ -153,7 +151,7 @@ The details of each configuration option are as follows:
 | `algorithm_execution_interval`   | int | `30`   | The forward iterations when the EPLB worker will finish CPU tasks. |
 | `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
 | `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
-| `eplb_policy_type`               | int | `1`    | EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), `3`=FlashLB (statistical method with sliding windows). |
+| `eplb_policy_type`               | int | `2`    | EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), `3`=FlashLB (statistical method with sliding windows). |
 | `eplb_heat_collection_stage`      | str | `"all"`| Stage to collect EPLB heat: `"prefill"` collects only during prefill, `"decode"` collects only during decode, `"all"` collects during both stages. In PD colocation scenarios, prefill and decode requests may produce different expert workloads. Selectively collecting heat on one stage can reduce expert imbalance more effectively. |
 
 **profiling_chunk_config**

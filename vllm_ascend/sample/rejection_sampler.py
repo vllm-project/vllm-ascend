@@ -31,6 +31,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.utils import is_310p
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -209,6 +210,20 @@ class AscendRejectionSampler(RejectionSampler):
             # the original raw logits for logprobs computation, since
             # apply_logits_processors modifies the tensor in-place.
             target_logits = target_logits.clone()
+
+        # Clean NaN/inf without introducing CPU sync.
+        # torch.nan_to_num is a pure element-wise op that replaces
+        # NaN/±inf in a single pass, avoiding the .any()/.item() sync
+        # triggered by `if tensor.any()` branches. No-op when clean.
+        if not is_310p():
+            info = torch.finfo(target_logits.dtype)
+            target_logits = torch.nan_to_num(
+                target_logits,
+                nan=0.0,
+                posinf=info.max,
+                neginf=info.min,
+            )
+
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
