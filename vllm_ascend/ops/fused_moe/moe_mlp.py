@@ -51,6 +51,16 @@ def _gmm_swiglu_quant_fusion_enabled(use_mxfp_quant, fusion, dynamic_eplb, activ
     )
 
 
+def _use_a2_w8a8_graph_fallback(use_mxfp_quant: bool, act_quant_type: torch.dtype) -> bool:
+    """Keep A2 W8A8 ACLGraph capture on the replay-safe split kernels."""
+    return (
+        _EXTRA_CTX.capturing is True
+        and ASCEND_DEVICE_TYPE == AscendDeviceType.A2
+        and not use_mxfp_quant
+        and act_quant_type == torch.int8
+    )
+
+
 def cumsum_group_list(
     group_list: torch.Tensor, src_list_type: int, dst_list_type: int, active_num: int = 0, expert_num: int = 0
 ) -> torch.Tensor:
@@ -207,6 +217,9 @@ def quant_apply_mlp(
         dynamic_eplb,
         activation,
     )
+    use_a2_w8a8_graph_fallback = _use_a2_w8a8_graph_fallback(use_mxfp_quant, act_quant_type)
+    if use_a2_w8a8_graph_fallback:
+        use_gmm_swiglu_quant_fusion = False
     # GELU can't use the fused SwiGLU+quant ops below; fall back to the
     # non-fused GMM -> GELU -> (re)quant -> GMM2 path for GELU activations.
     is_gelu_activation = activation in (MoEActivation.GELU, MoEActivation.GELU_TANH)
@@ -246,7 +259,11 @@ def quant_apply_mlp(
 
     is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
-        if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation) and not use_mxfp_quant:
+        if (
+            _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation)
+            and not use_mxfp_quant
+            and not use_a2_w8a8_graph_fallback
+        ):
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
@@ -457,6 +474,7 @@ def quant_apply_mlp(
             _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation)
             and not use_mxfp_quant
             and not is_gelu_activation
+            and not use_a2_w8a8_graph_fallback
         ):
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(

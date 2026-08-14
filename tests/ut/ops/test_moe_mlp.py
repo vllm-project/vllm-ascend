@@ -866,6 +866,54 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
 
 
 class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
+    def test_a2_w8a8_graph_capture_uses_split_kernels(self):
+        mock_ctx = SimpleNamespace(moe_comm_type=-1, capturing=True)
+        gate_up_output = torch.zeros(3, 8, dtype=torch.bfloat16)
+        activated = torch.zeros(3, 4, dtype=torch.bfloat16)
+        quantized_activated = torch.zeros(3, 4, dtype=torch.int8)
+        activated_scale = torch.ones(3, dtype=torch.float32)
+        final_output = torch.zeros(3, 2)
+        kwargs = self._common_w8a8_kwargs(
+            activation="silu",
+            group_list_type=1,
+            group_list=torch.tensor([1, 2, 0], dtype=torch.int64),
+            dynamic_scale=torch.ones(3),
+        )
+        kwargs.update(
+            {
+                "hidden_states": torch.zeros(3, 4, dtype=torch.int8),
+                "w1": torch.zeros(3, 4, 8, dtype=torch.int8),
+                "w1_scale": torch.ones(3, 8),
+                "w2": torch.zeros(3, 4, 2, dtype=torch.int8),
+                "w2_scale": torch.ones(3, 2),
+                "fusion": True,
+                "dynamic_eplb": False,
+            }
+        )
+
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX", mock_ctx),
+            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A2),
+            patch(f"{MOE_MLP}.HAS_TRITON", False),
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_output], create=True) as mock_gmm1,
+            patch("torch_npu.npu_swiglu", return_value=activated, create=True) as mock_activation,
+            patch(
+                "torch_npu.npu_dynamic_quant",
+                return_value=(quantized_activated, activated_scale),
+                create=True,
+            ),
+            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=final_output),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+            _patch_npu_stream()[0],
+        ):
+            output, _ = quant_apply_mlp(**kwargs)
+
+        mock_fused.assert_not_called()
+        mock_gmm1.assert_called_once()
+        mock_activation.assert_called_once()
+        self.assertIs(output, final_output)
+
     def test_multi_tensor_fused_paths_pass_expert_counts_to_v2(self):
         expected_group_list = torch.tensor([1, 2, 0], dtype=torch.int64)
 
