@@ -80,10 +80,10 @@ ge::graphStatus Tiling4RotaryPositionEmbedding(gert::TilingContext *context)
     {
         std::vector<std::unique_ptr<RopeRegBaseTilingClass>> regBaseTilingCases;
         regBaseTilingCases.reserve(4);
-        regBaseTilingCases.emplace_back(new RopeRegBaseTilingClassAAndB(context));
-        regBaseTilingCases.emplace_back(new RopeRegBaseTilingClassAB(context));
-        regBaseTilingCases.emplace_back(new RopeRegBaseTilingClassABAAndBA(context));
-        regBaseTilingCases.emplace_back(new RopeRegBaseTilingClassBAB(context));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassAAndB>(context));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassAB>(context));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassABAAndBA>(context));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassBAB>(context)); 
         OPS_LOG_I(context, "Using arch35 tiling for ASCEND950");
 
         for (const auto& ptr : regBaseTilingCases)
