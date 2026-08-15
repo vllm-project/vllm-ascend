@@ -411,6 +411,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
         return attn_metadata
 
+    # TODO 修改函数名称，作为上游的重写
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,

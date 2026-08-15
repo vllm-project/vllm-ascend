@@ -51,6 +51,8 @@ from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
 @dataclass
+
+
 class AscendMetadataForPrefill:
     """GQA prefill metadata used only by DCP."""
 
