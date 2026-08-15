@@ -205,9 +205,15 @@ class AscendSharedExperts:
     def _prepare_flashcomm_tp_input(hidden_states: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
 
-    @staticmethod
-    def _finalize_flashcomm_tp_output(shared_out: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.maybe_pad_and_reduce(shared_out)
+    def _finalize_flashcomm_tp_output(self, shared_out: torch.Tensor) -> torch.Tensor:
+        # Multimodal draft-model inputs intentionally bypass the usual
+        # maybe_pad_and_reduce path. This output is different: its input was
+        # explicitly TP all-gathered above for TP-sharded weights, so reduce it
+        # directly with the physical TP group.
+        pad_size = _EXTRA_CTX.pad_size
+        if pad_size > 0:
+            shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
+        return self.moe_config.tp_group.reduce_scatter(shared_out, dim=0)
 
     def forward(self, hidden_states: torch.Tensor, fused_moe_evts: FusedMoEEvents):
         mode = self.parallel_mode()

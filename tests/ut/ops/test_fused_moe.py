@@ -841,11 +841,21 @@ def test_local_shared_expert_dp_pads_splits_gathers_and_unpads(num_tokens):
     tp_group.all_gather.assert_called_once_with(local_hidden_states, dim=0)
 
 
-def test_flashcomm_tp_shared_expert_gathers_input_and_reduce_scatters_output():
+@pytest.mark.parametrize(("num_shared_tokens", "pad_size"), [(4, 0), (3, 1)])
+def test_flashcomm_tp_shared_expert_gathers_input_and_reduce_scatters_output(
+    monkeypatch,
+    num_shared_tokens,
+    pad_size,
+):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    tp_group = MagicMock(world_size=2, rank_in_group=0)
+    shared_experts.moe_config = SimpleNamespace(tp_group=tp_group)
     hidden_states = torch.ones(2, 4)
     gathered_states = torch.ones(4, 4)
-    shared_out = torch.ones(4, 4)
-    reduced_states = torch.ones(2, 4)
+    shared_out = torch.ones(num_shared_tokens, 4)
+    reduced_states = torch.ones((num_shared_tokens + pad_size) // 2, 4)
+    tp_group.reduce_scatter.return_value = reduced_states
+    monkeypatch.setattr(shared_experts_module, "_EXTRA_CTX", SimpleNamespace(pad_size=pad_size))
 
     with (
         patch(
@@ -855,17 +865,20 @@ def test_flashcomm_tp_shared_expert_gathers_input_and_reduce_scatters_output():
         ) as all_gather,
         patch(
             "torch.ops.vllm.maybe_pad_and_reduce",
-            return_value=reduced_states,
             create=True,
-        ) as reduce_scatter,
+        ) as generic_reduce,
     ):
-        prepared = AscendSharedExperts._prepare_flashcomm_tp_input(hidden_states)
-        finalized = AscendSharedExperts._finalize_flashcomm_tp_output(shared_out)
+        prepared = shared_experts._prepare_flashcomm_tp_input(hidden_states)
+        finalized = shared_experts._finalize_flashcomm_tp_output(shared_out)
 
     assert prepared is gathered_states
     assert finalized is reduced_states
     all_gather.assert_called_once_with(hidden_states, True)
-    reduce_scatter.assert_called_once_with(shared_out)
+    generic_reduce.assert_not_called()
+    reduced_input = tp_group.reduce_scatter.call_args.args[0]
+    expected_input = F.pad(shared_out, (0, 0, 0, pad_size))
+    torch.testing.assert_close(reduced_input, expected_input)
+    assert tp_group.reduce_scatter.call_args.kwargs == {"dim": 0}
 
 
 def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
