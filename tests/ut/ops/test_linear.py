@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -170,11 +171,16 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
 
     def setUp(self):
         self.mock_layer = MagicMock()
+        self.mock_group = MagicMock()
+        self.mock_group.world_size = 2
+        self.mock_group.rank_in_group = 0
         self._patches = [
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.is_310p", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:
@@ -215,11 +221,16 @@ class TestRowParallelOpDispatch(unittest.TestCase):
 
     def setUp(self):
         self.mock_layer = MagicMock()
+        self.mock_group = MagicMock()
+        self.mock_group.world_size = 2
+        self.mock_group.rank_in_group = 0
         self._patches = [
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.is_310p", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:
@@ -247,6 +258,134 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNone(self._op("model.multi_modal_projector.down_proj"))
         self.assertIsNone(self._op("model.patch_merge_mlp.out_proj"))
+
+    def test_sequence_row_op_calls_tensor_mm_reduce_scatter_in_eager(self):
+        from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+
+        layer = MagicMock()
+        layer.prefix = "model.layers.0.mlp.down_proj"
+        layer.unique_prefix = "model.layers.0.mlp.down_proj"
+        layer.input_is_parallel = True
+        layer.reduce_results = True
+        layer.input_size_per_partition = 8
+        layer.skip_bias_add = False
+        layer.return_bias = True
+        layer.quant_method = AscendUnquantizedLinearMethod()
+        layer.weight = torch.nn.Parameter(torch.empty(16, 8, dtype=torch.float16), requires_grad=False)
+        layer.bias = None
+        output = torch.empty(2, 16, dtype=torch.float16)
+
+        op = SequenceRowParallelOp(layer)
+        op.update_attrs()
+        input_ = torch.empty(4, 8, dtype=torch.float16)
+        with patch.object(
+            torch.ops.vllm,
+            "unquantized_matmul_reduce_scatter",
+            return_value=output,
+            create=True,
+        ) as mock_fused:
+            result, output_bias = op.apply_impl(input_)
+
+        self.assertIs(result, output)
+        self.assertIsNone(output_bias)
+        mock_fused.assert_called_once_with(input_, layer.weight, None)
+
+
+class TestSequenceRowParallelMatmulAndReduce(unittest.TestCase):
+    def test_dynamic_w8a8_tensor_op_uses_mm_reduce_scatter_fusion(self):
+        from vllm_ascend.ops import register_custom_ops
+
+        x = torch.randn(4, 8, dtype=torch.bfloat16)
+        weight = torch.randint(-8, 8, (8, 16), dtype=torch.int8)
+        weight_scale = torch.randn(16, dtype=torch.float32)
+        x_quant = torch.randint(-8, 8, (4, 8), dtype=torch.int8)
+        pertoken_scale = torch.randn(4, dtype=torch.float32)
+        fused_output = torch.randn(2, 16, dtype=torch.bfloat16)
+
+        tp_group = MagicMock()
+        tp_group.world_size = 2
+        tp_group.rank_in_group = 0
+        tp_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_comm"
+
+        with (
+            patch(
+                "vllm_ascend.ops.register_custom_ops._EXTRA_CTX",
+                SimpleNamespace(flash_comm_v1_enabled=True, pad_size=0),
+            ),
+            patch("vllm_ascend.ops.register_custom_ops.get_forward_context", return_value=MagicMock()),
+            patch("vllm_ascend.ops.register_custom_ops.get_tp_group", return_value=tp_group),
+            patch(
+                "vllm_ascend.ops.register_custom_ops.DeviceOperator.npu_dynamic_quant",
+                return_value=(x_quant, pertoken_scale),
+            ) as mock_dynamic_quant,
+            patch(
+                "vllm_ascend.ops.register_custom_ops.DeviceOperator.npu_mm_reduce_scatter_base",
+                return_value=fused_output,
+            ) as mock_mmrs,
+        ):
+            output = register_custom_ops._dynamic_quant_matmul_reduce_scatter_impl(x, weight, weight_scale)
+
+        self.assertIs(output, fused_output)
+        mock_dynamic_quant.assert_called_once_with(x, act_quant_type=torch.int8)
+        mock_mmrs.assert_called_once()
+        _, kwargs = mock_mmrs.call_args
+        self.assertEqual(kwargs["x1_scale"].shape, (4, 1))
+        self.assertTrue(torch.equal(kwargs["x1_scale"].squeeze(dim=1), pertoken_scale))
+        self.assertEqual(kwargs["x2_scale"].shape, (1, 16))
+        self.assertTrue(torch.equal(kwargs["x2_scale"].squeeze(dim=0), weight_scale))
+        self.assertEqual(kwargs["output_dtype"], x.dtype)
+
+    def test_dynamic_w8a8_uses_mm_reduce_scatter_fusion(self):
+        from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+        from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+        quant_method = AscendW8A8DynamicLinearMethod()
+        layer = MagicMock()
+        layer.quant_method = AscendLinearMethod(quant_method)
+        layer.weight = torch.randint(-8, 8, (8, 16), dtype=torch.int8)
+        layer.weight_scale = torch.randn(16, dtype=torch.bfloat16)
+        layer.weight_scale_fp32 = torch.randn(16, dtype=torch.float32)
+        layer.tp_size = 2
+        layer.tp_rank = 0
+
+        op = SequenceRowParallelOp(layer)
+        op.quant_method = layer.quant_method
+        x = torch.randn(4, 8, dtype=torch.bfloat16)
+        x_quant = torch.randint(-8, 8, (4, 8), dtype=torch.int8)
+        pertoken_scale = torch.randn(4, dtype=torch.float32)
+        fused_output = torch.randn(2, 16, dtype=torch.bfloat16)
+
+        tp_group = MagicMock()
+        tp_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_comm"
+
+        with (
+            patch(
+                "vllm_ascend.ops.linear_op._EXTRA_CTX",
+                SimpleNamespace(flash_comm_v1_enabled=True, mmrs_fusion=True, pad_size=0),
+            ),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=tp_group),
+            patch(
+                "vllm_ascend.ops.linear_op.DeviceOperator.npu_dynamic_quant",
+                return_value=(x_quant, pertoken_scale),
+            ) as mock_dynamic_quant,
+            patch(
+                "vllm_ascend.ops.linear_op.DeviceOperator.npu_mm_reduce_scatter_base",
+                return_value=fused_output,
+            ) as mock_mmrs,
+        ):
+            output = op.matmul_and_reduce(x, bias_=None)
+
+        self.assertIs(output, fused_output)
+        mock_dynamic_quant.assert_called_once_with(x, act_quant_type=quant_method.act_quant_type)
+        mock_mmrs.assert_called_once()
+        _, kwargs = mock_mmrs.call_args
+        self.assertEqual(kwargs["x1_scale"].shape, (4, 1))
+        self.assertTrue(torch.equal(kwargs["x1_scale"].squeeze(dim=1), pertoken_scale))
+        self.assertEqual(kwargs["x2_scale"].shape, (1, 16))
+        self.assertTrue(torch.equal(kwargs["x2_scale"].squeeze(dim=0), layer.weight_scale_fp32))
+        self.assertEqual(kwargs["output_dtype"], x.dtype)
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):
