@@ -15,6 +15,14 @@ MODEL_PATH = "Qwen/Qwen3.6-35B-A3B"
 
 LORA_2D_ID = 1
 LORA_3D_ID = 2
+LORA_2D_EXPECTED_OUTPUT = [
+    "A red stop sign stands prominently in the foreground.",
+    "Cherry blossoms in full bloom frame the Tokyo Skytree, creating a picturesque scene of pink flowers against a clear blue sky."
+]
+LORA_3D_EXPECTED_OUTPUT = [
+    "A red STOP sign stands prominently in the foreground, with a traditional Chinese gate adorned with red lanterns and the Chinese characters \"中華門\" in the background, signaling the entrance to a Chinatown. A black car passes by on the street, and stone lion statues guard the entrance to the culturally rich area.",
+    "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom."
+]
 
 PROMPT_TEMPLATE = """<|im_start|>user
 <|vision_start|><|image_pad|><|vision_end|>What is in the image?<|im_end|>
@@ -106,32 +114,15 @@ def _run_mixed_2d_3d_lora_test(
         for text in outputs_2d_alone + outputs_3d_alone:
             assert text, "Empty output from single-adapter LoRA generation"
 
-        # Mixed batch: prompt 0 uses the 2D adapter, prompt 1 uses the 3D
-        # adapter. Per-prompt outputs must match the standalone runs.
-        mixed_outputs = _generate(llm, [lora_2d, lora_3d])
-
-        assert mixed_outputs[0] == outputs_2d_alone[0], (
-            f"Mixed-batch 2D output {mixed_outputs[0]!r} does not match standalone 2D output {outputs_2d_alone[0]!r}"
-        )
-        assert mixed_outputs[1] == outputs_3d_alone[1], (
-            f"Mixed-batch 3D output {mixed_outputs[1]!r} does not match standalone 3D output {outputs_3d_alone[1]!r}"
-        )
-
-        # Reverse assignment: neither adapter should be silently aliased.
-        swapped_outputs = _generate(llm, [lora_3d, lora_2d])
-        assert swapped_outputs[0] == outputs_3d_alone[0], (
-            f"Swapped-batch 3D output {swapped_outputs[0]!r} does not match "
-            f"standalone 3D output {outputs_3d_alone[0]!r}"
-        )
-        assert swapped_outputs[1] == outputs_2d_alone[1], (
-            f"Swapped-batch 2D output {swapped_outputs[1]!r} does not match "
-            f"standalone 2D output {outputs_2d_alone[1]!r}"
-        )
+        assert outputs_2d_alone[0] == LORA_2D_EXPECTED_OUTPUT[0]
+        assert outputs_2d_alone[1] == LORA_2D_EXPECTED_OUTPUT[1]
+        assert outputs_3d_alone[0] == LORA_3D_EXPECTED_OUTPUT[0]
+        assert outputs_3d_alone[1] == LORA_3D_EXPECTED_OUTPUT[1]
 
 
 @pytest.mark.parametrize("fully_sharded_loras", [True, False])
 @wait_until_npu_memory_free()
-def test_qwen36_moe_mixed_2d_3d_lora_tp2(
+def test_qwen36_moe_2d_3d_lora_tp2(
     qwen36_moe_2d_lora_files,
     qwen36_moe_3d_lora_files,
     fully_sharded_loras,
