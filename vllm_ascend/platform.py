@@ -471,10 +471,8 @@ class NPUPlatform(Platform):
         # if the concurrency is below the threshold,
         # the performance may degrade due to the switching of
         # communication methods.
-        mmrs_fusion = True
         if is_moe_model(vllm_config):
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None
-            mmrs_fusion = False
         else:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
         pad_size = 0
@@ -516,7 +514,6 @@ class NPUPlatform(Platform):
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
             "capturing": capturing,
-            "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
             "flash_comm_v1_enabled": flash_comm_v1_enabled,
             "pad_size": pad_size,
