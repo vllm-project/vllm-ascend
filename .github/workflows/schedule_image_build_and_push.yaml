@@ -104,8 +104,8 @@ jobs:
     if: ${{ !((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')))
         && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
+      max-parallel: 6
       matrix:
-        max-parallel: 6
         build_meta:
           - name: A2 Ubuntu
             dockerfile: Dockerfile
@@ -180,8 +180,8 @@ jobs:
         && inputs.tag == 'none'
         && inputs.branch == 'none' }}
     strategy:
+      max-parallel: 6
       matrix:
-        max-parallel: 6
         build_meta:
           - name: A2 Ubuntu
             dockerfile: Dockerfile
