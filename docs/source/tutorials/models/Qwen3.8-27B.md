@@ -156,8 +156,6 @@ Before starting the service:
     export OMP_PROC_BIND=false
     # Number of OpenMP threads available for parallel regions
     export OMP_NUM_THREADS=1
-    # Enables the Ascend task queue for asynchronous operator dispatch
-    export TASK_QUEUE_ENABLE=1
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
     export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
@@ -167,7 +165,6 @@ Before starting the service:
         --port 8000 \
         --data-parallel-size 1 \
         --tensor-parallel-size 2 \
-        --seed 1024 \
         --quantization ascend \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
@@ -175,7 +172,6 @@ Before starting the service:
         --max-num-batched-tokens 16384 \
         --trust-remote-code \
         --gpu-memory-utilization 0.85 \
-        --no-enable-prefix-caching \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true}'
@@ -191,7 +187,6 @@ Before starting the service:
         - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.8-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
@@ -214,8 +209,6 @@ Before starting the service:
     export OMP_PROC_BIND=false
     # Number of OpenMP threads available for parallel regions
     export OMP_NUM_THREADS=1
-    # Enables the Ascend task queue for asynchronous operator dispatch
-    export TASK_QUEUE_ENABLE=1
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) or a local directory path
     export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
@@ -225,7 +218,6 @@ Before starting the service:
         --port 8000 \
         --data-parallel-size 1 \
         --tensor-parallel-size 1 \
-        --seed 1024 \
         --quantization ascend \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
@@ -233,7 +225,6 @@ Before starting the service:
         --max-num-batched-tokens 16384 \
         --trust-remote-code \
         --gpu-memory-utilization 0.85 \
-        --no-enable-prefix-caching \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true}'
@@ -249,7 +240,6 @@ Before starting the service:
         - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.8-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
