@@ -254,19 +254,20 @@ jobs:
     #     username: ${{ inputs.QUAY_TEMP_USERNAME }}
     #     password: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-      with:
-        install: true
-        driver: docker-container
-        use: true
+    # runner  linux-amd64-cpu-4-buildkit-gy006 目前不支持 此步骤
+    # - name: Set up Docker Buildx
+    #   uses: docker/setup-buildx-action@v4
+    #   with:
+    #     install: true
+    #     driver: docker-container
+    #     use: true
     #TODO SWR需要这个步骤吗？
-    - name: Login to GitHub Container Registry (for cache)
-      uses: docker/login-action@v4
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    # - name: Login to GitHub Container Registry (for cache)
+    #   uses: docker/login-action@v4
+    #   with:
+    #     registry: ghcr.io
+    #     username: ${{ github.actor }}
+    #     password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Compute cache tag
       id: cache-tag
