@@ -91,18 +91,18 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         """Pinned CPU per-request query lengths for ATB splitfuse (host qLensTensor)."""
         if self._query_lens_cpu_buffer is None:
             return (query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]).contiguous()
-        if is_drafting:
-            # We are using the same buffer for multi step drafting,
-            # so we have to clone the buffer or the q lens of step 0
-            # will be overwritten by the following steps.
-            buffer = self._query_lens_cpu_buffer[:num_reqs].clone()
-        else:
-            buffer = self._query_lens_cpu_buffer[:num_reqs]
+        buffer = self._query_lens_cpu_buffer[:num_reqs]
         torch.sub(
             query_start_loc_cpu[1 : num_reqs + 1],
             query_start_loc_cpu[:num_reqs],
             out=buffer,
         )
+        if is_drafting:
+            # Draft steps reuse the work buffer. Keep a pinned snapshot so the
+            # next step cannot overwrite qLens while ATB consumes it.
+            snapshot = torch.empty_like(buffer, pin_memory=buffer.is_pinned())
+            snapshot.copy_(buffer)
+            return snapshot
         return buffer
 
     def build(
