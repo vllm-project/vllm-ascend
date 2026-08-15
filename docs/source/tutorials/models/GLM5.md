@@ -809,6 +809,10 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
+```{warning}
+For GLM-5.1's Sparse Flash Attention (SFA) backend, when using Decode Context Parallelism (DCP) in PD disaggregation, enable it on both the prefiller and decoder nodes, or disable it on both. Enabling DCP on only one side can cause known accuracy issues.
+```
+
 Before you start, please
 
 1. prepare the script `launch_online_dp.py` on each node:
@@ -1383,6 +1387,10 @@ Once the preparation is done, you can start the server with the following comman
 ### 5.4 Prefill-Decode Disaggregation (Ascend950DT series)
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 2P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
+
+```{warning}
+For GLM-5.1's Sparse Flash Attention (SFA) backend, when using Decode Context Parallelism (DCP) in PD disaggregation, enable it on both the prefiller and decoder nodes, or disable it on both. Enabling DCP on only one side can cause known accuracy issues.
+```
 
 Before you start, please
 

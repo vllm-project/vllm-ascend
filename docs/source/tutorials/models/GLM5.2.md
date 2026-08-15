@@ -1271,6 +1271,8 @@ Recommended configurations for serving `GLM-5.2` with a 1M context window on Atl
 The 1M context scenarios are validated on Atlas 800 A3 only; the A2 series is not validated for 1M context.
 
 ::::{warning}
+For GLM-5.2's Sparse Flash Attention (SFA) backend, when using DCP in PD disaggregation, enable it on both the prefiller and decoder nodes, or disable it on both. Enabling DCP on only one side can cause known accuracy issues.
+
 DCP and Sparse Flash Attention C8 (`enable_sparse_sfa_c8`, also referred to as `sfa_c8`) are experimental features in v0.23.0. Enabling them together has known issues in this release, including performance degradation, and is not recommended. The following 1M deployment examples enable DCP and leave `enable_sparse_sfa_c8` disabled.
 ::::
 
