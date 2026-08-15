@@ -57,6 +57,7 @@ import torch
 # the pristine classes/file paths first.
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
+from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
@@ -231,11 +232,39 @@ def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
 def test_mamba_waiting_path_schedules_without_argument_mismatch():
     """Run the balance waiting path through the real upstream Mamba helper."""
     block_size = 4
-    vllm_config = create_vllm_config(
-        max_num_seqs=2,
-        max_num_batched_tokens=16,
-        block_size=block_size,
+    model_info = SimpleNamespace(
+        architecture="OPTForCausalLM",
+        is_text_generation_model=True,
+        is_pooling_model=False,
+        attn_type="decoder",
+        default_seq_pooling_type=None,
+        default_tok_pooling_type=None,
+        score_type=None,
+        supports_multimodal=False,
+        supports_multimodal_raw_input_only=False,
+        requires_raw_input_tokens=False,
+        supports_multimodal_encoder_tp_data=False,
+        supports_pp=True,
+        has_inner_state=False,
+        is_attention_free=False,
+        is_hybrid=False,
+        has_noops=False,
+        supports_mamba_prefix_caching=False,
+        supports_replayssm=False,
+        supports_transcription=False,
+        supports_transcription_only=False,
+        supported_video_pruning_methods=(),
     )
+    with patch.object(
+        ModelRegistry,
+        "inspect_model_cls",
+        return_value=(model_info, model_info.architecture),
+    ):
+        vllm_config = create_vllm_config(
+            max_num_seqs=2,
+            max_num_batched_tokens=16,
+            block_size=block_size,
+        )
     vllm_config.additional_config = {"scheduler_config": {"enable_balance_scheduling": True}}
     vllm_config.cache_config.num_gpu_blocks = 64
     kv_cache_config = KVCacheConfig(
