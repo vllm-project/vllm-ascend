@@ -1180,11 +1180,14 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _v_up_proj(self, x):
         if hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
-            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-            # Convert from (N, B, V) to (B, N * V)
+            # Transpose explicitly to (N, B, L) so the aclnn TransposeBatchMatMul
+            # can use perm_x1=(0,1,2) (no inner transpose). This downgrades the
+            # constraint from N*L<65536 (fails when TP=1: 128*512=65536) to
+            # L<65536 (always satisfied since kv_lora_rank=512).
+            x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
+            # Multiply (N, B, L) x (N, L, V) -> (N, B, V), perm_y=(1,0,2) -> (B, N, V)
+            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
             # Convert from (B, N, L) to (N, B, L)
