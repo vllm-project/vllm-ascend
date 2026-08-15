@@ -31,7 +31,10 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 0,
     hidden_size: int = 2048,
 ):
-    hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
+    hf_text_config_attrs: dict[str, object] = {
+        "first_k_dense_replace": 1,
+        "top_k_experts": top_k_experts,
+    }
     if quant_type is not None:
         hf_text_config_attrs["quantize"] = quant_type
     if num_experts_per_tok is not None:
@@ -312,6 +315,7 @@ def test_select_moe_comm_method_a3_quant_w8a8(
     [
         ("w4a8", True),
         ("w8a8", True),
+        ("w4a8_mxfp", False),
         ("w8a16", False),
     ],
 )
@@ -367,6 +371,70 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+def test_select_moe_comm_method_a5_uses_registered_layer_capability(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=4096,
+        enable_fused_mc2=1,
+    )
+    model_instance = object()
+    monkeypatch.setattr(
+        afc,
+        "get_model_cann_mega_moe_capability",
+        lambda model: SimpleNamespace(supported=model is model_instance),
+    )
+    vllm_config = _make_vllm_config(
+        world_size=32,
+        num_experts=896,
+        top_k_experts=16,
+        hidden_size=7168,
+    )
+
+    assert (
+        afc.select_moe_comm_method(129, vllm_config, model_instance=model_instance)
+        == MoECommType.FUSED_MC2
+    )
+
+
+def test_select_moe_comm_method_a5_rejects_megamoe_above_token_capacity(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=4096,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=32,
+        num_experts=896,
+        top_k_experts=16,
+    )
+
+    assert (
+        afc.select_moe_comm_method(
+            4097,
+            vllm_config,
+            cann_mega_moe_supported=True,
+        )
+        == MoECommType.ALLTOALL
+    )
+
+
+def test_select_moe_comm_method_a5_keeps_existing_path_for_unsupported_layer(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+
+    assert (
+        afc.select_moe_comm_method(129, vllm_config, cann_mega_moe_supported=False)
+        == MoECommType.ALLTOALL
+    )
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):

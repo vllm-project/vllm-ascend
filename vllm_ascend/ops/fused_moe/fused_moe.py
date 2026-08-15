@@ -43,6 +43,7 @@ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
+from vllm_ascend.ops.fused_moe.mega_moe_adapter import evaluate_cann_mega_moe_layer
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
@@ -471,7 +472,24 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
-        setup_moe_comm_method(self.moe_config)
+        self.cann_mega_moe_capability = evaluate_cann_mega_moe_layer(
+            self.moe_config,
+            self._quant_method,
+            self.activation,
+        )
+        if ascend_config.enable_fused_mc2 == 1:
+            logger.info_once(
+                "CANN MegaMoe layer capability: supported=%s, quant=%s, "
+                "activation=%s, reason=%s.",
+                self.cann_mega_moe_capability.supported,
+                self.cann_mega_moe_capability.quant_type,
+                self.cann_mega_moe_capability.activation,
+                self.cann_mega_moe_capability.reason or "supported",
+            )
+        setup_moe_comm_method(
+            self.moe_config,
+            cann_mega_moe_capability=self.cann_mega_moe_capability,
+        )
         if self.multistream_overlap_shared_expert:
             # Wrap the quant_method's process_weights_after_loading to validate that
             # splitting shared expert computation (gate_up projection + activation,
