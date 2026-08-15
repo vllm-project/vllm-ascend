@@ -232,6 +232,12 @@ def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
 def test_mamba_waiting_path_schedules_without_argument_mismatch():
     """Run the balance waiting path through the real upstream Mamba helper."""
     block_size = 4
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=True,
+            short_request_first_config=SimpleNamespace(enabled=False),
+        )
+    )
     model_info = SimpleNamespace(
         architecture="OPTForCausalLM",
         is_text_generation_model=True,
@@ -255,10 +261,17 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
         supports_transcription_only=False,
         supported_video_pruning_methods=(),
     )
-    with patch.object(
-        ModelRegistry,
-        "inspect_model_cls",
-        return_value=(model_info, model_info.architecture),
+    with (
+        patch.object(
+            ModelRegistry,
+            "inspect_model_cls",
+            return_value=(model_info, model_info.architecture),
+        ),
+        patch(
+            "vllm_ascend.platform.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch("vllm_ascend.logger.configure_ascend_file_logging"),
     ):
         vllm_config = create_vllm_config(
             max_num_seqs=2,
@@ -282,13 +295,6 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
             )
         ],
     )
-    ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            enable_balance_scheduling=True,
-            short_request_first_config=SimpleNamespace(enabled=False),
-        )
-    )
-
     with (
         patch(
             "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
