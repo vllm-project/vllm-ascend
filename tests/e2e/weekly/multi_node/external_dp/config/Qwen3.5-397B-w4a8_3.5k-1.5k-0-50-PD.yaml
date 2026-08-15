@@ -60,6 +60,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "24"
       - --max-model-len
@@ -124,6 +130,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "24"
       - --max-model-len
