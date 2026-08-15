@@ -162,8 +162,10 @@ jobs:
     strategy:
       matrix:
         runner_info:
-          - {runner: linux-aarch64-cpu-4, arch: arm64, tag: arm64}
-          - {runner: linux-amd64-cpu-4, arch: amd64, tag: amd64}
+          - {runner: linux-aarch64-cpu-4-buildkit-gy006, tag: arm64}
+          - {runner: linux-amd64-cpu-4-buildkit-gy006, tag: amd64}
+          # - {runner: linux-aarch64-cpu-4, arch: arm64, tag: arm64}
+          # - {runner: linux-amd64-cpu-4, arch: amd64, tag: amd64}
 
     steps:
 
