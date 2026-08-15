@@ -32,7 +32,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.utils import clear_enable_sp, enable_sp
+from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
 class TestAscendConfig(TestBase):
@@ -437,6 +437,41 @@ class TestAscendConfig(TestBase):
             patch("vllm.config.get_current_vllm_config", side_effect=AssertionError),
         ):
             self.assertTrue(enable_sp())
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_and_shared_expert_dp_are_independent(self, mock_check_and_update_config):
+        for enable_flashcomm1, enable_shared_expert_dp in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                enable_flashcomm1=enable_flashcomm1,
+                enable_shared_expert_dp=enable_shared_expert_dp,
+            ):
+                clear_ascend_config()
+                clear_enable_sp()
+                test_vllm_config = VllmConfig()
+                test_vllm_config.parallel_config.tensor_parallel_size = 2
+                test_vllm_config.parallel_config.enable_expert_parallel = True
+                test_vllm_config.additional_config = {
+                    "enable_flashcomm1": enable_flashcomm1,
+                    "enable_shared_expert_dp": enable_shared_expert_dp,
+                }
+
+                ascend_config = init_ascend_config(test_vllm_config)
+
+                self.assertEqual(enable_sp(test_vllm_config), enable_flashcomm1)
+                self.assertEqual(
+                    ascend_config.enable_shared_expert_dp,
+                    enable_shared_expert_dp,
+                )
+                self.assertEqual(
+                    shared_expert_dp_enabled(),
+                    enable_shared_expert_dp,
+                )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

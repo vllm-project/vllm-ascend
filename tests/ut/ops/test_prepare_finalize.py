@@ -74,9 +74,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         hidden_states = torch.randn(4, 8)
         router_logits = torch.randn(4, 2)
 
-        prepare_output = layer.prepare(
-            hidden_states, router_logits, enable_shared_expert_dp=False, replace_allreduce=False
-        )
+        prepare_output = layer.prepare(hidden_states, router_logits, replace_allreduce=False)
         h_out = prepare_output.hidden_states
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
 
@@ -125,9 +123,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         hidden_states = torch.randn(2, 8)
         router_logits = torch.randn(2, 2)
 
-        prepare_output = layer.prepare(
-            hidden_states, router_logits, enable_shared_expert_dp=False, replace_allreduce=False
-        )
+        prepare_output = layer.prepare(hidden_states, router_logits, replace_allreduce=False)
         h_out = prepare_output.hidden_states
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
 
