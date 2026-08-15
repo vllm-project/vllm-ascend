@@ -431,6 +431,14 @@ jobs:
       run: |
         mkdir -p ${{ runner.temp }}/digests
         digest="${{ steps.build.outputs.digest }}"
+        if [ -z "$digest" ]; then
+          # Fallback: extract digest from metadata output (push-by-digest mode)
+          digest=$(echo '${{ steps.build.outputs.metadata }}' | jq -r '."image.name"' | sed 's/.*@sha256://')
+        fi
+        if [ -z "$digest" ]; then
+          echo "::error::Build did not produce a digest output"
+          exit 1
+        fi
         touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
     - name: Upload digest
