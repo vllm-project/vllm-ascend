@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+
 def _queue_block_summary(block: KVCacheBlock) -> str:
     prev_id = block.prev_free_block.block_id if block.prev_free_block is not None else None
     next_id = block.next_free_block.block_id if block.next_free_block is not None else None

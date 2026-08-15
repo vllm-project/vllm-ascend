@@ -184,6 +184,7 @@ class Qwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
         pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
 
+
 class SequenceParallelismPass(VllmInductorPass):
     """Sequence parallelism compilation pass.
 

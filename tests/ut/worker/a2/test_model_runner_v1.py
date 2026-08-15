@@ -66,7 +66,7 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
 
         self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
 
-class TestNPUModelRunnerAcceptedTokens(unittest.TestCase):
+
 class TestNPUModelRunnerAcceptedTokens(unittest.TestCase):
     @patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu")
     def test_postprocess_writes_accepted_counts_to_independent_snapshot(self, mock_postprocess):
