@@ -2,490 +2,341 @@
 
 ## Overview
 
-vLLM is widely used as the **rollout (inference) engine** in reinforcement learning (RL) and post-training workflows such as RLHF, PPO, GRPO and DPO: the policy model generates rollouts with vLLM-Ascend, a training framework (e.g. [veRL](https://github.com/volcengine/verl), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [TRL](https://github.com/huggingface/trl)) optimizes the policy on those rollouts, and the updated weights are synchronized back into vLLM for the next round of generation. See the upstream vLLM [Reinforcement Learning from Human Feedback](https://docs.vllm.ai/en/latest/training/rlhf/) document for a list of RL libraries built on vLLM.
+vLLM is commonly used as the rollout engine in reinforcement learning (RL) and
+post-training workflows. A training framework generates samples with
+vLLM-Ascend, updates the policy from those samples, and then synchronizes the
+new weights back to the rollout engine. See the upstream vLLM
+[RLHF guide](https://docs.vllm.ai/en/latest/training/rlhf/) for integrations
+with RL frameworks.
 
-Running RL workloads imposes several requirements on the inference engine that ordinary serving does not:
+RL workloads commonly need the following capabilities:
 
-- **Memory sharing between rollout and training** — generation and training phases usually cannot coexist on the same NPU, so the engine must be able to release its memory footprint and restore it later.
-- **Frequent weight updates** — after every training step the rollout engine must pick up the new policy weights, ideally without a full restart.
-- **Determinism and reproducibility** — RL rollouts must be reproducible across batch sizes and request orders; otherwise the on-policy assumption silently breaks. Batch invariance ensures the same input always produces the same output.
-- **Training-critical data outputs** — RL algorithms (PPO, GRPO) require per-token logprobs for advantage and importance-sampling calculations; MoE models additionally need expert routing decisions (Router Replay) to prevent gradient corruption; hidden states are needed for value-function training and knowledge distillation.
-- **Token-in / token-out API** — RL frameworks manage their own tokenization and detokenization. A raw token API bypasses redundant encode/decode steps, allowing the training loop to feed pre-tokenized prompt IDs and receive raw output token IDs directly.
-- **Tool-call integration** — agentic RL rollouts require the model to emit structured tool calls that the environment executes, with results fed back into the generation loop.
-- **DP-aware request routing** — in large-scale deployments with data-parallel replication, requests must be routed to the correct DP shard's engine to maintain locality and minimize redundant weight transfer.
+- release NPU memory while a colocated trainer is running;
+- update model weights without restarting the rollout engine;
+- pause generation while weights are being updated;
+- return token log probabilities and, for supported MoE workflows, expert
+  routing decisions;
+- accept and return token IDs without redundant tokenization; and
+- produce reproducible results across different batch compositions.
 
-This guide covers the RL-specific features of vllm-ascend. For general inference features (graph mode, speculative decoding, structured output, LoRA, parallelism strategies, etc.), see the respective feature guides under [Feature Guide](./index.md).
+This page describes how these features fit together on Ascend. Follow the
+linked feature guides and examples for complete configuration details.
 
-## Deployment modes
+## Choose a deployment mode
 
-vLLM Ascend supports two RL deployment modes. Choose based on whether training and inference share the same NPU devices:
+| Deployment mode | Memory management | Weight transfer backend |
+| --- | --- | --- |
+| Trainer and rollout engine share NPUs | Enable sleep mode so the rollout engine can release NPU memory | `ipc` |
+| Trainer and rollout engine use different NPUs | Pause generation during the update; sleep mode is normally unnecessary | `hccl` |
 
-| Deployment mode | Description | Key APIs | Requires `enable_sleep_mode` |
-|---|---|---|---|
-| **Same-device** | Rollout engine and trainer share the same NPU card. The engine releases NPU memory via sleep so the trainer can use it. | `sleep(level)` / `wake_up(tags)` | **Yes** (CaMemAllocator memory pool required) |
-| **Cross-device** | Rollout engine and trainer use different NPU cards. Weights are synchronized via weight transfer without releasing NPU memory. | `pause_generation(mode)` / `resume_generation()` + weight transfer | **No** (only scheduler pause is needed) |
+The exact lifecycle is framework-dependent. In particular, level 2 sleep
+discards the weights. Wake the `weights` allocation before loading or
+transferring new weights, then wake `kv_cache` after the update. See
+[Sleep Mode](./sleep_mode.md) for the two-phase wake-up sequence.
 
-The same-device mode maximizes hardware utilization when NPU cards are scarce but requires careful memory management. The cross-device mode is simpler to operate and allows generation and training to be pipelined (overlapped) for higher throughput.
+## Engine lifecycle
 
-## The RL loop and where each feature fits
+### Sleep mode
 
-| Stage of the RL loop | Requirement | Feature | Detailed guide |
-| --- | --- | --- | --- |
-| Free NPU memory for training | Release weights / KV cache without full restart | [Sleep Mode](#sleep-mode-returning-npu-memory-to-the-trainer) | [Sleep Mode](./sleep_mode.md) |
-| Sync policy weights back to rollout engine | In-place weight update, no restart | [Weight Transfer](#weight-transfer-syncing-updated-policy-weights) | Upstream [Weight Transfer](https://docs.vllm.ai/en/latest/training/weight_transfer/) |
-| Overlap generation and training | Pause / resume with in-flight requests | [Pause and Resume Generation](#pause-and-resume-generation-safe-mid-flight-weight-updates) | Upstream [Async RL](https://docs.vllm.ai/en/latest/training/async_rl/) |
-| Reproducible, train-consistent rollouts | Deterministic compute across batch shapes | [Batch Invariance](#batch-invariance) | [Batch Invariance](./batch_invariance.md) |
-| Feed pre-tokenized prompts, receive raw output tokens | Bypass redundant tokenization/detokenization in the RL loop | [Token In / Token Out](#token-in--token-out) | Upstream RFC [#22817](https://github.com/vllm-project/vllm/issues/22817) |
-| Provide token-level logprobs to trainer | Per-token log probabilities for advantage / importance sampling | [Token Logprobs](#token-logprobs) | Upstream [SamplingParams](https://docs.vllm.ai/en/latest/dev/sampling_params/) |
-| Align MoE expert routing between inference and training | Record and replay expert selections | [Router Replay (R3)](#router-replay-r3) | Upstream [Return Routed Experts](https://docs.vllm.ai/en/latest/examples/rl/routed_experts_e2e/?h=experts) |
-| Provide hidden states for value / distillation | Return prompt hidden states | [Extract Hidden States](#extract-hidden-states) | Upstream [SamplingParams](https://docs.vllm.ai/en/latest/dev/sampling_params/) |
-| Emit structured tool calls in agentic rollouts | Model emits function-call syntax, environment executes and returns results | [Tool Call](#tool-call) | Upstream [Tool Calling](https://docs.vllm.ai/en/latest/features/tool_calling/) |
-| Route rollout requests to the correct DP shard | DP-index-aware request dispatching | [DP-Aware Routing](#dp-aware-routing) | — |
+Sleep mode lets a colocated rollout engine release NPU memory without exiting.
+Level 1 offloads model weights to CPU and discards the KV cache. Level 2
+discards both model weights and KV cache and is appropriate when new weights
+will be loaded before inference resumes.
 
-## Engine lifecycle between rollout and training
-
-The diagram below shows a complete RL training step — from rollout generation through training to weight synchronization — and which RL-specific feature is used at each stage.
-
-```mermaid
-flowchart TD
-    subgraph ROLLOUT["🎲 Rollout Phase — vLLM Inference Engine"]
-        direction LR
-        R0["Token In / Token Out<br/>Pre-tokenized prompt → raw token IDs"]
-        R1["Token Logprobs<br/>Per-token log probabilities"]
-        R2["Router Replay (R3)<br/>Expert routing decisions"]
-        R3["Extract Hidden States<br/>Final-layer activations"]
-        R4["Tool Call<br/>Structured tool invocations"]
-    end
-
-    DECISION{"Same-device<br/>or Cross-device?"}
-    SLEEP["💤 Sleep Mode<br/>Release NPU memory<br/>(weights → CPU / discard KV cache)"]
-    PAUSE["⏸️ Pause Generation<br/>Freeze or drain in-flight requests"]
-    TRAIN["🏋️ Training Step<br/>Compute loss from rollout data<br/>Update policy weights"]
-    WT["🔄 Weight Transfer<br/>Sync updated weights<br/>IPC (same-device) / HCCL (cross-device)"]
-    WAKE["⚡ Wake Up<br/>Restore weights → KV cache<br/>Replay ACL graphs"]
-    RESUME["▶️ Resume Generation<br/>Continue in-flight requests<br/>Replay ACL graphs"]
-
-    ROLLOUT -->|"Batch Invariance<br/>deterministic outputs"| DECISION
-    DECISION -->|"Same-device"| SLEEP
-    DECISION -->|"Cross-device"| PAUSE
-    SLEEP --> TRAIN
-    PAUSE --> TRAIN
-    TRAIN --> WT
-    WT -->|"Same-device"| WAKE
-    WT -->|"Cross-device"| RESUME
-    WAKE --> ROLLOUT
-    RESUME --> ROLLOUT
-
-    style ROLLOUT fill:#e1f5fe,stroke:#0288d1
-    style DECISION fill:#fff9c4,stroke:#f9a825
-    style SLEEP fill:#fce4ec,stroke:#c62828
-    style PAUSE fill:#fce4ec,stroke:#c62828
-    style TRAIN fill:#e8f5e9,stroke:#2e7d32
-    style WT fill:#f3e5f5,stroke:#7b1fa2
-    style WAKE fill:#e8f5e9,stroke:#2e7d32
-    style RESUME fill:#e8f5e9,stroke:#2e7d32
-```
-
-| Step | What happens | RL feature used |
-|---|---|---|
-| 1. Rollout | vLLM generates completions from pre-tokenized prompts; batch-invariant compute ensures deterministic outputs | Token In / Token Out, Batch Invariance |
-| 2. Data outputs | vLLM returns per-token logprobs, expert routing decisions, and hidden states alongside generated token IDs | Token Logprobs, Router Replay (R3), Extract Hidden States, Tool Call |
-| 3. Engine handoff | Rollout engine releases NPU memory (same-device → sleep) or pauses the scheduler (cross-device → pause) | Sleep Mode, Pause / Resume |
-| 4. Training | Trainer computes loss and updates policy weights using the rollout data | — (trainer-side) |
-| 5. Weight sync | Updated weights are pushed back into vLLM in-place without restart | Weight Transfer (IPC / HCCL) |
-| 6. Resume | Engine restores memory and resumes serving (same-device → wake up / cross-device → resume) | Sleep Mode (wake_up), Pause / Resume (resume) |
-| 7. Loop | Next rollout round begins with updated weights | — |
-
-### Sleep Mode — returning NPU memory to the trainer
-
-**Principle.** Generation and training are both memory-intensive and usually cannot run on the same NPU at the same time. Sleep Mode lets the rollout engine release its NPU memory footprint — offloading model weights and discarding the KV cache — while keeping the engine process alive, then restore everything on demand without a full restart. All NPU memory allocated by the engine is tagged as `weights` or `kv_cache`; sleep can release either or both.
-
-- **Level 1 sleep** offloads model weights to CPU memory and discards the KV cache. Suitable when the same model will be reused.
-- **Level 2 sleep** discards both weights and KV cache. Suitable when switching or updating the model.
-- `wake_up(tags=["weights"])` / `wake_up(tags=["kv_cache"])` lets you reload weights between the two phases for fine-grained control.
-
-**Graph-aware memory management.** On Ascend NPUs, ACL Graph (NPUGraph) capture records virtual memory addresses for replay. The sleep-mode allocator (CaMemAllocator) preserves these addresses across sleep/wake cycles so that captured graphs remain valid after `wake_up()` — no re-capture is needed under normal sleep (level 1 or 2 without extra cleanup). This is analogous to the CUDA-graph-aware weight offload via `torch_memory_saver` used in GPU RL stacks.
-
-**Usage.** Start the server with sleep mode enabled (requires `VLLM_SERVER_DEV_MODE=1`):
+For online control, enable the development endpoints and start the server with
+sleep mode enabled:
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
+VLLM_SERVER_DEV_MODE=1 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_ASCEND_ENABLE_NZ=0 \
+vllm serve Qwen/Qwen3-0.6B --enable-sleep-mode
 ```
 
-During the RL loop, control sleep and wake-up via HTTP endpoints:
+The sleep level is a query parameter; a JSON request body is ignored:
 
 ```bash
-# Release NPU memory for the trainer
-curl -X POST http://127.0.0.1:8000/sleep \
-    -H "Content-Type: application/json" \
-    -d '{"level": 1}'
+# Release memory.
+curl -X POST "http://127.0.0.1:8000/sleep?level=1"
+curl http://127.0.0.1:8000/is_sleeping
 
-# Check sleep status
-curl -X GET http://127.0.0.1:8000/is_sleeping
-
-# ... trainer step + reload / update weights ...
-
-# Restore and resume serving
+# Restore all tagged allocations.
 curl -X POST http://127.0.0.1:8000/wake_up
 ```
 
-**Extra cleanup for same-device mode.** When training and inference share the same NPU card, every byte of NPU memory matters. Enable `enable_sleep_mode_extra_cleanup` to additionally release HCCL process groups and ACL graph attention workspaces during sleep, returning even more NPU memory to the trainer:
+For level 2 sleep, wake the tags in the order documented in
+[Sleep Mode](./sleep_mode.md):
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+curl -X POST "http://127.0.0.1:8000/sleep?level=2"
+curl -X POST "http://127.0.0.1:8000/wake_up?tags=weights"
+# Load or transfer the new weights here.
+curl -X POST "http://127.0.0.1:8000/wake_up?tags=kv_cache"
+```
+
+To release HCCL process groups and ACL graph workspaces as well, enable extra
+cleanup:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_ASCEND_ENABLE_NZ=0 \
+vllm serve Qwen/Qwen3-0.6B \
     --enable-sleep-mode \
     --additional-config '{"enable_sleep_mode_extra_cleanup": true}'
 ```
 
-The trade-off: `wake_up()` must re-establish HCCL groups and re-capture ACL graphs, increasing wake-up latency. For cross-device mode this option is unnecessary — the trainer has its own NPU memory.
+Extra cleanup reduces sleep-time NPU memory use, but HCCL groups must be
+restored and ACL graphs must be recaptured during wake-up. Also ensure
+`PYTORCH_NPU_ALLOC_CONF` does not contain `expandable_segments:True`, which is
+incompatible with the sleep-mode memory pool.
 
-For the full API reference, sleep levels, expert weight layout restoration, and caveats, see the [Sleep Mode Guide](./sleep_mode.md).
+### Weight transfer
 
-### Weight transfer — syncing updated policy weights
+vLLM-Ascend exposes two Ascend-specific weight-transfer backends:
 
-**Principle.** After each training step the updated policy weights must be reflected in the rollout engine. vLLM provides a pluggable **weight transfer** system so weights are synchronized in place without restarting the engine. The underlying protocol follows four phases: initialize → start weight update → transfer weights → finish.
+| Backend | Use case | Transport |
+| --- | --- | --- |
+| `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
+| `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
 
-vllm-ascend supports two strategies, matching different infrastructure setups:
-
-| Strategy | Best for | How it works | Latency |
-|---|---|---|---|
-| **From tensor (IPC)** | Co-located training/rollout on same NPU | Trainer passes tensors directly via NPU IPC handles | Lowest (in-memory), same-device only |
-| **From distributed (HCCL)** | Disaggregated training/rollout on separate devices | Trainer broadcasts weights to rollout workers via HCCL | Low (network), cross-device support |
-
-#### From tensor (NPU IPC)
-
-Best when the trainer and rollout engine are co-located on the same NPU. Weights are shared directly via NPU IPC (Inter-Process Communication) handles — no copy, no disk I/O:
+Start an HCCL-enabled server with:
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-V4 \
+VLLM_SERVER_DEV_MODE=1 \
+VLLM_ASCEND_ENABLE_NZ=0 \
+vllm serve Qwen/Qwen3-0.6B \
+    --weight-transfer-config '{"backend": "hccl"}'
+```
+
+For same-NPU transfer, use the `ipc` backend. On Ascend, vLLM-Ascend maps this
+user-facing backend name to `NPUIPCWeightTransferEngine`:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 \
+VLLM_ASCEND_ENABLE_NZ=0 \
+VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+vllm serve Qwen/Qwen3-0.6B \
     --weight-transfer-config '{"backend": "ipc"}'
 ```
 
-The trainer writes updated weights into shared NPU memory, and the rollout engine picks them up immediately. This requires both processes to be on the same NPU device.
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1` is required by the HTTP NPU IPC example
+because it serializes IPC handles. Only enable it in a trusted environment.
 
-#### From distributed (HCCL)
+The control flow is:
 
-Best when training and inference run on separate devices. A dedicated HCCL communication group broadcasts weights from the trainer rank to all inference workers:
+1. initialize the transfer engine;
+2. pause generation;
+3. start the weight update;
+4. transfer one or more groups of weights;
+5. finish the weight update; and
+6. resume generation.
 
-```bash
-vllm serve deepseek-ai/DeepSeek-V4 \
-    --weight-transfer-config '{"backend": "nccl"}'   # "nccl" maps to HCCL on Ascend
-```
+The repository contains runnable examples for both backends:
 
-In this mode the trainer calls `init_weight_transfer_engine(info)` to set up the communication group, then `start_weight_update()`, `update_weights(info)`, and `finish_weight_update()` drive each transfer. The engine exposes corresponding HTTP endpoints under `VLLM_SERVER_DEV_MODE=1`.
+- [`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py)
+- [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
+- [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
 
-**Limitation: FRACTAL_NZ incompatibility.** When weights are repeatedly reloaded (via either strategy), the FRACTAL_NZ weight layout can cause precision issues. Always set `weight_nz_mode=0` (or `VLLM_ASCEND_ENABLE_NZ=0`) for RL workloads. In same-device mode this is validated at `wake_up()` time; in cross-device mode it is validated at `start_weight_update()` time.
+FRACTAL_NZ must be disabled for weight updates. Set
+`VLLM_ASCEND_ENABLE_NZ=0`; the weight-transfer start path validates this
+environment variable directly. For sleep without weight transfer,
+`weight_nz_mode=0` in `--additional-config` is also supported.
 
-Complete RL examples are provided in the [examples/rl](https://github.com/vllm-project/vllm-ascend/tree/main/examples/rl) directory (`rlhf_async_new_apis.py`, `rlhf_http_hccl.py`, `rlhf_http_npu_ipc.py`).
+### Pause and resume generation
 
-For the four-phase protocol details and trainer-side APIs, see the upstream [Weight Transfer](https://docs.vllm.ai/en/latest/training/weight_transfer/) documentation.
-
-### Pause and resume generation — safe mid-flight weight updates
-
-**Principle.** In an asynchronous RL loop, generation and training are pipelined to keep both the rollout engine and the trainer busy. This means the weights must be updated *while requests may still be in flight*. `pause_generation()` gives the trainer a clean window for weight synchronization without losing in-flight work.
-
-The correct flow is: `pause_generation` → update weights → `resume_generation`. An update can only happen when the engine is not actively processing inference tasks.
-
-**Pause modes.**
-
-| Mode | Behavior | In-flight requests | KV cache | Use case |
-|---|---|---|---|---|
-| `"abort"` (default) | Abort all in-flight requests, return partial results | Discarded | Released | Simple: discard and restart |
-| `"wait"` | Wait for all in-flight requests to finish naturally | Completed | Released after completion | Clean drain before update |
-| `"keep"` | Freeze requests in place; they resume generating when generation resumes | Frozen | Preserved (must not be flushed) | Fastest resume; requires weight-compatible KV cache |
-
-The `clear_cache` parameter (default `True`) controls whether the KV cache and prefix cache are invalidated during the pause. Set it to `True` when the updated weights would make cached tokens stale; set it to `False` with `mode="keep"` when you know the KV cache is still valid (e.g., minor weight updates that don't change token distributions significantly).
-
-**Usage.**
+With `VLLM_SERVER_DEV_MODE=1`, the server exposes `/pause` and `/resume`.
+Pause parameters are query parameters:
 
 ```bash
-# Pause generation (keep in-flight requests frozen)
-curl -X POST "http://127.0.0.1:8000/pause?mode=keep" \
-    -H "Content-Type: application/json" \
-    -d '{"clear_cache": true}'
+# Drain in-flight requests and clear caches before the update.
+curl -X POST \
+    "http://127.0.0.1:8000/pause?mode=wait&clear_cache=true"
 
-# ... update weights (see Weight Transfer above) ...
+# Transfer weights here.
 
-# Resume generation
 curl -X POST http://127.0.0.1:8000/resume
 ```
 
-See the upstream [Async Reinforcement Learning](https://docs.vllm.ai/en/latest/training/async_rl/) documentation for the full flow and a runnable example.
+The pause modes are:
 
-## RL-Specific sampling and data outputs
+| Mode | Behavior |
+| --- | --- |
+| `abort` | Abort in-flight requests immediately; this is the default |
+| `wait` | Wait for in-flight requests to complete before pausing |
+| `keep` | Freeze requests so they continue after `/resume` |
 
-RL algorithms require more from the inference engine than just generated text. The following features provide the training-critical data that PPO, GRPO, and related algorithms depend on.
+`clear_cache` is deprecated and is ignored for `mode=keep`. A kept request can
+therefore contain tokens and KV-cache entries produced with the old weights and
+continue with the new weights after resume. Use `abort` or `wait` when a rollout
+must not span weight versions.
 
-### Token logprobs
+See the upstream [Async RL guide](https://docs.vllm.ai/en/latest/training/async_rl/)
+for the API lifecycle.
 
-**Principle.** PPO and GRPO compute advantage estimates and importance sampling ratios from per-token log probabilities. The rollout engine must return `logprobs` for every generated token, and `prompt_logprobs` for the prompt tokens.
+## Training data returned by the engine
 
-**Usage.** Pass logprobs parameters in the completion request — no Ascend-specific configuration needed:
+### Token log probabilities
+
+Set `logprobs` and, when needed, `prompt_logprobs` on the completions request:
 
 ```bash
 curl http://127.0.0.1:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseek-ai/DeepSeek-V4",
+        "model": "Qwen/Qwen3-0.6B",
         "prompt": "Your prompt here",
-        "max_tokens": 256,
+        "max_tokens": 32,
         "temperature": 1.0,
         "logprobs": 1,
         "prompt_logprobs": 1
     }'
 ```
 
-For GRPO-style group sampling, pair with the `n` parameter to generate multiple completions per prompt in a single forward pass.
+`prompt_logprobs` is not available for streaming completion requests. See the
+upstream [Sampling Parameters](https://docs.vllm.ai/en/latest/api/vllm/sampling_params/)
+documentation for the corresponding engine-level options.
 
 ### Router Replay (R3)
 
-**Principle.** For MoE models (DeepSeek-V3/V4, Qwen-MoE, etc.), the training side must replay the exact expert routing decisions that the inference side made. If the trainer uses different expert selections, the gradients back-propagated through those experts are incorrect — this is called **gradient corruption** and silently degrades training.
-
-The `enable_return_routed_experts` flag makes vLLM output `routed_experts`, a tensor of shape `[seq_len, num_moe_layers, top_k]` recording which experts were selected at each layer and position. The trainer reads this tensor and forces the same expert selections during the forward pass.
-
-**Usage.**
+For supported MoE workflows, start the server with routed-expert capture:
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-V4 --enable-return-routed-experts
+vllm serve Qwen/Qwen3-30B-A3B --enable-return-routed-experts
 ```
 
-The `routed_experts` tensor is included in each completion response under `output.routed_experts` (shape: `[seq_len, num_moe_layers, top_k]`). The trainer reads this field from the API response and forces the same expert selections during its forward pass.
+For a non-streaming completion response, `choices[].routed_experts` is a
+base64-encoded NumPy array, not an inline tensor. After decoding, its shape is
+`(num_tokens - 1, num_layers, num_experts_per_tok)`. The final sampled token
+has no routing record because it has not passed through the model yet. The
+field is `null` when capture is disabled or the request is aborted before a
+forward pass.
 
-This is **required** for all MoE model RL training. Without it, the inference→training expert selection mismatch will corrupt the policy gradient.
+Enable this option only when the trainer consumes and replays the captured
+expert choices. See the upstream
+[routed experts example](https://docs.vllm.ai/en/latest/examples/rl/routed_experts_e2e/)
+for decoding and replay logic.
 
-### Extract hidden states
+## Deterministic rollouts
 
-**Principle.** RL training often needs the model's hidden states (activations) at the final layer for:
-
-- **Value function training** — a value head predicts the expected return from the hidden state of the last prompt token.
-- **OPD (Off-Policy Distillation)** — teacher-student knowledge distillation uses hidden states as training signals.
-- **Process reward models (PRM)** — hidden representations are features for step-level reward prediction.
-
-**Usage.** Set `return_prompt_hidden_states=True` in the request body to receive the hidden states tensor in the completion response:
-
-```bash
-curl http://127.0.0.1:8000/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "deepseek-ai/DeepSeek-V4",
-        "prompt": "Your prompt here",
-        "max_tokens": 256,
-        "temperature": 1.0,
-        "return_prompt_hidden_states": true
-    }'
-```
-
-The response includes a `prompt_hidden_states` field (shape: `[num_prompt_tokens, hidden_size]`). This returns hidden states for prompt tokens only. For generated tokens, use the logprobs API or a separate evaluation pass. Performance note: enabling this flag adds a small memory overhead because the hidden states must be held in NPU memory until the request completes.
-
-### Batch invariance
-
-**Principle.** RL training requires deterministic rollouts: the model's output must not depend on the batch size or the order of requests in a batch. Without batch invariance, numerical noise from floating-point non-determinism (e.g., different accumulation orders depending on batch composition) can cause token-probability drift between generation runs, silently breaking the on-policy assumption.
-
-vllm-ascend implements batch invariance with deterministic attention kernels on Ascend NPUs. When enabled, every forward pass produces bitwise-identical results for the same input regardless of how requests are batched — at the cost of some throughput. Batch invariance is also required for validating that weight-synchronized engines produce identical outputs after each weight update.
-
-**Usage.** Enable via the `VLLM_BATCH_INVARIANT=1` environment variable (requires building vllm-ascend from source on Atlas A2/A3):
+Batch invariance reduces output differences caused by changes in batch shape
+or request order. On Atlas A2 and A3, build vLLM-Ascend with
+`VLLM_BATCH_INVARIANT=1`, then set the variable when serving:
 
 ```bash
 VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
     --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
-When batch invariance is enabled, vllm-ascend automatically sets `HCCL_DETERMINISTIC=strict` and `LCCL_DETERMINISTIC=1` to ensure deterministic communication collectives.
+When batch invariance is enabled, vLLM-Ascend disables FRACTAL_NZ and sets
+`HCCL_DETERMINISTIC=strict` and `LCCL_DETERMINISTIC=1`. See
+[Batch Invariance](./batch_invariance.md) for supported hardware, models, and
+limitations.
 
-> **Note on `cudagraph_mode`:** Despite the CUDA-derived name, this option controls graph capture on Ascend NPUs via ACLGraph / NPUGraph. `"PIECEWISE"` mode captures the computation graph in pieces, which avoids full-graph capture limitations such as incompatibility with certain attention backends.
+## Tokens in, tokens out
 
-For hardware requirements, tested models and current limitations, see the [Batch Invariance](./batch_invariance.md) guide and the upstream [Batch Invariance](https://docs.vllm.ai/en/latest/features/batch_invariance/) documentation.
-
-### Token In / Token Out
-
-**Principle.** In RL workflows, the training framework typically manages its own tokenizer — it constructs prompts from chat templates, tokenizes them, and detokenizes model outputs for reward computation. Passing raw text through vLLM's completion API means every request pays the cost of redundant encode/decode steps that the RL loop has already performed or will perform again.
-
-The **Token In / Token Out** API (RFC [#22817](https://github.com/vllm-project/vllm/issues/22817)) makes vLLM's `AsyncLLM` a pure tokens-in / tokens-out engine. Instead of sending `"prompt": "..."` and receiving `"text": "..."`, the RL framework sends pre-tokenized `token_ids` and receives raw output `token_ids` — eliminating the tokenizer/detokenizer from the inference hot path entirely.
-
-This architecture also enables **disaggregated tokenization** for large-scale serving: a separate Renderer microservice handles tokenization (converting OpenAI-compatible requests to token IDs), and a separate Coordinator handles detokenization and tool-call parsing. The RL training loop can bypass both and speak directly to the token API.
-
-```text
-RL Trainer (tokenizes prompts itself)
-    │
-    │  GenerateRequest { token_ids: [...], sampling_params: {...} }
-    ▼
-vLLM Token API (/generate)
-    │
-    │  GenerateResponse { token_ids: [...], logprobs: [...], finish_reason: "stop" }
-    ▼
-RL Trainer (computes rewards, advantages — no detokenization needed)
-```
-
-**Usage.** Start the server in token-in/token-out mode:
+The experimental tokens-only endpoint accepts pre-tokenized prompts and
+returns generated token IDs. Start the normal `serve` command with
+`--tokens-only`:
 
 ```bash
-vllm serve-tokens deepseek-ai/DeepSeek-V4
+vllm serve Qwen/Qwen3-0.6B --tokens-only
 ```
 
-The RL training loop sends pre-tokenized requests to the `/generate` endpoint:
+Send requests to `/inference/v1/generate`:
 
 ```bash
-curl http://127.0.0.1:8000/generate \
+curl http://127.0.0.1:8000/inference/v1/generate \
     -H "Content-Type: application/json" \
     -d '{
         "request_id": "rollout-001",
-        "token_ids": [1, 234, 567, 890, 123, 456],
+        "token_ids": [151644, 8948, 198],
         "sampling_params": {
             "temperature": 1.0,
-            "max_tokens": 256,
+            "max_tokens": 32,
             "logprobs": 1
         }
     }'
 ```
 
-Response:
+A non-streaming response has the following shape:
 
 ```json
 {
-    "request_id": "rollout-001",
-    "token_ids": [789, 321, 654, 987],
-    "logprobs": [-0.5, -1.2, -0.8, -2.1],
-    "prompt_logprobs": null,
-    "finish_reason": "stop"
+  "request_id": "rollout-001",
+  "model": "Qwen/Qwen3-0.6B",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "stop",
+      "token_ids": [123, 456],
+      "routed_experts": null
+    }
+  ],
+  "prompt_logprobs": null,
+  "usage": null
 }
 ```
 
-The `GenerateRequest` / `GenerateResponse` schema provides:
+The exact logprob and usage values depend on the sampling parameters and
+server configuration. The API is intended for disaggregated serving and may
+change; track the upstream [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
+for its status.
 
-| Field | Direction | Description |
-|---|---|---|
-| `request_id` | In / Out | Unique identifier for this rollout request |
-| `token_ids` | In / Out | Pre-tokenized input IDs (in) / generated output IDs (out) |
-| `sampling_params` | In | Same `SamplingParams` as the standard completion API |
-| `logprobs` | Out | Per-token log probabilities |
-| `prompt_logprobs` | Out | Log probabilities for prompt tokens |
-| `finish_reason` | Out | Why generation stopped (`stop`, `length`, `abort`) |
-| `stop_reason` | Out | Which stop token was hit (if any) |
+## Tool calling for agentic RL
 
-This is the most efficient path for RL: the RL framework sends token IDs it already has, and receives token IDs it can feed directly into the trainer's forward pass — no string serialization, no text decode on the critical path.
-
-## RL inference workflow
-
-### Tool call
-
-**Principle.** In agentic RL (e.g., RL for coding agents, web agents, or tool-augmented reasoning), the model must emit structured tool/function calls during rollouts. The RL environment intercepts these calls, executes the corresponding tools, and feeds the results back as the next turn's prompt. This creates a multi-turn interaction loop:
-
-```text
-prompt → model generates tool call → environment executes tool → result appended to prompt → model continues
-```
-
-vLLM supports tool calling through. The server accepts a `tools` parameter defining the available functions, and the model can respond with a `tool_calls` block specifying which function to invoke and with what arguments. For RL, this enables:
-
-- **Tool-augmented exploration** — the policy learns when and how to use tools to solve tasks.
-- **Verifiable reward signals** — tool execution results (success/failure, return values) provide ground-truth feedback.
-- **Multi-step agent trajectories** — complex tasks are decomposed into sequences of tool interactions.
-
-**Usage.** Start the server with tool calling support:
+Agentic rollout environments can use the standard OpenAI-compatible tool-call
+API. For a model with a supported parser:
 
 ```bash
-vllm serve Qwen/Qwen3-8B --enable-auto-tool-choice --tool-call-parser hermes
+vllm serve Qwen/Qwen3-8B \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
 ```
 
-In the RL loop, each rollout request includes a `tools` definition and the conversation history:
+The environment supplies `tools` in `/v1/chat/completions`, executes returned
+tool calls, appends tool results to the conversation, and submits the next
+turn. See upstream [Tool Calling](https://docs.vllm.ai/en/latest/features/tool_calling/)
+for request examples and the supported parser/model combinations.
+
+## Data-parallel request routing
+
+vLLM's OpenAI serving layer recognizes the `X-data-parallel-rank` header and
+passes its integer value to the scheduler. A DP-aware external router can use
+this header to target a rank:
 
 ```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
+curl http://127.0.0.1:8000/v1/completions \
     -H "Content-Type: application/json" \
+    -H "X-data-parallel-rank: 2" \
     -d '{
-        "model": "Qwen/Qwen3-8B",
-        "messages": [
-            {"role": "system", "content": "You are a coding assistant."},
-            {"role": "user", "content": "List all Python files in the current directory."}
-        ],
-        "tools": [{
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": "List files in a directory",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string", "description": "Glob pattern, e.g. *.py"}
-                    },
-                    "required": ["pattern"]
-                }
-            }
-        }],
-        "max_tokens": 256
-    }'
-```
-
-The response may contain a `tool_calls` entry. The RL environment executes the tool, appends the result as a new `"tool"` role message, and sends the updated conversation back for the next generation step.
-
-See the upstream [Tool Calling](https://docs.vllm.ai/en/latest/features/tool_calling/) documentation for supported parsers and models.
-
-## RL serving infrastructure
-
-### DP-Aware Routing
-
-**Principle.** In large-scale RL deployments, the rollout engine is often replicated across multiple **data-parallel (DP)** shards. Each DP shard is paired with a training worker that holds the corresponding parameter shard. To minimize weight transfer overhead and ensure cache locality, rollout requests must be routed to the engine instance that serves the correct DP index.
-
-Without DP-aware routing, a request assigned to DP shard *k* might land on the engine for DP shard *j* (j ≠ k), causing:
-
-- **Unnecessary weight transfer** — the wrong engine must fetch weights from DP shard *k*'s trainer.
-- **KV cache cold start** — the engine has no cached context for this DP group's conversation history.
-- **Load imbalance** — random routing can concentrate requests on a subset of engines while others sit idle.
-
-DP-aware routing addresses this by tagging each request with its target DP index and having the proxy/router dispatch it to the corresponding engine instance.
-
-**Architecture.**
-
-```text
-Trainer DP-0 ←→ vLLM Engine :8000 ┐
-Trainer DP-1 ←→ vLLM Engine :8001  ├── vLLM Router (:8080) ←── RL training loop
-Trainer DP-2 ←→ vLLM Engine :8002  │    (dp-aware dispatch)
-Trainer DP-3 ←→ vLLM Engine :8003 ┘
-```
-
-The RL training loop sends rollout requests to the router with a `dp_index` header or query parameter. The router maintains a mapping of `dp_index → engine_address` and forwards each request to the correct backend.
-
-**Usage.** Start the vLLM router with DP-aware routing enabled, specifying the backend engines and their DP indices:
-
-```bash
-vllm serve router \
-    --dp-routing-config '{
-        "backends": [
-            {"dp_index": 0, "url": "http://127.0.0.1:8000"},
-            {"dp_index": 1, "url": "http://127.0.0.1:8001"},
-            {"dp_index": 2, "url": "http://127.0.0.1:8002"},
-            {"dp_index": 3, "url": "http://127.0.0.1:8003"}
-        ]
-    }'
-```
-
-The trainer then tags each rollout request with the target DP index:
-
-```bash
-curl http://127.0.0.1:8080/v1/completions \
-    -H "Content-Type: application/json" \
-    -H "X-DP-Index: 2" \
-    -d '{
-        "model": "deepseek-ai/DeepSeek-V4",
+        "model": "Qwen/Qwen3-0.6B",
         "prompt": "Your prompt here",
-        "max_tokens": 256
+        "max_tokens": 32
     }'
 ```
 
-The `X-DP-Index` header tells the router which backend engine to forward the request to. If no header is provided, the router falls back to a round-robin or load-based policy.
+vLLM-Ascend does not provide a `vllm serve router` command or a
+`--dp-routing-config` option. Configure the vLLM data-parallel deployment and
+an external router separately. See upstream
+[Data Parallel Deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)
+for the supported load-balancing modes.
 
-## RL configuration checklist
+## Configuration checklist
 
-Several options are required or recommended for RL workloads to run correctly on Ascend. See the [Additional Configuration](../configuration/additional_config.md) and [Environment Variables](../configuration/env_vars.md) pages for details.
+| Setting | When to use it | Purpose |
+| --- | --- | --- |
+| `VLLM_ASCEND_ENABLE_NZ=0` | Sleep mode or weight transfer | Prevent precision problems when weights are restored or updated; required by the weight-transfer start path |
+| `--enable-sleep-mode` | Trainer and rollout engine share NPUs | Enable the CaMemAllocator memory pool |
+| `VLLM_WORKER_MULTIPROC_METHOD=spawn` | Sleep mode | Use the supported worker start method |
+| `enable_sleep_mode_extra_cleanup=true` | Optional for sleep mode | Release HCCL and ACL graph resources at the cost of slower wake-up |
+| `VLLM_SERVER_DEV_MODE=1` | Online sleep, pause, or weight-transfer control | Expose development-only control endpoints; do not expose them to untrusted networks |
+| `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
+| `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
+| `VLLM_BATCH_INVARIANT=1` | Reproducible rollouts | Enable batch-invariant kernels and deterministic communication settings |
+| `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 
-| Option | Value for RL | Mode | Why |
-| --- | --- | --- | --- |
-| `additional_config.weight_nz_mode` (or legacy `VLLM_ASCEND_ENABLE_NZ`) | `0` | Both | Disables the FRACTAL_NZ weight layout. When weights are repeatedly reloaded via sleep/wake-up or weight transfer, the NZ layout transformation can introduce floating-point precision drift that accumulates across training steps. Setting to `0` keeps weights in their original layout. |
-| `additional_config.enable_sleep_mode_extra_cleanup` | `true` (recommended) | Same-device | Releases HCCL process groups and ACL graph workspaces during sleep, returning more NPU memory to the trainer. Trade-off: longer wake-up latency. |
-| `VLLM_SERVER_DEV_MODE` | `1` | Both | Exposes the `/sleep`, `/wake_up`, `/pause`, `/resume` and weight-transfer HTTP endpoints in `vllm serve` mode. |
-| `VLLM_WORKER_MULTIPROC_METHOD` | `spawn` | Both | Required for sleep mode. |
-| `PYTORCH_NPU_ALLOC_CONF` | must not contain `expandable_segments` | Same-device | `expandable_segments` is incompatible with the sleep-mode memory pool (CaMemAllocator); vllm-ascend skips it automatically when sleep mode is enabled. |
-| `--enable-sleep-mode` | Required for same-device | Same-device | Enables CaMemAllocator memory pool for sleep/wake-up memory management. |
-| `VLLM_BATCH_INVARIANT` | `1` (recommended) | Both | Enables deterministic compute for reproducible, train-consistent rollouts. Also sets `HCCL_DETERMINISTIC=strict` and `LCCL_DETERMINISTIC=1` automatically. Requires building from source. |
-| `--enable-return-routed-expert` | Required for MoE models | Both | Records expert routing decisions during inference so the trainer can replay them identically. **Required** for DeepSeek, Qwen-MoE, and any other MoE model in RL training. |
-| `--weight-transfer-config` | `{"backend": "nccl"}` or `{"backend": "ipc"}` | Cross-device | Enables in-place weight synchronization from trainer to rollout engine without restart. |
-| `--enable-auto-tool-choice` | Required for agentic RL | Both | Enables the model to emit structured tool calls that the RL environment can execute. |
+For the Ascend-specific option definitions, see
+[Additional Configuration](../configuration/additional_config.md) and
+[Environment Variables](../configuration/env_vars.md).
