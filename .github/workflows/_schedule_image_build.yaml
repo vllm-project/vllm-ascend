@@ -150,7 +150,7 @@ env:
   QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
   # Use this repo's own GHCR namespace so forks (e.g. du-ping1-merge) can write build cache.
   CACHE_REPO: ghcr.io/${{ github.repository }}
-  digest_dir: ${{ github.workspace }}/digests
+  digest_dir: /__w/vllm-benchmarks/vllm-benchmarks/digests/
 
 jobs:
   build-push-digest:
