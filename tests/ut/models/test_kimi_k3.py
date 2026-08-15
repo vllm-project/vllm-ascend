@@ -168,7 +168,9 @@ def test_kimi_k3_projector_applies_rotation_only_after_weight_load():
     projector.post_norm = nn.Identity()
     image_features = torch.tensor([[1.0, 2.0]])
 
+    projector.rot_proj = ScaleLinear()
     del projector.rot_proj
+    assert not hasattr(projector, "rot_proj")
     torch.testing.assert_close(projector(image_features), image_features)
 
     projector.rot_proj = ScaleLinear()
