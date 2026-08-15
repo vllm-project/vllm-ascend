@@ -6,6 +6,10 @@ vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Para
 
 Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
 
+```{warning}
+When using Decode Context Parallelism (DCP) in PD disaggregation, enable it on both the prefiller and decoder nodes, or disable it on both. Enabling DCP on only one side can cause known accuracy issues.
+```
+
 ## Verify Multi-Node Communication Environment
 
 ### Physical Layer Requirements

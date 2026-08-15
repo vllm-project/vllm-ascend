@@ -393,6 +393,10 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 
 We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
+```{warning}
+When using Decode Context Parallelism (DCP) in PD disaggregation, enable it on both the prefiller and decoder nodes, or disable it on both. Enabling DCP on only one side can cause known accuracy issues.
+```
+
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. PD (Prefill-Decode) separation addresses this by running Prefill and Decode on dedicated node groups, each configured independently:
 
 - **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication.
