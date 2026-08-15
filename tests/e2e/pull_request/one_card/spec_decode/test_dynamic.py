@@ -7,17 +7,54 @@ from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, DSPARK, calculate_acceptance_per_pos
+from tests.e2e.pull_request.one_card.spec_decode.utils import (
+    BASELINES,
+    DFLASH,
+    DSPARK,
+    calculate_acceptance_per_pos,
+)
+
+# Confidence-based dynamic verify-length via additional_config.dynamic_spec_config.
+# Distinct from batch-size based dynamic K (num_speculative_tokens_per_batch_size).
+DYNAMIC_CASES = {
+    "dspark": {
+        "models": DSPARK,
+        "num_speculative_tokens": 7,
+        "prompt": "What is your name? Please introduce yourself in detail.",
+        "method_params": {
+            "initial_verify_budget_per_req": 3,
+            "budget_update_interval": 1,
+            "budget_threshold": 0.7,
+        },
+        "compilation_config": CompilationConfig(
+            cudagraph_mode="FULL",
+            cudagraph_capture_sizes=[7, 8],
+        ),
+    },
+    "dflash": {
+        "models": DFLASH,
+        "num_speculative_tokens": 8,
+        "prompt": "What is your name? Please introduce yourself in detail.",
+        "method_params": {
+            "initial_verify_budget_per_req": 3,
+            "budget_update_interval": 1,
+            "budget_threshold": 0.7,
+        },
+        "compilation_config": CompilationConfig(
+            cudagraph_mode="FULL",
+            cudagraph_capture_sizes=[9, 18],
+        ),
+    },
+}
 
 
-@pytest.mark.parametrize("method", DSPARK.keys())
-@pytest.mark.parametrize("num_speculative_tokens", [7])
-def test_dspark_dynamic_spec_acceptance(
-    method: str,
-    num_speculative_tokens: int,
-):
-    main_model_name = DSPARK[method]["main"]
-    spec_model_name = DSPARK[method]["spec"]
+@pytest.mark.parametrize("method", DYNAMIC_CASES.keys())
+def test_dynamic_spec_acceptance(method: str):
+    case = DYNAMIC_CASES[method]
+    models = case["models"]
+    main_model_name = models[method]["main"]
+    spec_model_name = models[method]["spec"]
+    num_speculative_tokens = case["num_speculative_tokens"]
 
     tokenizer = AutoTokenizer.from_pretrained(
         main_model_name,
@@ -29,7 +66,7 @@ def test_dspark_dynamic_spec_acceptance(
         max_tokens=256,
     )
 
-    prompts = [{"role": "user", "content": "What is your name? Please introduce yourself in detail."}]
+    prompts = [{"role": "user", "content": case["prompt"]}]
     prompts = [
         tokenizer.apply_chat_template(
             [prompt],
@@ -41,23 +78,18 @@ def test_dspark_dynamic_spec_acceptance(
     ]
 
     speculative_config = {
-        "method": "dspark",
+        "enforce_eager": True,
+        "method": method,
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
     }
 
     additional_config = {
         "dynamic_spec_config": {
-            "method": "dspark",
-            "method_params": {
-                "initial_verify_budget_per_req": 3,
-                "budget_update_interval": 1,
-                "budget_threshold": 0.7,
-            },
+            "method": method,
+            "method_params": case["method_params"],
         },
     }
-
-    compilation_config = CompilationConfig(cudagraph_mode="FULL", cudagraph_capture_sizes=[7, 8])
 
     with VllmRunner(
         main_model_name,
@@ -69,7 +101,7 @@ def test_dspark_dynamic_spec_acceptance(
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         additional_config=additional_config,
-        compilation_config=compilation_config,
+        compilation_config=case["compilation_config"],
         enable_prefix_caching=False,
     ) as llm:
         outputs = llm.model.generate(prompts, sampling_params)

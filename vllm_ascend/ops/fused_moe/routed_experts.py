@@ -244,15 +244,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
-        if (
-            self.custom_routing_function is None
-            and self.e_score_correction_bias is not None
-            and not vllm_config.model_config.is_deepseek_mla
-        ):
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
-
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         try:
             get_weight_views = self.quant_method.get_eplb_weight_views
@@ -295,7 +286,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         eplb_config = get_ascend_config().eplb_config
 
-        # The upstream FusedMoE factory has already included redundant expert
+        # The upstream FusedMoEFactory factory has already included redundant expert
         # slots in moe_config and allocated RoutedExperts weights accordingly.
         # Ascend's placement builder operates on logical expert IDs, so give it
         # a shallow config view with the logical count.
@@ -449,17 +440,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         )
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
-
-        try:
-            _vllm_config = get_current_vllm_config()
-
-            model_config = None if _vllm_config is None else _vllm_config.model_config
-            if model_config is not None and model_config.enable_return_routed_experts:
-                capturer = getattr(self, "_ascend_routed_experts_capturer", None)
-                if capturer is not None:
-                    capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
-        except Exception:
-            pass
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:

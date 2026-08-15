@@ -147,9 +147,6 @@ msgid ""
 "Guide](../../installation.md)."
 msgstr "更多详情，请参考[安装指南](../../installation.md)。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -566,3 +563,6 @@ msgstr ""
 "- `Qwen3-VL-30B-A3B-Instruct`（BF16版本）：需要1个Atlas 800 A3（64G x 16）节点或1个Atlas "
 "800 A2（64G x "
 "8）节点。[模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct)。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

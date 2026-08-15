@@ -69,7 +69,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer, vllm_version_is
+from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
 
 # isort: off
 if TYPE_CHECKING:
@@ -126,6 +126,7 @@ class ReqMeta:
     num_prompt_blocks: int
     remote_block_size: int
     local_full_block_ids: BlockIds = tuple()
+    do_virtual: bool = False
 
 
 @dataclass(frozen=True)
@@ -822,16 +823,15 @@ class KVCacheRecvingThread(threading.Thread):
                 local_block_ids_replicate_k[0],
             )
 
-        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
+        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int, group_spec: dict[str, Any]) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
             if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index += self.num_draft_layers
+            is_index_cache_plane = any(".index_cache" in name for name in group_spec.get("layer_names", []))
 
             def in_partition(metadata_layer_idx: int) -> bool:
                 transformer_layer = (
-                    metadata_layer_idx - self.index_cache_plane_base
-                    if metadata_layer_idx >= self.index_cache_plane_base
-                    else metadata_layer_idx
+                    metadata_layer_idx - self.index_cache_plane_base if is_index_cache_plane else metadata_layer_idx
                 )
                 return first_layer_index <= transformer_layer < end_layer_index
 
@@ -863,7 +863,7 @@ class KVCacheRecvingThread(threading.Thread):
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
             kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
             raw_layer_indices = layer_indices
-            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
+            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank, group_spec)
 
             if not layer_indices:
                 continue
@@ -1560,49 +1560,27 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
             local_full_block_ids=local_full_block_ids or tuple(),
+            do_virtual=kv_transfer_params.get("do_virtual", False),
         )
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
-    # main2main compat: upstream KVConnectorBase_V1.__init__() now sets
-    # _kv_transfer_config (required by requires_kv_delivery property in
-    # Scheduler.__init__() post-0.26.0).
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
+    def __init__(  # type: ignore[misc]
+        self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
+    ):
+        assert vllm_config.kv_transfer_config is not None
+        self._kv_transfer_config = vllm_config.kv_transfer_config
+        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        self._connector_metadata = MooncakeConnectorMetadata()
 
-        def __init__(
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self._kv_transfer_config = vllm_config.kv_transfer_config
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(  # type: ignore[no-redef]
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None  # type: ignore[no-redef]
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
+                vllm_config, str(self.engine_id), kv_cache_config
+            )
+            self.connector_worker: MooncakeConnectorWorker | None = None
+        elif role == KVConnectorRole.WORKER:
+            self.connector_scheduler = None
+            self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
     ############################################################
     # Scheduler Side Methods
@@ -3549,6 +3527,10 @@ class MooncakeConnectorWorker:
                 self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
         for req_id, meta in metadata.requests.items():
+            if meta.do_virtual:
+                if self.kv_recv_thread is not None:
+                    self.kv_recv_thread.task_tracker.add_not_transfer_request(req_id)
+                continue
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "start_load_kv for request %s from remote engine %s. "
