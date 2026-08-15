@@ -2,9 +2,11 @@
 
 ## 1 Introduction
 
-#TODO
+Qwen3.8-27B is the 27-billion-parameter dense member of the Qwen3.8 family, the most capable generation in the Qwen open-model family to date. Built on the architectural foundation of Qwen3.5, it shares the same hybrid-attention backbone as the 2.4T MoE flagship: of its 64 layers, only 16 run full (gated) attention (`full_attention_interval: 4`) while the other 48 run linear attention (Gated DeltaNet) with a constant recurrent state. It is a native vision-language model — the architecture is `Qwen3_5ForConditionalGeneration` and `config.json` carries a `vision_config` — that understands images and videos, and it ships with a built-in MTP (Multi-Token Prediction) draft head and a native 262,144-token context window extensible up to 1,000,000 tokens.
 
-This document describes the main validation steps for the model, including supported features, prerequisites, installation, multi-node deployment, functional verification, accuracy and performance evaluation, performance tuning, and FAQs. All configurations in this document are for Atlas 800 A3.
+Delivering substantial gains over Qwen3.5/Qwen3.6 across coding, professional work, research, and long-horizon agentic tasks, Qwen3.8-27B features stronger autonomous planning, more reliable end-to-end task completion, and broader downstream compatibility with popular harnesses and development tools. Thinking mode is on by default and can be disabled per request; reasoning depth is tunable via `reasoning_effort` (`xhigh`/`medium`/`low`), and reasoning context from historical messages is retained via `preserve_thinking`.
+
+This document focuses on text serving on Ascend NPUs. It describes the main validation steps for the model, including supported features, prerequisites, installation, multi-node deployment, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
 
 This document is validated and written based on **vLLM-Ascend 0.23.0**. The current model (Qwen3.8-27B) is first supported in this version.
 
@@ -23,7 +25,7 @@ The support matrix records the maximum verified capability for this model. Adjus
 ### 3.1 Model Weight
 
 The following model weights are available:
-- `Qwen3.8-27B` (BF16 version): requires 1 Ascend 950DT(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
+- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
 - `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
 - `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
 
@@ -37,7 +39,7 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node,refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 :::::{tab-set}
 :sync-group: install
@@ -292,7 +294,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
 
 For `Qwen3.8-27B-w8a8`, a typical **1P1D** configuration requires **2 Atlas 800 A3 (64GB × 16) nodes** (1 Prefill node + 1 Decode node), with **TP=2** and **DP=8** on each node, which fully utilizes all 16 NPUs of an Atlas A3. The example below uses `Qwen3.8-27B-w8a8`.
 
-> **Note**: Since `Qwen3.8-27B` fit in a single node, multi-node PD separation is only recommended for high-concurrency production deployments. For the Mooncake deployment specifics, please refer to the [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
+> **Note**: Since `Qwen3.8-27B` fits in a single node, multi-node PD separation is only recommended for high-concurrency production deployments. For the Mooncake deployment specifics, please refer to the [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
 
 To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 
@@ -529,7 +531,7 @@ curl http://localhost:8000/v1/completions \
         "model": "qwen3.8",
         "prompt": "The future of AI is",
         "max_tokens": 50,
-        "temperature": 0
+        "temperature": 0.7
     }'
 ```
 
@@ -544,7 +546,7 @@ curl http://localhost:8000/v1/chat/completions \
             {"role": "user", "content": "The future of AI is"}
         ],
         "max_completion_tokens": 1024,
-        "temperature": 0.7,
+        "temperature": 1.0,
         "top_p": 0.95
     }'
 ```
@@ -581,11 +583,13 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result. Here is the result of `Qwen3.8-27B-w8a8` in `vllm-ascend:v0.23.0rc1` for reference only. The accuracy result of `Qwen3.8-27B-w8a8` can be obtained in the same way and is not listed here.
+2. After execution, you can get the result. Here are the results of `Qwen3.8-27B`, `Qwen3.8-27B-w8a8` and `Qwen3.8-27B-w8a8-mxfp8` in `vllm-ascend:v0.23.0rc1` for reference only.
 
-| dataset | version | metric | mode | vllm-api-general-chat |
+| dataset | model | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
-| gsm8k | - | accuracy | gen | #TODO |
+| GPQA Diamond | Qwen3.8-27B | accuracy | gen | 90.40 |
+| GPQA Diamond | Qwen3.8-27B-w8a8 | accuracy | gen | 89.90 |
+| GPQA Diamond | Qwen3.8-27B-w8a8-mxfp8 | accuracy | gen | 89.39 |
 
 ### Using Language Model Evaluation Harness
 
@@ -597,12 +601,12 @@ Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluatio
 ```shell
 # For Qwen3.8-27B-w8a8
 export VLLM_USE_MODELSCOPE=True
-vllm serve Eco-Tech/Qwen3.8-27B-w8a8-mtp \
+vllm serve Eco-Tech/Qwen3.8-27B-w8a8 \
     --served-model-name qwen3.8 \
     --trust-remote-code \
     --quantization ascend \
     --tensor-parallel-size 2 \
-    --max-model-len 133000 \
+    --max-model-len 13312 \
     --max-num-seqs 32 \
     --gpu-memory-utilization 0.90 \
     --no-enable-prefix-caching
@@ -619,14 +623,11 @@ lm_eval \
 
 ### 8.1 Install AISBench
 
-Run AISBench in a separate environment or container so that the load generator
-does not affect the serving processes. Refer to
-[Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
+Run AISBench in a separate environment or container so that the load generator does not affect the serving processes. Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
 
 ### 8.2 Performance Service Configuration
 
-Use the deployment in Section 5 as the baseline. Change the following values
-on all four nodes:
+Use the deployment in Section 5 as the baseline. Change the following values on the node:
 
 | Parameter | Standard deployment | Performance test |
 | --- | ---: | ---: |
@@ -636,11 +637,9 @@ on all four nodes:
 
 ### 8.3 Run the Tests
 
-Run performance evaluation of `Qwen3.8-27B` as an example. Refer to
-[vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Run performance evaluation of `Qwen3.8-27B` as an example. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ```shell
-# TODO: Validate the benchmark parameters with Qwen3.8.
 vllm bench serve \
   --model Qwen/Qwen3.8-27B \
   --served-model-name qwen3.8 \
@@ -654,20 +653,17 @@ vllm bench serve \
   --result-dir ./
 ```
 
-Record the A3 node count, TP/PP/EP topology, context length, concurrency,
-reasoning effort, and weight revision together with the result.
+Record the node count, DP/TP topology, context length, concurrency, reasoning effort, and weight revision together with the result.
 
 ### 8.4 Enabled Optimizations
 
 | Feature | Description |
 | --- | --- |
 | Chunked Prefill | Splits long prefill inputs into chunks to reduce per-step memory peaks. |
-| Prefix Cache | Reuses KV state for repeated prefixes. |
 | W8A8 | Uses Ascend quantization for the validated checkpoint. |
 | Lazy Safetensors | Avoids prefetching the complete NFS checkpoint. |
 | MTP | Uses three speculative tokens with the `qwen3_5_mtp` method. |
 | ACL Graph | Uses `FULL_DECODE_ONLY` replay. |
-| Fused MC2 | Enabled through the environment and additional configuration. |
 | CPU Binding | Reduces cross-core scheduling overhead. |
 
 ## 9 Performance Tuning
@@ -678,5 +674,4 @@ Refer to the [performance tuning guide](../../developer_guide/performance_and_de
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to
-the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
