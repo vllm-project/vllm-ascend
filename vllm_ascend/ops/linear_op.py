@@ -55,7 +55,9 @@ from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
@@ -68,6 +70,8 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
+
+DYNAMIC_W8A8_MMRS_COMM_MODE = "aiv"
 
 
 class CustomLinearOp:
@@ -298,8 +302,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
         need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix)
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
-        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+        output_parallel = _apply_tensor_all_gather_matmul_if_supported(self.layer, input_, bias, need_all_gather)
+        if output_parallel is None:
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
+            output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -364,10 +370,15 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
         from vllm_ascend.quantization.method_adapters import AscendLinearMethod
-        from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+        from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
+
+        layer_prefix = getattr(self.layer, "prefix", "<unknown>")
+        mmrs_op_enabled = mmrs_fusion and "self_attn.o_proj" in layer_prefix
+        quantized_mmrs_op_enabled = mmrs_op_enabled and get_ascend_device_type() != AscendDeviceType.A5
+        dynamic_w8a8_mmrs_enabled = quantized_mmrs_op_enabled
 
         # For unquant
-        if mmrs_fusion and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
+        if mmrs_op_enabled and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
             output = DeviceOperator.npu_mm_reduce_scatter_base(
                 x,
                 self.layer.weight.t(),
@@ -380,7 +391,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             if bias_ is not None:
                 output.add_(bias_)
         # For w8a8 quant
-        elif mmrs_fusion and (
+        elif quantized_mmrs_op_enabled and (
             isinstance(self.layer.quant_method, AscendLinearMethod)
             and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)
         ):
@@ -408,6 +419,40 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 output_dtype=output_dtype,
             )
             output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
+        # For dynamic w8a8 quant
+        elif dynamic_w8a8_mmrs_enabled and (
+            isinstance(self.layer.quant_method, AscendLinearMethod)
+            and isinstance(self.layer.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+            and hasattr(self.layer, "weight")
+            and hasattr(self.layer, "weight_scale")
+        ):
+            quant_method = self.layer.quant_method.quant_method
+            x_quant, pertoken_scale = DeviceOperator.npu_dynamic_quant(x, act_quant_type=quant_method.act_quant_type)
+            need_unsqueeze = False
+            if pertoken_scale.dim() == 2:
+                need_unsqueeze = True
+                x_quant = x_quant.squeeze(dim=1)
+                pertoken_scale = pertoken_scale.squeeze(dim=1)
+            x1_scale = pertoken_scale.reshape(-1, 1).contiguous()
+            weight_scale = getattr(self.layer, "weight_scale_fp32", self.layer.weight_scale)
+            x2_scale = weight_scale.reshape(1, -1).contiguous()
+            output = DeviceOperator.npu_mm_reduce_scatter_base(
+                x_quant,
+                self.layer.weight,
+                hcom_name,
+                world_size,
+                reduce_op="sum",
+                bias=bias_ if quant_method.act_quant_type == torch.int8 else None,
+                comm_turn=0,
+                x1_scale=x1_scale,
+                x2_scale=x2_scale,
+                output_dtype=x.dtype,
+                comm_mode=DYNAMIC_W8A8_MMRS_COMM_MODE,
+            )
+            if need_unsqueeze:
+                output = output.unsqueeze(dim=1)
+            if bias_ is not None and quant_method.act_quant_type != torch.int8:
+                output = (output + bias_).to(x.dtype)
         else:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
             output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
@@ -450,6 +495,55 @@ _MULTIMODAL_ENCODER_PREFIX_PARTS = (
 
 def _should_skip_sp_for_multimodal_encoder(prefix: str) -> bool:
     return any(part in prefix for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
+
+
+_TENSOR_ALL_GATHER_MATMUL_DTYPES = {torch.float16, torch.bfloat16}
+
+
+def _get_weight_dtype(layer) -> torch.dtype | None:
+    weight = getattr(layer, "weight", None)
+    if weight is None:
+        return None
+    return getattr(weight, "dtype", getattr(getattr(weight, "data", None), "dtype", None))
+
+
+def _apply_tensor_all_gather_matmul_if_supported(
+    layer,
+    input_: torch.Tensor,
+    bias: torch.Tensor | None,
+    need_all_gather: bool,
+) -> torch.Tensor | None:
+    if not need_all_gather:
+        return None
+
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+    quant_method = getattr(layer, "quant_method", None)
+    if (
+        isinstance(quant_method, UnquantizedLinearMethod)
+        and _get_weight_dtype(layer) in _TENSOR_ALL_GATHER_MATMUL_DTYPES
+    ):
+        return torch.ops.vllm.all_gather_unquantized_matmul(input_, layer.weight, bias)
+
+    chunk_size = getattr(layer, "_chunk_size", 0)
+    has_dynamic_weight_chunks = isinstance(chunk_size, int) and chunk_size > 0
+    if (
+        bias is None
+        and get_ascend_device_type() != AscendDeviceType.A5
+        and isinstance(quant_method, AscendLinearMethod)
+        and isinstance(quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+        and quant_method.quant_method.act_quant_type == torch.int8
+        and hasattr(layer, "weight")
+        and hasattr(layer, "weight_scale")
+        and not has_dynamic_weight_chunks
+    ):
+        weight_scale = getattr(layer, "weight_scale_fp32", layer.weight_scale)
+        return torch.ops.vllm.all_gather_dynamic_quant_matmul(input_, layer.weight, weight_scale)
+
+    return None
 
 
 def _get_column_parallel_op(
