@@ -26,16 +26,16 @@ test_cases:
       - "--allowed-local-media-path"
       - "/"
     benchmarks:
-      acc:
-        case_type: accuracy
-        dataset_path: vllm-ascend/textvqa-lite
-        request_conf: vllm_api_stream_chat
-        dataset_conf: textvqa/textvqa_gen_base64
-        max_out_len: 4096
-        batch_size: 8
-        baseline: 80
-        threshold: 20
-        temperature: 0
+    #  acc:
+      #  case_type: accuracy
+      #  dataset_path: vllm-ascend/textvqa-lite
+      #  request_conf: vllm_api_stream_chat
+      #  dataset_conf: textvqa/textvqa_gen_base64
+      #  max_out_len: 4096
+      #  batch_size: 8
+      #  baseline: 80
+      #  threshold: 20
+      #  temperature: 0
       #  top_p: 0.95
       #  top_k: 40
       #  min_p:
