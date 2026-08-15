@@ -17,11 +17,11 @@ LORA_2D_ID = 1
 LORA_3D_ID = 2
 LORA_2D_EXPECTED_OUTPUT = [
     "A red stop sign stands prominently in the foreground.",
-    "Cherry blossoms in full bloom frame the Tokyo Skytree, creating a picturesque scene of pink flowers against a clear blue sky."
+    "Cherry blossoms in full bloom frame the Tokyo Skytree, creating a picturesque scene of pink flowers against a clear blue sky.",
 ]
 LORA_3D_EXPECTED_OUTPUT = [
-    "A red STOP sign stands prominently in the foreground, with a traditional Chinese gate adorned with red lanterns and the Chinese characters \"中華門\" in the background, signaling the entrance to a Chinatown. A black car passes by on the street, and stone lion statues guard the entrance to the culturally rich area.",
-    "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom."
+    'A red STOP sign stands prominently in the foreground, with a traditional Chinese gate adorned with red lanterns and the Chinese characters "中華門" in the background, signaling the entrance to a Chinatown. A black car passes by on the street, and stone lion statues guard the entrance to the culturally rich area.',
+    "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom.",
 ]
 
 PROMPT_TEMPLATE = """<|im_start|>user
