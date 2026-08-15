@@ -32,7 +32,7 @@ It is recommended to download the model weight to a local directory such as `/ro
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. For Atlas 300I DUO and Atlas 200I Pro on Ubuntu, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image). For Atlas 200I Pro on openEuler, use `vllm-ascend:nightly-releases-v0.23.0-310p-openeuler` (or a later `-310p-openeuler` image).
+It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. As a minimum-version requirement, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image. For Atlas 200I Pro on openEuler, use the matching `-310p-openeuler` image.
 
 :::::::{tab-set}
 

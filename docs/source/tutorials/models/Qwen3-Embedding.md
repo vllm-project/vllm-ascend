@@ -26,8 +26,6 @@ You can use our official docker image to run `Qwen3-Embedding` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
-
 :::::{tab-set}
 :sync-group: install
 
