@@ -317,8 +317,8 @@ jobs:
 
     - name: Install csrc cache dependencies
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y zstd
+        apt-get update -y
+        apt-get install -y zstd
 
     - name: Restore vllm-ascend csrc cache
       id: cache-csrc
