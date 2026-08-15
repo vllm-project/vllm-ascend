@@ -658,6 +658,28 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        if self.use_v2_model_runner:
+            model_runner = self.model_runner
+            has_pcp_prefill = False
+            if model_runner.pcp_manager is not None:
+                # This runs before MRV2 adds new requests to req_states, so use
+                # the scheduler payload as the authoritative pre-update state.
+                has_pcp_prefill = any(
+                    req.prefill_token_ids is None or req.num_computed_tokens < len(req.prefill_token_ids)
+                    for req in scheduler_output.scheduled_new_reqs
+                ) or any(
+                    num_output_tokens == 0
+                    for num_output_tokens in (scheduler_output.scheduled_cached_reqs.num_output_tokens)
+                )
+
+            set_pcp_batch_state = getattr(
+                model_runner.cudagraph_manager,
+                "set_pcp_batch_has_prefill",
+                None,
+            )
+            if set_pcp_batch_state is not None:
+                set_pcp_batch_state(has_pcp_prefill)
+
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output

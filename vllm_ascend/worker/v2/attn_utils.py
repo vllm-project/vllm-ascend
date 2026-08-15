@@ -52,7 +52,12 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    calc_split_factor,
+    enable_sfa,
+    get_ascend_device_type,
+)
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -171,6 +176,7 @@ def build_attn_metadata(
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
+    is_prefilling: torch.Tensor | None = None,
     # extra attributes for ascend npus.
     seq_lens_np: np.ndarray | None = None,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
@@ -180,7 +186,6 @@ def build_attn_metadata(
     graph_pad_size: int = -1,
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
-    is_prefilling: torch.Tensor | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -220,6 +225,10 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        group_is_prefilling = common_attn_metadata_extra_kwargs.pop(
+            "is_prefilling",
+            is_prefilling,
+        )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -235,7 +244,7 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
-            is_prefilling=is_prefilling,
+            is_prefilling=group_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,

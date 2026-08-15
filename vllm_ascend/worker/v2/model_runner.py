@@ -202,7 +202,13 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_query_len = self.num_speculative_steps + 1
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
-        set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
+        set_cos_and_sin(
+            vllm_config,
+            self.max_num_reqs,
+            self.decode_query_len,
+            self.dtype,
+            self.device,
+        )
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
@@ -212,6 +218,8 @@ class NPUModelRunner(GPUModelRunner):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
+                if self.speculator is not None:
+                    self.speculator.pcp_manager = self.pcp_manager
                 self.pcp_manager.vllm_config = self.vllm_config
 
         if self.model_config.enable_return_routed_experts:

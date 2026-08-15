@@ -29,14 +29,20 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    ModelCudaGraphManager,
+)
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -52,6 +58,95 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     capture descriptors, not the raw config sizes.
     """
     return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
+
+
+def _prepare_pcp_inputs_to_capture(
+    num_reqs: int,
+    num_tokens: int,
+    model_state: ModelState,
+    input_buffers: InputBuffers,
+    block_tables: BlockTables,
+    attn_groups: list[list[AttentionGroup]],
+    kv_cache_config: KVCacheConfig,
+    pcp_manager: PCPManager,
+    full_cudagraph: bool,
+) -> cudagraph_utils.AttentionState:
+    """Build PCP capture metadata from the buffers used during replay."""
+    if not isinstance(input_buffers, AscendInputBuffers):
+        raise TypeError(f"MRV2 PCP graph capture requires AscendInputBuffers, got {type(input_buffers).__name__}.")
+
+    input_batch = AscendInputBatch.make_dummy(
+        num_reqs,
+        num_tokens,
+        input_buffers,
+    )
+
+    input_batch = pcp_manager.partition_batch(input_batch)
+    input_block_tables, slot_mappings = pcp_manager.prepare_dummy_attn(
+        input_batch.num_reqs_after_padding,
+        input_batch.num_tokens_after_padding,
+    )
+    slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(
+        slot_mappings,
+        kv_cache_config,
+    )
+
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=full_cudagraph,
+    )
+    return cudagraph_utils.AttentionState(
+        attn_metadata,
+        slot_mappings_by_layer,
+    )
+
+
+def prepare_pcp_speculator_inputs_to_capture(
+    num_reqs: int,
+    num_tokens: int,
+    model_state: ModelState,
+    input_buffers: InputBuffers,
+    block_tables: BlockTables,
+    attn_groups: list[list[AttentionGroup]],
+    kv_cache_config: KVCacheConfig,
+    pcp_manager: PCPManager,
+    full_cudagraph: bool,
+) -> cudagraph_utils.AttentionState:
+    """Build global draft-prefill metadata with a PCP-expanded KV layout."""
+    if not isinstance(input_buffers, AscendInputBuffers):
+        raise TypeError(
+            f"MRV2 PCP speculator graph capture requires AscendInputBuffers, got {type(input_buffers).__name__}."
+        )
+
+    input_batch = AscendInputBatch.make_dummy(
+        num_reqs,
+        num_tokens,
+        input_buffers,
+    )
+    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+    slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
+    slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(
+        slot_mappings,
+        kv_cache_config,
+    )
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=full_cudagraph,
+    )
+    return cudagraph_utils.AttentionState(
+        attn_metadata,
+        slot_mappings_by_layer,
+    )
 
 
 def _get_graph_update_backend(
@@ -90,6 +185,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.model_runner = model_runner
         # Reuse the public update_stream from model_runner (shared with draft).
         self.update_stream = self.model_runner.update_stream
+        self._pcp_batch_has_prefill = False
         # The attention backend keys its per-size graph params by the actual
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors
@@ -99,6 +195,36 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # so we need to set graph params before capture full graph.
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
+
+    def set_pcp_batch_has_prefill(self, has_prefill: bool) -> None:
+        """Record whether the current PCP batch contains prefill tokens."""
+        self._pcp_batch_has_prefill = has_prefill
+
+    def dispatch(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        num_active_loras: int = 0,
+    ) -> BatchExecutionDescriptor:
+        desc = super().dispatch(
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            num_active_loras,
+        )
+        # FULL_DECODE_ONLY dispatch is shape-based and cannot distinguish a
+        # one-token decode from a one-token suffix left by a prefix-cache hit.
+        # Reject only the invalid full graph, preserving PIECEWISE and eager
+        # dispatch for all other PCP batches.
+        if self._pcp_batch_has_prefill and desc.cg_mode == CUDAGraphMode.FULL:
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=desc.num_active_loras,
+            )
+        return desc
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -152,8 +278,15 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
-        with communicator_switch():
-            return super().capture(
+        capture = super().capture
+        # Import lazily to avoid a cycle during Ascend plugin patch registration.
+        from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+
+        pcp_manager = getattr(self.model_runner, "pcp_manager", None)
+        use_pcp_full_capture = isinstance(pcp_manager, AscendPCPManager) and self.cudagraph_mode.has_full_cudagraphs()
+
+        def capture_graphs() -> None:
+            return capture(
                 model,
                 model_state,
                 input_buffers,
@@ -166,6 +299,40 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 lora_capture_hook=lora_capture_hook,
                 progress_bar_desc=progress_bar_desc,
             )
+
+        with communicator_switch():
+            if not use_pcp_full_capture:
+                return capture_graphs()
+
+            original_prepare_inputs = cudagraph_utils.prepare_inputs_to_capture
+
+            def prepare_pcp_inputs(
+                num_reqs: int,
+                num_tokens: int,
+                model_state: ModelState,
+                input_buffers: InputBuffers,
+                block_tables: BlockTables,
+                attn_groups: list[list[AttentionGroup]],
+                kv_cache_config: KVCacheConfig,
+                full_cudagraph: bool,
+            ) -> cudagraph_utils.AttentionState:
+                return _prepare_pcp_inputs_to_capture(
+                    num_reqs,
+                    num_tokens,
+                    model_state,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager,
+                    full_cudagraph=full_cudagraph,
+                )
+
+            cudagraph_utils.prepare_inputs_to_capture = prepare_pcp_inputs
+            try:
+                return capture_graphs()
+            finally:
+                cudagraph_utils.prepare_inputs_to_capture = original_prepare_inputs
 
 
 class ModelWithContext(nn.Module):
