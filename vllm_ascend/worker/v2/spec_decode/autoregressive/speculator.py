@@ -27,11 +27,14 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+    AutoRegressiveSpeculator,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -44,6 +47,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_draft_attn_metadata_factory,
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +96,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+        self.pcp_manager: AscendPCPManager | None = None
+        self._pcp_draft_prefill_attn_inputs: tuple[tuple[torch.Tensor, ...], torch.Tensor] | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
@@ -136,9 +142,35 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
+        self._pcp_draft_prefill_attn_inputs = None
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with build_attn_metadata_wrapper(), torch_gather_wrapper():
+            if self.method in ("mtp", "eagle3") and self.pcp_manager is not None and not dummy_run:
+                self._pcp_draft_prefill_attn_inputs = self.pcp_manager.prepare_speculator_attn(input_batch)
+                block_tables, global_slot_mappings = self._pcp_draft_prefill_attn_inputs
+                attn_metadata = self.model_state.prepare_attn(
+                    input_batch,
+                    CUDAGraphMode.NONE,
+                    block_tables,
+                    global_slot_mappings,
+                    self.target_attn_groups,
+                    self.kv_cache_config,
+                )
+                slot_mappings = build_slot_mappings_by_layer(
+                    global_slot_mappings,
+                    self.kv_cache_config,
+                )
+
+                if self.method == "eagle3":
+                    if not aux_hidden_states:
+                        raise RuntimeError("Eagle3 with PCP requires auxiliary target hidden states.")
+                    combined_aux_hidden_states = torch.cat(
+                        aux_hidden_states,
+                        dim=-1,
+                    )
+                    aux_hidden_states = [self.pcp_manager.restore_hidden_states(combined_aux_hidden_states)]
+
             return super().propose(
                 input_batch,
                 attn_metadata,
@@ -343,9 +375,38 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
+    def build_draft_attn_metadatas(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        is_draft_model_prefill: bool,
+    ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
+
+        if is_draft_model_prefill and self._pcp_draft_prefill_attn_inputs is not None:
+            assert self.input_batch is not None
+            if (
+                batch_desc.num_reqs != self.input_batch.num_reqs_after_padding
+                or batch_desc.num_tokens != self.input_batch.num_tokens_after_padding
+            ):
+                raise RuntimeError(
+                    "PCP draft-prefill graph shape does not match the restored "
+                    "global batch: "
+                    f"graph=({batch_desc.num_reqs}, {batch_desc.num_tokens}), "
+                    "batch=("
+                    f"{self.input_batch.num_reqs_after_padding}, "
+                    f"{self.input_batch.num_tokens_after_padding})."
+                )
+            block_tables, slot_mappings = self._pcp_draft_prefill_attn_inputs
+            attn_metadata = self.model_state.prepare_attn(
+                self.input_batch,
+                batch_desc.cg_mode,
+                block_tables,
+                slot_mappings,
+                self.target_attn_groups,
+                self.kv_cache_config,
+            )
+
         attn_metadata = {
             name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
         }
@@ -353,6 +414,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if is_draft_model_prefill:
             return [attn_metadata]
 
+        num_reqs_padded = batch_desc.num_reqs
+        assert num_reqs_padded is not None
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
 
         for i, per_step_attn_metadata in enumerate(draft_attn_metadatas):
@@ -415,7 +478,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         return draft_attn_metadatas
 
     def _update_decode_attn_metadata(
-        self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
+        self,
+        attn_metadata: dict[str, Any] | None,
+        step: int,
+        num_reqs: int | None = None,
     ):
         """Update per-step decode attention metadata on Ascend."""
         if attn_metadata is None:
