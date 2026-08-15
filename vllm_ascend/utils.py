@@ -1238,6 +1238,12 @@ def dispose_layer(layer: Any):
 
 
 def check_kv_extra_config(vllm_config):
+    kv_transfer_config = vllm_config.kv_transfer_config
+    prefill_config = kv_transfer_config.get_from_extra_config("prefill", {})
+    decode_config = kv_transfer_config.get_from_extra_config("decode", {})
+    is_pd_disaggregated = bool(kv_transfer_config.is_kv_producer) != bool(kv_transfer_config.is_kv_consumer)
+    validate_sfa_dcp = is_pd_disaggregated and model_uses_sfa_sparse(vllm_config.model_config)
+
     def _check(name: str, config: dict):
         tp_key = "tp_size"
         dp_key = "dp_size"
@@ -1258,10 +1264,29 @@ def check_kv_extra_config(vllm_config):
                     f"Expected {vllm_dp}, but got {config_dp}."
                 )
 
-    if vllm_config.kv_transfer_config.is_kv_producer:
-        _check("prefill", vllm_config.kv_transfer_config.get_from_extra_config("prefill", {}))
-    if vllm_config.kv_transfer_config.is_kv_consumer:
-        _check("decode", vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+        if validate_sfa_dcp:
+            config_dcp = config.get("dcp_size", 1)
+            vllm_dcp = vllm_config.parallel_config.decode_context_parallel_size
+            if config_dcp != vllm_dcp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting decode context parallel size. "
+                    f"Expected {vllm_dcp}, but got {config_dcp}."
+                )
+
+    if kv_transfer_config.is_kv_producer:
+        _check("prefill", prefill_config)
+    if kv_transfer_config.is_kv_consumer:
+        _check("decode", decode_config)
+
+    if validate_sfa_dcp:
+        prefill_dcp = prefill_config.get("dcp_size", 1)
+        decode_dcp = decode_config.get("dcp_size", 1)
+        if (prefill_dcp > 1) != (decode_dcp > 1):
+            raise ValueError(
+                "SFA models in PD disaggregation require DCP to be enabled on both prefill and decode nodes "
+                "or disabled on both. "
+                f"Got prefill dcp_size={prefill_dcp} and decode dcp_size={decode_dcp}."
+            )
 
 
 def is_gqa_backend(vllm_config: VllmConfig) -> bool:

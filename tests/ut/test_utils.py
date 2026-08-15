@@ -15,6 +15,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -23,6 +24,46 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
+
+
+def _make_kv_extra_config(
+    *,
+    role: str,
+    local_dcp_size: int,
+    prefill_dcp_size: int | None,
+    decode_dcp_size: int | None,
+    use_sfa: bool = True,
+):
+    prefill_config = {"tp_size": 8, "dp_size": 1}
+    decode_config = {"tp_size": 8, "dp_size": 1}
+    if prefill_dcp_size is not None:
+        prefill_config["dcp_size"] = prefill_dcp_size
+    if decode_dcp_size is not None:
+        decode_config["dcp_size"] = decode_dcp_size
+
+    kv_transfer_config = mock.MagicMock(
+        kv_role=role,
+        is_kv_producer=role == "kv_producer",
+        is_kv_consumer=role == "kv_consumer",
+    )
+    kv_transfer_config.get_from_extra_config.side_effect = lambda key, default: {
+        "prefill": prefill_config,
+        "decode": decode_config,
+    }.get(key, default)
+
+    hf_text_config = SimpleNamespace(index_topk=2048) if use_sfa else SimpleNamespace()
+    return SimpleNamespace(
+        kv_transfer_config=kv_transfer_config,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            data_parallel_size=1,
+            decode_context_parallel_size=local_dcp_size,
+        ),
+        model_config=SimpleNamespace(
+            hf_text_config=hf_text_config,
+            hf_config=SimpleNamespace(),
+        ),
+    )
 
 
 class TestUtils(TestBase):
@@ -458,3 +499,88 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_check_kv_extra_config_accepts_sfa_pd_with_dcp_enabled_on_both_sides(role):
+    vllm_config = _make_kv_extra_config(
+        role=role,
+        local_dcp_size=8,
+        prefill_dcp_size=8,
+        decode_dcp_size=8,
+    )
+
+    utils.check_kv_extra_config(vllm_config)
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_check_kv_extra_config_accepts_sfa_pd_with_dcp_disabled_on_both_sides(role):
+    vllm_config = _make_kv_extra_config(
+        role=role,
+        local_dcp_size=1,
+        prefill_dcp_size=None,
+        decode_dcp_size=None,
+    )
+
+    utils.check_kv_extra_config(vllm_config)
+
+
+@pytest.mark.parametrize(
+    ("role", "local_dcp_size", "prefill_dcp_size", "decode_dcp_size"),
+    [
+        ("kv_producer", 8, 8, 1),
+        ("kv_consumer", 8, 1, 8),
+    ],
+)
+def test_check_kv_extra_config_rejects_sfa_pd_with_dcp_enabled_on_only_one_side(
+    role,
+    local_dcp_size,
+    prefill_dcp_size,
+    decode_dcp_size,
+):
+    vllm_config = _make_kv_extra_config(
+        role=role,
+        local_dcp_size=local_dcp_size,
+        prefill_dcp_size=prefill_dcp_size,
+        decode_dcp_size=decode_dcp_size,
+    )
+
+    with pytest.raises(ValueError, match="SFA models in PD disaggregation require DCP"):
+        utils.check_kv_extra_config(vllm_config)
+
+
+def test_check_kv_extra_config_rejects_sfa_pd_with_missing_local_dcp_size():
+    vllm_config = _make_kv_extra_config(
+        role="kv_producer",
+        local_dcp_size=8,
+        prefill_dcp_size=None,
+        decode_dcp_size=8,
+    )
+
+    with pytest.raises(ValueError, match="conflicting decode context parallel size"):
+        utils.check_kv_extra_config(vllm_config)
+
+
+def test_check_kv_extra_config_does_not_apply_sfa_dcp_rule_to_other_backends():
+    vllm_config = _make_kv_extra_config(
+        role="kv_producer",
+        local_dcp_size=8,
+        prefill_dcp_size=None,
+        decode_dcp_size=None,
+        use_sfa=False,
+    )
+
+    utils.check_kv_extra_config(vllm_config)
+
+
+def test_check_kv_extra_config_does_not_apply_sfa_dcp_rule_to_colocated_serving():
+    vllm_config = _make_kv_extra_config(
+        role="kv_both",
+        local_dcp_size=8,
+        prefill_dcp_size=None,
+        decode_dcp_size=None,
+    )
+    vllm_config.kv_transfer_config.is_kv_producer = True
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+
+    utils.check_kv_extra_config(vllm_config)
