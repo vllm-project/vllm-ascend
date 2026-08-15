@@ -25,7 +25,6 @@ using namespace AscendC;
 constexpr int64_t BLOCK_SIZE = 32;
 constexpr int64_t BLOCK_ELEM = BLOCK_SIZE / sizeof(float);
 constexpr int64_t SWI_FACTOR = 2;
-constexpr float DYNAMIC_QUANT_FACTOR = 1.0 / static_cast<float>(127.0);
 constexpr uint64_t MAX_CALC_NUM = 64;
 constexpr uint64_t REDUCEMAX_CALC_NUM = 64;
 constexpr uint64_t SPILI_NUM = 2;
@@ -395,20 +394,21 @@ public:
             ResetMask();
 
             LocalTensor<int32_t> xActLocal = xActQueue_.AllocTensor<int32_t>();
-            DataCopyParams dataCopyActScaleParams;
-            dataCopyActScaleParams.blockCount = proDimsx;
-            dataCopyActScaleParams.blockLen = sizeof(float);
-            dataCopyActScaleParams.srcStride = 0;
-            dataCopyActScaleParams.dstStride = 0;
             LocalTensor<float> xActLocalF32 = xActLocal.template ReinterpretCast<float>();
-            DataCopyPad(xActLocalF32[tilingData_->ubFactorDimx * tilingData_->N], activateScaleGm_[xDimxOffset],
-                dataCopyActScaleParams, padParams);
+            LocalTensor<float> activationScaleLocal = xActLocalF32[tilingData_->ubFactorDimx * tilingData_->N];
 
             if (isSyncAll) {
                 AscendC::CrossCoreWaitFlag(0x8);
                 SyncAll<true>();
                 isSyncAll = false;
             }
+
+            DataCopyParams dataCopyActScaleParams;
+            dataCopyActScaleParams.blockCount = 1;
+            dataCopyActScaleParams.blockLen = proDimsx * sizeof(float);
+            dataCopyActScaleParams.srcStride = 0;
+            dataCopyActScaleParams.dstStride = 0;
+            DataCopyPad(activationScaleLocal, activateScaleGm_[xDimxOffset], dataCopyActScaleParams, padParams);
 
             DataCopyParams dataCopyXParams;
             dataCopyXParams.blockCount = proDimsx;
@@ -420,23 +420,27 @@ public:
             xActLocal = xActQueue_.DeQue<int32_t>();
 
             LocalTensor<int32_t> xLocal = xActLocal;
-            xActLocalF32 = xActLocal.template ReinterpretCast<float>();
             LocalTensor<float> xLocalF32 = xActLocalF32;
-            LocalTensor<float> activationScaleLocal = xActLocalF32[tilingData_->ubFactorDimx * tilingData_->N];
 
             Cast(xLocalF32, xLocal, RoundMode::CAST_NONE, SWI_FACTOR * proDimsx * tilingData_->ubFactorDimy);
             PipeBarrier<PIPE_V>();
 
-            Mul(xLocalF32, tmpUbF32, xLocalF32, tilingData_->ubFactorDimy * SWI_FACTOR * proDimsx);
-            PipeBarrier<PIPE_V>();
-
-            SetMaskCount();
-            SetVectorMask<float, MaskMode::COUNTER>(tilingData_->ubFactorDimy * SWI_FACTOR);
-            Copy<float, false>(tmpUbF32, activationScaleLocal, AscendC::MASK_PLACEHOLDER, proDimsx,
-                {1, 0, static_cast<uint16_t>((tilingData_->ubFactorDimy * SWI_FACTOR) / BLOCK_ELEM), 1});
-            SetMaskNorm();
-            ResetMask();
-            PipeBarrier<PIPE_V>();
+            int32_t eventIdMTE2ToS = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+            SetFlag<HardEvent::MTE2_S>(eventIdMTE2ToS);
+            WaitFlag<HardEvent::MTE2_S>(eventIdMTE2ToS);
+            int32_t eventIdSToVDequant = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+            SetFlag<HardEvent::S_V>(eventIdSToVDequant);
+            for (uint32_t i = 0; i < proDimsx; i++) {
+                WaitFlag<HardEvent::S_V>(eventIdSToVDequant);
+                float scale = activationScaleLocal.GetValue(i);
+                SetFlag<HardEvent::S_V>(eventIdSToVDequant);
+                WaitFlag<HardEvent::S_V>(eventIdSToVDequant);
+                Muls(xLocalF32[i * tilingData_->ubFactorDimy * SWI_FACTOR],
+                    xLocalF32[i * tilingData_->ubFactorDimy * SWI_FACTOR], scale,
+                    tilingData_->ubFactorDimy * SWI_FACTOR);
+                SetFlag<HardEvent::S_V>(eventIdSToVDequant);
+            }
+            WaitFlag<HardEvent::S_V>(eventIdSToVDequant);
 
             Mul(xLocalF32, tmpUbF32, xLocalF32, tilingData_->ubFactorDimy * SWI_FACTOR * proDimsx);
             PipeBarrier<PIPE_V>();
@@ -465,20 +469,13 @@ public:
                 PipeBarrier<PIPE_V>();
             }
 
-            Muls(xLocalF32, tmpUbF32Act, static_cast<float>(-1.0), tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
-            Exp(xLocalF32, xLocalF32, tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
-            Adds(xLocalF32, xLocalF32, static_cast<float>(1.0), tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
-            Div(tmpUbF32Act, tmpUbF32Act, xLocalF32, tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
+            float beta = 1.0f;
+            LocalTensor<float> swigluOutput = xLocalF32;
+            SwiGLU<float, false>(swigluOutput, tmpUbF32Gate, tmpUbF32Act, beta,
+                tilingData_->ubFactorDimy * proDimsx);
+            PipeBarrier<PIPE_ALL>();
 
-            xActQueue_.FreeTensor(xActLocal);
-            Mul(tmpUbF32Act, tmpUbF32Gate, tmpUbF32Act, tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
-
-            Abs(tmpUbF32Gate, tmpUbF32Act, tilingData_->ubFactorDimy * proDimsx);
+            Abs(tmpUbF32Gate, swigluOutput, tilingData_->ubFactorDimy * proDimsx);
 
             LocalTensor<float> outLocal = outQueue_.AllocTensor<float>();
 
@@ -501,8 +498,16 @@ public:
                 tilingData_->ubFactorDimy / BLOCK_ELEM, ReduceOrder::ORDER_ONLY_VALUE);
             PipeBarrier<PIPE_V>();
 
-            Muls(scaleOut, tmpUbF32Gate, DYNAMIC_QUANT_FACTOR, proDimsx);
-            PipeBarrier<PIPE_V>();
+            int32_t eventIdVToS = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+            SetFlag<HardEvent::V_S>(eventIdVToS);
+            WaitFlag<HardEvent::V_S>(eventIdVToS);
+            for (uint32_t i = 0; i < proDimsx; i++) {
+                float quantScale = tmpUbF32Gate.GetValue(i) / QUANT_SCALE_INT8;
+                scaleOut.SetValue(i, quantScale);
+            }
+            int32_t eventIdSToV = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+            SetFlag<HardEvent::S_V>(eventIdSToV);
+            WaitFlag<HardEvent::S_V>(eventIdSToV);
 
             int64_t blockCount = (proDimsx + BLOCK_ELEM - 1) / BLOCK_ELEM;
             Brcb(outLocal, scaleOut, blockCount, {1, 8});
@@ -516,20 +521,17 @@ public:
             ResetMask();
             PipeBarrier<PIPE_V>();
 
-            Div(tmpUbF32Act, tmpUbF32Act, tmpUbF32Gate, tilingData_->ubFactorDimy * proDimsx);
+            Div(swigluOutput, swigluOutput, tmpUbF32Gate, tilingData_->ubFactorDimy * proDimsx);
             PipeBarrier<PIPE_V>();
 
-            LocalTensor<int32_t> tmpUbF32ActI32 = tmpUbF32Act.ReinterpretCast<int32_t>();
-            Cast(tmpUbF32ActI32, tmpUbF32Act, RoundMode::CAST_RINT, tilingData_->ubFactorDimy * proDimsx);
-            SetDeqScale((half)1.000000e+00f);
-
-            LocalTensor<half> tmpUbF32Gate16 = tmpUbF32Gate.template ReinterpretCast<half>();
-            Cast(tmpUbF32Gate16, tmpUbF32ActI32, RoundMode::CAST_ROUND, tilingData_->ubFactorDimy * proDimsx);
+            LocalTensor<half> swigluOutput16 = swigluOutput.template ReinterpretCast<half>();
+            Cast(swigluOutput16, swigluOutput, RoundMode::CAST_RINT, tilingData_->ubFactorDimy * proDimsx);
             PipeBarrier<PIPE_V>();
 
-            Cast(yOut, tmpUbF32Gate16, RoundMode::CAST_TRUNC, tilingData_->ubFactorDimy * proDimsx);
+            Cast(yOut, swigluOutput16, RoundMode::CAST_RINT, tilingData_->ubFactorDimy * proDimsx);
             PipeBarrier<PIPE_V>();
 
+            xActQueue_.FreeTensor(xActLocal);
             tmpBuf1_.FreeTensor(tmpUbF32);
             outQueue_.EnQue<float>(outLocal);
             outLocal = outQueue_.DeQue<float>();

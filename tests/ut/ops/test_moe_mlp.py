@@ -1095,6 +1095,10 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
             patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
             patch(f"{MOE_MLP}.HAS_TRITON", False),
             patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4), create=True) as mock_swiglu,
+            patch(
+                f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward",
+                return_value=torch.zeros(1, 4),
+            ),
             patch("torch.nn.functional.gelu") as mock_gelu,
         ):
             mock_ctx.moe_comm_type = -1  # not MoECommType.MC2

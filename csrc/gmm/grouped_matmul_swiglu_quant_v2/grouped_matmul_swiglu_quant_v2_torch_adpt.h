@@ -55,6 +55,14 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2(
     int64_t dequant_dtype_real = static_cast<int64_t>(ConvertType(dequant_dtype.value_or(at::kFloat)));
     auto bias_real = bias.value_or(at::Tensor());
     auto smooth_scale_real = smooth_scale.value_or(at::Tensor());
+    TORCH_CHECK(group_list_type == 0 || group_list_type == 1,
+                "group_list_type must be 0 or 1, but got ", group_list_type);
+    at::Tensor normalized_group_list = group_list;
+    int64_t normalized_group_list_type = group_list_type;
+    if (group_list_type == 1) {
+        normalized_group_list = at::cumsum(group_list, 0);
+        normalized_group_list_type = 0;
+    }
     double swiglu_limit_f = static_cast<double>(swiglu_limit);
     if (quant_dtype.has_value()) {
         // A5 consumes the public ND V2 contract and supports per-token and MX
@@ -69,11 +77,11 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2(
             bias_real,
             x_scale,
             smooth_scale_real,
-            group_list,
+            normalized_group_list,
             dequant_mode_real,
             dequant_dtype_real,
             quant_mode_real,
-            group_list_type,
+            normalized_group_list_type,
             tuning_config,
             swiglu_limit_f,
             output,
@@ -88,11 +96,11 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2(
             bias_real,
             x_scale,
             smooth_scale_real,
-            group_list,
+            normalized_group_list,
             dequant_mode_real,
             dequant_dtype_real,
             quant_mode_real,
-            group_list_type,
+            normalized_group_list_type,
             tuning_config,
             swiglu_limit_f,
             output,

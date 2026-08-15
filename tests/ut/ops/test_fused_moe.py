@@ -941,6 +941,7 @@ def test_w8a8_multistream_uses_shared_expert_stream(monkeypatch, device_type):
         ),
     )
     shared_experts.multistream_overlap = True
+    shared_experts.moe_config = SimpleNamespace(tp_group=SimpleNamespace(world_size=1))
     shared_experts.quant_type = QuantType.W8A8
     shared_experts.lora_context = None
     shared_experts.swiglu_limit = 0.0

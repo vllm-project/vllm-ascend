@@ -263,6 +263,7 @@ class AscendSharedExperts:
                     output_dtype=torch.int32,
                 )
                 # Execute activation concurrently with gmm2.
+
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                     x=hidden_states,
