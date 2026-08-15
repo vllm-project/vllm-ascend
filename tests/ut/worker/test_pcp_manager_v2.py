@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +25,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
@@ -225,6 +227,35 @@ def test_npu_model_runner_upgrades_vllm_027_base_pcp_manager():
     assert runner.pcp_manager.pcp_rank == 1
     assert runner.pcp_manager.cp_interleave == 4
     validate_config.assert_called_once_with(runner.vllm_config, False)
+
+
+def test_initialize_kv_cache_preserves_pcp_and_routed_experts_initialization():
+    """Keep both initialization hooks when their upstream changes overlap."""
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
+    runner._ensure_ascend_pcp_manager = MagicMock()
+    runner.init_routed_experts_capturer = MagicMock()
+    kv_cache_config = MagicMock()
+    events = []
+
+    runner._ensure_ascend_pcp_manager.side_effect = lambda: events.append("pcp")
+    runner.init_routed_experts_capturer.side_effect = lambda: events.append("routed_experts")
+
+    with (
+        patch.object(
+            GPUModelRunner,
+            "initialize_kv_cache",
+            side_effect=lambda _: events.append("base"),
+        ) as base_initialize,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.graph_manager_wrapper",
+            return_value=nullcontext(),
+        ),
+    ):
+        runner.initialize_kv_cache(kv_cache_config)
+
+    base_initialize.assert_called_once_with(kv_cache_config)
+    assert events == ["base", "pcp", "routed_experts"]
 
 
 def _make_pcp_config(
