@@ -103,6 +103,10 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
+      - name: MiniMax-M2.5-w8a8-QuaRot-A3-PD-200k
+        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3-PD-200k.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
   double_node:
     test_config:
       - name: multi-node-qwen3-dp
