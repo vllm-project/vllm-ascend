@@ -444,6 +444,31 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertEqual(len(draft_pulls), 1)
         self.assertEqual(draft_pulls[0].num_group_pulls, 1)
 
+    def test_build_kv_group2layeridx_maps_index_cache_to_synthetic_plane(self):
+        index_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.total_layers = 32
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=["model.layers.3.attn.index_cache"],
+                    kv_cache_spec=index_spec,
+                )
+            ]
+        )
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(kv_group2layeridx[0][1], [35])
+        self.assertTrue(MooncakeConnectorWorker._is_index_cache_layer("model.layers.3.attn.index_cache"))
+
     def test_hybrid_rank_pulls_use_transfer_group_kv_heads(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
@@ -624,6 +649,9 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             kv_caches=self.kv_caches,
             prefill_pp_layer_partition=None,
         )
+
+    def test_index_cache_plane_base_matches_hidden_layers(self):
+        self.assertEqual(self.thread.index_cache_plane_base, 32)
 
     def test_add_request(self):
         test_req: dict[str, Any] = {
@@ -1522,6 +1550,7 @@ class MockVllmConfig:
             model_type="qwen2",
         )
         self.model_config.get_num_layers = MagicMock(return_value=32)
+        self.model_config.get_total_num_hidden_layers = MagicMock(return_value=32)
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank = 0
         self.parallel_config.data_parallel_size = 1

@@ -239,6 +239,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.group_kv_caches_base_addr = {}
         worker.group_block_len = {}
         worker.group_block_stride = {}
+        worker.group_layer_cache_entry_offsets = {}
         worker.group_num_layers = {}
 
         worker._infer_cache_group_metadata(0, list(worker.kv_caches))
