@@ -596,7 +596,6 @@ class BalanceScheduler(Scheduler):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break
