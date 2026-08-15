@@ -170,8 +170,6 @@ jobs:
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
       swr_username: ${{ secrets.SWR_USERNAME }}
       swr_password: ${{ secrets.SWR_PASSWORD }}
-      quay_username: ${{ secrets.SWR_USERNAME }}
-      quay_temp_username: ${{ secrets.SWR_USERNAME }}
 
   image_build_by_commit:
     name: ${{ matrix.build_meta.name }} (commit mode)
@@ -241,5 +239,3 @@ jobs:
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
       swr_username: ${{ secrets.SWR_USERNAME }}
       swr_password: ${{ secrets.SWR_PASSWORD }}
-      quay_username: ${{ secrets.SWR_USERNAME }}
-      quay_temp_username: ${{ secrets.SWR_USERNAME }}
