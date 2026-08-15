@@ -214,7 +214,6 @@ jobs:
       # quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
       # quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
       quay_temp_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
-      quay_temp_username: ${{ secrets.swr_username }}
       should_push: true
       temp_only: true
       vllm_commit: ${{ inputs.vllm_commit }}
