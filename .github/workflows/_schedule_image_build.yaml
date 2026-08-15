@@ -150,6 +150,7 @@ env:
   QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
   # Use this repo's own GHCR namespace so forks (e.g. du-ping1-merge) can write build cache.
   CACHE_REPO: ghcr.io/${{ github.repository }}
+  digest_dir: ${{ github.workspace }}/digests
 
 jobs:
   build-push-digest:
@@ -429,7 +430,7 @@ jobs:
 
     - name: Export digest
       run: |
-        mkdir -p ${{ github.workspace }}/digests
+        mkdir -p ${{ env.digest_dir }}
         digest="${{ steps.build.outputs.digest }}"
         if [ -z "$digest" ]; then
           # Fallback: extract digest from metadata output (push-by-digest mode)
@@ -439,13 +440,13 @@ jobs:
           echo "::error::Build did not produce a digest output"
           exit 1
         fi
-        touch "${{ github.workspace }}/digests/${digest#sha256:}"
+        touch "${{ env.digest_dir }}/${digest#sha256:}"
 
     - name: Upload digest
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}
-        path: ${{ github.workspace }}/digests/*
+        path: ${{ env.digest_dir }}/*
         if-no-files-found: error
         retention-days: 1
 
