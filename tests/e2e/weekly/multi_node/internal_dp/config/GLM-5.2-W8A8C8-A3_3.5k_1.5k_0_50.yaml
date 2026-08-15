@@ -1,8 +1,4 @@
-<<<<<<< HEAD:tests/e2e/weekly/multi_node/internal_dp/config/GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_50.yaml
 test_name: "multi-node-GLM-5.2-W8A8C8-MTP-A3_3.5k_1.5k_0_50"
-=======
-test_name: "multi-node-GLM-5.2-W8A8C8-MTP-A3_3.5k_1.5k_0_50_20"
->>>>>>> 17ca0aadc... update glm5.1-w8a8c8 glm5.2-w8a8c8 qwen3.6-35B qwen3.5-122B-w4a8:tests/e2e/weekly/multi_node/internal_dp/config/GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_50_20.yaml
 model: "Eco-Tech/GLM-5.2-w8a8c8"
 num_nodes: 2
 npu_per_node: 16
@@ -95,8 +91,6 @@ benchmarks:
     batch_size: 64
     request_rate: 0
     baseline: 1370.8835
-<<<<<<< HEAD:tests/e2e/weekly/multi_node/internal_dp/config/GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_50.yaml
-=======
     threshold: 0.97
   perf_TPOT20:
     case_type: performance
@@ -108,5 +102,4 @@ benchmarks:
     batch_size: 8
     request_rate: 0
     baseline: 324.6152
->>>>>>> 17ca0aadc... update glm5.1-w8a8c8 glm5.2-w8a8c8 qwen3.6-35B qwen3.5-122B-w4a8:tests/e2e/weekly/multi_node/internal_dp/config/GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_50_20.yaml
     threshold: 0.97
