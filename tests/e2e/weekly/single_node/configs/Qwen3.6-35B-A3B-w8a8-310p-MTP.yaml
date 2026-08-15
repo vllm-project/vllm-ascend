@@ -7,7 +7,7 @@ test_cases:
       - "--port"
       - "$SERVER_PORT"
       - "--tensor-parallel-size"
-      - "2"
+      - "4"
       - "--trust-remote-code"
       - "--max_num_seqs"
       - "32"
