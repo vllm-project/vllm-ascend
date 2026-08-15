@@ -427,19 +427,19 @@ jobs:
     #       "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
 
 
-    - name: Export digest
-      run: |
-        mkdir -p ${{ runner.temp }}/digests
-        digest="${{ steps.build.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/${digest#sha256:}"
+    # - name: Export digest
+    #   run: |
+    #     mkdir -p ${{ runner.temp }}/digests
+    #     digest="${{ steps.build.outputs.digest }}"
+    #     touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
-    - name: Upload digest
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}
-        path: ${{ runner.temp }}/digests/*
-        if-no-files-found: error
-        retention-days: 1
+    # - name: Upload digest
+    #   uses: actions/upload-artifact@v7
+    #   with:
+    #     name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}
+    #     path: ${{ runner.temp }}/digests/*
+    #     if-no-files-found: error
+    #     retention-days: 1
 
 
   merge-image:
