@@ -363,7 +363,7 @@ jobs:
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
-        tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
+        tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ inputs.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
         # TODO: outputs: type=image,name=${QUAY_TEMP_REPO},push-by-digest=true,name-canonical=true,push=... ：以 digest 形式推送到 temp 仓库（不直接打 tag）
         # outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         # Image builds can compile inside Docker and therefore keep a fallback;
