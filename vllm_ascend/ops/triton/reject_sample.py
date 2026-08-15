@@ -16,6 +16,7 @@
 #
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num
 
@@ -27,7 +28,7 @@ def cal_grid_and_block_size(batch_size: int):
         block_size = 1
     else:
         grid = vectorcore_num
-        block_size = triton.next_power_of_2(triton.cdiv(batch_size, grid))
+        block_size = next_power_of_2(triton.cdiv(batch_size, grid))
     return grid, block_size
 
 

@@ -1,10 +1,12 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for ``kernel_warmup``."""
 
+import importlib
 from unittest.mock import patch
 
 from tests.ut.model_executor.warmup.helpers import make_mock_worker
-from vllm_ascend.model_executor.warmup import kernel_warmup as kw
+
+kw = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
 
 
 @patch.object(kw, "logger")
