@@ -34,8 +34,8 @@ _server_cmd: &server_cmd
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--trust-remote-code"
-  - "--speculative_config"
-  - '{{"ascend_compolation_config":{{"enable_npugraph_ex":false}},"enable_cpu_binding":true}}'
+  - "--additional-config"
+  - '{"ascend_compilation_config":{"enable_npugraph_ex":false},"enable_cpu_binding":true}'
 
 
 # ==========================================
@@ -63,8 +63,8 @@ test_cases:
     server_cmd_extra:
       - "--max-model-len"
       - "70000"
-      - "--additional-config"
-      - '{{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokrns":5}}'
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
   - name: "Eagle3_Base_Step_Function_Test_03"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -75,8 +75,8 @@ test_cases:
     server_cmd_extra:
       - "--max-model-len"
       - "70000"
-      - "--additional-config"
-      - '{{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokrns":3}}'
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
   - name: "Eagle3_Base_Step_Function_Test_04"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -87,8 +87,8 @@ test_cases:
     server_cmd_extra:
       - "--max-model-len"
       - "70000"
-      - "--additional-config"
-      - '{{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokrns":5}}'
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
   - name: "Eagle3_Base_Acceptance_Rate_Boundary_Test_02"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -99,14 +99,13 @@ test_cases:
     server_cmd_extra:
       - "--max-model-len"
       - "70000"
-      - "--additional-config"
-      - '{{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokrns":3}}'
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
   - name: "Qwen36_27B_A5_Single_Maximum_Context_Test_01"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"
       - "262144"
-      - "--additional-config"
-      - '{{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokrns":3}}'
-
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'

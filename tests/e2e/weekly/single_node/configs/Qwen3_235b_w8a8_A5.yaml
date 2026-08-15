@@ -116,6 +116,6 @@ test_cases:
       - "8192"
       - "--no-enable-prefix-caching"
       - "--speculative_config"
-      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3_235B_A22B_EAGLE3","enforce_eager":true，"num_speculative_tokens":1}'
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3_235B_A22B_EAGLE3","enforce_eager":true,"num_speculative_tokens":1}'
     benchmarks:
       <<: *benchmarks_perf1

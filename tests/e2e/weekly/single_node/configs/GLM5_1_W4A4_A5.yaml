@@ -64,10 +64,8 @@ _server_cmd: &server_cmd
 # ==========================================
 
 test_cases:
-  - name: "Qwen35_35B_FP8_A5_acc_1"
+  - name: "GLM-5.1-w4a4c8-mxfp4"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4"
     envs:
       <<: *envs
     server_cmd: *server_cmd
-
-
