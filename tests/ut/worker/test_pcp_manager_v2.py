@@ -17,19 +17,14 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
-import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import (
-    AscendPCPManager,
-    maybe_build_ascend_pcp_manager,
-)
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -123,7 +118,6 @@ def _make_global_pcp_batch():
 
 def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     """Refresh Ascend metadata after the real PCP local-batch rewrite."""
-    vllm_config = object()
     global_batch = _make_global_pcp_batch()
     req_states = SimpleNamespace(
         last_sampled_tokens=torch.zeros(4, dtype=torch.int64),
@@ -134,12 +128,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
-        vllm_config=vllm_config,
         req_states=req_states,
         max_num_reqs=1,
         max_num_tokens=18,
     )
-    attn_state = MagicMock()
 
     with (
         # This Triton helper is unrelated to PCP partitioning and has no CPU
@@ -157,7 +149,6 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
             side_effect=_mock_async_copy_to_cpu,
         ),
-        patch.object(pcp_manager_module, "build_attn_state", return_value=attn_state) as build_attn_state,
     ):
         result = manager.partition_batch(global_batch)
 
@@ -181,64 +172,4 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     # the override must refresh them from real PCP-local CPU rows.
     expected_seq_lens = np.array([18, 5], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
-    assert result.attn_state is attn_state
-
-    args = build_attn_state.call_args.args
-    assert args[0] is vllm_config
-    np.testing.assert_array_equal(args[1], expected_seq_lens)
-    assert args[2] == 2
-    np.testing.assert_array_equal(args[3], np.array([3, 5], dtype=np.int32))
-    np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
-
-
-def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
-    )
-
-    assert (
-        maybe_build_ascend_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=MagicMock(),
-            block_tables=MagicMock(),
-        )
-        is None
-    )
-
-
-def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=4,
-        ),
-        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
-    )
-    pcp_group = SimpleNamespace(rank_in_group=1)
-    dcp_group = SimpleNamespace(rank_in_group=0)
-    req_states = MagicMock()
-
-    with (
-        patch.object(PCPManager, "validate_config") as validate_config,
-        patch.object(pcp_manager_module, "get_pcp_group", return_value=pcp_group),
-        patch.object(pcp_manager_module, "get_dcp_group", return_value=dcp_group),
-    ):
-        manager = maybe_build_ascend_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=req_states,
-            block_tables=None,
-        )
-
-    assert isinstance(manager, AscendPCPManager)
-    assert manager.vllm_config is vllm_config
-    assert manager.pcp_world_size == 2
-    assert manager.pcp_rank == 1
-    assert manager.dcp_world_size == 2
-    assert manager.dcp_rank == 0
-    assert manager.cp_interleave == 4
-    validate_config.assert_called_once_with(vllm_config, False)
+    assert result.attn_state == "global-attn-state"
