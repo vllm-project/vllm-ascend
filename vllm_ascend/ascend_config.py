@@ -834,10 +834,13 @@ class EplbConfig:
                 raise ValueError("The expert_map is not exist.")
         if self.expert_map_record_path is not None:
             self.config["dynamic_eplb"] = True
-            if self.expert_map_record_path[-5:] != ".json":
-                raise TypeError("The expert_map_record_path is not json.")
-            dirname = os.path.dirname(self.expert_map_record_path)
-            os.makedirs(dirname, exist_ok=True)
+            if self.enable_omni_eplb:
+                os.makedirs(self.expert_map_record_path, exist_ok=True)
+            else:
+                if self.expert_map_record_path[-5:] != ".json":
+                    raise TypeError("The expert_map_record_path is not json.")
+                dirname = os.path.dirname(self.expert_map_record_path)
+                os.makedirs(dirname, exist_ok=True)
         for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
             if not isinstance(self.config[key], int):
                 raise TypeError(f"{key} must be an integer")

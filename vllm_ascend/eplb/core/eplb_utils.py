@@ -17,7 +17,7 @@
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
 import json
 from collections import defaultdict
-
+import os
 import numpy as np
 import torch
 from vllm.logger import logger
@@ -65,14 +65,15 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
     if eplb_config.enable_omni_eplb:
         try:
             from omni_placement.omni_planner import OmniPlanner
-            OmniPlanner(
+            planner = OmniPlanner(
                 config_file=eplb_config.omni_config_file,
                 device="npu",
                 rank=moe_config.ep_rank,
                 world_size=moe_config.ep_size,
                 num_experts=moe_config.num_experts,
             )
-            logger.info("[eplb/omni] OmniPlanner stage 1 initialized on rank %s", moe_config.ep_rank)
+            planner.config.dump_dir = eplb_config.expert_map_record_path
+            planner.config.enable_dump = os.getenv("EXPERT_MAP_RECORD", "false") == "true"
         except Exception as e:
             logger.error("[eplb/omni] Failed to initialize OmniPlanner: %s", e)
             raise

@@ -76,10 +76,6 @@ class EplbUpdator:
 
         logger.info("[eplb/updator] Launched EPLB subprocess, pid=%s", self.process.pid)
 
-        self.enable_omni_eplb = self.eplb_config.enable_omni_eplb
-        self.omni_config_file = self.eplb_config.omni_config_file
-        logger.info("[eplb/updator] enable_omni_eplb=%s, omni_config_file=%s",
-                    self.enable_omni_eplb, self.omni_config_file)
 
     def update_iteration(self):
         self.cur_iterations += 1

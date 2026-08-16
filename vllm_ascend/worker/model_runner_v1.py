@@ -509,17 +509,26 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type
-            self.eplb_loader = D2DExpertWeightLoader()
-            self.manager = Manager()
-            self.shared_dict = self.manager.dict({"expert_map": None, "moe_load": None, "expert_maps": None})
-            self.eplb_process = EplbProcess(
-                shared_dict=self.shared_dict,
-                policy_type=self.policy_type,
-                enable_d2d=True,
-                tp_size=self.parallel_config.tensor_parallel_size,
-            )
-            self.process = self.eplb_process._launch_process()
-            self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
+            if eplb_config.enable_omni_eplb:
+                self.eplb_loader = None
+                self.manager = None
+                self.shared_dict = None
+                self.eplb_process = None
+                self.process = None
+                from vllm_ascend.eplb.omni_eplb_updator import OmniEplbUpdator
+                self.eplb_updator = OmniEplbUpdator(eplb_config)
+            else:
+                self.eplb_loader = D2DExpertWeightLoader()
+                self.manager = Manager()
+                self.shared_dict = self.manager.dict({"expert_map": None, "moe_load": None, "expert_maps": None})
+                self.eplb_process = EplbProcess(
+                    shared_dict=self.shared_dict,
+                    policy_type=self.policy_type,
+                    enable_d2d=True,
+                    tp_size=self.parallel_config.tensor_parallel_size,
+                )
+                self.process = self.eplb_process._launch_process()
+                self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
             # In pd colocation scenarios, we find that prefill/decode requests result in different
             # expert workloads. To reduce expert imbalance more effectively, we can coolect eplb
             # heat exclusively on a single stage rather than both prefill/decode.
@@ -3738,7 +3747,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
             self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
-            self.eplb_loader.set_adator(self.eplb_adaptor)
+            if self.eplb_loader is not None:
+                self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
 
@@ -3751,6 +3761,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_moe_layers = len(_VllmEplbAdaptor._registered_moe_layers)
                 omni_planner = OmniPlanner()  # get singleton
                 omni_planner.init_dynamic_components(num_moe_layers)
+                #TODO(kuang.wenwei) register the moe weights data_ptr
+                omni_planner.start_dynamic_optimize_expert_load_balance()
                 logger.info("[eplb/omni] OmniPlanner stage 2 initialized, num_moe_layers=%s", num_moe_layers)
             except Exception as e:
                 logger.error("[eplb/omni] OmniPlanner stage 2 failed: %s", e)
