@@ -486,11 +486,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch.num_reqs,
                 input_batch.num_scheduled_tokens,
                 input_batch.num_scheduled_tokens
-                - (
-                    input_batch.num_draft_tokens_per_req
-                    if input_batch.num_draft_tokens_per_req is not None
-                    else 0
-                ),
+                - (input_batch.num_draft_tokens_per_req if input_batch.num_draft_tokens_per_req is not None else 0),
             )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
