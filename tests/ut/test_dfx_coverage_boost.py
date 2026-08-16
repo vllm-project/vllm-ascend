@@ -188,6 +188,48 @@ def test_manual_trigger_manager_paths(tmp_path):
     assert ev.detail["manual_trigger_remaining_after"] == 1
 
 
+def test_manual_trigger_v2_req_states_and_scheduler_output(tmp_path):
+    """MRV2 has no input_batch; use req_states / scheduler_output instead."""
+    from vllm_ascend.dfx.manual_trigger import iter_local_request_rows
+
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["dump"]["enabled"] = True
+    cfg._data["dump"]["manual_trigger"] = 2
+
+    empty = SimpleNamespace(tp_rank=0, input_batch=None, requests=None, req_states=None)
+    assert iter_local_request_rows(empty) == []
+    assert ManualTriggerManager(dfx_config=cfg, runner=empty).consume_once(allow_arm=True) is None
+    assert cfg.manual_trigger_count() == 2
+
+    v2_runner = SimpleNamespace(
+        tp_rank=0,
+        input_batch=None,
+        requests=None,
+        req_states=SimpleNamespace(req_id_to_index={"r_v2": 3}),
+    )
+    assert iter_local_request_rows(v2_runner) == [("r_v2", 3)]
+    with patch(
+        "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
+        return_value=True,
+    ):
+        ev = ManualTriggerManager(dfx_config=cfg, runner=v2_runner).consume_once(allow_arm=True)
+    assert ev is not None
+    assert cfg.manual_trigger_count() == 1
+
+    cfg._data["dump"]["enabled"] = True
+    cfg._data["dump"]["manual_trigger"] = 1
+    first_wave = SimpleNamespace(tp_rank=0, input_batch=None, requests=None, req_states=None)
+    so = SimpleNamespace(num_scheduled_tokens={"new_req": 11})
+    assert iter_local_request_rows(first_wave, so) == [("new_req", -1)]
+    with patch(
+        "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
+        return_value=True,
+    ):
+        ev2 = ManualTriggerManager(dfx_config=cfg, runner=first_wave).consume_once(allow_arm=True, scheduler_output=so)
+    assert ev2 is not None
+    assert cfg.manual_trigger_count() == 0
+
+
 def test_processor_get_tokenizer_and_save_sample_param(tmp_path):
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.dfx_config = MagicMock()
