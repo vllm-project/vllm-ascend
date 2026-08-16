@@ -127,8 +127,17 @@ class TestIndexerForward:
         execution_order: list[str] = []
         topk_indices = torch.tensor([[[1, 2, 3]], [[4, 5, 6]]])
         indexer_q = torch.ones((2, 2, 4))
-        serial_select = MagicMock(side_effect=lambda *args: execution_order.append("select") or topk_indices)
-        multistream_compute = MagicMock(side_effect=lambda *args: execution_order.append("compute") or indexer_q)
+
+        def select_serial(*args: Any) -> torch.Tensor:
+            execution_order.append("select")
+            return topk_indices
+
+        def compute_multistream(*args: Any) -> torch.Tensor:
+            execution_order.append("compute")
+            return indexer_q
+
+        serial_select = MagicMock(side_effect=select_serial)
+        multistream_compute = MagicMock(side_effect=compute_multistream)
 
         def select_multistream(*args: Any) -> torch.Tensor:
             execution_order.append("select_start")
