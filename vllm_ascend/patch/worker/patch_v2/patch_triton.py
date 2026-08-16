@@ -1,5 +1,4 @@
 from vllm.triton_utils import triton
-from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker.gpu import structured_outputs
 from vllm.v1.worker.gpu.metrics import logits as metrics_logits
 from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, penalties, prompt_logprob, sampler, states

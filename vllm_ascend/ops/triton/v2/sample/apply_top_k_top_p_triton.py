@@ -172,12 +172,14 @@ def _topk_topp_kernel(
                     num_finite_total += tl.sum(tl.where(finite_blk_mask & mask_n, 1, 0).to(tl.int32))
 
                     outlier_mask = (logits_blk > outlier_pivot) & mask_n
-                    cumulative_pos = tl.cast(
-                        tl.cumsum(tl.where(outlier_mask, 1, 0).to(tl.int32)) - 1 + num_outliers, tl.int32
-                    )
                     num_outliers += tl.sum(tl.where(outlier_mask, 1, 0).to(tl.int32))
-                    write_pos = tl.where(outlier_mask, cumulative_pos, -1)
-                    tl.store(BUFFER_ROW + write_pos, logits_blk, mask=outlier_mask)
+
+                    # Ascend: avoid runtime-indexed scatter here. The backend
+                    # lowers BUFFER_ROW + write_pos to DiscreteMemAccess /
+                    # SyncBlockLock. Keep the same candidate set in a dense
+                    # buffer and use contiguous GM stores instead.
+                    buffer_blk = tl.where(outlier_mask, logits_blk, -float("inf"))
+                    tl.store(BUFFER_ROW + offs_n, buffer_blk, mask=mask_n)
 
                 # If no finite logits exist (all -inf), clamp min to
                 # max so the search converges to -inf (no masking).
@@ -192,9 +194,9 @@ def _topk_topp_kernel(
                 if num_outliers > k:
                     max_range = max_logit
                     min_range = outlier_pivot
-                    search_range = tl.cast(num_outliers, tl.int32)
+                    search_range = VOCAB_SIZE
                     search_iters = tl.cast(
-                        (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
+                        (VOCAB_SIZE + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
                         tl.int32,
                     )
                     found_pivot = 0
@@ -359,10 +361,9 @@ def _topk_topp_kernel(
                     if p < 1.0:
                         min_logit = k_pivot
                         sum_exp_logits = 0.0
-                        num_outliers_2 = tl.zeros((), dtype=tl.int32)
-                        search_range = tl.cast(num_outliers, tl.int32)
+                        search_range = VOCAB_SIZE
                         search_iters = tl.cast(
-                            (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
+                            (VOCAB_SIZE + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
                             tl.int32,
                         )
 
@@ -435,17 +436,14 @@ def _topk_topp_kernel(
                                 probs_blk = tl.exp(probs_blk)
                                 sum_exp_logits += tl.sum(probs_blk)
 
-                                cumulative_pos = tl.cast(
-                                    tl.cumsum(tl.where(outlier_mask, 1, 0).to(tl.int32)) - 1 + num_outliers_2,
-                                    tl.int32,
-                                )
-                                num_outliers_2 += tl.sum(tl.where(outlier_mask, 1, 0).to(tl.int32))
-                                write_pos = tl.where(outlier_mask, cumulative_pos, -1)
-                                tl.store(BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask)
+                                # probs_blk is exp(-inf) == 0 for entries
+                                # rejected by Top-k. Store the full tile densely
+                                # to keep BUFFER_ROW access contiguous.
+                                tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
 
-                            search_range = tl.cast(num_outliers_2, tl.int32)
+                            search_range = VOCAB_SIZE
                             search_iters = tl.cast(
-                                (num_outliers_2 + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
+                                (VOCAB_SIZE + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
                                 tl.int32,
                             )
 
@@ -587,8 +585,6 @@ def _topk_topp_kernel(
 
                 outlier_prob = tl.exp(outlier_pivot - max_sample) / sum_exp_logits
                 sum_outlier_probs = 0.0
-                num_outliers = tl.zeros((), dtype=tl.int32)
-
                 # Second pass: Calculate softmax and gather outliers
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -600,12 +596,12 @@ def _topk_topp_kernel(
 
                     outlier_mask = (probs_blk > outlier_prob) & mask_n
                     sum_outlier_probs += tl.sum(tl.where(outlier_mask, probs_blk, 0.0))
-                    cumulative_pos = tl.cast(
-                        tl.cumsum(tl.where(outlier_mask, 1, 0).to(tl.int32)) - 1 + num_outliers, tl.int32
-                    )
-                    num_outliers += tl.sum(tl.where(outlier_mask, 1, 0).to(tl.int32))
-                    write_pos = tl.where(outlier_mask, cumulative_pos, -1)
-                    tl.store(BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask)
+
+                    # Keep selected probabilities in their original positions
+                    # and fill non-candidates with 0. Positive p-pivots ignore
+                    # these entries, while the store remains contiguous.
+                    buffer_probs = tl.where(outlier_mask, probs_blk, 0.0)
+                    tl.store(BUFFER_ROW + offs_n, buffer_probs, mask=mask_n)
 
                 max_range = tl.exp(max_logit - max_sample) / sum_exp_logits
                 min_range = tl.exp(min_logit - max_sample) / sum_exp_logits
@@ -619,9 +615,9 @@ def _topk_topp_kernel(
                 # Third pass: Search for p_pivot
                 if sum_outlier_probs > p:
                     min_range = outlier_prob
-                    search_range = tl.cast(num_outliers, tl.int32)
+                    search_range = VOCAB_SIZE
                     search_iters = tl.cast(
-                        (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
+                        (VOCAB_SIZE + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
                         tl.int32,
                     )
 
