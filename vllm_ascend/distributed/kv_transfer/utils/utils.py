@@ -75,6 +75,8 @@ def get_cp_group(tp: int, heads: int, dcp: int):
     # head_group is all blocks for request in the same head
     # tp8 dcp2 heads4 return[[0,1,2,3]]
     # tp8 dcp1 heads4 return[[0,2,4,6],[1,3,5,7]]
+    if tp is None or heads is None or dcp is None or heads == 0 or dcp == 0:
+        return [[i for i in range(tp or 1)]]
     step = tp // heads
     if step == 0:
         return [[i for i in range(tp // dcp)]]
@@ -158,6 +160,8 @@ def get_local_remote_block_port_mappings(
     total_num_kv_heads: int,
     req_id: str,
 ):
+    if d_port is None:
+        return {}, {}, {}, {}
     p_head_group_size = p_parallel_info.tp_size // p_parallel_info.dcp_size
     d_head_group_size = d_parallel_info.tp_size // d_parallel_info.dcp_size
     world_size = d_parallel_info.pcp_size * d_head_group_size * d_parallel_info.dcp_size
