@@ -465,6 +465,20 @@ class NPUModelRunner(GPUModelRunner):
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
+            if self.pcp_manager is not None:
+                input_batch.attn_state = build_attn_state(
+                    self.vllm_config,
+                    input_batch.seq_lens_np,
+                    input_batch.num_reqs,
+                    input_batch.num_scheduled_tokens,
+                    input_batch.num_scheduled_tokens
+                    - (
+                        input_batch.num_draft_tokens_per_req
+                        if input_batch.num_draft_tokens_per_req is not None
+                        else 0
+                    ),
+                )
+
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
 
@@ -681,8 +695,10 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state=attn_state,
             )
 
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager, input_batch
+            )
+
             if self.pcp_manager is not None:
                 input_batch.attn_state = build_attn_state(
                     self.vllm_config,
@@ -696,7 +712,6 @@ class NPUModelRunner(GPUModelRunner):
                         else 0
                     ),
                 )
-
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
 

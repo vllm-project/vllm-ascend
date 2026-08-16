@@ -352,8 +352,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             actual_seq_lengths_query = self.spec_actual_seq_lengths_query[draft_index - 1]
             actual_seq_lengths_key = self.spec_actual_seq_lengths_key[draft_index - 1]
         else:
-            actual_seq_lengths_query = actual_seq_lengths_query
-            actual_seq_lengths_key = actual_seq_lengths_key
+            actual_seq_lengths_query = self.actual_seq_lengths_query
+            actual_seq_lengths_key = self.actual_seq_lengths_key
 
         runtime_cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         actual_seq_lengths_query.zero_()

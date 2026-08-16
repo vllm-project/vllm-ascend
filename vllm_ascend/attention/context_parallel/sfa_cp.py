@@ -1326,9 +1326,6 @@ def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImp
         return AscendSFADSACPImpl
     if dcp_enabled:
         return AscendSFADCPImpl
-    if (
-        vllm_config is not None
-        and vllm_config.parallel_config.prefill_context_parallel_size > 1
-    ):
+    if vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1:
         return AscendSFACPImpl
     return AscendSFAImpl

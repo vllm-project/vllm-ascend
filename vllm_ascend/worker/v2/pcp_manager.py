@@ -50,9 +50,7 @@ class AscendPCPManager(PCPManager):
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         if cudagraph_mode.has_full_cudagraphs():
             if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
-                raise NotImplementedError(
-                    "MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only."
-                )
+                raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
             vllm_config = copy(vllm_config)
             vllm_config.compilation_config = copy(vllm_config.compilation_config)
             vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
