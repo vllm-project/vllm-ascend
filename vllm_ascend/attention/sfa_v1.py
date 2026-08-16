@@ -1559,8 +1559,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin = attn_metadata.sin
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
-        preprocess_slot_mapping = attn_metadata.slot_mapping[:num_input_tokens]
-        kv_slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
+        slot_mapping = attn_metadata.slot_mapping
+        input_slot_mapping = slot_mapping[:num_input_tokens]
         parallel_context = self._get_parallel_forward_context(
             attn_metadata,
             num_input_tokens,
@@ -1579,10 +1579,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if fused_type != PreprocessType.NATIVE:
             if fused_type == PreprocessType.PROLOG_V3:
-                assert preprocess_slot_mapping.numel() == hidden_states.shape[0], (
+                assert input_slot_mapping.numel() == hidden_states.shape[0], (
                     "SFA Prolog V3 requires one cache index per input token, "
                     f"got token_x={hidden_states.shape[0]} and "
-                    f"cache_index={preprocess_slot_mapping.numel()}."
+                    f"cache_index={input_slot_mapping.numel()}."
                 )
             if self.has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
@@ -1596,7 +1596,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=preprocess_slot_mapping,
+                    slot_mapping=input_slot_mapping,
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
@@ -1604,7 +1604,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=preprocess_slot_mapping,
+                    slot_mapping=input_slot_mapping,
                     num_input_tokens=num_input_tokens,
                 )
         # native
@@ -1669,7 +1669,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 fused_kv_no_split,
                 kv_ag_handles,
                 kv_cache,
-                kv_slot_mapping,
+                self._get_sfa_kv_slot_mapping(attn_metadata),
                 attn_metadata,
                 parallel_context.gather_full_o_proj,
             )
@@ -1677,9 +1677,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.has_indexer:
             assert k_li is not None
             indexer_cache_slot_mapping = (
-                kv_slot_mapping
+                slot_mapping
                 if self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-                else preprocess_slot_mapping
+                else input_slot_mapping
             )
             self._write_indexer_cache(
                 k_li,
