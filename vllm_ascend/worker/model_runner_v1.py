@@ -505,7 +505,7 @@ class NPUModelRunner(GPUModelRunner):
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
-        self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None)
+        self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None) or eplb_config.enable_omni_eplb
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type
@@ -3741,6 +3741,20 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
+
+        # Trigger OmniPlanner stage 2 when num_moe_layers is now known
+        eplb_config = self.ascend_config.eplb_config
+        if eplb_config.enable_omni_eplb:
+            try:
+                from omni_placement.omni_planner import OmniPlanner
+                from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor as _VllmEplbAdaptor
+                num_moe_layers = len(_VllmEplbAdaptor._registered_moe_layers)
+                omni_planner = OmniPlanner()  # get singleton
+                omni_planner.init_dynamic_components(num_moe_layers)
+                logger.info("[eplb/omni] OmniPlanner stage 2 initialized, num_moe_layers=%s", num_moe_layers)
+            except Exception as e:
+                logger.error("[eplb/omni] OmniPlanner stage 2 failed: %s", e)
+                raise
 
     def update_eplb_heat_collection_status(self, num_tokens_padded: int):
         if self.eplb_heat_collection_stage == "prefill":

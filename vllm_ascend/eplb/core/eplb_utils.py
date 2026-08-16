@@ -62,6 +62,21 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
 
 
 def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1, tp_size=None):
+    if eplb_config.enable_omni_eplb:
+        try:
+            from omni_placement.omni_planner import OmniPlanner
+            OmniPlanner(
+                config_file=eplb_config.omni_config_file,
+                device="npu",
+                rank=moe_config.ep_rank,
+                world_size=moe_config.ep_size,
+                num_experts=moe_config.num_experts,
+            )
+            logger.info("[eplb/omni] OmniPlanner stage 1 initialized on rank %s", moe_config.ep_rank)
+        except Exception as e:
+            logger.error("[eplb/omni] Failed to initialize OmniPlanner: %s", e)
+            raise
+
     expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size

@@ -803,6 +803,8 @@ class EplbConfig:
         "num_redundant_experts": 0,
         "eplb_policy_type": 2,
         "eplb_heat_collection_stage": "all",
+        "enable_omni_eplb": False,
+        "omni_config_file": None,
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -850,9 +852,13 @@ class EplbConfig:
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
-
+        if self.enable_omni_eplb:
+            if self.omni_config_file is not None and not os.path.exists(self.omni_config_file):
+                raise ValueError(f"omni_config_file does not exist: {self.omni_config_file}")
+        
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+        logger.info("Omni EPLB is %s, config_file=%s", self.config["enable_omni_eplb"], self.config["omni_config_file"])
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
