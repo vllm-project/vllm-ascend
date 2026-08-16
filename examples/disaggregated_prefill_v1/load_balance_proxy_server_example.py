@@ -120,13 +120,14 @@ import heapq
 import ipaddress
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.managers import BaseManager
@@ -209,6 +210,18 @@ class BackendServer:
 
 
 @dataclass
+class RequestLease:
+    request_id: str
+    started_at: float
+    last_progress_at: float
+    prefiller_key: str | None = None
+    prefiller_load: float = 0.0
+    decoder_key: str | None = None
+    decoder_load: float = 0.0
+    prefill_released: bool = False
+
+
+@dataclass
 class RolePools:
     """Per-role scheduling state: live servers, priority heap, and drain-isolated keys."""
 
@@ -262,6 +275,22 @@ def build_base_url(host: str, port: int) -> str:
     return f"{build_server_url(host, port)}/v1"
 
 
+def positive_finite_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0 or not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("timeout must be a positive finite number")
+    return parsed
+
+
+def build_http_timeout(args: argparse.Namespace) -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=args.connect_timeout,
+        write=args.write_timeout,
+        pool=args.pool_timeout,
+        read=args.read_timeout,
+    )
+
+
 class SharedProxyScheduler:
     """Centralized mutable scheduling state shared by all uvicorn workers.
 
@@ -272,7 +301,7 @@ class SharedProxyScheduler:
 
     def __init__(self, prefiller_instances, decoder_instances):
         self._lock = threading.RLock()
-        self.request_num = 0
+        self.active_requests: dict[str, RequestLease] = {}
         self.waiting_nodes: dict[str, tuple[str, tuple[str, int], int]] = {}
         self._pools: dict[ServerRole, RolePools] = {
             ServerRole.PREFILL: RolePools(),
@@ -295,6 +324,10 @@ class SharedProxyScheduler:
     @property
     def decoders(self) -> dict[str, BackendServer]:
         return self._pool(ServerRole.DECODE).servers
+
+    @property
+    def request_num(self) -> int:
+        return len(self.active_requests)
 
     def _next_ordinal(self) -> int:
         ordinal = self._ordinal
@@ -370,11 +403,22 @@ class SharedProxyScheduler:
 
     def healthcheck(self) -> dict[str, Any]:
         with self._lock:
+            now = time.monotonic()
+            oldest_request_age = max(
+                (now - lease.started_at for lease in self.active_requests.values()),
+                default=0.0,
+            )
+            max_request_idle = max(
+                (now - lease.last_progress_at for lease in self.active_requests.values()),
+                default=0.0,
+            )
             return {
                 "status": "ok",
                 "prefill_instances": len(self.prefillers),
                 "decode_instances": len(self.decoders),
                 "request_num": self.request_num,
+                "oldest_request_age_seconds": oldest_request_age,
+                "max_request_idle_seconds": max_request_idle,
             }
 
     def _pick_server(
@@ -407,48 +451,101 @@ class SharedProxyScheduler:
             return
         entry = self._pool(role).servers[key]
         if active_tokens:
-            entry.active_tokens -= load
+            entry.active_tokens = max(0.0, entry.active_tokens - load)
         if kv_cache:
             entry.active_kv_cache = max(0.0, entry.active_kv_cache - load)
         self._push_heap(role, key)
 
-    def begin_request(self, load: float) -> dict[str, Any]:
+    def begin_request(self, request_id: str, load: float) -> dict[str, Any]:
         """Pick a prefiller, reserve KV pressure, and count this as an active request."""
         with self._lock:
+            if request_id in self.active_requests:
+                raise RuntimeError(f"Request lease {request_id} already exists")
             picked = self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
-            self.request_num += 1
+            now = time.monotonic()
+            self.active_requests[request_id] = RequestLease(
+                request_id=request_id,
+                started_at=now,
+                last_progress_at=now,
+                prefiller_key=picked["key"],
+                prefiller_load=load,
+            )
             return picked
 
-    def reserve_prefill_kv(self, load: float) -> dict[str, Any]:
+    def reserve_prefill_kv(self, request_id: str, load: float) -> dict[str, Any]:
         """Pick a prefiller for recompute without bumping the active request count."""
         with self._lock:
-            return self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            lease = self.active_requests[request_id]
+            if lease.prefiller_key is not None:
+                raise RuntimeError(f"Request lease {request_id} already has a prefiller")
+            picked = self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            lease.prefiller_key = picked["key"]
+            lease.prefiller_load = load
+            lease.prefill_released = False
+            return picked
 
-    def pick_decoder(self, load: float) -> dict[str, Any]:
+    def pick_decoder(self, request_id: str, load: float) -> dict[str, Any]:
         with self._lock:
-            return self._pick_server(ServerRole.DECODE, load, active_tokens=True)
+            lease = self.active_requests[request_id]
+            if lease.decoder_key is not None:
+                raise RuntimeError(f"Request lease {request_id} already has a decoder")
+            picked = self._pick_server(ServerRole.DECODE, load, active_tokens=True)
+            lease.decoder_key = picked["key"]
+            lease.decoder_load = load
+            return picked
 
-    def release_prefill_kv(self, key: str, load: float) -> None:
+    def release_prefill_kv(self, request_id: str) -> None:
         with self._lock:
-            self._release_load(ServerRole.PREFILL, key, load, kv_cache=True)
+            lease = self.active_requests.get(request_id)
+            if lease is None or lease.prefill_released:
+                return
+            self._release_load(
+                ServerRole.PREFILL,
+                lease.prefiller_key,
+                lease.prefiller_load,
+                kv_cache=True,
+            )
+            lease.prefill_released = True
 
-    def release_decoder(self, key: str, load: float) -> None:
-        with self._lock:
-            self._release_load(ServerRole.DECODE, key, load, active_tokens=True)
+    def _release_lease_reservations(self, lease: RequestLease) -> None:
+        if not lease.prefill_released:
+            self._release_load(
+                ServerRole.PREFILL,
+                lease.prefiller_key,
+                lease.prefiller_load,
+                kv_cache=True,
+            )
+        self._release_load(
+            ServerRole.DECODE,
+            lease.decoder_key,
+            lease.decoder_load,
+            active_tokens=True,
+        )
+        lease.prefiller_key = None
+        lease.prefiller_load = 0.0
+        lease.decoder_key = None
+        lease.decoder_load = 0.0
+        lease.prefill_released = True
 
-    def finish_request(
-        self,
-        prefiller_key: str | None,
-        prefiller_load: float,
-        decoder_key: str | None,
-        decoder_load: float,
-        release_prefill_kv: bool,
-    ) -> None:
+    def release_attempt(self, request_id: str) -> None:
         with self._lock:
-            if release_prefill_kv:
-                self._release_load(ServerRole.PREFILL, prefiller_key, prefiller_load, kv_cache=True)
-            self._release_load(ServerRole.DECODE, decoder_key, decoder_load, active_tokens=True)
-            self.request_num = max(0, self.request_num - 1)
+            lease = self.active_requests.get(request_id)
+            if lease is not None:
+                self._release_lease_reservations(lease)
+
+    def finish_request(self, request_id: str) -> bool:
+        with self._lock:
+            lease = self.active_requests.pop(request_id, None)
+            if lease is None:
+                return False
+            self._release_lease_reservations(lease)
+            return True
+
+    def mark_request_progress(self, request_id: str) -> None:
+        with self._lock:
+            lease = self.active_requests.get(request_id)
+            if lease is not None:
+                lease.last_progress_at = time.monotonic()
 
     def get_waiting_nodes(self) -> dict[str, tuple[str, tuple[str, int], int]]:
         with self._lock:
@@ -541,8 +638,9 @@ SchedulerManager.register("get_scheduler", callable=_shared_scheduler_proxy)
 
 
 class WorkerRuntime:
-    def __init__(self, scheduler: Any):
+    def __init__(self, scheduler: Any, timeout: httpx.Timeout | None = None):
         self.scheduler = scheduler
+        self.timeout = timeout or httpx.Timeout(connect=10, write=30, pool=10, read=300)
         self._clients: dict[ServerRole, dict[str, httpx.AsyncClient]] = {
             ServerRole.PREFILL: {},
             ServerRole.DECODE: {},
@@ -580,7 +678,7 @@ class WorkerRuntime:
             if key in clients:
                 continue
             clients[key] = httpx.AsyncClient(
-                timeout=None,
+                timeout=self.timeout,
                 base_url=build_base_url(host, port),
                 limits=httpx.Limits(max_connections=100000, max_keepalive_connections=100000),
             )
@@ -679,6 +777,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
     )
+    parser.add_argument("--connect-timeout", type=positive_finite_float, default=10.0)
+    parser.add_argument("--write-timeout", type=positive_finite_float, default=30.0)
+    parser.add_argument("--pool-timeout", type=positive_finite_float, default=10.0)
+    parser.add_argument("--read-timeout", type=positive_finite_float, default=300.0)
     parser.add_argument(
         "--max-waiting-retries", type=int, default=3, help="Maximum number of retries for waiting nodes to be started"
     )
@@ -763,7 +865,7 @@ async def lifespan(_app: FastAPI):
         scheduler = connect_shared_scheduler(args.port)
     else:
         scheduler = _ensure_scheduler(args)
-    runtime = WorkerRuntime(scheduler)
+    runtime = WorkerRuntime(scheduler, build_http_timeout(args))
     await runtime.sync_clients()
     snapshot = scheduler.get_snapshot()
     logger.info(
@@ -796,11 +898,19 @@ def with_cancellation(handler_func):
     @functools.wraps(handler_func)
     async def wrapper(*args, **kwargs):
         request = kwargs["request"]
+        # Cache the body before starting the disconnect listener. Both
+        # ``Request.body()`` and ``listen_for_disconnect`` consume the ASGI
+        # receive channel, so running them concurrently can split the body
+        # between two consumers and leave the handler waiting forever.
+        await request.body()
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
         done, pending = await asyncio.wait([handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
+        for task in pending:
+            with suppress(asyncio.CancelledError):
+                await task
         if handler_task in done:
             return handler_task.result()
         return None
@@ -870,15 +980,17 @@ async def stream_service_response_with_retry(
 ):
     headers = auth_headers(request_id)
     for attempt in range(1, max_retries + 1):
+        chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
-                first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
-                    first_chunk_sent = True
+                    chunk_sent = True
                     yield chunk
                 return
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            if chunk_sent:
+                raise
             if attempt < max_retries:
                 logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -886,9 +998,8 @@ async def stream_service_response_with_retry(
                 logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise exc
         except Exception as exc:
-            if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
+            if chunk_sent:
+                raise
             if attempt < max_retries:
                 logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -899,32 +1010,38 @@ async def stream_service_response_with_retry(
 
 async def _abort_prefill_selection(
     runtime: WorkerRuntime,
-    prefiller_key: str,
-    prefiller_score: float,
+    request_id: str,
     *,
     is_initial_request: bool,
 ) -> None:
     if is_initial_request:
-        await runtime.schedule("finish_request", prefiller_key, prefiller_score, None, 0.0, release_prefill_kv=True)
+        await _run_cleanup(runtime, "finish_request", request_id)
     else:
-        await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+        await _run_cleanup(runtime, "release_attempt", request_id)
 
 
-async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, release_prefill_kv: bool) -> None:
-    await runtime.schedule(
-        "finish_request",
-        info.prefiller_key,
-        info.prefiller_score,
-        info.decoder_key,
-        info.decoder_score,
-        release_prefill_kv,
-    )
+async def _run_cleanup(runtime: WorkerRuntime, method: str, request_id: str) -> None:
+    cleanup_task = asyncio.create_task(runtime.schedule(method, request_id))
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    cleanup_task.result()
+    if cancellation is not None:
+        raise cancellation
+
+
+async def _finish_request(runtime: WorkerRuntime, request_id: str) -> None:
+    await _run_cleanup(runtime, "finish_request", request_id)
 
 
 async def assign_instances(
     api: str,
     req_data: Any,
     request_length: int,
+    request_id: str,
     *,
     is_initial_request: bool,
 ) -> InstanceInfo:
@@ -932,9 +1049,8 @@ async def assign_instances(
     args = get_global_args()
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
-    request_id = next_req_id()
     pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
-    prefiller = await runtime.schedule(pick_prefill, prefiller_score)
+    prefiller = await runtime.schedule(pick_prefill, request_id, prefiller_score)
     prefiller_key = prefiller["key"]
 
     try:
@@ -946,35 +1062,28 @@ async def assign_instances(
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
+        response_json = response.json()
+        kv_transfer_params = response_json.get("kv_transfer_params", {})
+        if kv_transfer_params:
+            req_data["kv_transfer_params"] = kv_transfer_params
+        prefiller_cached_tokens = extract_cached_tokens(response_json)
+        decoder = await runtime.schedule("pick_decoder", request_id, decoder_score)
+        prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
+        decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
+        logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
+        return InstanceInfo(
+            request_id=request_id,
+            prefiller_key=prefiller_key,
+            prefiller_score=prefiller_score,
+            decoder_key=decoder["key"],
+            decoder_score=decoder_score,
+            decoder_host=decoder["host"],
+            decoder_port=decoder["port"],
+            prefiller_cached_tokens=prefiller_cached_tokens,
+        )
+    except (Exception, asyncio.CancelledError):
+        await _abort_prefill_selection(runtime, request_id, is_initial_request=is_initial_request)
         raise
-
-    response_json = response.json()
-    kv_transfer_params = response_json.get("kv_transfer_params", {})
-    if kv_transfer_params:
-        req_data["kv_transfer_params"] = kv_transfer_params
-    prefiller_cached_tokens = extract_cached_tokens(response_json)
-
-    try:
-        decoder = await runtime.schedule("pick_decoder", decoder_score)
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
-        raise
-
-    prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
-    decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
-    logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
-    return InstanceInfo(
-        request_id=request_id,
-        prefiller_key=prefiller_key,
-        prefiller_score=prefiller_score,
-        decoder_key=decoder["key"],
-        decoder_score=decoder_score,
-        decoder_host=decoder["host"],
-        decoder_port=decoder["port"],
-        prefiller_cached_tokens=prefiller_cached_tokens,
-    )
 
 
 async def reassign_instances(
@@ -984,20 +1093,34 @@ async def reassign_instances(
     previous_instance: InstanceInfo,
 ) -> InstanceInfo:
     runtime = get_runtime()
-    await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
-    await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
-    return await assign_instances(api, req_data, request_length, is_initial_request=False)
+    await runtime.schedule("release_attempt", previous_instance.request_id)
+    return await assign_instances(
+        api,
+        req_data,
+        request_length,
+        previous_instance.request_id,
+        is_initial_request=False,
+    )
 
 
 async def handle_completions_impl(api: str, request: Request):
     runtime = get_runtime()
     args = get_global_args()
-    request_released = False
+    request_id = next_req_id()
+    lease_started = False
+    downstream_started = False
     try:
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
-        instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
+        instance_info = await assign_instances(
+            api,
+            req_data,
+            request_length,
+            request_id,
+            is_initial_request=True,
+        )
+        lease_started = True
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -1012,21 +1135,26 @@ async def handle_completions_impl(api: str, request: Request):
 
         async def generate_stream():
             nonlocal instance_info
-            nonlocal request_released
             generated_token = ""
             released_kv = False
             retry_count = 0
             retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+            last_progress_report = 0.0
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
                 if not released_kv:
-                    await runtime.schedule(
-                        "release_prefill_kv", instance_info.prefiller_key, instance_info.prefiller_score
-                    )
+                    await runtime.schedule("release_prefill_kv", request_id)
                     released_kv = True
+
+            async def report_progress() -> None:
+                nonlocal last_progress_report
+                now = time.monotonic()
+                if now - last_progress_report >= 1.0:
+                    await runtime.schedule("mark_request_progress", request_id)
+                    last_progress_report = now
 
             try:
                 while retry:
@@ -1040,6 +1168,7 @@ async def handle_completions_impl(api: str, request: Request):
                         max_retries=args.max_retries,
                         base_delay=args.retry_delay,
                     ):
+                        await report_progress()
                         if not released_kv and chunk:
                             await release_prefill_kv_once()
                         try:
@@ -1107,6 +1236,14 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
                 raise
+            except httpx.TimeoutException as exc:
+                if not downstream_started:
+                    raise
+                logger.warning(
+                    "Decoder stream timed out after the response started for request %s: %s",
+                    request_id,
+                    exc,
+                )
             except Exception as exc:
                 logger.error(
                     "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
@@ -1116,27 +1253,72 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
             finally:
-                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                released_kv = True
-                request_released = True
+                await _finish_request(runtime, request_id)
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        upstream_stream = generate_stream()
+        try:
+            first_chunk = await anext(upstream_stream)
+        except StopAsyncIteration:
+            await upstream_stream.aclose()
+            return Response(content=b"", media_type=media_type)
+        except httpx.TimeoutException:
+            await upstream_stream.aclose()
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "error": {
+                        "message": "Upstream request timed out",
+                        "type": "upstream_timeout",
+                    }
+                },
+            )
+        except asyncio.CancelledError:
+            await upstream_stream.aclose()
+            raise
+        except Exception:
+            await upstream_stream.aclose()
+            raise
+
+        async def response_stream():
+            nonlocal downstream_started
+            downstream_started = True
+            try:
+                yield first_chunk
+                async for chunk in upstream_stream:
+                    yield chunk
+            finally:
+                await upstream_stream.aclose()
+
+        return StreamingResponse(response_stream(), media_type=media_type)
+    except asyncio.CancelledError:
+        if lease_started:
+            await _finish_request(runtime, request_id)
+        raise
     except Exception as e:
         import traceback
 
         exc_info = sys.exc_info()
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print("".join(traceback.format_exception(*exc_info)))
-        if not request_released and "instance_info" in locals():
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
-            request_released = True
+        if lease_started:
+            await _finish_request(runtime, request_id)
         if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
             try:
                 err_body = e.response.json()
             except Exception:
                 err_body = {"error": {"message": e.response.text or "upstream error"}}
             return JSONResponse(err_body, status_code=e.response.status_code)
+        if isinstance(e, httpx.TimeoutException):
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "error": {
+                        "message": "Upstream request timed out",
+                        "type": "upstream_timeout",
+                    }
+                },
+            )
         raise
 
 

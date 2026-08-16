@@ -656,6 +656,14 @@
   tests:
     - tests/ut/
 # Single File
+- name: pd_proxy
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+  tests:
+    - tests/ut/test_load_balance_proxy_server_example.py
+
 - name: dependency_documentation
   optional: true
   cpu_only: true
