@@ -4,6 +4,7 @@ import torch
 from vllm.logger import logger
 
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
+from vllm_ascend.worker.v2.updatable_graph import UpdatableGraph
 
 
 @contextmanager
@@ -15,7 +16,7 @@ def torch_cuda_wrapper():
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
-        torch.cuda.CUDAGraph = torch.npu.NPUGraph
+        torch.cuda.CUDAGraph = UpdatableGraph
         torch.cuda.graph = torch_npu_graph_wrapper
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.set_stream = torch.npu.set_stream

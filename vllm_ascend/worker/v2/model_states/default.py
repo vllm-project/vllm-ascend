@@ -73,6 +73,7 @@ class AscendModelState(DefaultModelState):
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             # extra attributes for ascend npus.
+            query_start_loc_np=input_batch.query_start_loc_np,
             seq_lens_np=input_batch.seq_lens_np,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,

@@ -172,6 +172,7 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
     # extra attributes for ascend npus.
+    query_start_loc_np: np.ndarray | None = None,
     seq_lens_np: np.ndarray | None = None,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     num_computed_tokens_cpu: torch.Tensor | None = None,
@@ -194,6 +195,12 @@ def build_attn_metadata(
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
+    query_start_loc_list = (
+        query_start_loc_np[1 : num_reqs + 1].tolist()
+        if query_start_loc_np is not None
+        else query_start_loc_cpu[1 : num_reqs + 1].tolist()
+    )
+    seq_lens_list = seq_lens_np[:num_reqs].tolist()
 
     # Upstream speculative-decoding callers do not provide Ascend's separate
     # scheduled-token and padded-input-token counts. Without these fields,
@@ -236,6 +243,8 @@ def build_attn_metadata(
             num_input_tokens=num_input_tokens,
             max_seq_len=max_seq_len,
             causal=group_causal,
+            query_start_loc_list=query_start_loc_list,
+            seq_lens_list=seq_lens_list,
             **common_attn_metadata_extra_kwargs,
         )
 
