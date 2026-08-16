@@ -196,7 +196,24 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
-        return [128, 512]
+        return [128]
+
+
+class AscendC8MXFPAttentionBackend(AscendAttentionBackend):
+    """Backend for C8-MXFP KV cache layers.
+
+    C8-MXFP FIA requires 512-token pages. This must not be advertised by the
+    generic backend because hybrid BF16 models use its 128-token logical block
+    layout when reshaping their KV cache.
+    """
+
+    @staticmethod
+    def get_impl_cls() -> type["AscendC8MXFPAttentionBackendImpl"]:
+        return AscendC8MXFPAttentionBackendImpl
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [512]
 
 
 class AscendAttentionState(Enum):

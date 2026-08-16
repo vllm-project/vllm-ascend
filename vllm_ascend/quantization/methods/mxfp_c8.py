@@ -25,9 +25,9 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
 class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
     """MXFP8 KV cache storage for dense-attention models.
 
-    This method only changes the cache storage path: K/V are cached as FP8 E4M3
-    and their per-32-element E8M0 scales are stored in extra cache tensors. The
-    attention operator call path intentionally stays unchanged for now.
+    K/V are cached as FP8 E4M3 and their per-32-element E8M0 scales are stored
+    in extra cache tensors. The C8-MXFP backend owns the matching 512-token
+    kernel block size, keeping hybrid cache scheduling and cache views aligned.
     """
 
     def __init__(self, quant_description: dict, prefix: str):
@@ -37,7 +37,12 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
     def create_weights(self, layer: torch.nn.Module) -> None:
         layer.kv_cache_torch_dtype = torch.float8_e4m3fn
         if hasattr(layer, "impl"):
-            from vllm_ascend.attention.attention_v1 import AscendC8MXFPAttentionBackendImpl
+            from vllm_ascend.attention.attention_v1 import (
+                AscendC8MXFPAttentionBackend,
+                AscendC8MXFPAttentionBackendImpl,
+            )
+
+            layer.attn_backend = AscendC8MXFPAttentionBackend
             layer.impl.__class__ = AscendC8MXFPAttentionBackendImpl
             layer.impl.save_v_scale_flag = False
             # Changing __class__ does not invoke the new class's __init__.
