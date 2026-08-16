@@ -84,7 +84,7 @@ class AscendPCPManager(PCPManager):
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
         # Keep the request-shaped metadata at that same fixed graph extent.
         graph_num_reqs = graph_num_tokens if is_decode_only else input_batch.num_reqs_after_padding
-        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding:  # TODO(lwq) 这里的判断是在干什么
+        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding:
             assert self._input_buffers is not None
             input_buffers = self._input_buffers
             actual_tokens = local_batch.num_tokens

@@ -78,35 +78,6 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
 
 
 class AscendSFACPImpl(AscendSFAImpl):
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **kwargs,
-        )
-        self.enable_sp = False
-
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
