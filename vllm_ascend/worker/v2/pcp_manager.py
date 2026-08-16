@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from copy import copy
 from dataclasses import dataclass, replace
 
 import torch
@@ -46,31 +47,17 @@ class AscendPCPManager(PCPManager):
         vllm_config: VllmConfig,
         supports_mm_inputs: bool,
     ) -> None:
-        """Allow only the graph-safe PCP decode path on Ascend."""
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if not cudagraph_mode.has_full_cudagraphs():
-            PCPManager.validate_config(vllm_config, supports_mm_inputs)
-            return
+        if cudagraph_mode.has_full_cudagraphs():
+            if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+                raise NotImplementedError(
+                    "MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only."
+                )
+            vllm_config = copy(vllm_config)
+            vllm_config.compilation_config = copy(vllm_config.compilation_config)
+            vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        parallel_config = vllm_config.parallel_config
-        model_config = vllm_config.model_config
-        pcp_size = parallel_config.prefill_context_parallel_size
-        if pcp_size <= 1:
-            return
-        if not model_config.use_mla:
-            raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
-        if parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError("MRV2 PCP does not support PP yet.")
-        if model_config.is_encoder_decoder:
-            raise NotImplementedError("MRV2 PCP does not support encoder-decoder models yet.")
-        if supports_mm_inputs:
-            raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError("MRV2 PCP does not support speculative decoding yet.")
-        if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
-            raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
+        PCPManager.validate_config(vllm_config, supports_mm_inputs)
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
