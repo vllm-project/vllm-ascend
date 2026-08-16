@@ -117,10 +117,6 @@ class NPUModelRunner(GPUModelRunner):
 
     execute_model_state: ExecuteModelState | None
 
-    @property
-    def pcp_manager_cls(self) -> type[AscendPCPManager]:
-        return AscendPCPManager
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -129,7 +125,7 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
         if parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Decode Context parallelism is not supported by Ascend NPU model runner v2.")
+            raise NotImplementedError("Decode context parallelism is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -214,10 +210,6 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
-            if self.pcp_manager is not None:
-                assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
-
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
@@ -585,10 +577,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        if (
-            cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
             num_reqs_padded = num_reqs
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
