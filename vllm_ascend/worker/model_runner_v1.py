@@ -512,6 +512,43 @@ def _e56_dump_aclgraph_entries():
     print(f"[E56] total entries={total}")
 
 
+def _e57_test_replay_corrupts_eager_fia():
+    """E57: does replaying the captured FA3 decode graphs corrupt EAGER CANN V1
+    FIA?  E56 showed that in FULL mode ONLY FA3 decode graphs are captured (no
+    prefill entries) — prefill therefore runs EAGERLY, and the "prefill output
+    wrong" symptom must be FA3 replay -> eager FIA corruption (NOT task-group,
+    NOT capture — E48 already showed capture is clean).
+
+    Runs eager FIA before and after replaying every captured ACL graph (all are
+    FA3 decode in FULL mode), then compares.  This is the replay-time analogue
+    of E48.  Set VLLM_ASCEND_DEBUG_E57=1
+    (VLLM_ASCEND_DEBUG_E57_REPLAYS=3 default).
+    """
+    from vllm_ascend.compilation.acl_graph import _acl_graph_wrappers
+
+    n_replay = int(os.environ.get("VLLM_ASCEND_DEBUG_E57_REPLAYS", "3"))
+
+    before = _e48_run_eager_fia()
+    torch.npu.synchronize()
+
+    replayed = 0
+    for wrapper in list(_acl_graph_wrappers):
+        for entry in list(wrapper.concrete_aclgraph_entries.values()):
+            if entry.aclgraph is None:
+                continue
+            for _ in range(n_replay):
+                entry.aclgraph.replay()
+                replayed += 1
+    torch.npu.synchronize()
+    print(f"[E57] replayed {replayed} ACL graphs x{n_replay}; testing eager FIA now")
+
+    after = _e48_run_eager_fia()
+    torch.npu.synchronize()
+    max_diff = float((before - after).abs().max().item())
+    print(f"[E57] eager FIA before/after FA3 replay: "
+          f"match={max_diff <= 1e-3}, max_abs_diff={max_diff}")
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -5316,6 +5353,11 @@ class NPUModelRunner(GPUModelRunner):
             # E56: dump all captured ACL graph batch descriptors so we can see
             # how decode (FA3) vs prefill (CANN V1) are keyed in FULL mode.
             _e56_dump_aclgraph_entries()
+        if os.environ.get("VLLM_ASCEND_DEBUG_E57") == "1":
+            # E57: eager FIA before/after replaying the captured FA3 decode
+            # graphs.  E56 showed prefill is NOT captured (eager), so this is
+            # the replay-time test of the actual corruption vector.
+            _e57_test_replay_corrupts_eager_fia()
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):
