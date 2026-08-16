@@ -14,8 +14,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
     MooncakePullConnector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
-    MooncakeTransferMetadata,
     MooncakeConnectorMetadata,
+    MooncakeTransferMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakePullConnectorScheduler,
