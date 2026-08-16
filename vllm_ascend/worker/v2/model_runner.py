@@ -210,16 +210,6 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
-
-            # GPUModelRunner constructs the community PCP manager while initializing
-            # the KV cache. Replace it with the Ascend subclass.
-            self.pcp_manager = maybe_build_ascend_pcp_manager(
-                self.vllm_config,
-                self.device,
-                self.supports_mm_inputs,
-                self.req_states,
-                self.block_tables,
-            )
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
