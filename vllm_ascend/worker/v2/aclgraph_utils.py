@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 import torch
@@ -46,10 +47,11 @@ def _prepare_pcp_inputs_to_capture(
     num_tokens: int,
     model_state: ModelState,
     input_buffers: InputBuffers,
-    block_tables: BlockTables,
+    _block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    full_cudagraph: bool,
+    skip_attn: bool = False,
+    *,
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
     """Build graph inputs with the same PCP-local layout used on replay."""
@@ -58,27 +60,35 @@ def _prepare_pcp_inputs_to_capture(
     input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
-    if block_tables.cp_size > 1:
-        cudagraph_utils.prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            input_batch.num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
+    attn_metadata = None
+    if not skip_attn:
+        attn_metadata = model_state.prepare_attn(
+            input_batch,
+            CUDAGraphMode.NONE,
+            input_block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=True,
         )
-        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[: input_batch.num_reqs]
-
-    attn_metadata = model_state.prepare_attn(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=full_cudagraph,
-    )
     return cudagraph_utils.AttentionState(attn_metadata, slot_mappings_by_layer)
+
+
+@contextmanager
+def _override_prepare_inputs_to_capture(pcp_manager: Any):
+    if pcp_manager is None:
+        yield
+        return
+
+    upstream_prepare = cudagraph_utils.prepare_inputs_to_capture
+    cudagraph_utils.prepare_inputs_to_capture = partial(
+        _prepare_pcp_inputs_to_capture,
+        pcp_manager=pcp_manager,
+    )
+    try:
+        yield
+    finally:
+        cudagraph_utils.prepare_inputs_to_capture = upstream_prepare
 
 
 def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
@@ -193,67 +203,21 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
-        with communicator_switch():
-            # PCPManager belongs to the model runner, not the graph manager.
-            # Capture must partition the dummy decode batch through the same
-            # manager as replay so the graph binds to PCP-local input buffers.
-            pcp_manager = getattr(self.model_runner, "pcp_manager", None)
-            if pcp_manager is None:
-                return super().capture(
-                    model,
-                    model_state,
-                    input_buffers,
-                    intermediate_tensors,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    has_lora=has_lora,
-                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                    lora_capture_hook=lora_capture_hook,
-                    progress_bar_desc=progress_bar_desc,
-                )
-
-            upstream_prepare = cudagraph_utils.prepare_inputs_to_capture
-
-            def prepare_inputs_to_capture(
-                num_reqs: int,
-                num_tokens: int,
-                model_state: ModelState,
-                input_buffers: InputBuffers,
-                block_tables: BlockTables,
-                attn_groups: list[list[AttentionGroup]],
-                kv_cache_config: KVCacheConfig,
-                full_cudagraph: bool,
-            ) -> cudagraph_utils.AttentionState:
-                return _prepare_pcp_inputs_to_capture(
-                    num_reqs,
-                    num_tokens,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    full_cudagraph,
-                    pcp_manager,
-                )
-
-            cudagraph_utils.prepare_inputs_to_capture = prepare_inputs_to_capture
-            try:
-                return super().capture(
-                    model,
-                    model_state,
-                    input_buffers,
-                    intermediate_tensors,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    has_lora=has_lora,
-                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                    lora_capture_hook=lora_capture_hook,
-                    progress_bar_desc=progress_bar_desc,
-                )
-            finally:
-                cudagraph_utils.prepare_inputs_to_capture = upstream_prepare
+        pcp_manager = getattr(self.model_runner, "pcp_manager", None)
+        with communicator_switch(), _override_prepare_inputs_to_capture(pcp_manager):
+            return super().capture(
+                model,
+                model_state,
+                input_buffers,
+                intermediate_tensors,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                has_lora=has_lora,
+                use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                lora_capture_hook=lora_capture_hook,
+                progress_bar_desc=progress_bar_desc,
+            )
 
 
 class ModelWithContext(nn.Module):
