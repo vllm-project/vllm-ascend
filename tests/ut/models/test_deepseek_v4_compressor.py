@@ -66,6 +66,7 @@ class TestCompressorMetadata:
         assert args[4] is block_table
         assert args[5:] == (128, 7, 4, 3, 2)
 
+
 class TestCompressorForward:
     @pytest.mark.parametrize(
         ("compress_ratio", "overlap", "expected_coff"),
@@ -91,9 +92,7 @@ class TestCompressorForward:
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
             start_pos=torch.tensor([1], dtype=torch.int32),
         )
-        state_req_metadata = SimpleNamespace(
-            block_table=torch.tensor([[3]], dtype=torch.int32)
-        )
+        state_req_metadata = SimpleNamespace(block_table=torch.tensor([[3]], dtype=torch.int32))
         metadata = AscendCompressorMetadata(
             cache=SimpleNamespace(req_metadata=cache_req_metadata),
             state=SimpleNamespace(req_metadata=state_req_metadata),
@@ -104,9 +103,7 @@ class TestCompressorForward:
         compress_sin = torch.zeros((1, 1, 2))
         slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
         compressed_kv = torch.ones((1, 1, 4))
-        compute_metadata = MagicMock(
-            return_value=(compress_cos, compress_sin, slot_mapping)
-        )
+        compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
         compressor._compute_metadata = compute_metadata
 
         with patch.object(
@@ -153,9 +150,7 @@ class TestCompressorStateCache:
         cache.block_size = 8
         cache.dtype = torch.float32
         cache.sliding_window = 64
-        vllm_config = SimpleNamespace(
-            cache_config=SimpleNamespace(block_size=128)
-        )
+        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
 
         spec = cache.get_kv_cache_spec(vllm_config)
 

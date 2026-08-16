@@ -1350,6 +1350,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio == 4:
             assert self.indexer is not None
             assert layer_metadata.indexer is not None
+
             def compute_attention_compressed_kv() -> tuple[torch.Tensor, torch.Tensor]:
                 return self.compressor(
                     hidden_states=hidden_states,

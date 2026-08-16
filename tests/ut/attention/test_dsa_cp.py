@@ -11,14 +11,10 @@ class TestAscendDSACPLayerMetadata:
         impl = AscendDSACPImpl.__new__(AscendDSACPImpl)
         impl.compress_ratio = 4
         impl.swa_cache_layer = SimpleNamespace(prefix="swa_cache")
-        impl.compressor = SimpleNamespace(
-            state_cache=SimpleNamespace(prefix="compressor.state_cache")
-        )
+        impl.compressor = SimpleNamespace(state_cache=SimpleNamespace(prefix="compressor.state_cache"))
         impl.indexer = SimpleNamespace(
             k_cache=SimpleNamespace(prefix="indexer.k_cache"),
-            compressor=SimpleNamespace(
-                state_cache=SimpleNamespace(prefix="indexer.compressor.state_cache")
-            ),
+            compressor=SimpleNamespace(state_cache=SimpleNamespace(prefix="indexer.compressor.state_cache")),
         )
         attention_metadata = object()
         compressor_state_metadata = object()
