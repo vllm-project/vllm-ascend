@@ -1,18 +1,20 @@
-(Worker_TP1 pid=104959) [E55] replayed a FA3 decode graph 3x; testing task-group now
-(Worker_TP0 pid=104958) [E55] replayed a FA3 decode graph 3x; testing task-group now
-(Worker_TP1 pid=104959) [E53] fresh task-group graph replay vs eager: match=True, max_abs_diff=0.0
-(Worker_TP1 pid=104959) INFO 08-16 17:57:00 [worker.py:751] Free memory on device (60.6/60.96 GiB) on startup. Desired GPU memory utilization is (0.9, 54.86 GiB). Actual usage: 14.27 GiB for weights, 1.22 GiB for peak activation, 0.48 GiB for non-torch memory, 5.6 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=35595671552` (33.15 GiB) to fit into requested memory, or `--kv-cache-memory=41754286080` (38.89 GiB) to fully utilize NPU free memory. Current KV cache memory: 38.89 GiB. After warmup: torch reserved memory 58.97 GiB, torch allocated memory 58.07 GiB.
-(Worker_TP0 pid=104958) [E53] fresh task-group graph replay vs eager: match=True, max_abs_diff=0.0
-(Worker_TP0 pid=104958) INFO 08-16 17:57:00 [worker.py:751] Free memory on device (60.59/60.96 GiB) on startup. Desired GPU memory utilization is (0.9, 54.86 GiB). Actual usage: 14.27 GiB for weights, 1.22 GiB for peak activation, 0.48 GiB for non-torch memory, 5.6 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=35595790336` (33.15 GiB) to fit into requested memory, or `--kv-cache-memory=41750452224` (38.88 GiB) to fully utilize NPU free memory. Current KV cache memory: 38.9 GiB. After warmup: torch reserved memory 58.97 GiB, torch allocated memory 58.07 GiB.
-(Worker_TP2 pid=104960) [E55] replayed a FA3 decode graph 3x; testing task-group now
-(Worker_TP2 pid=104960) [E53] fresh task-group graph replay vs eager: match=True, max_abs_diff=0.0
-(Worker_TP2 pid=104960) INFO 08-16 17:57:00 [worker.py:751] Free memory on device (60.59/60.95 GiB) on startup. Desired GPU memory utilization is (0.9, 54.86 GiB). Actual usage: 14.27 GiB for weights, 1.22 GiB for peak activation, 0.48 GiB for non-torch memory, 5.6 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=35591851622` (33.15 GiB) to fit into requested memory, or `--kv-cache-memory=41748637696` (38.88 GiB) to fully utilize NPU free memory. Current KV cache memory: 38.89 GiB. After warmup: torch reserved memory 58.97 GiB, torch allocated memory 58.07 GiB.
-(Worker_TP3 pid=104961) [E55] replayed a FA3 decode graph 3x; testing task-group now
-(Worker_TP3 pid=104961) [E53] fresh task-group graph replay vs eager: match=True, max_abs_diff=0.0
-(Worker_TP1 pid=104959) [E1] CANN V1 FIA graph workspaces:
-(Worker_TP3 pid=104961)   tok=  8192 block_table    [0x12e4e8d10000-0x12e4e9110000) (8192, 128) torch.int32
-(Worker_TP1 pid=104959) [E1] overlap check (FA3 buffer x CANN workspace):
-(Worker_TP3 pid=104961) [E1] CANN V1 FIA graph workspaces:
-(Worker_TP1 pid=104959)   no overlap between FA3 buffers and CANN workspaces
-(Worker_TP3 pid=104961) [E1] overlap check (FA3 buffer x CANN workspace):
-(Worker_TP3 pid=104961)   no overlap between FA3 buffers and CANN workspaces
+(Worker_TP1 pid=107572) [E56] captured ACL graph entries (FA3 decode num_tokens: [1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 160, 192, 256, 512, 1024, 2048, 4096, 8192])
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=8192 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=4096 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=2048 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=1024 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=512 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=256 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=192 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=160 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=128 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=96 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=64 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=48 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=32 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=16 num_reqs=16 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=8 num_reqs=8 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=4 num_reqs=4 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=2 num_reqs=2 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572)   mode=FULL         num_tokens=1 num_reqs=1 uniform=False FA3_decode=True
+(Worker_TP1 pid=107572) [E56] total entries=18
