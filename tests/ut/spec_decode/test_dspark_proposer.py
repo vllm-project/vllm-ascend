@@ -39,6 +39,7 @@ _NUM_SPECULATIVE_TOKENS = 3
 _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
+_VOCAB_SIZE = 7
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +53,12 @@ def _stub_device_properties(monkeypatch):
     either way (matching ``test_kernel_called_with_has_num_rejected``)."""
     monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_AICORE", 8)
     monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_VECTORCORE", 8)
+    monkeypatch.setattr(
+        "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+        lambda: SimpleNamespace(
+            dynamic_spec_config=SimpleNamespace(method=None, method_params={}),
+        ),
+    )
 
 
 class _DSparkProposerTestBase:
@@ -62,7 +69,8 @@ class _DSparkProposerTestBase:
         """Build the minimal config consumed by the DSpark initializer."""
         draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
         return SimpleNamespace(
-            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config)
+            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config),
+            model_config=SimpleNamespace(get_vocab_size=lambda: _VOCAB_SIZE),
         )
 
     @classmethod
@@ -94,6 +102,10 @@ class _DSparkProposerTestBase:
             proposer.hidden_size = _HIDDEN_SIZE
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
+            proposer._enable_probabilistic_draft_probs = (
+                vllm_config.speculative_config.draft_sample_method == "probabilistic"
+            )
+            proposer._last_draft_probs = None
             proposer.model = (
                 SimpleNamespace(get_draft_attn_causal=lambda: [draft_attn_causal])
                 if draft_attn_causal is not None
@@ -342,11 +354,36 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
 class TestDSparkInitialization(_DSparkProposerTestBase):
     """Tests for DSpark initialization configuration."""
 
+    def test_rejects_reduced_vocab_before_parent_initialization(self) -> None:
+        vllm_config = self._make_vllm_config(
+            SimpleNamespace(
+                vocab_size=_VOCAB_SIZE,
+                draft_vocab_size=_VOCAB_SIZE - 1,
+            )
+        )
+        parent_init = MagicMock()
+
+        with (
+            pytest.raises(ValueError, match="does not support reduced-vocabulary"),
+            patch.object(
+                AscendDSparkProposer.__base__,
+                "__init__",
+                parent_init,
+            ),
+        ):
+            AscendDSparkProposer(vllm_config, torch.device("cpu"))
+
+        parent_init.assert_not_called()
+
     @pytest.mark.parametrize(
         ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
         [
             pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
-            pytest.param(SimpleNamespace(sample_from_anchor=False), False, 1 + _NUM_SPECULATIVE_TOKENS),
+            pytest.param(
+                SimpleNamespace(sample_from_anchor=False),
+                False,
+                1 + _NUM_SPECULATIVE_TOKENS,
+            ),
         ],
     )
     def test_configures_anchor_sampling(
@@ -407,10 +444,7 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
 
 
 class TestDSparkInitValidation:
-    """``AscendDSparkProposer.__init__`` rejects probabilistic draft sampling
-    (unsupported on the v1 model runner) and, for the greedy path, allocates
-    the DSpark-specific draft/seed buffers and overrides the DFlash
-    query-token / cudagraph defaults."""
+    """Tests DSpark-specific buffers and eager/query-layout overrides."""
 
     @staticmethod
     def _make_vllm_config(
@@ -429,7 +463,10 @@ class TestDSparkInitValidation:
                 get_hidden_size=lambda: hidden_size
             ),
         )
-        return SimpleNamespace(speculative_config=speculative_config)
+        return SimpleNamespace(
+            speculative_config=speculative_config,
+            model_config=SimpleNamespace(get_vocab_size=lambda: _VOCAB_SIZE),
+        )
 
     @staticmethod
     def _stub_dflash_init(
@@ -455,27 +492,40 @@ class TestDSparkInitValidation:
             self.hidden_size = 0
             self.hidden_states = None
             self._dflash_hidden_states = None
+            self._enable_probabilistic_draft_probs = (
+                vllm_config.speculative_config.draft_sample_method
+                == "probabilistic"
+            )
+            self._last_draft_probs = None
 
         monkeypatch.setattr(AscendDflashProposer, "__init__", _stub)
 
-    def test_probabilistic_rejected(self, monkeypatch):
+    def test_probabilistic_allocates_draft_probs_buffer(self, monkeypatch):
         device = torch.device("cpu")
+        num_spec, max_batch = 5, 16
         self._stub_dflash_init(
             monkeypatch,
-            num_speculative_tokens=5,
-            max_batch_size=16,
+            num_speculative_tokens=num_spec,
+            max_batch_size=max_batch,
             max_num_tokens=256,
             dtype=torch.float32,
             device=device,
         )
         vllm_config = self._make_vllm_config(
-            num_speculative_tokens=5,
-            max_batch_size=16,
+            num_speculative_tokens=num_spec,
+            max_batch_size=max_batch,
             max_num_tokens=256,
             draft_sample_method="probabilistic",
         )
-        with pytest.raises(ValueError, match="probabilistic"):
-            AscendDSparkProposer(vllm_config, device)
+        proposer = AscendDSparkProposer(vllm_config, device)
+
+        assert proposer._dspark_draft_probs is not None
+        assert proposer._dspark_draft_probs.shape == (
+            max_batch,
+            num_spec,
+            _VOCAB_SIZE,
+        )
+        assert proposer._dspark_draft_probs.dtype == torch.float32
 
     def test_greedy_allocates_dspark_buffers(self, monkeypatch):
         device = torch.device("cpu")
@@ -504,6 +554,7 @@ class TestDSparkInitValidation:
         assert proposer._dspark_draft_buffer.dtype == torch.int64
         assert proposer._dspark_seed_buffer.shape == (max_batch,)
         assert proposer._dspark_seed_buffer.dtype == torch.int64
+        assert proposer._dspark_draft_probs is None
         # hidden_size / hidden states come from the draft model config.
         assert proposer.hidden_size == hidden
         assert proposer.hidden_states.shape == (max_num_tokens, hidden)
@@ -520,6 +571,111 @@ class TestDSparkInitValidation:
         assert proposer._per_group_block_tables == {}
         assert proposer._per_group_slot_mappings == {}
         assert proposer._context_slot_mapping_buffers is None
+
+
+class TestDSparkSampling(_DSparkProposerTestBase):
+    """Tests sequential Markov sampling and draft-probability retention."""
+
+    def _make_sampling_proposer(self) -> AscendDSparkProposer:
+        proposer = self._make_proposer(
+            max_num_tokens=8,
+            num_reqs=2,
+            block_size=2,
+        )
+        proposer._enable_probabilistic_draft_probs = True
+        proposer._last_draft_probs = None
+        proposer._dspark_draft_probs = torch.empty(
+            (2, 2, 3),
+            dtype=torch.float32,
+        )
+        proposer._dspark_seed_buffer[:2] = torch.tensor([2, 1])
+        proposer.runner = SimpleNamespace(
+            input_batch=SimpleNamespace(
+                sampling_metadata=SimpleNamespace(all_greedy=False),
+            ),
+        )
+        proposer.model = SimpleNamespace(
+            markov_embed=MagicMock(side_effect=lambda token_ids: token_ids.clone()),
+            markov_bias=MagicMock(
+                side_effect=lambda token_ids: torch.stack(
+                    [
+                        token_ids.float(),
+                        token_ids.float() + 1,
+                        token_ids.float() + 2,
+                    ],
+                    dim=-1,
+                )
+            ),
+        )
+        return proposer
+
+    def test_probabilistic_sampling_keeps_conditional_probs(self) -> None:
+        proposer = self._make_sampling_proposer()
+        step0_probs = torch.tensor(
+            [[0.1, 0.7, 0.2], [0.6, 0.3, 0.1]],
+            dtype=torch.float32,
+        )
+        step1_probs = torch.tensor(
+            [[0.2, 0.3, 0.5], [0.1, 0.8, 0.1]],
+            dtype=torch.float32,
+        )
+        proposer._sample_from_logits = MagicMock(
+            side_effect=[
+                (torch.tensor([1, 2]), step0_probs),
+                (torch.tensor([2, 0]), step1_probs),
+            ]
+        )
+
+        draft_token_ids = proposer._sample_dspark_tokens(
+            torch.zeros((4, 3), dtype=torch.float32),
+        )
+
+        assert torch.equal(
+            draft_token_ids,
+            torch.tensor([[2, 1, 2], [1, 2, 0]]),
+        )
+        assert proposer._last_draft_probs is not None
+        assert torch.equal(proposer._last_draft_probs[:, 0], step0_probs)
+        assert torch.equal(proposer._last_draft_probs[:, 1], step1_probs)
+        sampled_logits = [
+            call.args[0] for call in proposer._sample_from_logits.call_args_list
+        ]
+        assert torch.equal(
+            sampled_logits[0],
+            torch.tensor([[2.0, 3.0, 4.0], [1.0, 2.0, 3.0]]),
+        )
+        assert torch.equal(
+            sampled_logits[1],
+            torch.tensor([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]]),
+        )
+        markov_inputs = [call.args[0] for call in proposer.model.markov_embed.call_args_list]
+        assert torch.equal(markov_inputs[0], torch.tensor([2, 1]))
+        assert torch.equal(markov_inputs[1], torch.tensor([1, 2]))
+
+    def test_all_greedy_clears_cached_probs(self) -> None:
+        proposer = self._make_sampling_proposer()
+        proposer._last_draft_probs = torch.ones((2, 2, 3))
+        proposer._sample_from_logits = MagicMock()
+        proposer.runner.input_batch.sampling_metadata = SimpleNamespace(
+            all_greedy=True,
+        )
+        raw_logits = torch.tensor(
+            [
+                [0.0, 2.0, 1.0],
+                [3.0, 1.0, 0.0],
+                [2.0, 0.0, 1.0],
+                [0.0, 1.0, 4.0],
+            ]
+        )
+
+        draft_token_ids = proposer._sample_dspark_tokens(raw_logits)
+
+        assert torch.equal(
+            draft_token_ids,
+            torch.tensor([[2, 1, 0], [1, 2, 2]]),
+        )
+        assert proposer._last_draft_probs is None
+        proposer._sample_from_logits.assert_not_called()
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
