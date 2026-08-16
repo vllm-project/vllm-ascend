@@ -309,6 +309,9 @@ class EplbConfig:
     num_redundant_experts: int = 0
     eplb_policy_type: int = 2
     eplb_heat_collection_stage: str = "all"
+    enable_omni_eplb = False,
+    omni_config_file = None,
+    convert_weight_to_list = False
     # Model Runner V2 only. Restricts which batch phase contributes to the
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
@@ -317,7 +320,7 @@ class EplbConfig:
 
     @model_validator(mode="after")
     def _validate_config(self):
-        if self.expert_map_path is not None:
+        if self.expert_map_path is not None and not self.enable_omni_eplb:
             logger.info("The expert_map is %s", self.expert_map_path)
             if self.expert_map_path[-5:] != ".json":
                 raise TypeError("The expert_map is not json.")
@@ -325,10 +328,13 @@ class EplbConfig:
                 raise ValueError("The expert_map is not exist.")
         if self.expert_map_record_path is not None:
             self.dynamic_eplb = True
-            if self.expert_map_record_path[-5:] != ".json":
-                raise TypeError("The expert_map_record_path is not json.")
-            dirname = os.path.dirname(self.expert_map_record_path)
-            os.makedirs(dirname, exist_ok=True)
+            if self.enable_omni_eplb:
+                os.makedirs(self.expert_map_record_path, exist_ok=True)
+            else:
+                if self.expert_map_record_path[-5:] != ".json":
+                    raise TypeError("The expert_map_record_path is not json.")
+                dirname = os.path.dirname(self.expert_map_record_path)
+                os.makedirs(dirname, exist_ok=True)
         for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
             value = getattr(self, key)
             if not isinstance(value, int):
@@ -347,8 +353,16 @@ class EplbConfig:
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
 
-        logger.info("Dynamic EPLB is %s", self.dynamic_eplb)
-        logger.info("The number of redundant experts is %s", self.num_redundant_experts)
+        if self.enable_omni_eplb and self.omni_config_file is not None and not os.path.exists(self.omni_config_file):
+                raise ValueError(f"omni_config_file does not exist: {self.omni_config_file}")
+
+        if self.config["dynamic_eplb"] and not self.enable_omni_eplb:
+            self.config["convert_weight_to_list"] = True
+        
+        logger.info("Dynamic EPLB is %s and convert moe's weights to list is %s", self.config["dynamic_eplb"], self.config["convert_weight_to_list"])
+        logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+        logger.info("Omni EPLB is %s, config_file=%s", self.config["enable_omni_eplb"], self.config["omni_config_file"])
+
         return self
 
 

@@ -173,6 +173,8 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[local_idx] = list()
             for name in expert_weight_names:
                 param_key = f"{local_idx}.{name}"
+                if not hasattr(layer, name):
+                    name = name.replace("_list", "")
                 # Inspect the attribute without invoking __getattr__. Besides
                 # avoiding side effects from dynamic proxies, this prevents an
                 # unspecced MagicMock from fabricating the optional accessor.
