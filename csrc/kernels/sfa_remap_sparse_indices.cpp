@@ -22,6 +22,8 @@ namespace {
 // sparse-attention configurations without changing the kernel ABI.
 constexpr uint32_t kMaxTopK = 8192;
 constexpr uint32_t kBufferBytes = kMaxTopK * sizeof(int32_t);
+constexpr uint32_t kMaskBufferBytes = (kMaxTopK + 7) / 8;
+constexpr uint32_t kVectorTileElements = 64;
 
 class SfaRemapSparseIndices {
 public:
@@ -49,10 +51,14 @@ public:
         interleaveSize_ = interleaveSize;
         interleaveShift_ = interleaveShift;
         dcpInterleaveShift_ = dcpInterleaveShift;
+        dcpShift_ = dcpInterleaveShift - interleaveShift;
         usePowerOfTwo_ = usePowerOfTwo;
         rowsPerCore_ = rowsPerCore;
         pipe_->InitBuffer(inputQueue_, 1, kBufferBytes);
         pipe_->InitBuffer(outputQueue_, 1, kBufferBytes);
+        pipe_->InitBuffer(tempABuffer_, kBufferBytes);
+        pipe_->InitBuffer(tempBBuffer_, kBufferBytes);
+        pipe_->InitBuffer(ownerMaskBuffer_, kMaskBufferBytes);
     }
 
     __aicore__ inline void Process()
@@ -81,10 +87,110 @@ private:
         inputQueue_.EnQue(input);
     }
 
-    __aicore__ inline void Compute()
+    __aicore__ inline void ComputePowerOfTwo(
+        const AscendC::LocalTensor<int32_t>& input,
+        const AscendC::LocalTensor<int32_t>& output)
     {
-        AscendC::LocalTensor<int32_t> input = inputQueue_.DeQue<int32_t>();
-        AscendC::LocalTensor<int32_t> output = outputQueue_.AllocTensor<int32_t>();
+        AscendC::LocalTensor<int32_t> tempA = tempABuffer_.Get<int32_t>();
+        AscendC::LocalTensor<int32_t> tempB = tempBBuffer_.Get<int32_t>();
+        AscendC::LocalTensor<uint8_t> ownerMask = ownerMaskBuffer_.Get<uint8_t>();
+        uint32_t writePos = 0;
+        constexpr uint64_t vectorMask = 32;
+        constexpr uint8_t vectorRepeats = 2;
+        const AscendC::UnaryRepeatParams unaryParams{1, 1, 4, 4};
+        const AscendC::BinaryRepeatParams binaryParams{1, 1, 1, 4, 4, 4};
+
+        AscendC::Duplicate(output, static_cast<int32_t>(-1), topK_);
+        AscendC::PipeBarrier<PIPE_V>();
+        for (uint32_t offset = 0; offset < topK_; offset += kVectorTileElements) {
+            AscendC::LocalTensor<int32_t> source = input[offset];
+
+            AscendC::ShiftRight(
+                tempA, source, static_cast<int32_t>(interleaveShift_),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::ShiftRight(
+                tempB, tempA, static_cast<int32_t>(dcpShift_),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::ShiftLeft(
+                tempB, tempB, static_cast<int32_t>(dcpShift_),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Sub(
+                tempA, tempA, tempB, vectorMask, vectorRepeats, binaryParams);
+            AscendC::PipeBarrier<PIPE_V>();
+            // Fold validity into the owner value so CompareScalar emits the
+            // final packed mask directly. For negative sentinels, shifting by
+            // 31 produces a value that cannot equal a legal DCP rank.
+            AscendC::ShiftRight(
+                tempB, source, static_cast<int32_t>(31),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::Muls(
+                tempB, tempB, static_cast<int32_t>(dcpSize_ + 1),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Add(
+                tempA, tempA, tempB, vectorMask, vectorRepeats, binaryParams);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::CompareScalar(
+                ownerMask, tempA, static_cast<int32_t>(dcpRank_),
+                AscendC::CMPMODE::EQ, kVectorTileElements);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            AscendC::ShiftRight(
+                tempA, source, static_cast<int32_t>(dcpInterleaveShift_),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::ShiftLeft(
+                tempA, tempA, static_cast<int32_t>(interleaveShift_),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::ShiftRight(
+                tempB, source, static_cast<int32_t>(interleaveShift_),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::ShiftLeft(
+                tempB, tempB, static_cast<int32_t>(interleaveShift_),
+                vectorMask, vectorRepeats, unaryParams);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Sub(
+                tempB, source, tempB, vectorMask, vectorRepeats, binaryParams);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Add(
+                tempA, tempA, tempB, vectorMask, vectorRepeats, binaryParams);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            uint64_t selectedCount = 0;
+            AscendC::GatherMaskParams gatherParams;
+            gatherParams.repeatTimes = 1;
+            gatherParams.src0BlockStride = 1;
+            gatherParams.src0RepeatStride = 8;
+            gatherParams.src1RepeatStride = 0;
+            AscendC::GatherMask(
+                tempB.ReinterpretCast<uint32_t>(),
+                tempA.ReinterpretCast<uint32_t>(),
+                ownerMask.ReinterpretCast<uint32_t>(), true,
+                kVectorTileElements, gatherParams, selectedCount);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            event_t vectorToScalar =
+                static_cast<event_t>(pipe_->FetchEventID(AscendC::HardEvent::V_S));
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(vectorToScalar);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(vectorToScalar);
+            // Gather into an aligned UB tensor, then append only the selected
+            // values. Writing GatherMask directly at output[writePos] is not
+            // valid because writePos is generally not 32-byte aligned.
+            for (uint32_t index = 0; index < selectedCount; ++index) {
+                output.SetValue(writePos, tempB.GetValue(index));
+                ++writePos;
+            }
+        }
+        event_t scalarToMte3 =
+            static_cast<event_t>(pipe_->FetchEventID(AscendC::HardEvent::S_MTE3));
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
+    }
+
+    __aicore__ inline void ComputeScalar(
+        const AscendC::LocalTensor<int32_t>& input,
+        const AscendC::LocalTensor<int32_t>& output)
+    {
         uint32_t writePos = 0;
 
         // Stable compaction has a scalar prefix dependency. Vector initializes
@@ -123,6 +229,17 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
 
+    }
+
+    __aicore__ inline void Compute()
+    {
+        AscendC::LocalTensor<int32_t> input = inputQueue_.DeQue<int32_t>();
+        AscendC::LocalTensor<int32_t> output = outputQueue_.AllocTensor<int32_t>();
+        if (usePowerOfTwo_ != 0 && topK_ % kVectorTileElements == 0) {
+            ComputePowerOfTwo(input, output);
+        } else {
+            ComputeScalar(input, output);
+        }
         inputQueue_.FreeTensor(input);
         outputQueue_.EnQue(output);
     }
@@ -139,6 +256,9 @@ private:
     AscendC::TPipe* pipe_;
     AscendC::TQue<AscendC::QuePosition::VECIN, 1> inputQueue_;
     AscendC::TQue<AscendC::QuePosition::VECOUT, 1> outputQueue_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tempABuffer_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tempBBuffer_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> ownerMaskBuffer_;
     AscendC::GlobalTensor<int32_t> inputGm_;
     AscendC::GlobalTensor<int32_t> outputGm_;
     uint32_t rows_;
@@ -148,6 +268,7 @@ private:
     uint32_t interleaveSize_;
     uint32_t interleaveShift_;
     uint32_t dcpInterleaveShift_;
+    uint32_t dcpShift_;
     uint32_t usePowerOfTwo_;
     uint32_t rowsPerCore_;
 };
