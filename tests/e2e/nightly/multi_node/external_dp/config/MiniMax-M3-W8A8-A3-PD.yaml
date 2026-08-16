@@ -87,7 +87,7 @@ templates:
       - --long-prefill-token-threshold
       - "2048"
       - --max-num-seqs
-      - "64"
+      - "32"
       - --trust-remote-code
       - --quantization
       - ascend
@@ -100,7 +100,7 @@ templates:
       - --enable-prefix-caching
       - --enforce-eager
       - --additional-config
-      - '{"enable_cpu_binding": true, "ascend_compilation_config": {"enable_static_kernel": true, "fuse_norm_quant": false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2, "enable_shared_expert_dp": true, "enable_flashcomm1": true}'
+      - '{"enable_cpu_binding": true, "ascend_compilation_config": {"fuse_norm_quant": false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2, "enable_shared_expert_dp": true, "enable_flashcomm1": true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "31000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 4, "pp_size": 2, "pp_layer_partition": "30,30"}, "decode": {"dp_size": 4, "tp_size": 4}}}'
 
@@ -130,7 +130,7 @@ templates:
       - --max-num-batched-tokens
       - "32768"
       - --max-num-seqs
-      - "64"
+      - "32"
       - --distributed-executor-backend
       - mp
       - --trust-remote-code
