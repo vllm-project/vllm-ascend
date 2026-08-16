@@ -424,6 +424,8 @@ class DeepseekV4Indexer(nn.Module):
         )
         _, hadamard = self._get_indexer_cache_metadata(metadata)
         main_stream = torch.npu.current_stream()
+        compressor = self.compressor
+        assert compressor is not None
 
         # ===== Part0: Pre-compute on main =====
         if _is_w8a8_dynamic(self.wq_b) and qr_pertoken_scale is not None:
@@ -432,14 +434,14 @@ class DeepseekV4Indexer(nn.Module):
         else:
             qr_quant_ready, qr_scale_ready = self.cv_wq_b.quantize(qr)
 
-        kv, slot_mapping_indexer = self.compressor(
+        kv, slot_mapping_indexer = compressor(
             hidden_states=hidden_states,
             state_cache=indexer_state_cache,
             metadata=metadata.compressor,
         )
         if kv.numel() == 0:
             kv = None
-        elif self.compressor.rotate:
+        elif compressor.rotate:
             kv = rotate_activation(kv, hadamard)
 
         # ===== Part1: matmul[C] ∥ kv_quant[V] + scatter_k_cache[AIV] =====
@@ -567,6 +569,8 @@ class DeepseekV4Indexer(nn.Module):
             self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
         )
         cache_metadata, hadamard = self._get_indexer_cache_metadata(metadata)
+        compressor = self.compressor
+        assert compressor is not None
 
         if (
             _is_w8a8_dynamic(self.wq_b)
@@ -594,14 +598,14 @@ class DeepseekV4Indexer(nn.Module):
         )
 
         q = rotate_activation(q, hadamard)
-        kv, indexer_slot_mapping = self.compressor(
+        kv, indexer_slot_mapping = compressor(
             hidden_states=x,
             state_cache=indexer_state_cache,
             metadata=metadata.compressor,
         )
         if kv.numel() == 0:
             kv = None
-        elif self.compressor.rotate:
+        elif compressor.rotate:
             kv = rotate_activation(kv, hadamard)
 
         return (

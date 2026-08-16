@@ -1344,7 +1344,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         state_cache: torch.Tensor,
     ) -> torch.Tensor | None:
         """Update compressed caches and return Indexer top-k indices."""
-        assert self.compressor is not None
+        compressor = self.compressor
+        assert compressor is not None
         assert layer_metadata.compressor is not None
 
         if self.compress_ratio == 4:
@@ -1352,7 +1353,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             assert layer_metadata.indexer is not None
 
             def compute_attention_compressed_kv() -> tuple[torch.Tensor, torch.Tensor]:
-                return self.compressor(
+                return compressor(
                     hidden_states=hidden_states,
                     state_cache=state_cache,
                     metadata=layer_metadata.compressor,
@@ -1384,7 +1385,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 qr_pertoken_scale=qr_pertoken_scale,
             )
 
-        compressed_kv, compress_slot_mapping = self.compressor(
+        compressed_kv, compress_slot_mapping = compressor(
             hidden_states=hidden_states,
             state_cache=state_cache,
             metadata=layer_metadata.compressor,

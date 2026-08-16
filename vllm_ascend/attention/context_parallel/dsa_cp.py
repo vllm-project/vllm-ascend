@@ -1629,7 +1629,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 **common_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
-            assert compressor_attn_metadata.req_metadata is not None
+            assert compressor_attn_metadata is not None
+            compressor_req_metadata = compressor_attn_metadata.req_metadata
+            assert compressor_req_metadata is not None
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
@@ -1639,13 +1641,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 cmp_kv=compress_kv_cache,
                 cmp_sparse_indices=compress_topk_idxs,
                 ori_block_table=swa_metadata.req_metadata.block_table,
-                cmp_block_table=compressor_attn_metadata.req_metadata.block_table,
+                cmp_block_table=compressor_req_metadata.block_table,
                 metadata=req_metadata.sas_metadata,
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
         else:
-            assert compressor_attn_metadata.req_metadata is not None
+            assert compressor_attn_metadata is not None
+            compressor_req_metadata = compressor_attn_metadata.req_metadata
+            assert compressor_req_metadata is not None
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
@@ -1654,8 +1658,8 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 ori_kv=swa_kv_cache,
                 cmp_kv=compress_kv_cache,
                 ori_block_table=swa_metadata.req_metadata.block_table,
-                cmp_block_table=compressor_attn_metadata.req_metadata.block_table,
-                metadata=compressor_attn_metadata.req_metadata.sas_metadata,
+                cmp_block_table=compressor_req_metadata.block_table,
+                metadata=compressor_req_metadata.sas_metadata,
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
