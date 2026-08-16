@@ -483,6 +483,35 @@ def _e55_test_replay_corrupts_taskgroup():
     _e53_test_fresh_taskgroup()
 
 
+def _e56_dump_aclgraph_entries():
+    """E56: dump every captured ACL graph entry's batch descriptor, so we can
+    see how decode (FA3) vs prefill (CANN V1) graphs are keyed in FULL mode
+    (where patch_cudagraph forces ``uniform=False``).  This reveals the correct
+    signal to use for the E54 decode-capture isolation, and surfaces any
+    num_tokens collision between decode and prefill graphs (both uniform=False
+    in FULL mode).  Set VLLM_ASCEND_DEBUG_E56=1.
+    """
+    import vllm_ascend.attention.attention_v1 as _attn_v1
+    from vllm_ascend.compilation.acl_graph import _acl_graph_wrappers
+
+    fa3_tokens = set(_attn_v1._FA3_GRAPH_TENSORS.keys())
+    print("[E56] captured ACL graph entries (FA3 decode num_tokens: %s)"
+          % (sorted(fa3_tokens) if fa3_tokens else "NONE"))
+    total = 0
+    for wrapper in list(_acl_graph_wrappers):
+        for entry in list(wrapper.concrete_aclgraph_entries.values()):
+            bd = entry.batch_descriptor
+            nt = getattr(bd, "num_tokens", None)
+            nr = getattr(bd, "num_reqs", None)
+            uni = getattr(bd, "uniform", None)
+            is_fa3 = nt in fa3_tokens
+            print(f"  mode={wrapper.runtime_mode.name:12s} "
+                  f"num_tokens={nt} num_reqs={nr} uniform={uni} "
+                  f"FA3_decode={is_fa3}")
+            total += 1
+    print(f"[E56] total entries={total}")
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -5283,6 +5312,10 @@ class NPUModelRunner(GPUModelRunner):
             # test.  match=False here (while E53-alone is match=True) proves
             # the corruption is REPLAY-time, not capture-time.
             _e55_test_replay_corrupts_taskgroup()
+        if os.environ.get("VLLM_ASCEND_DEBUG_E56") == "1":
+            # E56: dump all captured ACL graph batch descriptors so we can see
+            # how decode (FA3) vs prefill (CANN V1) are keyed in FULL mode.
+            _e56_dump_aclgraph_entries()
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):
