@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +35,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
     SendTask,
     SfaPDProducerReqMeta,
     infer_sfa_component_group_ids,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import (  # noqa: E402
+    read_thread as read_thread_module,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
     ConsumerReadState,
@@ -848,6 +852,40 @@ def test_send_thread_falls_back_to_device_sync_when_no_event_is_available():
 
     device_sync.assert_called_once()
     stream.wait_event.assert_not_called()
+
+
+def test_await_destinations_returns_once_the_worker_registers():
+    # P can prefill and notify inside the gap between D advertising a request
+    # and the next forward step recording its destination blocks.
+    thread = _make_read_thread()
+    thread._stop_event = threading.Event()
+    thread._state.dest_blocks_by_req.clear()
+
+    def register_late():
+        time.sleep(0.05)
+        thread._state.dest_blocks_by_req["req-late"] = ([1], [2])
+
+    registrar = threading.Thread(target=register_late)
+    registrar.start()
+    try:
+        thread._await_destinations(["req-late"])
+    finally:
+        registrar.join()
+
+    assert "req-late" in thread._state.dest_blocks_by_req
+
+
+def test_await_destinations_gives_up_after_the_timeout():
+    thread = _make_read_thread()
+    thread._stop_event = threading.Event()
+    thread._state.dest_blocks_by_req.clear()
+
+    with patch.object(read_thread_module, "DEST_REGISTRATION_TIMEOUT_SECONDS", 0.01):
+        thread._await_destinations(["req-never"])
+
+    # Returning lets the read itself raise the missing-destination error, so a
+    # request that truly never registers still fails rather than hanging.
+    assert "req-never" not in thread._state.dest_blocks_by_req
 
 
 def test_record_p_save_event_returns_the_event_for_the_task():
