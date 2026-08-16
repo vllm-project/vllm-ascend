@@ -134,7 +134,7 @@ class AscendSFABackend(AttentionBackend):
             return AscendSFAKVOffloadImpl
         from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_impl
 
-        return resolve_sfa_impl()
+        return resolve_sfa_impl(get_current_vllm_config())
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
@@ -346,7 +346,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+        slot_mapping = common_attn_metadata.slot_mapping
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = self.kernel_block_size
@@ -1577,11 +1577,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
-        slot_mapping = attn_metadata.slot_mapping
-        slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
-
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
+        slot_mapping = attn_metadata.slot_mapping[:num_input_tokens]
+        slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
         output_padded = output
         parallel_context = self._get_parallel_forward_context(
             attn_metadata,
