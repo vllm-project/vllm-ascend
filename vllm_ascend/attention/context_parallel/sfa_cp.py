@@ -39,6 +39,13 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 
 
 class AscendSFACPImpl(AscendSFAImpl):
+    def _get_indexer_cache_slot_mapping(
+        self,
+        attn_metadata: M,
+        _preprocess_slot_mapping: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._get_sfa_kv_slot_mapping(attn_metadata)
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -66,7 +73,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         attn_metadata: M,
     ) -> None:
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
         tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
         gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_decode_tokens)
         k_li = gathered_tensors[0]

@@ -1434,6 +1434,13 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         return attn_metadata.slot_mapping
 
+    def _get_indexer_cache_slot_mapping(
+        self,
+        _attn_metadata: M,
+        preprocess_slot_mapping: torch.Tensor,
+    ) -> torch.Tensor:
+        return preprocess_slot_mapping
+
     def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:
         """Compose split cache handles into the tuple expected by SFA kernels.
 
@@ -1559,8 +1566,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin = attn_metadata.sin
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
-        slot_mapping = attn_metadata.slot_mapping[:num_input_tokens]
-        slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
+        preprocess_slot_mapping = attn_metadata.slot_mapping[:num_input_tokens]
+        kv_slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
         parallel_context = self._get_parallel_forward_context(
             attn_metadata,
             num_input_tokens,
@@ -1579,9 +1586,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if fused_type != PreprocessType.NATIVE:
             if fused_type == PreprocessType.PROLOG_V3:
-                assert slot_mapping_sfa.numel() == hidden_states.shape[0], (
+                assert preprocess_slot_mapping.numel() == hidden_states.shape[0], (
                     "SFA Prolog V3 requires one cache index per input token, "
-                    f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping_sfa.numel()}."
+                    f"got token_x={hidden_states.shape[0]} and "
+                    f"cache_index={preprocess_slot_mapping.numel()}."
                 )
             if self.has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
@@ -1595,7 +1603,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=slot_mapping_sfa,
+                    slot_mapping=preprocess_slot_mapping,
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
@@ -1603,7 +1611,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=slot_mapping_sfa,
+                    slot_mapping=preprocess_slot_mapping,
                     num_input_tokens=num_input_tokens,
                 )
         # native
@@ -1668,14 +1676,24 @@ class AscendSFAImpl(MLAAttentionImpl):
                 fused_kv_no_split,
                 kv_ag_handles,
                 kv_cache,
-                slot_mapping_sfa,
+                kv_slot_mapping,
                 attn_metadata,
                 parallel_context.gather_full_o_proj,
             )
 
         if self.has_indexer:
             assert k_li is not None
-            self._write_indexer_cache(k_li, k_li_scale, slot_mapping, kv_cache, attn_metadata)
+            indexer_cache_slot_mapping = self._get_indexer_cache_slot_mapping(
+                attn_metadata,
+                preprocess_slot_mapping,
+            )
+            self._write_indexer_cache(
+                k_li,
+                k_li_scale,
+                indexer_cache_slot_mapping,
+                kv_cache,
+                attn_metadata,
+            )
 
         # Notify for every layer that wrote the cache, not just indexer layers:
         # by this point all of the layer's KV (main + indexer) has been
