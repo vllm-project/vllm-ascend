@@ -386,7 +386,7 @@ def test_sync_for_step_calls_refresh_then_dump_or():
         proc.sync_for_step(allow_arm=False)
 
     proc.dumper.advance_wave.assert_called_once_with(allow_arm=False)
-    proc.refresh_config.assert_called_once_with(allow_arm=False)
+    proc.refresh_config.assert_called_once_with(allow_arm=False, scheduler_output=None)
     proc.sync_dump_pending_or.assert_called_once_with(allow_arm=False)
 
 
@@ -409,7 +409,7 @@ def test_refresh_config_skips_manual_trigger_arm_when_not_allow_arm():
 
     proc.refresh_config(allow_arm=False)
 
-    proc.manual_triggers.consume_once.assert_called_once_with(allow_arm=False)
+    proc.manual_triggers.consume_once.assert_called_once_with(allow_arm=False, scheduler_output=None)
     proc._handle_manual_trigger.assert_not_called()
     proc.dfx_config.consume_manual_trigger.assert_not_called()
 
@@ -429,7 +429,7 @@ def test_refresh_config_hot_reload_off_skips_sync_and_filters():
         assert proc.refresh_config(allow_arm=True) is False
         proc.dfx_config.sync_dfx_config.assert_not_called()
         filt_cls.get.assert_not_called()
-    proc.manual_triggers.consume_once.assert_called_once_with(allow_arm=True)
+    proc.manual_triggers.consume_once.assert_called_once_with(allow_arm=True, scheduler_output=None)
 
 
 def test_maybe_print_input_token_ids_once_logs_and_consumes():

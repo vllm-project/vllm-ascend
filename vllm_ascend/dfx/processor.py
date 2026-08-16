@@ -31,7 +31,11 @@ from vllm_ascend.dfx.detector.manager import DetectorManager
 from vllm_ascend.dfx.dumper import Dumper
 from vllm_ascend.dfx.input_filters import InputFilterManager, iter_batch_prompt_token_ids
 from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
-from vllm_ascend.dfx.manual_trigger import ManualTriggerManager, TriggerEvent
+from vllm_ascend.dfx.manual_trigger import (
+    ManualTriggerManager,
+    TriggerEvent,
+    iter_local_request_rows,
+)
 from vllm_ascend.dfx.report import DfxReportWriter
 from vllm_ascend.dfx.request_state import RequestDfxStore
 from vllm_ascend.dfx.tokenizer import load_model_tokenizer
@@ -73,6 +77,9 @@ class DfxProcessor:
         self._report_tokenizer: Any | None = None
         self._report_tokenizer_failed = False
         self.manual_triggers = ManualTriggerManager(dfx_config=dfx_config, runner=runner)
+        # Set for the duration of ``sync_for_step`` so first-wave MRV2 can see
+        # ``scheduler_output`` before ``prepare_inputs`` fills ``req_states``.
+        self._scheduler_output_for_step: Any | None = None
         # Stage-hook facade; concrete detectors stay inside the manager.
         self.detectors = DetectorManager(
             dfx_config=dfx_config,
@@ -85,7 +92,12 @@ class DfxProcessor:
 
     # ---- step entry (all ranks) --------------------------------------------
 
-    def refresh_config(self, *, allow_arm: bool = True) -> bool:
+    def refresh_config(
+        self,
+        *,
+        allow_arm: bool = True,
+        scheduler_output: Any | None = None,
+    ) -> bool:
         """All-rank DFX config sync. Must not be skipped on early PP.
 
         ``allow_arm``: False on idle ``execute_dummy_batch``. Config sync still
@@ -96,12 +108,25 @@ class DfxProcessor:
         logger.debug("[DFX sync] enter stage=refresh_config allow_arm=%s", allow_arm)
         # Always advance the IO append-wave frontier (same-wave dedupe).
         RequestIoSnapshotManager.get().clear_wave_cache()
+        so = scheduler_output if scheduler_output is not None else getattr(self, "_scheduler_output_for_step", None)
+        prev_so = getattr(self, "_scheduler_output_for_step", None)
+        self._scheduler_output_for_step = so
+        try:
+            return self._refresh_config_body(allow_arm=allow_arm, scheduler_output=so)
+        finally:
+            self._scheduler_output_for_step = prev_so
 
+    def _refresh_config_body(
+        self,
+        *,
+        allow_arm: bool,
+        scheduler_output: Any | None,
+    ) -> bool:
         # Hot-reload off: config/filters are static after init. Skip sync +
         # filter rebuild; still honor startup one-shots (manual_trigger /
         # print_input) on real waves.
         if not self.dfx_config.hot_reload_enabled:
-            trigger = self.manual_triggers.consume_once(allow_arm=allow_arm)
+            trigger = self.manual_triggers.consume_once(allow_arm=allow_arm, scheduler_output=scheduler_output)
             if trigger is not None:
                 self._handle_manual_trigger(trigger)
             self.maybe_print_input_token_ids_once(allow_arm=allow_arm)
@@ -122,7 +147,7 @@ class DfxProcessor:
             self.report_writer.max_output_token_ids = self.dfx_config.report_max_output_token_ids()
             self.report_writer.decode_token_ids = self.dfx_config.report_decode_token_ids()
         # Dump limits sync only when config changed (via apply_dfx_config).
-        trigger = self.manual_triggers.consume_once(allow_arm=allow_arm)
+        trigger = self.manual_triggers.consume_once(allow_arm=allow_arm, scheduler_output=scheduler_output)
         if trigger is not None:
             self._handle_manual_trigger(trigger)
         self.maybe_print_input_token_ids_once(allow_arm=allow_arm)
@@ -180,7 +205,12 @@ class DfxProcessor:
         logger.debug("[DFX sync] leave stage=sync_dump_pending_or ok=%s", ok)
         return ok
 
-    def sync_for_step(self, *, allow_arm: bool = True) -> None:
+    def sync_for_step(
+        self,
+        *,
+        allow_arm: bool = True,
+        scheduler_output: Any | None = None,
+    ) -> None:
         """Lockstep DFX sync for one engine wave (real step or idle dummy).
 
         ``refresh_config`` uses the per-DP sync group (or local file poll) and
@@ -189,6 +219,9 @@ class DfxProcessor:
         Do not put this inside ``_dummy_run``: ``execute_model`` may already
         sync then call ``_dummy_run``. Never use a cross-DP full-world
         collective for config hot-reload.
+
+        ``scheduler_output`` (optional): lets MRV2 arm ``manual_trigger`` on the
+        first prefill wave before ``prepare_inputs`` populates ``req_states``.
         """
         runner = self.runner
         dp = getattr(runner, "dp_rank", "?")
@@ -204,16 +237,18 @@ class DfxProcessor:
             tp,
             pp,
         )
+        self._scheduler_output_for_step = scheduler_output
         try:
             dumper = getattr(self, "dumper", None)
             if dumper is not None and hasattr(dumper, "advance_wave"):
                 dumper.advance_wave(allow_arm=allow_arm)
-            self.refresh_config(allow_arm=allow_arm)
+            self.refresh_config(allow_arm=allow_arm, scheduler_output=scheduler_output)
             self.sync_dump_pending_or(allow_arm=allow_arm)
             # Idle / early-return finishes never reach check_after_sample; reap
             # finished reqs whose sample-wave FIFO is already drained.
             self._reap_finished_requests()
         finally:
+            self._scheduler_output_for_step = None
             logger.debug(
                 "[DFX sync] leave sync_for_step allow_arm=%s dp=%s tp=%s pp=%s",
                 allow_arm,
@@ -599,16 +634,10 @@ class DfxProcessor:
 
     def _batch_request_io_rows(self) -> list[tuple[str, int]]:
         """``(req_id, req_idx)`` for every request currently in the local batch."""
-        runner = self.runner
-        input_batch = getattr(runner, "input_batch", None)
-        req_ids = getattr(input_batch, "req_ids", None) if input_batch is not None else None
-        if req_ids:
-            return [(str(req_id), idx) for idx, req_id in enumerate(req_ids) if req_id]
-        # Fallback: known requests map (no stable batch index).
-        requests = getattr(runner, "requests", None)
-        if isinstance(requests, dict) and requests:
-            return [(str(req_id), -1) for req_id in requests if req_id]
-        return []
+        return iter_local_request_rows(
+            self.runner,
+            getattr(self, "_scheduler_output_for_step", None),
+        )
 
     def _get_detector_tokenizer(self) -> Any | None:
         """Tokenizer for detectors that need encode/decode (not gated on report flags)."""

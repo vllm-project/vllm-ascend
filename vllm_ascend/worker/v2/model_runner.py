@@ -212,7 +212,10 @@ class NPUModelRunner(GPUModelRunner):
             get_tp_group().rank_in_group,
             get_pp_group().is_last_rank,
         )
-        self.dfx.sync_for_step(allow_arm=not dummy_run)
+        self.dfx.sync_for_step(
+            allow_arm=not dummy_run,
+            scheduler_output=scheduler_output,
+        )
         # start/finalize wrap the forward path; sample_tokens runs afterwards.
         self.dfx.start_dump_data()
         try:
