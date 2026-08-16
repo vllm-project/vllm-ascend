@@ -50,7 +50,7 @@ def _prepare_pcp_inputs_to_capture(
     _block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    skip_attn: bool = False,
+    full_cudagraph: bool,
     *,
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
@@ -60,17 +60,15 @@ def _prepare_pcp_inputs_to_capture(
     input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
-    attn_metadata = None
-    if not skip_attn:
-        attn_metadata = model_state.prepare_attn(
-            input_batch,
-            CUDAGraphMode.NONE,
-            input_block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture=True,
-        )
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=full_cudagraph,
+    )
     return cudagraph_utils.AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
