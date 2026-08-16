@@ -43,8 +43,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         self,
         attn_metadata: M,
     ) -> torch.Tensor:
-        assert attn_metadata.full_slot_mapping is not None
-        return attn_metadata.full_slot_mapping
+        assert attn_metadata.pcp_slot_mapping is not None
+        return attn_metadata.pcp_slot_mapping
 
     def exec_kv(
         self,
