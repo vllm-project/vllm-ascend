@@ -41,7 +41,7 @@ test_cases:
       - "--long-prefill-token-threshold"
       - "2048"
       - "--max-num-seqs"
-      - "16"
+      - "64"
       - "--distributed-executor-backend"
       - "mp"
       - "--reasoning-parser"
