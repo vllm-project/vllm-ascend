@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad):
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     """Wrap build_attn_metadata to forward MLA rotary positions for the block.
 
     MLA reads positions inside build_decode_metadata for cos/sin; the flat
@@ -56,6 +56,7 @@ def build_draft_attn_metadata_factory(positions, pad):
 
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
+        kwargs["is_prefilling"] = is_prefilling
         return raw(*args, **kwargs)
 
     try:
@@ -335,7 +336,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_query_per_req: int = 1,
         causal: bool = True,
     ) -> dict[str, Any] | None:
-        with build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded):
+        assert self.input_batch is not None
+        with build_draft_attn_metadata_factory(
+            self.input_buffers.positions,
+            num_tokens_padded,
+            torch.from_numpy(self.input_batch.is_prefilling_np),
+        ):
             attn_metadata = super()._build_draft_attn_metadata(
                 num_reqs,
                 num_reqs_padded,
@@ -371,6 +377,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         return draft_attn_metadatas
 
     def _ascend_update_seq_lens(self, attn_metadata: dict[str, Any] | None) -> None:
+        if self.attn_architecture == "DSA":
+            return
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
