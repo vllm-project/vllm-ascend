@@ -36,6 +36,7 @@ COMPAT_HIDDEN_SIZE = 2048
 COMPAT_INTERMEDIATE_SIZE = 2816
 GRAPH_COMPAT_NUM_TOKENS = 64
 GRAPH_COMPAT_NUM_EXPERTS = 16
+REAL_CAPACITY_NUM_TOKENS = 24972
 
 
 @pytest.fixture(autouse=True)
@@ -383,6 +384,80 @@ def test_grouped_matmul_swiglu_quant_v2_a8w8_matches_compat(expert_counts):
         hidden_states=hidden_states,
         weights=[weight],
         weight_scales=[weight_scale],
+        token_scales=token_scales,
+        groups=groups,
+        group_list_type=0,
+    )
+
+    torch.testing.assert_close(output.cpu(), compat_output.cpu(), atol=0, rtol=0)
+    torch.testing.assert_close(output_scale.cpu(), compat_scale.cpu(), atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_grouped_matmul_swiglu_quant_v2_a8w8_real_capacity_matches_compat():
+    """Large prefill buffers must keep the compatibility path's rounding."""
+    torch.manual_seed(29)
+    hidden_states = torch.randint(
+        -128,
+        127,
+        (REAL_CAPACITY_NUM_TOKENS, COMPAT_HIDDEN_SIZE),
+        dtype=torch.int8,
+        device="npu",
+    )
+    weights_cpu = torch.randint(
+        -128,
+        127,
+        (GRAPH_COMPAT_NUM_EXPERTS, COMPAT_HIDDEN_SIZE, COMPAT_INTERMEDIATE_SIZE),
+        dtype=torch.int8,
+    )
+    compat_weight = torch_npu.npu_format_cast(weights_cpu.npu(), 29)
+    weights = [torch_npu.npu_format_cast(weight.npu(), 29) for weight in weights_cpu]
+    weight_scales_cpu = (
+        torch.rand(
+            GRAPH_COMPAT_NUM_EXPERTS,
+            COMPAT_INTERMEDIATE_SIZE,
+            dtype=torch.float32,
+        )
+        * 0.02
+        + 0.001
+    )
+    compat_weight_scale = weight_scales_cpu.npu()
+    weight_scales = [scale.npu() for scale in weight_scales_cpu]
+    token_scales = torch.rand(REAL_CAPACITY_NUM_TOKENS, dtype=torch.float32, device="npu") * 0.02 + 0.001
+    groups = torch.tensor(
+        [
+            1568,
+            3100,
+            4704,
+            6376,
+            7832,
+            9380,
+            10928,
+            12468,
+            14060,
+            15604,
+            17156,
+            18608,
+            20148,
+            21660,
+            23280,
+            REAL_CAPACITY_NUM_TOKENS,
+        ],
+        dtype=torch.int64,
+        device="npu",
+    )
+
+    compat_output, compat_scale = _call_a8w8_compat(
+        hidden_states=hidden_states,
+        weight=compat_weight,
+        weight_scale=compat_weight_scale,
+        token_scales=token_scales,
+        groups=groups,
+    )
+    output, output_scale = _call_v2(
+        hidden_states=hidden_states,
+        weights=weights,
+        weight_scales=weight_scales,
         token_scales=token_scales,
         groups=groups,
         group_list_type=0,

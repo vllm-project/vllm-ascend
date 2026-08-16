@@ -501,27 +501,21 @@ public:
             int32_t eventIdVToS = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
             SetFlag<HardEvent::V_S>(eventIdVToS);
             WaitFlag<HardEvent::V_S>(eventIdVToS);
-            for (uint32_t i = 0; i < proDimsx; i++) {
-                float quantScale = tmpUbF32Gate.GetValue(i) / QUANT_SCALE_INT8;
-                scaleOut.SetValue(i, quantScale);
-            }
             int32_t eventIdSToV = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
             SetFlag<HardEvent::S_V>(eventIdSToV);
+            for (uint32_t i = 0; i < proDimsx; i++) {
+                WaitFlag<HardEvent::S_V>(eventIdSToV);
+                float quantScale = tmpUbF32Gate.GetValue(i) / QUANT_SCALE_INT8;
+                scaleOut.SetValue(i, quantScale);
+                quantScale = 1.0f / quantScale;
+                SetFlag<HardEvent::S_V>(eventIdSToV);
+                WaitFlag<HardEvent::S_V>(eventIdSToV);
+                Muls(swigluOutput[i * tilingData_->ubFactorDimy],
+                    swigluOutput[i * tilingData_->ubFactorDimy], quantScale,
+                    tilingData_->ubFactorDimy);
+                SetFlag<HardEvent::S_V>(eventIdSToV);
+            }
             WaitFlag<HardEvent::S_V>(eventIdSToV);
-
-            int64_t blockCount = (proDimsx + BLOCK_ELEM - 1) / BLOCK_ELEM;
-            Brcb(outLocal, scaleOut, blockCount, {1, 8});
-            PipeBarrier<PIPE_V>();
-
-            SetMaskCount();
-            SetVectorMask<float, MaskMode::COUNTER>(tilingData_->ubFactorDimy);
-            Copy<float, false>(tmpUbF32Gate, outLocal, AscendC::MASK_PLACEHOLDER, proDimsx,
-                {1, 0, static_cast<uint16_t>(tilingData_->ubFactorDimy / BLOCK_ELEM), 1});
-            SetMaskNorm();
-            ResetMask();
-            PipeBarrier<PIPE_V>();
-
-            Div(swigluOutput, swigluOutput, tmpUbF32Gate, tilingData_->ubFactorDimy * proDimsx);
             PipeBarrier<PIPE_V>();
 
             LocalTensor<half> swigluOutput16 = swigluOutput.template ReinterpretCast<half>();
