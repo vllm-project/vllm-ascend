@@ -1,20 +1,9 @@
-(Worker_TP1 pid=107572) [E56] captured ACL graph entries (FA3 decode num_tokens: [1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 160, 192, 256, 512, 1024, 2048, 4096, 8192])
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=8192 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=4096 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=2048 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=1024 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=512 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=256 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=192 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=160 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=128 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=96 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=64 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=48 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=32 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=16 num_reqs=16 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=8 num_reqs=8 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=4 num_reqs=4 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=2 num_reqs=2 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572)   mode=FULL         num_tokens=1 num_reqs=1 uniform=False FA3_decode=True
-(Worker_TP1 pid=107572) [E56] total entries=18
+(Worker_TP1 pid=110215) [E57] replayed 54 ACL graphs x3; testing eager FIA now
+(Worker_TP2 pid=110216) [E57] replayed 54 ACL graphs x3; testing eager FIA now
+(Worker_TP3 pid=110217) [E57] replayed 54 ACL graphs x3; testing eager FIA now
+(Worker_TP0 pid=110214) [E57] replayed 54 ACL graphs x3; testing eager FIA now
+(Worker_TP3 pid=110217) [E57] eager FIA before/after FA3 replay: match=True, max_abs_diff=0.0
+(Worker_TP2 pid=110216) [E57] eager FIA before/after FA3 replay: match=True, max_abs_diff=0.0
+(Worker_TP3 pid=110217) INFO 08-16 18:44:45 [worker.py:751] Free memory on device (60.6/60.96 GiB) on startup. Desired GPU memory utilization is (0.9, 54.86 GiB). Actual usage: 14.27 GiB for weights, 1.22 GiB for peak activation, 0.48 GiB for non-torch memory, 5.6 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=35595962368` (33.15 GiB) to fit into requested memory, or `--kv-cache-memory=41755236352` (38.89 GiB) to fully utilize NPU free memory. Current KV cache memory: 38.89 GiB. After warmup: torch reserved memory 58.81 GiB, torch allocated memory 58.02 GiB.
+(Worker_TP1 pid=110215) [E57] eager FIA before/after FA3 replay: match=True, max_abs_diff=0.0
+(Worker_TP0 pid=110214) [E57] eager FIA before/after FA3 replay: match=True, max_abs_diff=0.0
