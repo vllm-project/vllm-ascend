@@ -94,7 +94,7 @@ class AscendPCPManager(PCPManager):
                 dtype=local_batch.seq_lens_cpu_upper_bound.dtype,
             )
             seq_lens_cpu_upper_bound[:actual_reqs].copy_(local_batch.seq_lens_cpu_upper_bound[:actual_reqs])
-            local_batch = replace(
+            local_batch = replace(  # type: ignore[call-arg]
                 local_batch,
                 num_reqs_after_padding=graph_num_reqs,
                 num_tokens_after_padding=graph_num_tokens,
