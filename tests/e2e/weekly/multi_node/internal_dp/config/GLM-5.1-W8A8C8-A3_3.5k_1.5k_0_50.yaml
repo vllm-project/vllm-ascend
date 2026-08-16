@@ -92,14 +92,3 @@ benchmarks:
     request_rate: 0
     baseline: 1267.2573
     threshold: 0.97
-  perf_TPOT20:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_in3500_bs400
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
-    max_out_len: 1500
-    batch_size: 8
-    request_rate: 0
-    baseline: 345.13
-    threshold: 0.97

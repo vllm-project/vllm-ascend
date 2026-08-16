@@ -1937,9 +1937,9 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    # vLLM's Hunyuan prompt update adds the image start/end tokens around
-    # this placeholder. Supplying the wrapper here would duplicate it.
-    placeholder = "<｜hy_place▁holder▁no▁102｜>"  # noqa: E501
+    image_token = "<｜hy_place▁holder▁no▁102｜>"
+    # vLLM PR #49691 matches the complete image placeholder.
+    placeholder = f"<｜hy_place▁holder▁no▁100｜>{image_token}<｜hy_place▁holder▁no▁101｜>"
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
@@ -1954,7 +1954,7 @@ PROMPT_CONFIGS = {
         },
     },
     "hunyuan-vl": {
-        "model": "Tencent-Hunyuan/HunyuanOCR",
+        "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
     },

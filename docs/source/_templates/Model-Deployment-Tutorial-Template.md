@@ -81,7 +81,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 ### 4.1 Docker Image Installation
 
-**Example: (Applicable to v0.24.0rc and later versions (MkDocs syntax). For v0.23.0 and earlier versions (Sphinx framework), please refer to the Sphinx official documentation for more syntax details.)**
+**Example: (For MkDocs + Material tab syntax (`=== "label"`) and Sphinx + MyST-Parser tab syntax (`::::{tab-item}`), please refer to the [Syntax Supplement](template-supplement.md#3-tabs).)**
 
 === "A3 series"
 
@@ -111,7 +111,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
-- When multiple hardware series (e.g., A3/A2 series) are involved, the tab markup syntax MUST be used to present them in separate tabs, with tabs ordered by newer hardware series first.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the tab markup syntax MUST be used to present them in separate tabs, with tabs ordered by newer hardware series first;For detailed syntax differences between MkDocs and Sphinx frameworks, see the [Syntax Supplement](template-supplement.md#3-tabs).
 
 **Example:**
 

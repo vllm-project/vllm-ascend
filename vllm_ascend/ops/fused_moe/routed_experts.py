@@ -34,9 +34,9 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
@@ -160,9 +160,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
@@ -231,7 +228,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
         self.dynamic_eplb = False
         self.multi_stage = False
@@ -246,15 +242,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
-
-        if (
-            self.custom_routing_function is None
-            and self.e_score_correction_bias is not None
-            and not vllm_config.model_config.is_deepseek_mla
-        ):
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         try:
@@ -298,7 +285,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         eplb_config = get_ascend_config().eplb_config
 
-        # The upstream FusedMoE factory has already included redundant expert
+        # The upstream FusedMoEFactory factory has already included redundant expert
         # slots in moe_config and allocated RoutedExperts weights accordingly.
         # Ascend's placement builder operates on logical expert IDs, so give it
         # a shallow config view with the logical count.
@@ -453,17 +440,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
 
-        try:
-            _vllm_config = get_current_vllm_config()
-
-            model_config = None if _vllm_config is None else _vllm_config.model_config
-            if model_config is not None and model_config.enable_return_routed_experts:
-                capturer = getattr(self, "_ascend_routed_experts_capturer", None)
-                if capturer is not None:
-                    capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
-        except Exception as e:
-            logger.warning("Failed to capture routed experts: %s", e)
-
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
             num_shared_experts = 0
@@ -530,7 +506,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
         )
         hidden_states = prepare_output.hidden_states
