@@ -39,6 +39,13 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 
 
 class AscendSFACPImpl(AscendSFAImpl):
+    def _get_sfa_kv_slot_mapping(
+        self,
+        attn_metadata: M,
+    ) -> torch.Tensor:
+        assert attn_metadata.full_slot_mapping is not None
+        return attn_metadata.full_slot_mapping
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
