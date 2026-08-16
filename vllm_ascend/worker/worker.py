@@ -76,6 +76,7 @@ from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
+    enable_custom_op,
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
@@ -450,6 +451,10 @@ class NPUWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
         init_device_properties_triton()
+        # Resolve extension availability before Dynamo traces model forwards.
+        # A missing extension is supported through torch-npu fallbacks, but
+        # probing it from inside a full graph raises an import failure.
+        enable_custom_op()
 
         return device
 

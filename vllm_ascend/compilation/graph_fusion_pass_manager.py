@@ -47,11 +47,26 @@ class GraphFusionPassManager:
         self.passes.append(pass_)
 
     def configure(self, config: VllmConfig):
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.utils import (
+            AscendDeviceType,
+            get_ascend_device_type,
+            is_310p,
+        )
 
         # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("fuse_norm_quant", True) and not is_310p():
+        hf_config = config.model_config.hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        mistral_on_a2 = (
+            getattr(text_config, "model_type", None)
+            in {"mistral3", "ministral3", "mistral4"}
+            and get_ascend_device_type() == AscendDeviceType.A2
+        )
+        if (
+            self.ascend_compilation_config.get("fuse_norm_quant", True)
+            and not is_310p()
+            and not mistral_on_a2
+        ):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
             self.passes.append(AddRMSNormQuantFusionPass(config))

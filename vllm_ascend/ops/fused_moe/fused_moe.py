@@ -82,8 +82,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     @property
     def is_internal_router(self) -> bool:
+        return self.gate is not None
+
+    def _compute_router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate = self.gate
-        return gate is not None and hasattr(gate, "weight_fp32")
+        assert gate is not None
+        if hasattr(gate, "weight_fp32"):
+            return F.linear(hidden_states.float(), gate.weight_fp32)
+        router_logits, _ = gate(hidden_states)
+        return router_logits
 
     @property
     def use_dp_chunking(self) -> bool:
@@ -190,21 +197,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
             if self.ascend_shared_experts is None:
+                # Fused shared experts remove the standalone shared-expert
+                # wrapper, but the runner can still own the router gate.
+                if self.is_internal_router:
+                    router_logits = self._compute_router_logits(hidden_states)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
             if self.is_internal_router:
-                gate = self.gate
-                assert gate is not None
-                # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
-                # increase with extra hidden states. We also assume that all gate
-                # linear is unquantized so that we the weight is pre-casted in
-                # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                hidden_states_fp32 = hidden_states.float()
                 before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                router_logits = self._compute_router_logits(hidden_states)
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()
