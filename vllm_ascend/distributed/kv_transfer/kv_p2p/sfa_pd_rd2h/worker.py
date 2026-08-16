@@ -721,10 +721,16 @@ class SFAPDRD2HProducerWorker:
         layer_group_indices = set(self.layer_metadata[resolved_layer_name].tensor_group_idx)
         if self._has_memfabric_pull_target(connector_metadata, layer_idx, layer_group_indices):
             self.kv_send_layer_thread.mark_layer_pending(layer_idx)
-        # Fresh compute-stream event right after the scatter; it supersedes the
-        # layer-end wait_event in the send thread.
-        self.kv_send_layer_thread.record_p_save_event(layer_idx)
-        self._enqueue_layer_send(resolved_layer_name, layer_idx, connector_metadata)
+        # Fresh compute-stream event right after the scatter, carried by the
+        # task: dispatching pre-attention puts two steps in flight, and a
+        # layer-keyed lookup cannot tell one step's event from the other's.
+        save_event = self.kv_send_layer_thread.record_p_save_event(layer_idx)
+        self._enqueue_layer_send(
+            resolved_layer_name,
+            layer_idx,
+            connector_metadata,
+            wait_event=save_event,
+        )
 
     def save_kv_layer(
         self,
@@ -757,22 +763,11 @@ class SFAPDRD2HProducerWorker:
         layer_group_indices = set(self.layer_metadata[resolved_layer_name].tensor_group_idx)
         if self._has_memfabric_pull_target(connector_metadata, layer_idx, layer_group_indices):
             send_thread.mark_layer_pending(layer_idx)
-        # Fallback path (attention hook did not fire for this layer): record
-        # scatter completion now and pick the reshape/event to wait on.
-        send_thread.record_p_save_event(layer_idx)
-        layer_attn_metadata = None
-        if self.use_mla and hasattr(attn_metadata, "__getitem__"):
-            try:
-                layer_attn_metadata = attn_metadata[resolved_layer_name]
-            except Exception:
-                layer_attn_metadata = None
-        if layer_attn_metadata is not None and hasattr(layer_attn_metadata, "reshape_cache_event"):
-            wait_event = layer_attn_metadata.reshape_cache_event
-        elif hasattr(attn_metadata, "reshape_cache_event"):
-            wait_event = attn_metadata.reshape_cache_event
-        else:
-            wait_event = torch.npu.Event()
-            wait_event.record()
+        # Fallback path (attention hook did not fire for this layer). Recorded
+        # at layer end, so it already covers this layer's scatter, and carried
+        # by the task: the attn metadata's reshape event is shared across
+        # layers and steps and cannot identify this dispatch.
+        wait_event = send_thread.record_p_save_event(layer_idx)
         self._enqueue_layer_send(resolved_layer_name, layer_idx, connector_metadata, wait_event=wait_event)
         self.current_layer += 1
 
