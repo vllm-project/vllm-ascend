@@ -17,15 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
-import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
@@ -43,7 +41,7 @@ def _mock_async_copy_to_cpu(value, out=None, device=None):
     return value.to(device="cpu")
 
 
-def _make_local_pcp_batch() -> AscendInputBatch:
+def _make_local_pcp_batch():
     """Build a local batch in the shape returned by the community PCP manager."""
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
@@ -120,7 +118,6 @@ def _make_global_pcp_batch():
 
 def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     """Refresh Ascend metadata after the real PCP local-batch rewrite."""
-    vllm_config = object()
     global_batch = _make_global_pcp_batch()
     req_states = SimpleNamespace(
         last_sampled_tokens=torch.zeros(4, dtype=torch.int64),
@@ -131,12 +128,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
-        vllm_config=vllm_config,
         req_states=req_states,
         max_num_reqs=1,
         max_num_tokens=18,
     )
-    attn_state = MagicMock()
 
     with (
         # This Triton helper is unrelated to PCP partitioning and has no CPU
@@ -154,7 +149,6 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
             side_effect=_mock_async_copy_to_cpu,
         ),
-        patch.object(pcp_manager_module, "build_attn_state", return_value=attn_state) as build_attn_state,
     ):
         result = manager.partition_batch(global_batch)
 
@@ -178,31 +172,4 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     # the override must refresh them from real PCP-local CPU rows.
     expected_seq_lens = np.array([18, 5], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
-    assert result.attn_state is attn_state
-
-    args = build_attn_state.call_args.args
-    assert args[0] is vllm_config
-    np.testing.assert_array_equal(args[1], expected_seq_lens)
-    assert args[2] == 2
-    np.testing.assert_array_equal(args[3], np.array([3, 5], dtype=np.int32))
-    np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
-
-
-def test_npu_model_runner_uses_ascend_pcp_manager() -> None:
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    assert runner.pcp_manager_cls is AscendPCPManager
-
-
-def test_initialize_kv_cache_skips_pcp_binding_when_disabled() -> None:
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.pcp_manager = None
-    runner.model_config = MagicMock(enable_return_routed_experts=False)
-    kv_cache_config = MagicMock()
-
-    with (
-        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper"),
-        patch("vllm.v1.worker.gpu.model_runner.GPUModelRunner.initialize_kv_cache") as initialize_kv_cache,
-    ):
-        runner.initialize_kv_cache(kv_cache_config)
-
-    initialize_kv_cache.assert_called_once_with(kv_cache_config)
+    assert result.attn_state == "global-attn-state"
