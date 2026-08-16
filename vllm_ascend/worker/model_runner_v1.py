@@ -409,36 +409,77 @@ def _e53_test_fresh_taskgroup():
 
 def _e55_test_replay_corrupts_taskgroup():
     """E55: does FA3 decode graph REPLAY (not capture) corrupt the CANN
-    task-group machinery?  Replays every captured FA3 decode graph (batch
-    descriptor ``uniform=True``) to execute the FA3 kernel — including its
-    UNCONDITIONAL FFTS cross-core sync — then runs the E53 fresh task-group
-    test.
+    task-group machinery?
+
+    Captures a small FA3 (flash_attn_with_kvcache) decode graph — using the
+    same scheduler_metadata + kvcache layout as the production decode path —
+    replays it N times to execute the FA3 kernel (incl. its UNCONDITIONAL FFTS
+    cross-core sync), then runs the E53 fresh task-group test.
+
+    NOTE: do NOT detect decode graphs via ``batch_descriptor.uniform`` — in
+    FULL graph mode ``patch_cudagraph`` forces ``uniform=False`` for every
+    batch, so that signal is a no-op (this is also why E31/E54 were no-ops).
+    This diagnostic instead builds its OWN FA3 decode graph, independent of the
+    vllm capture session, isolating "FA3 kernel REPLAY" as the variable.
 
     Interpretation (given E53-alone is match=True):
       * E55 match=False  -> FA3 REPLAY corrupts the task-group machinery
         (device-side FFTS / C2C flag residue) -> fix at the replay boundary.
       * E55 match=True   -> FA3 replay does not corrupt a FRESH task-group;
-        the corruption is then data-level (memory aliasing between FA3 buffers
-        and CANN prefill workspace/output) or specific to the prefill graph's
-        own params/handles.
+        corruption is then session-scoped (vllm capture session) or data-level.
 
     Set VLLM_ASCEND_DEBUG_E55=1 (VLLM_ASCEND_DEBUG_E55_REPLAYS=3 default).
     """
-    from vllm_ascend.compilation.acl_graph import _acl_graph_wrappers
+    from flash_attn_npu_v3 import flash_attn_with_kvcache as fa3_kvcache
+    from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
 
     n_replay = int(os.environ.get("VLLM_ASCEND_DEBUG_E55_REPLAYS", "3"))
-    replayed = 0
-    for wrapper in list(_acl_graph_wrappers):
-        for entry in list(wrapper.concrete_aclgraph_entries.values()):
-            if entry.aclgraph is None:
-                continue
-            if not bool(getattr(entry.batch_descriptor, "uniform", False)):
-                continue
-            for _ in range(n_replay):
-                entry.aclgraph.replay()
-                replayed += 1
-    torch.npu.synchronize()
-    print(f"[E55] replayed FA3 decode graphs {replayed}x; testing task-group now")
+
+    H, HKV, D = 4, 2, 128
+    block_size = 128
+    kv_seqlen = 128  # one block
+    num_blocks = 8
+    dtype = torch.bfloat16
+    scale = 1.0 / (D ** 0.5)
+
+    with torch.inference_mode():
+        q = torch.randn(1, H, D, dtype=dtype, device="npu")
+        k = torch.randn(num_blocks, block_size, HKV, D, dtype=dtype, device="npu")
+        v = torch.randn_like(k)
+        cache_seqlens = torch.tensor([kv_seqlen], dtype=torch.int32, device="npu")
+        cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device="npu")
+        page_table = torch.arange(num_blocks, dtype=torch.int32, device="npu").unsqueeze(0)
+        meta = get_scheduler_metadata(
+            batch_size=1, max_seqlen_q=1, max_seqlen_k=kv_seqlen,
+            num_heads_q=H, num_heads_kv=HKV, headdim=D,
+            cache_seqlens=cache_seqlens, qkv_dtype=dtype,
+            cu_seqlens_q=cu_seqlens_q, page_size=block_size, causal=False,
+        )
+
+        def _run_fa3():
+            return fa3_kvcache(
+                q, k, v,
+                cache_seqlens=cache_seqlens,
+                page_table=page_table,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=1,
+                softmax_scale=scale,
+                causal=False,
+                scheduler_metadata=meta,
+            )
+
+        # Capture an FA3 decode graph (no task-group wrapper, like production).
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            _run_fa3()
+        torch.npu.synchronize()
+
+        # Replay N times — executes the FA3 kernel / FFTS cross-core sync.
+        for _ in range(n_replay):
+            graph.replay()
+        torch.npu.synchronize()
+        print(f"[E55] replayed a FA3 decode graph {n_replay}x; testing task-group now")
+
     _e53_test_fresh_taskgroup()
 
 
