@@ -1441,13 +1441,6 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         return attn_metadata.slot_mapping
 
-    def _get_indexer_cache_slot_mapping(
-        self,
-        _attn_metadata: M,
-        preprocess_slot_mapping: torch.Tensor,
-    ) -> torch.Tensor:
-        return preprocess_slot_mapping
-
     def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:
         """Compose split cache handles into the tuple expected by SFA kernels.
 
@@ -1700,9 +1693,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
-            indexer_cache_slot_mapping = self._get_indexer_cache_slot_mapping(
-                attn_metadata,
-                preprocess_slot_mapping,
+            indexer_cache_slot_mapping = (
+                kv_slot_mapping
+                if self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+                else preprocess_slot_mapping
             )
             self._write_indexer_cache(
                 k_li,

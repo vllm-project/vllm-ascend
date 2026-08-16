@@ -39,13 +39,6 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 
 
 class AscendSFACPImpl(AscendSFAImpl):
-    def _get_indexer_cache_slot_mapping(
-        self,
-        attn_metadata: M,
-        _preprocess_slot_mapping: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._get_sfa_kv_slot_mapping(attn_metadata)
-
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
