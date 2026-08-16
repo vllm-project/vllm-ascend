@@ -407,6 +407,41 @@ def _e53_test_fresh_taskgroup():
               f"max_abs_diff={max_diff}")
 
 
+def _e55_test_replay_corrupts_taskgroup():
+    """E55: does FA3 decode graph REPLAY (not capture) corrupt the CANN
+    task-group machinery?  Replays every captured FA3 decode graph (batch
+    descriptor ``uniform=True``) to execute the FA3 kernel — including its
+    UNCONDITIONAL FFTS cross-core sync — then runs the E53 fresh task-group
+    test.
+
+    Interpretation (given E53-alone is match=True):
+      * E55 match=False  -> FA3 REPLAY corrupts the task-group machinery
+        (device-side FFTS / C2C flag residue) -> fix at the replay boundary.
+      * E55 match=True   -> FA3 replay does not corrupt a FRESH task-group;
+        the corruption is then data-level (memory aliasing between FA3 buffers
+        and CANN prefill workspace/output) or specific to the prefill graph's
+        own params/handles.
+
+    Set VLLM_ASCEND_DEBUG_E55=1 (VLLM_ASCEND_DEBUG_E55_REPLAYS=3 default).
+    """
+    from vllm_ascend.compilation.acl_graph import _acl_graph_wrappers
+
+    n_replay = int(os.environ.get("VLLM_ASCEND_DEBUG_E55_REPLAYS", "3"))
+    replayed = 0
+    for wrapper in list(_acl_graph_wrappers):
+        for entry in list(wrapper.concrete_aclgraph_entries.values()):
+            if entry.aclgraph is None:
+                continue
+            if not bool(getattr(entry.batch_descriptor, "uniform", False)):
+                continue
+            for _ in range(n_replay):
+                entry.aclgraph.replay()
+                replayed += 1
+    torch.npu.synchronize()
+    print(f"[E55] replayed FA3 decode graphs {replayed}x; testing task-group now")
+    _e53_test_fresh_taskgroup()
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -5201,6 +5236,12 @@ class NPUModelRunner(GPUModelRunner):
             # (tests whether the graph_task_group machinery is corrupted
             # globally or only within the vllm capture session).
             _e53_test_fresh_taskgroup()
+        if os.environ.get("VLLM_ASCEND_DEBUG_E55") == "1":
+            # E55: replay the captured FA3 decode graphs (executes the FA3
+            # kernel / FFTS cross-core sync), THEN run the E53 fresh task-group
+            # test.  match=False here (while E53-alone is match=True) proves
+            # the corruption is REPLAY-time, not capture-time.
+            _e55_test_replay_corrupts_taskgroup()
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):
