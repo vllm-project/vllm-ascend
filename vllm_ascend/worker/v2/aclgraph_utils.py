@@ -74,23 +74,6 @@ def _prepare_pcp_inputs_to_capture(
     return cudagraph_utils.AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
-@contextmanager
-def _override_prepare_inputs_to_capture(pcp_manager: Any):
-    if pcp_manager is None:
-        yield
-        return
-
-    upstream_prepare = cudagraph_utils.prepare_inputs_to_capture
-    cudagraph_utils.prepare_inputs_to_capture = partial(
-        _prepare_pcp_inputs_to_capture,
-        pcp_manager=pcp_manager,
-    )
-    try:
-        yield
-    finally:
-        cudagraph_utils.prepare_inputs_to_capture = upstream_prepare
-
-
 def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     """Collect the actual per-graph token counts that will be captured.
 
@@ -204,7 +187,12 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
         pcp_manager = getattr(self.model_runner, "pcp_manager", None)
-        with communicator_switch(), _override_prepare_inputs_to_capture(pcp_manager):
+        if pcp_manager is not None:
+            cudagraph_utils.prepare_inputs_to_capture = partial(
+                _prepare_pcp_inputs_to_capture,
+                pcp_manager=pcp_manager,
+            )
+        with communicator_switch():
             return super().capture(
                 model,
                 model_state,
