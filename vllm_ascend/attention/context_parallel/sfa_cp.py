@@ -38,45 +38,6 @@ from vllm_ascend.utils import (
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-@dataclass
-class AscendSFACPMetadata(AscendSFAMetadata):
-    pcp_slot_mapping: torch.Tensor | None = None
-
-
-class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
-    def __init__(
-        self,
-        kv_cache_spec: AttentionSpec,
-        layer_names: list[str],
-        vllm_config: VllmConfig,
-        device: torch.device,
-        metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
-    ) -> None:
-        super().__init__(
-            kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
-            metadata_cls if metadata_cls is not None else AscendSFACPMetadata,
-            supports_dcp_with_varlen,
-        )
-
-    def _build_with_metadata_view(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        build_metadata: Callable[[], AscendSFAMetadata],
-    ) -> AscendSFAMetadata:
-        pcp_slot_mapping = common_attn_metadata.slot_mapping
-        metadata = super()._build_with_metadata_view(
-            common_attn_metadata,
-            build_metadata,
-        )
-        assert isinstance(metadata, AscendSFACPMetadata)
-        metadata.pcp_slot_mapping = pcp_slot_mapping
-        return metadata
-
-
 class AscendSFACPImpl(AscendSFAImpl):
     def exec_kv(
         self,
@@ -95,11 +56,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         )
 
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-
-    def _get_sfa_kv_slot_mapping(self, attn_metadata: M) -> torch.Tensor:
-        assert isinstance(attn_metadata, AscendSFACPMetadata)
-        assert attn_metadata.pcp_slot_mapping is not None
-        return attn_metadata.pcp_slot_mapping
 
     def _write_indexer_cache(
         self,
@@ -1354,7 +1310,7 @@ def resolve_sfa_metadata_builder() -> type[AscendSFAMetadataBuilder]:
     return AscendSFAMetadataBuilder
 
 
-def resolve_sfa_impl() -> type[AscendSFAImpl]:
+def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
     """Resolve one SFA implementation from the two independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
@@ -1364,4 +1320,9 @@ def resolve_sfa_impl() -> type[AscendSFAImpl]:
         return AscendSFADSACPImpl
     if dcp_enabled:
         return AscendSFADCPImpl
+    if (
+        vllm_config is not None
+        and vllm_config.parallel_config.prefill_context_parallel_size > 1
+    ):
+        return AscendSFACPImpl
     return AscendSFAImpl
