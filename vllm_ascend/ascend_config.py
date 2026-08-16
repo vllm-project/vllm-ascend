@@ -108,9 +108,6 @@ class AscendConfig:
         )
         from vllm_ascend.utils import enable_sp
 
-        if self.enable_shared_expert_dp:
-            assert enable_sp(vllm_config=vllm_config, enable_shared_expert_dp=True)
-
         if vllm_config.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vllm_config):
             tp_pcp_size = (
                 vllm_config.parallel_config.tensor_parallel_size

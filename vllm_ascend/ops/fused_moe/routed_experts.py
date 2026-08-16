@@ -228,7 +228,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
         self.dynamic_eplb = False
         self.multi_stage = False
@@ -243,15 +242,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
-
-        if (
-            self.custom_routing_function is None
-            and self.e_score_correction_bias is not None
-            and not vllm_config.model_config.is_deepseek_mla
-        ):
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         try:
@@ -516,7 +506,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
         )
         hidden_states = prepare_output.hidden_states
