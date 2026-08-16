@@ -3818,7 +3818,11 @@ class NPUModelRunner(GPUModelRunner):
                 raise NotImplementedError(
                     "create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it"
                 )
-            self.attn_state = AscendAttentionState.DecodeOnly
+            self.attn_state = (
+                AscendAttentionState.DecodeOnly
+                if uniform_decode
+                else AscendAttentionState.ChunkedPrefill
+            )
             if self.speculative_config and self.speculative_config.method == "mtp":
                 # `AscendAttentionState.SpecDecoding` is only designed for mla
                 if self.vllm_config.model_config.use_mla:
