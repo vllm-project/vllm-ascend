@@ -128,7 +128,6 @@ The following features and optimizations are planned for deprecation in a future
 
 ### Documentation
 
-- Added Kimi-K3 deployment guides for A2 and A3, corrected its openEuler image tag, and refreshed the deployment configuration. [#12953](https://github.com/vllm-project/vllm-ascend/pull/12953)† [#13037](https://github.com/vllm-project/vllm-ascend/pull/13037)† [#13143](https://github.com/vllm-project/vllm-ascend/pull/13143)†
 - Refreshed Ascend 950 DeepSeek-V3.1/V3.2 and GLM-5.2 deployment guidance. [#12937](https://github.com/vllm-project/vllm-ascend/pull/12937)† [#13043](https://github.com/vllm-project/vllm-ascend/pull/13043)†
 
 ### Known Issues
