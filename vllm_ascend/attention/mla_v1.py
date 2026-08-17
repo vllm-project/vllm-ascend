@@ -260,7 +260,29 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         max_num_reqs = scheduler_config.max_num_seqs
         num_mtp_draft_slots = max(self.decode_threshold - 2, 0) * max_num_reqs
-        self._max_pad_num_reqs = max_num_reqs
+        disable_padded_drafter_batch = (
+            self.speculative_config is not None
+            and self.speculative_config.disable_padded_drafter_batch
+        )
+        capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+        if isinstance(capture_sizes, list) and capture_sizes:
+            capture_sizes = sorted(capture_sizes)
+            max_graph_input_size = (
+                max_num_reqs
+                if disable_padded_drafter_batch
+                else max_num_reqs * self.decode_threshold
+            )
+            max_graph_pad_size = next(
+                (size for size in capture_sizes if size >= max_graph_input_size),
+                capture_sizes[-1],
+            )
+        else:
+            max_graph_pad_size = max_num_reqs * self.decode_threshold
+        self._max_pad_num_reqs = (
+            max_graph_pad_size
+            if disable_padded_drafter_batch
+            else max_graph_pad_size // self.decode_threshold
+        )
         self._max_pad_num_tokens = scheduler_config.max_num_batched_tokens + num_mtp_draft_slots
         self._pad_buffers: dict[str, torch.Tensor] = {}
 
@@ -294,6 +316,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         max_size: int,
         pad_value: int,
     ) -> torch.Tensor:
+        assert target_size <= max_size, (
+            f"Padding target size {target_size} exceeds "
+            f"the {key} buffer capacity {max_size}"
+        )
         buffer = self._pad_buffers.get(key)
         if buffer is None:
             buffer = tensor.new_empty((max_size,) + tensor.shape[1:])
