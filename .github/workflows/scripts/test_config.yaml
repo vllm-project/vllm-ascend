@@ -74,7 +74,7 @@
   tests:
     - tests/ut/attention/
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/half_card/test_qwen3_5_0_8b.py
 
 - name: attention_gqa
   optional: false
@@ -335,7 +335,7 @@
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/half_card/test_minicpm.py
+    - tests/e2e/pull_request/one_card/test_minicpm.py
 
 - name: ops_moe
   optional: false
@@ -344,7 +344,7 @@
     - vllm_ascend/ops/fused_moe
     - vllm_ascend/ops/mla.py
   tests:
-    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/half_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
@@ -427,7 +427,7 @@
     - tests/ut/patch
     - tests/ut/test_compressed_prefix_cache.py
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/half_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py
 
 - name: patch_mamba_utils_310p
@@ -564,7 +564,7 @@
     - vllm_ascend/spec_decode/utils.py
     - vllm_ascend/models/qwen3_dspark.py
   tests:
-    - tests/e2e/pull_request/half_card/spec_decode/test_dynamic.py
+    - tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py
 
 - name: spec_decode_extract_hidden_states
   optional: false
@@ -599,7 +599,7 @@
   tests:
     - tests/ut/worker
     - tests/e2e/pull_request/quarter_card/test_qwen3_embedding_0_6b.py
-    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/half_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/half_card/test_qwen3_8b_w8a8.py
     - tests/e2e/pull_request/one_card/pooling
     - tests/e2e/pull_request/half_card/pooling
@@ -703,7 +703,7 @@
     - tests/ut/test_utils.py
     - tests/ut/test_platform.py
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/half_card/test_qwen3_5_0_8b.py
 
 # === Features ===
 - name: quantization_gqa_mla_c8
@@ -782,7 +782,7 @@ estimated_times:
   tests/e2e/pull_request/half_card/spec_decode/test_dflash.py: 390
   tests/e2e/pull_request/half_card/spec_decode/test_dspark.py: 290
   # Upstream now runs both DSpark and DFlash dynamic cases in this file.
-  tests/e2e/pull_request/half_card/spec_decode/test_dynamic.py: 760
+  tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 760
   tests/e2e/pull_request/half_card/spec_decode/test_draft_parallel.py: 230
   tests/e2e/pull_request/half_card/spec_decode/test_eagle.py: 540
   tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 460
@@ -796,13 +796,13 @@ estimated_times:
   tests/e2e/pull_request/quarter_card/test_cpu_offloading.py: 30
   tests/e2e/pull_request/quarter_card/test_cpu_weight_offload.py: 880
   tests/e2e/pull_request/quarter_card/test_guided_decoding.py: 660
-  tests/e2e/pull_request/half_card/test_minicpm.py: 320
+  tests/e2e/pull_request/one_card/test_minicpm.py: 320
   tests/e2e/pull_request/quarter_card/test_minimax_m3_sparse_attn.py: 440
   tests/e2e/pull_request/quarter_card/test_multi_instance.py: 160
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 340
   tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py: 180
   tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py: 220
-  tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py: 450
+  tests/e2e/pull_request/half_card/test_qwen3_5_0_8b.py: 450
   tests/e2e/pull_request/half_card/test_qwen3_8b_w8a8.py: 430
   tests/e2e/pull_request/quarter_card/test_qwen3_embedding_0_6b.py: 180
   tests/e2e/pull_request/quarter_card/rlhf/state_transitions/test_pause_resume.py: 270

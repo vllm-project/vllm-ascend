@@ -21,6 +21,30 @@ capture 的 SQ/CQ 资源申请失败，因此整文件退回物理整卡。随�
 60 秒。MiniCPM 暂留 1/2 卡，在新软件栈复测；若仍出现相同 SQ/CQ 错误，再按
 整文件规则退回物理整卡。
 
+[Actions run 32017074775](https://github.com/vllm-project/vllm-ascend/actions/runs/32017074775?pr=12171)
+确认 csrc cache 和 9.1.0 安装链路已稳定。Qwen3.5-0.8B 在 1/4 卡已占用
+14.31 GiB 后仍需申请 486 MiB，整文件升到 1/2 卡；MiniCPM-2B 在 9.1.0
+的 1/2 卡仍因 stream 资源耗尽触发 ACL Graph `207005`，整文件退回物理整卡。
+Dynamic DSpark 没有资源不足，但连续两轮在 1/2 卡得到相同的
+acceptance baseline 偏差，而同一用例在上游物理 A2 的 vLLM main 和 v0.26.0
+矩阵均通过；这是 vNPU 执行一致性问题，整文件退回物理整卡。另一个
+1/2 卡 job 在 `apt-get update` 阶段挂起至
+120 分钟超时，未开始测试；安装步骤现设置 30 分钟总超时。
+
+## 待基础设施反馈的安装超时
+
+- Run：[32017074775](https://github.com/vllm-project/vllm-ascend/actions/runs/32017074775?pr=12171)
+- Job：[95350574280](https://github.com/vllm-project/vllm-ascend/actions/runs/32017074775/job/95350574280?pr=12171)
+- Runner：`linux-aarch64-a2b3-v-half-45g6g-runner-jwgpw`（`linux-aarch64-a2b3-v-half`）
+- 阶段：`Install packages` 中的 `apt-get update -y`，测试尚未开始。
+- 内部源：`cache-service.nginx-pypi-cache.svc.cluster.local:8081/ubuntu-ports`。
+- 时间线：2026-08-17 09:59:17 UTC 最后一次输出为拉取 `jammy-updates`
+  包索引，随后约 118 分钟无新输出；11:57:41 UTC 整个 job 的
+  120 分钟超时触发，并报 `Executing the custom container implementation failed`。
+- 待排查：该 runner 到内部 Ubuntu mirror 的连接、mirror 后端响应及 runner
+  容器网络状态；工作流侧仅设置 `Install packages` 的 30 分钟总超时，
+  不额外限制单次 HTTP 连接。
+
 ## 约束与判断口径
 
 - A2B3 整卡按 64 GiB 计算，1/4 卡和 1/2 卡的名义显存分别为 16 GiB、
@@ -37,7 +61,7 @@ capture 的 SQ/CQ 资源申请失败，因此整文件退回物理整卡。随�
 - 表格的“本轮实测结果”只记录本轮 run；“通过（main）”表示该文件在 vLLM main
   矩阵通过。失败项同时核对 v0.26.0 矩阵，确认可复现后再迁移。
 
-## 1/4 卡 E2E（25 个文件）
+## 1/4 卡 E2E（24 个文件）
 
 | 测试文件 | 主要内容 | 静态预测依据 | 本轮实测结果 |
 | --- | --- | --- | --- |
@@ -61,26 +85,24 @@ capture 的 SQ/CQ 资源申请失败，因此整文件退回物理整卡。随�
 | `quarter_card/test_minimax_m3_sparse_attn.py` | MiniMax M3 稀疏 attention | 不加载完整模型，只构造生产形状的 KV/index 合成张量 | 通过（main） |
 | `quarter_card/test_multi_instance.py` | 两个 Qwen3-0.6B 实例 | 两实例合计约 2.4 GiB 权重，单实例显存比例 0.4 | 通过（main） |
 | `quarter_card/test_qwen3_0_6b.py` | Qwen3-0.6B 基础图模式 | 小模型、1024 上下文 | 通过（main） |
-| `quarter_card/test_qwen3_5_0_8b.py` | Qwen3.5-0.8B + MTP | 0.8B 主模型、单 token 草稿、2048 上下文 | 通过（main） |
 | `quarter_card/test_qwen3_embedding_0_6b.py` | Qwen3-Embedding-0.6B | 0.6B pooling，capture size=4 | 通过（main） |
 | `quarter_card/test_sampler.py` | sampler/logprobs | Qwen3-0.6B；虽配置 8192 上下文和 capture 64，权重与 KV 仍预计小于 16 GiB | 通过（main） |
 | `quarter_card/test_simple_cpu_offload.py` | simple CPU offload | Qwen3-0.6B、eager、显存比例 0.5 | 通过（main） |
 | `quarter_card/test_xlite.py` | XLite eager/graph | Qwen3-0.6B、1024 上下文 | 通过（main） |
 
-## 1/2 卡 E2E（12 个文件）
+## 1/2 卡 E2E（11 个文件）
 
 | 测试文件 | 主要内容 | 静态预测依据 | 本轮实测结果 |
 | --- | --- | --- | --- |
 | `half_card/spec_decode/test_dflash.py` | Qwen3-8B DFlash | 约 16 GiB 主权重，加 DFlash、4096 KV、batch 256 和图捕获 | 通过（main） |
 | `half_card/spec_decode/test_draft_parallel.py` | Llama-3.1-8B + PARD-1B | 主模型约 16 GiB、草稿约 2 GiB，加 KV/PIECEWISE Graph | 通过（main） |
 | `half_card/spec_decode/test_dspark.py` | Qwen3-8B DSpark | 8B BF16 主模型、草稿、4096 KV、batch 256 | 通过（main） |
-| `half_card/spec_decode/test_dynamic.py` | Qwen3-8B Dynamic DSpark/DFlash | 上游新增 DFlash 参数并对 draft 侧启用 eager；两类 case 都是 8B BF16 主模型加草稿模型和 FULL Graph |  |
 | `half_card/spec_decode/test_eagle.py` | Qwen3/Qwen3-VL-8B Eagle3 | 文件含 8B 文本和视觉主模型，单次还加载 Eagle3 草稿 | 通过（main） |
 | `half_card/spec_decode/test_mtp_eagle_correctness.py` | DeepSeek MTP smoke | BF16 MoE checkpoint、batch 256、图 capture 20，静态上不适合 16 GiB | 通过（main） |
 | `half_card/spec_decode/test_ngram.py` | Llama-3.1-8B n-gram | 8B BF16 主权重约占满 1/4 卡名义容量 | 通过（main） |
 | `half_card/spec_decode/test_ngram_npu.py` | Llama-3.1-8B NPU n-gram | 8B BF16、batch 256、2048 上下文、PIECEWISE Graph | 通过（main） |
 | `half_card/spec_decode/test_suffix.py` | Llama-3.1-8B suffix decode | 8B BF16 加 suffix cache、KV 和运行时 | 通过（main） |
-| `half_card/test_minicpm.py` | MiniCPM 0.5B/2B | 最大 case 的图捕获峰值超过仅按权重估算的 1/4 卡预算；9.0.1 下 2B case 出现旧栈 SQ/CQ 错误，升级 9.1.0 后待复测 |  |
+| `half_card/test_qwen3_5_0_8b.py` | Qwen3.5-0.8B + MTP | 1/4 卡上已占用 14.31 GiB 后仍需申请 486 MiB，峰值明确超过 15 GiB 可用容量 |  |
 | `half_card/test_qwen3_8b_w8a8.py` | Qwen3-8B W8A8 + Eagle3 | 约 8 GiB 主权重，加草稿、4096 KV 与 FULL Graph，1/4 卡余量不足 | 通过（main） |
 | `half_card/test_vlm.py` | 7B/8B 视觉、音频、Whisper | 文件由 7B/8B BF16 多模态模型决定，需为编码器、KV 和图保留空间 | 通过（main） |
 
@@ -139,6 +161,8 @@ MLA 投影矩阵及初始化临时副本放入 1/2 卡，`test_attention_v1_prec
 | `one_card/test_multistream_overlap_shared_expert.py` | 半卡并非 OOM，而是 HCCL `hcclGetRootInfo` error code 19（main、v0.26.0）；该用例需要物理设备的 HCCL 语义。 |
 | `one_card/lora/test_qwen3_reranker_lora.py` | 1/2 卡复测仍在 ACL Graph capture 报 `Alloc sq cq fail`；这是 vNPU SQ/CQ 资源限制，不是增加显存即可解决，退回物理整卡。 |
 | `one_card/test_batch_job_aware_scheduler_e2e.py` | 1/2 卡中 4 个参数有 3 个在 ACL Graph capture 报 `Alloc sq cq fail`；按整文件迁移规则退回物理整卡。 |
+| `one_card/test_minicpm.py` | 9.1.0 的 1/2 卡仍在 MiniCPM-2B 图捕获阶段报 `EE1023`/`207005`：创建 stream 过多，属于 vNPU stream 资源限制。 |
+| `one_card/spec_decode/test_dynamic.py` | 物理 A2 在上游 #13819 的 vLLM main 和 v0.26.0 矩阵均通过 DSpark/DFlash；1/2 卡 vNPU 连续两轮得到相同 DSpark acceptance 偏差，功能/数值等价性未建立，因此退回物理整卡。 |
 
 310P 专用、A3、多卡 HCCL 测试保持原 runner，不参与本次 A2B3 vNPU 容量采样。
 
@@ -157,6 +181,6 @@ runner。
 - `run_selected_tests.sh` 对每个文件单独调用 pytest。某个文件失败时记录状态和
   日志并继续执行同一分桶内剩余文件；全部文件结束后统一打印汇总，并以首个非零
   状态退出，确保既收集完整结果又不掩盖失败。
-- 最新估时中 dynamic 文件因新增 DSpark、DFlash 两个参数按 760 秒计；1/2 卡由
-  5 桶收敛为 4 桶（最长约 1290 秒），1/4 卡保持 6 桶（最长约 1440 秒），使两类
-  job 的理论结束时间接近，同时少占用 0.5 张物理卡的切分容量。
+- Dynamic 文件退回物理整卡后，1/2 卡剩余文件采用 3 桶，负载为
+  1360/1400/1340 秒；1/4 卡继续使用 6 桶，负载为
+  1310/1390/1370/1300/1370/1360 秒。两类最长桶仅相差 10 秒，使用 3/6 桶。
