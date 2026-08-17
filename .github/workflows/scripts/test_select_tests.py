@@ -479,22 +479,29 @@ def test_virtual_npu_partition_counts():
         ),
     ]
     groups = {
-        (1, select_tests.NpuType.A2_HALF): [f"half-{i}.py" for i in range(2)],
-        (1, select_tests.NpuType.A2_QUARTER): [f"quarter-{i}.py" for i in range(4)],
+        (1, select_tests.NpuType.A2_HALF): [f"half-{i}.py" for i in range(4)],
+        (1, select_tests.NpuType.A2_QUARTER): [f"quarter-{i}.py" for i in range(6)],
     }
 
     resolved = select_tests._resolve_to_runners(
         groups,
         runners,
-        partition_config={"a2_half_x1": 2, "a2_quarter_x1": 4},
+        partition_config={"a2_half_x1": 4, "a2_quarter_x1": 6},
     )
 
     half_groups = [group for group in resolved if group["npu_type"] == "a2_half"]
     quarter_groups = [group for group in resolved if group["npu_type"] == "a2_quarter"]
-    assert len(half_groups) == 2
-    assert len(quarter_groups) == 4
-    assert {group["partition"] for group in half_groups} == {"1-2", "2-2"}
-    assert {group["partition"] for group in quarter_groups} == {"1-4", "2-4", "3-4", "4-4"}
+    assert len(half_groups) == 4
+    assert len(quarter_groups) == 6
+    assert {group["partition"] for group in half_groups} == {"1-4", "2-4", "3-4", "4-4"}
+    assert {group["partition"] for group in quarter_groups} == {
+        "1-6",
+        "2-6",
+        "3-6",
+        "4-6",
+        "5-6",
+        "6-6",
+    }
     assert {group["csrc_cache_target"] for group in resolved} == {"a2-arm64-ubuntu"}
 
 

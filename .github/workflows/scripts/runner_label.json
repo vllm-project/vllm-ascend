@@ -49,13 +49,13 @@
     "linux-aarch64-a2b3-v-half": {
         "chip": "a2_half",
         "npu_num": 1,
-        "image_tag": "9.0.1-910b-ubuntu22.04-py3.12",
+        "image_tag": "9.1.0-910b-ubuntu22.04-py3.12",
         "csrc_cache_target": "a2-arm64-ubuntu"
     },
     "linux-aarch64-a2b3-v-quarter": {
         "chip": "a2_quarter",
         "npu_num": 1,
-        "image_tag": "9.0.1-910b-ubuntu22.04-py3.12",
+        "image_tag": "9.1.0-910b-ubuntu22.04-py3.12",
         "csrc_cache_target": "a2-arm64-ubuntu"
     },
     "linux-aarch64-a2b3-2": {

@@ -205,10 +205,27 @@ jobs:
           # Restore fail-on-cache-miss to true after the transition period.
           fail-on-cache-miss: false
 
+      - name: Retry vNPU csrc cache restore
+        id: cache-csrc-retry
+        if: >-
+          ${{
+            (matrix.group.npu_type == 'a2_half' || matrix.group.npu_type == 'a2_quarter') &&
+            steps.cache-csrc.outputs.cache-hit != 'true'
+          }}
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          fail-on-cache-miss: false
+
       - name: Verify required vNPU csrc cache
         if: ${{ matrix.group.npu_type == 'a2_half' || matrix.group.npu_type == 'a2_quarter' }}
         env:
-          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit == 'true' || steps.cache-csrc-retry.outputs.cache-hit == 'true' }}
         run: |
           if [ "$CSRC_CACHE_HIT" != "true" ]; then
             echo "::error::vNPU runners require the CPU-built A2 csrc cache."
@@ -240,7 +257,7 @@ jobs:
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
-          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit == 'true' || steps.cache-csrc-retry.outputs.cache-hit == 'true' }}
         run: |
           REQUIRE_PREBUILT_CSRC_CACHE=false
           case "${{ matrix.group.npu_type }}" in
