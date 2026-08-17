@@ -50,8 +50,6 @@ on:
           - releases/v0.20.2rc
           - releases/v0.18.0
           - none
-          - ws_test
-          - ws_test_swr2
       vllm_commit:
         description: 'vLLM commit hash (must be paired with vllm_ascend_commit; mutually exclusive with tag/branch). Image will be pushed only to QUAY_TEMP_USERNAME.'
         required: false
@@ -115,24 +113,24 @@ jobs:
           - name: A2 openeuler
             dockerfile: Dockerfile.openEuler
             suffix: 'openeuler'
-          # - name: A3 Ubuntu
-          #   dockerfile: Dockerfile.a3
-          #   suffix: 'a3'
-          # - name: A3 openEuler
-          #   dockerfile: Dockerfile.a3.openEuler
-          #   suffix: 'a3-openeuler'
-          # - name: 310P Ubuntu
-          #   dockerfile: Dockerfile.310p
-          #   suffix: '310p'
-          # - name: 310P openEuler
-          #   dockerfile: Dockerfile.310p.openEuler
-          #   suffix: '310p-openeuler'
-          # - name: A5 Ubuntu
-          #   dockerfile: Dockerfile.a5
-          #   suffix: 'a5'
-          # - name: A5 openEuler
-          #   dockerfile: Dockerfile.a5.openEuler
-          #   suffix: 'a5-openeuler'
+          - name: A3 Ubuntu
+            dockerfile: Dockerfile.a3
+            suffix: 'a3'
+          - name: A3 openEuler
+            dockerfile: Dockerfile.a3.openEuler
+            suffix: 'a3-openeuler'
+          - name: 310P Ubuntu
+            dockerfile: Dockerfile.310p
+            suffix: '310p'
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
+          - name: A5 Ubuntu
+            dockerfile: Dockerfile.a5
+            suffix: 'a5'
+          - name: A5 openEuler
+            dockerfile: Dockerfile.a5.openEuler
+            suffix: 'a5-openeuler'
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
@@ -143,12 +141,9 @@ jobs:
       quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
       quay_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_USERNAME || vars.QUAY_USERNAME }}
       quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
-      # swr_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
-      # swr_temp_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
       # ====================================================================
       
-      # should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
-      should_push: true
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
       schedule_tag_pattern: 'main'
@@ -172,8 +167,8 @@ jobs:
     secrets:
       quay_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_PASSWORD || secrets.QUAY_PASSWORD }}
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
-      swr_username: ${{ secrets.SWR_USERNAME }}
-      swr_password: ${{ secrets.SWR_PASSWORD }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
   image_build_by_commit:
     name: ${{ matrix.build_meta.name }} (commit mode)
@@ -186,37 +181,36 @@ jobs:
       max-parallel: 6
       matrix:
         build_meta:
-          # - name: A2 Ubuntu
-          #   dockerfile: Dockerfile
-          #   suffix: ''
-          # - name: A2 openeuler
-          #   dockerfile: Dockerfile.openEuler
-          #   suffix: 'openeuler'
-          # - name: A3 Ubuntu
-          #   dockerfile: Dockerfile.a3
-          #   suffix: 'a3'
+          - name: A2 Ubuntu
+            dockerfile: Dockerfile
+            suffix: ''
+          - name: A2 openeuler
+            dockerfile: Dockerfile.openEuler
+            suffix: 'openeuler'
+          - name: A3 Ubuntu
+            dockerfile: Dockerfile.a3
+            suffix: 'a3'
           - name: A3 openEuler
             dockerfile: Dockerfile.a3.openEuler
             suffix: 'a3-openeuler'
-          # - name: 310P Ubuntu
-          #   dockerfile: Dockerfile.310p
-          #   suffix: '310p'
-          # - name: 310P openEuler
-          #   dockerfile: Dockerfile.310p.openEuler
-          #   suffix: '310p-openeuler'
-          # - name: A5 Ubuntu
-          #   dockerfile: Dockerfile.a5
-          #   suffix: 'a5'
-          # - name: A5 openEuler
-          #   dockerfile: Dockerfile.a5.openEuler
-          #   suffix: 'a5-openeuler'
+          - name: 310P Ubuntu
+            dockerfile: Dockerfile.310p
+            suffix: '310p'
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
+          - name: A5 Ubuntu
+            dockerfile: Dockerfile.a5
+            suffix: 'a5'
+          - name: A5 openEuler
+            dockerfile: Dockerfile.a5.openEuler
+            suffix: 'a5-openeuler'
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
-      # quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
-      # quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
-      quay_temp_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
+      quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
+      quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
       should_push: true
       temp_only: true
       vllm_commit: ${{ inputs.vllm_commit }}
@@ -242,5 +236,5 @@ jobs:
 
     secrets:
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
-      swr_username: ${{ secrets.SWR_USERNAME }}
-      swr_password: ${{ secrets.SWR_PASSWORD }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}

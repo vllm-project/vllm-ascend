@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: 'quay.io/atlas-ci/vllm-atlas-temp'    
+      swr_temp_repo:
+        description: 'swr repository for temp images'
+        required: false
+        type: string
+        default: 'swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test' 
       suffix:
         description: 'The tag subfix to use'
         required: true
@@ -134,11 +139,11 @@ on:
         QUAY_TEMP_PASSWORD:
             description: 'Quay password for pushing temp tag digests'
             required: false
-        swr_username:
-            description: 'SWR username for pulling CANN base images'
+        SWR_USERNAME:
+            description: 'SWR username for pulling and pushing CANN base images'
             required: false
-        swr_password:
-            description: 'SWR password for pulling CANN base images'
+        SWR_PASSWORD:
+            description: 'SWR password for pulling and pushing CANN base images'
             required: false
 
 defaults:
@@ -165,10 +170,8 @@ jobs:
     strategy:
       matrix:
         runner_info:
-          - {runner: linux-aarch64-cpu-4-buildkit-gy006, arch: arm64, tag: arm64}
-          - {runner: linux-amd64-cpu-4-buildkit-gy006, arch: amd64, tag: amd64}
-          # - {runner: linux-aarch64-cpu-4, arch: arm64, tag: arm64}
-          # - {runner: linux-amd64-cpu-4, arch: amd64, tag: amd64}
+          - {runner: linux-aarch64-cpu-4-buildkit-gy006, tag: arm64}
+          - {runner: linux-amd64-cpu-4-buildkit-gy006, tag: amd64}
 
     steps:
 
@@ -242,35 +245,6 @@ jobs:
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
-
-    # - name: Free up disk space
-    #   uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-    #   with:
-    #     tool-cache: true
-    #     docker-images: false
-
-    # - name: Publish - Login to Quay Temp (for pushing temp tag digest)
-    #   if: ${{ inputs.should_push }}
-    #   uses: docker/login-action@v4
-    #   with:
-    #     registry: quay.io
-    #     username: ${{ inputs.QUAY_TEMP_USERNAME }}
-    #     password: ${{ secrets.QUAY_TEMP_PASSWORD }}
-
-    # runner  linux-amd64-cpu-4-buildkit-gy006 目前不支持 此步骤
-    # - name: Set up Docker Buildx
-    #   uses: docker/setup-buildx-action@v4
-    #   with:
-    #     install: true
-    #     driver: docker-container
-    #     use: true
-    #TODO SWR需要这个步骤吗？
-    # - name: Login to GitHub Container Registry (for cache)
-    #   uses: docker/login-action@v4
-    #   with:
-    #     registry: ghcr.io
-    #     username: ${{ github.actor }}
-    #     password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Compute cache tag
       id: cache-tag
@@ -354,8 +328,8 @@ jobs:
       uses: docker/login-action@v4
       with:
         registry: swr.cn-southwest-2.myhuaweicloud.com
-        username: ${{ secrets.swr_username }}
-        password: ${{ secrets.swr_password }}
+        username: ${{ secrets.SWR_USERNAME }}
+        password: ${{ secrets.SWR_PASSWORD }}
 
     - name: Build and push
       uses: docker/build-push-action@v7
@@ -366,9 +340,7 @@ jobs:
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
-        # tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ inputs.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
-        # TODO: outputs: type=image,name=${QUAY_TEMP_REPO},push-by-digest=true,name-canonical=true,push=... ：以 digest 形式推送到 temp 仓库（不直接打 tag）
-        outputs: type=image,name=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test,push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
+        outputs: type=image,name=${{ inputs.swr_temp_repo }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
@@ -380,7 +352,7 @@ jobs:
           ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
           GIT_PROXY=https://gh-proxy.test.osinfra.cn/
           SOC_VERSION=${{ steps.vars.outputs.soc_version }}
-          COMPILE_CUSTOM_KERNELS=0
+          COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           VLLM_COMMIT=${{ inputs.vllm_commit }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
@@ -396,37 +368,8 @@ jobs:
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
         # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
-        # push地址 tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ inputs.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
-        # cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
-        # cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
-        cache-from: type=registry,ref=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:${{ steps.cache-tag.outputs.value }}
-        cache-to: ${{ inputs.should_push && format('type=registry,ref=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test:{0},mode=max', steps.cache-tag.outputs.value) || '' }}
-
-    # Quay.io automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
-    # Add temporary tags to digests to prevent them from being removed.
-    # - name: Tag digest to prevent GC
-    #   if: ${{ inputs.should_push }}
-    #   run: |
-    #     SUFFIX=""
-    #     if [ -n "${{ inputs.suffix }}" ]; then
-    #       SUFFIX="-${{ inputs.suffix }}"
-    #     fi
-    #     if [ "${{ inputs.temp_only }}" = "true" ]; then
-    #       VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
-    #       ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-    #       TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
-    #     else
-    #       TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
-    #       if [ "${{ inputs.build_type }}" = "daily" ]; then
-    #         DATE=$(date +'%Y%m%d')
-    #         TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
-    #       fi
-    #     fi
-    #     echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
-    #     docker buildx imagetools create \
-    #       -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
-    #       "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
-
+        cache-from: type=registry,ref=${{ inputs.swr_temp_repo }}:${{ steps.cache-tag.outputs.value }}
+        cache-to: ${{ inputs.should_push && format('type=registry,ref=${{ inputs.swr_temp_repo }}:{0},mode=max', steps.cache-tag.outputs.value) || '' }}
 
     - name: Export digest
       run: |
@@ -503,7 +446,7 @@ jobs:
 
       - name: Create multi-arch manifest
         env:
-          FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
+          FROM_IMAGE: ${{ inputs.swr_temp_repo }}
           TO_IMAGE: ${{ env.QUAY_TEMP_REPO }}
           DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile' }}
           SHA: ${{ github.sha }}
@@ -516,138 +459,6 @@ jobs:
           docker buildx imagetools create \
             -t "$TAG" \
             $DIGESTS
-
-      # - name: Prepare suffix
-      #   id: suffix
-      #   run: |
-      #     # Prepend '-' to suffix so Docker metadata action can append it directly
-      #     # to the tag (e.g. suffix=310p-openeuler → SUFFIX=-310p-openeuler,
-      #     # resulting in tags like main-310p-openeuler).
-      #     # Leave SUFFIX empty when no suffix is provided (plain tags like main).
-      #     if [ -n "${{ inputs.suffix }}" ]; then
-      #       echo "SUFFIX=-${{ inputs.suffix }}" >> $GITHUB_ENV
-      #     else
-      #       echo "SUFFIX=" >> $GITHUB_ENV
-      #     fi
-
-      # # ===== New: Generate custom tags for daily scenario =====
-      # - name: Generate daily tags
-      #   id: daily_tags
-      #   if: ${{ inputs.build_type == 'daily' }}
-      #   run: |
-      #     # Get current date in YYYYMMDD format
-      #     DATE=$(date +'%Y%m%d')
-      #     # Get CANN version and convert to lowercase (e.g., 2026.08.03 -> 2026.08.03)
-      #     CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-      #     # Get the base tag pattern (e.g., main)
-      #     PATTERN="${{ inputs.schedule_tag_pattern }}"
-      #     # Get the suffix
-      #     SUFFIX="${{ inputs.suffix }}"
-          
-      #     # Construct the daily tag: nightly-{PATTERN}-{SUFFIX}-cann{VERSION}-{DATE}
-      #     # Example: nightly-main-310p-openeuler-cann2026.08.03-20260729
-      #     if [ -n "$SUFFIX" ]; then
-      #       DAILY_TAG="nightly-${PATTERN}-${SUFFIX}-cann${CANN_VERSION}-${DATE}"
-      #     else
-      #       DAILY_TAG="nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
-      #     fi
-          
-      #     echo "Generated daily tag: $DAILY_TAG"
-      #     echo "daily_tag=$DAILY_TAG" >> $GITHUB_OUTPUT
-      # # =========================================================
-
-      # - name: Docker meta
-      #   id: meta
-      #   uses: docker/metadata-action@v6
-      #   with:
-      #     # TODO(yikun): add more hub image and a note on release policy for container image
-      #     images: |
-      #       swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
-      #     # Three trigger scenarios and resulting image tags:
-      #     # https://github.com/marketplace/actions/docker-metadata-action#typeref
-      #     #
-      #     # 1. Push tag (on: push tags: v*) → type=pep440
-      #     #    Only pep440-compliant tags are published:
-      #     #    - v0.16.0rc1       --> vllm-ascend:v0.16.0rc1[-suffix]
-      #     #    Non-pep440 tags are ignored.
-      #     #
-      #     # 2. Schedule (on: schedule) → type=schedule,pattern=main
-      #     #    Triggered by cron, always produces a fixed tag:
-      #     #    - (any schedule run) --> vllm-ascend:main[-suffix]
-      #     #
-      #     # 3. Manual (on: workflow_dispatch) → type=raw,value=inputs.workflow_dispatch_tag
-      #     #    Tag is determined by the user-selected input at dispatch time:
-      #     #    - inputs.tag=main       --> vllm-ascend:main[-suffix]
-      #     #    - inputs.tag=v0.16.0rc1 --> vllm-ascend:v0.16.0rc1[-suffix]
-      #     tags: |
-      #       # In daily mode, only the CANN-versioned daily tag is published; the pep440,
-      #       # schedule and workflow_dispatch_tag rules would emit bare/plain tags
-      #       # (e.g. main-310p, nightly-main-310p) without date info, so they are disabled
-      #       # for daily builds only.
-      #       type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
-      #       type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
-      #       type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' && inputs.build_type != 'daily' }},suffix=${{ env.SUFFIX }}
-      #       type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
-            
-      #       # ===== New: Daily scenario specific tags =====
-      #       type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' }}
-      #       # =============================================
-      #     flavor:
-      #       latest=false
-
-      # - name: Login to Quay
-      #   uses: docker/login-action@v4
-      #   with:
-      #     registry: quay.io
-      #     username: ${{ inputs.QUAY_TEMP_USERNAME }}
-      #     password: ${{ secrets.QUAY_TEMP_PASSWORD }}
-
-      # - name: Set up Docker Buildx
-      #   uses: docker/setup-buildx-action@v4
-
-      # - name: Merge and push multi-arch image
-      #   env:
-      #     IMAGE: ${{ env.QUAY_TEMP_REPO }}
-      #     TAGS: ${{ steps.meta.outputs.tags }}
-      #     BUILD_TYPE: ${{ inputs.build_type }}
-      #     SCHEDULE_TAG_PATTERN: ${{ inputs.schedule_tag_pattern }}
-      #     SUFFIX: ${{ env.SUFFIX }}
-      #   run: |
-      #     DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
-
-      #     echo "Digests: $DIGESTS"
-      #     echo "Current tags:"
-      #     echo "$TAGS"
-
-      #     # For daily builds, skip the plain schedule tag (e.g. nightly-main-310p-openeuler)
-      #     # because it's redundant with the daily tag that includes CANN version + date
-      #     UNWANTED_TAG="nightly-${SCHEDULE_TAG_PATTERN}${SUFFIX}"
-
-      #     for tag in $TAGS; do
-      #       if [ "$BUILD_TYPE" = "daily" ] && [ "$tag" = "${{ env.QUAY_REPO }}:${UNWANTED_TAG}" ]; then
-      #         echo "Skipping unwanted schedule tag: $tag"
-      #         continue
-      #       fi
-      #       echo "Creating tag $tag"
-      #       docker buildx imagetools create \
-      #         -t "$tag" \
-      #         $DIGESTS
-      #     done
-
-      # - name: Clean up temp tags
-      #   if: ${{ inputs.build_type == 'daily' }}
-      #   run: |
-      #     apt-get update -qq && apt-get install -y -qq skopeo
-      #     SUFFIX=""
-      #     if [ -n "${{ inputs.suffix }}" ]; then
-      #       SUFFIX="-${{ inputs.suffix }}"
-      #     fi
-      #     DATE=$(date +'%Y%m%d')
-      #     for arch in amd64 arm64; do
-      #       TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${arch}-${DATE}-temp"
-      #       skopeo delete --creds "${{ inputs.QUAY_TEMP_USERNAME }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
-      #         "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
-      #     done
 
   merge-image-temp:
     name: merge-image-temp
@@ -673,8 +484,8 @@ jobs:
         uses: docker/login-action@v4
         with:
           registry: swr.cn-southwest-2.myhuaweicloud.com
-          username: ${{ secrets.swr_username }}
-          password: ${{ secrets.swr_password }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
       - name: Login to Quay
         uses: docker/login-action@v4
@@ -686,54 +497,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
+      - name: Create multi-arch manifest
         env:
-          FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
+          FROM_IMAGE: ${{ inputs.swr_temp_repo }}
           TO_IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile' }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          SUFFIX=""
-          if [ -n "${{ inputs.suffix }}" ]; then
-            SUFFIX="-${{ inputs.suffix }}"
-          fi
-          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
-          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="${TO_IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
+          TAG="${TO_IMAGE}:${DOCKERFILE}-${SHA}"
           DIGESTS=$(printf "$FROM_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
           echo "Digests: $DIGESTS"
           echo "Creating multi-arch manifest tag: $TAG"
           docker buildx imagetools create \
             -t "$TAG" \
             $DIGESTS
-
-          # ===== Daily scenario: also push daily tag =====
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            DATE=$(date +'%Y%m%d')
-            CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-            PATTERN="${{ inputs.schedule_tag_pattern }}"
-            if [ -n "${{ inputs.suffix }}" ]; then
-              DAILY_TAG="${TO_IMAGE}:nightly-${PATTERN}-${{ inputs.suffix }}-cann${CANN_VERSION}-${DATE}"
-            else
-              DAILY_TAG="${TO_IMAGE}:nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
-            fi
-            echo "Creating daily tag: $DAILY_TAG"
-            docker buildx imagetools create \
-              -t "$DAILY_TAG" \
-              $DIGESTS
-          fi
-
-      - name: Clean up temp tags
-        if: ${{ inputs.build_type == 'daily' }}
-        run: |
-          apt-get update -qq && apt-get install -y -qq skopeo
-          SUFFIX=""
-          if [ -n "${{ inputs.suffix }}" ]; then
-            SUFFIX="-${{ inputs.suffix }}"
-          fi
-          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
-          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          for arch in amd64 arm64; do
-            TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${arch}-temp"
-            skopeo delete --creds "${{ inputs.QUAY_TEMP_USERNAME }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
-              "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
-          done
