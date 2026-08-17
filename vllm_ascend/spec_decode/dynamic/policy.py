@@ -44,6 +44,7 @@ class HardwareAwarePrefixPolicy:
         self._best_total_tokens: int | None = None
         self._last_num_reqs: int | None = None
         self._last_num_draft_tokens: int | None = None
+        self._last_min_total_tokens: int | None = None
         self.last_goodput: float | None = None
 
         # The profile is tiny, so keeping the lookup on device avoids a CPU
@@ -59,7 +60,12 @@ class HardwareAwarePrefixPolicy:
     def _lookup_latency(self, token_counts: torch.Tensor) -> torch.Tensor:
         return self._latency_ms[token_counts.clamp(min=1, max=self._latency_ms.numel() - 1)]
 
-    def allocate(self, survival: torch.Tensor) -> torch.Tensor:
+    def allocate(
+        self,
+        survival: torch.Tensor,
+        *,
+        min_total_tokens: int = 0,
+    ) -> torch.Tensor:
         num_reqs, num_draft_tokens = survival.shape
         if num_reqs == 0:
             return torch.empty((0,), dtype=torch.int32, device=survival.device)
@@ -69,6 +75,8 @@ class HardwareAwarePrefixPolicy:
                 f"got {num_draft_tokens}"
             )
 
+        min_total_tokens = max(int(min_total_tokens), 0)
+
         # Batch-level dynamic-K may temporarily use a smaller physical width.
         # Recompute the hardware optimum for that width instead of reusing a
         # budget computed for a different candidate set.
@@ -76,9 +84,14 @@ class HardwareAwarePrefixPolicy:
             self._best_total_tokens = None
             self._last_num_draft_tokens = num_draft_tokens
 
+        max_total = num_reqs * num_draft_tokens
+        min_total_tokens = min(min_total_tokens, max_total)
+        if self._last_min_total_tokens != min_total_tokens:
+            self._best_total_tokens = None
+            self._last_min_total_tokens = min_total_tokens
+
         self._steps += 1
         mandatory = min(self.min_k, num_draft_tokens)
-        max_total = num_reqs * num_draft_tokens
         base_total = num_reqs * mandatory
 
         # Recompute the global optimum periodically.  Confidence still drives
@@ -130,11 +143,19 @@ class HardwareAwarePrefixPolicy:
                     ((num_reqs + (survival[:, :mandatory].sum() if mandatory else 0.0))
                      / self.cost_model.latency(max(1, base_total)))
                 )
-            self._best_total_tokens = max(base_total, min(best_total, max_total))
+            self._best_total_tokens = max(
+                base_total,
+                min_total_tokens,
+                min(best_total, max_total),
+            )
             self._last_num_reqs = num_reqs
 
         selected_total = self._best_total_tokens
         assert selected_total is not None
+        selected_total = max(
+            selected_total,
+            min_total_tokens,
+        )
         extra = selected_total - base_total
         lengths = torch.full(
             (num_reqs,), mandatory, dtype=torch.int32, device=survival.device
