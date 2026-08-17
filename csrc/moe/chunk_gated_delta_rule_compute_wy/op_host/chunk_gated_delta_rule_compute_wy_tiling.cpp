@@ -15,10 +15,12 @@ static constexpr size_t DIM_H = 2;
 static constexpr size_t DIM_D = 3;
 
 static constexpr int64_t FIXED_CHUNK = 64;
+// 310P dav_m200 UB is 192KB. At K=V=64, InitBuffer is ~154KB; K=V=128 overflows (~242KB).
+static constexpr int64_t MAX_HEAD_DIM = 64;
 static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
-// Per-core GM staging for Cube inputs: A_half(64*128) + B_half(64*128).
-static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
-static constexpr uint32_t STAGING_B_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
+// Per-core GM staging for Cube inputs: A_half(64*MAX_HEAD_DIM) + B_half(64*MAX_HEAD_DIM).
+static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);
+static constexpr uint32_t STAGING_B_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);
 static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES;
 
 static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, int64_t n, int64_t k, bool bTranspose,
@@ -79,7 +81,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     if ((kdim % 16) != 0 || (vdim % 16) != 0) {
         return ge::GRAPH_FAILED;
     }
-    if (kdim > 128 || vdim > 128) {
+    if (kdim > MAX_HEAD_DIM || vdim > MAX_HEAD_DIM) {
         return ge::GRAPH_FAILED;
     }
     if (b > 32 || hv > 64) {
