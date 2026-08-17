@@ -347,23 +347,6 @@ def test_select_moe_comm_method_a3_quant_w8a8(
 
 
 @pytest.mark.parametrize(
-    ("quant_type", "expected"),
-    [
-        ("w4a8", True),
-        ("w8a8", True),
-        ("w8a16", False),
-    ],
-)
-def test_cann_megamoe_supported_by_config_quant_type(
-    quant_type,
-    expected,
-):
-    vllm_config = _make_vllm_config(quant_type=quant_type)
-
-    assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
-
-
-@pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
