@@ -13,8 +13,9 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
+from vllm.distributed.parallel_state import _groups
 
-from vllm_ascend.ops.triton.sfa_cp import sfa_dcp_a2a_fused_combine
+import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
 
 
 def _legacy_all_to_all(
@@ -142,6 +143,16 @@ def main() -> None:
     dist.init_process_group("hccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    group_name = "sfa-dcp-a2a-benchmark"
+    benchmark_group = type(
+        "BenchmarkGroup",
+        (),
+        {
+            "world_size": world_size,
+            "device_group": dist.group.WORLD,
+        },
+    )()
+    _groups[group_name] = lambda: benchmark_group
     scatter_dim = 0 if args.scatter_tokens else 1
     scatter_size = args.tokens if scatter_dim == 0 else args.heads
     if scatter_size % world_size:
@@ -163,12 +174,12 @@ def main() -> None:
         device=device,
     )
     baseline_eager = lambda: _legacy_two_a2a_merge(output, lse, scatter_dim, dist.group.WORLD)
-    candidate_eager = lambda: sfa_dcp_a2a_fused_combine(
+    candidate_eager = lambda: torch.ops.vllm.sfa_dcp_a2a_fused(
         output,
         lse,
         world_size,
         scatter_dim,
-        dist.group.WORLD,
+        group_name,
     )
 
     expected = baseline_eager()
@@ -236,6 +247,7 @@ def main() -> None:
     result["wall_relative_improvement"] = 1.0 - candidate_median / baseline_median
 
     del captured_graphs
+    _groups.pop(group_name)
     dist.destroy_process_group()
     if rank == 0:
         print(json.dumps(result, indent=2, sort_keys=True))

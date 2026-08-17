@@ -104,10 +104,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Whether to use the fused SFA DCP output post-processing path.
-    # 1: stride-aware pack + one HCCL All2All + fused LSE combine.
-    # 0: two HCCL All2All calls + the original PyTorch LSE combine.
-    "VLLM_ASCEND_ENABLE_SFA_DCP_FUSED_A2A": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_SFA_DCP_FUSED_A2A", "1"))),
 }
 
 # end-env-vars-definition

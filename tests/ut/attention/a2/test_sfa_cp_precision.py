@@ -162,51 +162,29 @@ def test_sfa_dcp_torch_output_merge_handles_invalid_lse() -> None:
     torch.testing.assert_close(dsa_actual, torch.tensor([[[3.0]], [[7.0]]]))
 
 
-@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
-def test_sfa_dcp_routes_native_output_merge_to_fused_a2a(fused_combine) -> None:
+@patch("torch.ops.vllm.sfa_dcp_a2a_fused")
+def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
     impl = _make_impl(rank=1)
-    device_group = object()
-    impl.dcp_group = SimpleNamespace(device_group=device_group)
+    impl.dcp_group = SimpleNamespace(unique_name="dcp:0")
     output = torch.empty(3, 4, 8)
     lse = torch.empty(3, 4, 1, dtype=torch.float32)
     expected = torch.empty(3, 2, 8)
-    fused_combine.return_value = expected
+    fused_a2a.return_value = expected
 
     actual = impl._merge_dcp_outputs(output, lse)
 
     assert actual is expected
-    fused_combine.assert_called_once_with(output, lse, 2, 1, device_group)
+    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0")
 
 
-@patch("vllm_ascend.attention.context_parallel.sfa_cp.AscendSFADCPImpl._all_to_all_dcp_tensor")
-@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
-def test_sfa_dcp_can_route_output_merge_to_original_torch(fused_combine, all_to_all, monkeypatch) -> None:
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_SFA_DCP_FUSED_A2A", "0")
+@patch("torch.ops.vllm.sfa_dcp_a2a_fused")
+def test_sfa_dsa_dcp_routes_token_scatter_to_custom_op(fused_a2a) -> None:
     impl = _make_impl(rank=1)
-    impl.dcp_group = SimpleNamespace(device_group=object())
-    output = torch.empty(3, 4, 8)
-    lse = torch.empty(3, 4, 1, dtype=torch.float32)
-    output_recv = torch.randn(2, 3, 2, 8)
-    lse_recv = torch.randn(2, 3, 2, 1)
-    all_to_all.side_effect = [output_recv, lse_recv]
-
-    actual = impl._merge_dcp_outputs(output, lse)
-
-    expected = impl._merge_dcp_outputs_with_torch(output_recv, lse_recv.squeeze(-1), token_dim=2)
-    torch.testing.assert_close(actual, expected)
-    assert all_to_all.call_count == 2
-    fused_combine.assert_not_called()
-
-
-@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
-def test_sfa_dsa_dcp_routes_token_scatter_to_fused_a2a(fused_combine) -> None:
-    impl = _make_impl(rank=1)
-    device_group = object()
-    impl.dcp_group = SimpleNamespace(device_group=device_group)
+    impl.dcp_group = SimpleNamespace(unique_name="dcp:0")
     output = torch.empty(4, 2, 8)
     lse = torch.empty(4, 2, 1, dtype=torch.float32)
     expected = torch.empty(2, 2, 8)
-    fused_combine.return_value = expected
+    fused_a2a.return_value = expected
     dsa_cp_context = SimpleNamespace(
         num_tokens_pad=4,
         local_start=2,
@@ -216,4 +194,4 @@ def test_sfa_dsa_dcp_routes_token_scatter_to_fused_a2a(fused_combine) -> None:
     actual = impl._merge_dcp_outputs(output, lse, dsa_cp_context)
 
     assert actual is expected
-    fused_combine.assert_called_once_with(output, lse, 2, 0, device_group)
+    fused_a2a.assert_called_once_with(output, lse, 2, 0, "dcp:0")
