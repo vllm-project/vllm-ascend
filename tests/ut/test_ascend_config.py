@@ -921,8 +921,11 @@ class TestUpstreamConfigCompatibility(TestBase):
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(supported))
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(unsupported))
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_profile):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="hierarchy",
@@ -932,15 +935,18 @@ class TestUpstreamConfigCompatibility(TestBase):
         with self.assertRaisesRegex(ValueError, "supports at most 512 experts"):
             config._validate_mc2_comm_alg(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_mc2_hierarchy_comm_rejects_unsupported_device(self, mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_mc2_hierarchy_comm_rejects_unsupported_device(self, _mock_profile):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="hierarchy",
         )
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 1))
 
-        with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
+        with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
             config._validate_mc2_comm_alg(vllm_config)
 
 

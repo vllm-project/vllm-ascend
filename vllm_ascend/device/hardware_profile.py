@@ -23,6 +23,7 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_FUSION = auto()
     IRQ_CPU_RESERVATION = auto()
     LORA_CUSTOM_OPS = auto()
+    MC2_HIERARCHY_COMM = auto()
     NPUGRAPH_EX = auto()
     RC_DEVICE_DISCOVERY = auto()
     REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
@@ -100,6 +101,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
+        HardwareCapability.MC2_HIERARCHY_COMM,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,

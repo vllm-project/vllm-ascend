@@ -535,22 +535,22 @@ class AscendConfig:
         return self
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        if self.mc2_comm_alg == "fullmesh_v2":
+            from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-        device_type = get_ascend_device_type()
-
-        if self.mc2_comm_alg == "fullmesh_v2" and device_type != AscendDeviceType.A3:
-            raise NotImplementedError(
-                f"mc2_comm_alg == 'fullmesh_v2' is only supported on A3, but got {device_type.name}."
-            )
+            device_type = get_ascend_device_type()
+            if device_type != AscendDeviceType.A3:
+                raise NotImplementedError(
+                    f"mc2_comm_alg == 'fullmesh_v2' is only supported on A3, but got {device_type.name}."
+                )
 
         if self.mc2_comm_alg != "hierarchy":
             return
 
-        if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
-            raise NotImplementedError(
-                f"mc2_comm_alg == 'hierarchy' is only supported on A2 and A3, but got {device_type.name}."
-            )
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+        if not get_current_hardware_profile().supports(HardwareCapability.MC2_HIERARCHY_COMM):
+            raise NotImplementedError("mc2_comm_alg == 'hierarchy' is not supported by the current hardware profile.")
 
         num_logical_experts = vllm_config.model_config.get_num_experts()
         num_redundant_experts = self.eplb_config.num_redundant_experts if self.eplb_config.dynamic_eplb else 0
