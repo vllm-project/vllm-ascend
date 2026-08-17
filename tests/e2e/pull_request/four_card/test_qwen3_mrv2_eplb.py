@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
-from tests.e2e.model_utils import check_outputs_equal
+from vllm_ascend.distributed.eplb.async_worker import ASYNC_EPLB_CYCLE_COMMITTED_LOG
 
 MODEL = os.environ.get("QWEN3_MRV2_EPLB_MODEL_PATH", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 PROMPTS = [
@@ -21,40 +21,79 @@ PROMPTS = [
     "The opposite of hot is",
     "The first month of the year is",
 ]
+EXPECTED_ANSWER_PREFIXES = [
+    ("Paris",),
+    ("Jupiter",),
+    ("32 degrees Fahrenheit", "0 degrees Celsius"),
+    ("Jane Austen",),
+    ("Au",),
+    ("12",),
+    ("cold",),
+    ("January",),
+]
 
 
-def _run_dp2_tp2(*, enable_eplb: bool):
+def _assert_expected_answers(outputs, name: str) -> None:
+    assert len(outputs) == len(PROMPTS) == len(EXPECTED_ANSWER_PREFIXES)
+    for prompt_idx, (prompt, (_, output_text), expected_prefixes) in enumerate(
+        zip(PROMPTS, outputs, EXPECTED_ANSWER_PREFIXES)
+    ):
+        assert output_text.startswith(prompt), (
+            f"{name} returned text that does not start with its prompt for "
+            f"prompt {prompt_idx}: expected prefix {prompt!r}, got {output_text!r}"
+        )
+        completion = output_text[len(prompt) :].lstrip()
+        matching_prefix = next(
+            (prefix for prefix in expected_prefixes if completion.startswith(prefix)),
+            None,
+        )
+        assert matching_prefix is not None, (
+            f"{name} produced an incorrect answer for prompt {prompt_idx}: "
+            f"expected the completion to start with one of {expected_prefixes!r}, "
+            f"got {completion!r}"
+        )
+        suffix = completion[len(matching_prefix) :]
+        assert not suffix or not (suffix[0].isalnum() or suffix[0] == "_"), (
+            f"{name} only matched an answer as part of a longer word for "
+            f"prompt {prompt_idx}: matched {matching_prefix!r}, got {completion!r}"
+        )
+
+
+def _run_dp2_tp2():
     runner_kwargs: dict[str, Any] = {
         "data_parallel_size": 2,
         "tensor_parallel_size": 2,
         "enable_expert_parallel": True,
-        "max_model_len": 1024,
-        "max_num_seqs": 4,
-        "max_num_batched_tokens": 1024,
-        "enforce_eager": True,
+        "max_model_len": 2048,
+        "max_num_seqs": 8,
+        "max_num_batched_tokens": 2048,
+        "compilation_config": {"cudagraph_mode": "FULL_AND_PIECEWISE"},
         "quantization": "ascend",
         "distributed_executor_backend": "mp",
-        "async_scheduling": False,
+        "async_scheduling": True,
         "gpu_memory_utilization": 0.7,
         "block_size": 128,
+        "enable_prefix_caching": False,
         "dp_start_timeout": 1800,
         "dp_request_timeout": 1800,
     }
-    if enable_eplb:
-        runner_kwargs.update(
-            {
-                "enable_eplb": True,
+    runner_kwargs.update(
+        {
+            "enable_eplb": True,
+            "eplb_config": {
+                "window_size": 2,
+                "step_interval": 2,
+                "num_redundant_experts": 4,
+                "log_balancedness": False,
+                "use_async": True,
+            },
+            "additional_config": {
                 "eplb_config": {
-                    "window_size": 2,
-                    "step_interval": 2,
-                    "num_redundant_experts": 16,
-                    "log_balancedness": True,
-                    "log_balancedness_interval": 1,
-                    "use_async": False,
-                },
-                "additional_config": {"eplb_config": {"load_collection_phase": "prefill"}},
-            }
-        )
+                    "load_collection_phase": "prefill",
+                }
+            },
+        }
+    )
 
     with DPVllmRunner(MODEL, **runner_kwargs) as runner:
         return runner.generate_greedy(PROMPTS, max_tokens=16)
@@ -68,7 +107,7 @@ def _run_dp2_tp2(*, enable_eplb: bool):
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",
-    graph_mode="eager",
+    graph_mode="full_and_piecewise",
 )
 @patch.dict(
     os.environ,
@@ -80,13 +119,8 @@ def _run_dp2_tp2(*, enable_eplb: bool):
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.7, max_wait_seconds=180)
-def test_qwen3_moe_w8a8_dp2_tp2_sync_eplb_accuracy():
-    baseline_outputs = _run_dp2_tp2(enable_eplb=False)
-    eplb_outputs = _run_dp2_tp2(enable_eplb=True)
-
-    check_outputs_equal(
-        outputs_0_lst=eplb_outputs,
-        outputs_1_lst=baseline_outputs,
-        name_0="MRV2 synchronous EPLB",
-        name_1="MRV2 baseline",
-    )
+def test_qwen3_moe_w8a8_dp2_tp2_async_stair_eplb_accuracy(capfd: pytest.CaptureFixture[str]):
+    eplb_outputs = _run_dp2_tp2()
+    _assert_expected_answers(eplb_outputs, "MRV2 asynchronous STAIR EPLB")
+    captured = capfd.readouterr()
+    assert ASYNC_EPLB_CYCLE_COMMITTED_LOG in captured.out + captured.err

@@ -11,7 +11,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
-from vllm_ascend.distributed.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
 def is_eplb_load_collection_phase_matched(
@@ -56,6 +56,22 @@ class AscendEPLBController(EPLBController):
             batch_has_prefill,
         )
 
+    def prepare_forward(
+        self,
+        model_config: Any,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        state = self.state
+        if state is None or not self.parallel_config.enable_eplb:
+            return
+        state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+        if state.should_record_tensor is not None:
+            state.should_record_tensor.fill_(
+                state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
+                and self._load_collection_phase_matched
+            )
+
     def step(
         self,
         is_dummy: bool = False,
@@ -65,23 +81,10 @@ class AscendEPLBController(EPLBController):
         if not self.parallel_config.enable_eplb or self.suppressed or state is None or not self._has_registered_models:
             return
 
-        discard_current_load = not is_profile and not self._load_collection_phase_matched
-        if (
-            not is_dummy
-            and not is_profile
-            and not discard_current_load
-            and not state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
-        ):
-            # Ascend records local GMM counts after every MoE call. Clear
-            # them once per pass while the upstream window is closed.
-            for model_state in state.model_states.values():
-                model_state.expert_load_pass.zero_()
-
-        # Phase selection may change the load submitted by each rank, but all
-        # ranks must advance the EPLB state machine and enter collectives in
-        # the same order. Treat a non-matching batch as an EPLB dummy step and
-        # let the upstream controller preserve the global logging schedule.
-        super().step(is_dummy=is_dummy or discard_current_load, is_profile=is_profile)
+        # prepare_forward() already gates load recording for a non-matching
+        # batch. Keep the step non-dummy so every rank advances the same load
+        # window slot; filtered ranks contribute zeros to that slot.
+        super().step(is_dummy=is_dummy, is_profile=is_profile)
 
     def setup_from_mapping(
         self,
