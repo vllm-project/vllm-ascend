@@ -87,6 +87,29 @@ class DSparkMarkovHead(nn.Module):
         return self.logits_processor(self.markov_w2, markov_embed)
 
 
+class DSparkConfidenceHead(nn.Module):
+    def __init__(self, config: PretrainedConfig, prefix: str) -> None:
+        super().__init__()
+
+        input_dim = config.hidden_size + config.dspark_markov_rank
+
+        self.proj = ReplicatedLinear(
+            input_dim,
+            1,
+            bias=False,
+            return_bias=False,
+            prefix=maybe_prefix(prefix, "proj"),
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        markov_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        features = torch.cat([hidden_states, markov_embed.to(dtype=hidden_states.dtype)], dim=-1)
+        return self.proj(features).squeeze(-1)
+
+
 class DeepseekV4DSparkModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -143,6 +166,7 @@ class DeepseekV4DSparkModel(nn.Module):
             config,
             maybe_prefix(prefix, f"layers.{last_layer_idx}.markov_head"),
         )
+        self.confidence_head = DSparkConfidenceHead(config, maybe_prefix(prefix, "confidence_head"))
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -264,6 +288,13 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         return logits_processor(lm_head, self.norm(hidden_states))
 
+    def compute_confidence(
+        self,
+        hidden_states: torch.Tensor,
+        markov_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.confidence_head(hidden_states, markov_embed)
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
             self,
@@ -346,6 +377,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_bias(markov_embed)
+
+    def confidence_logits(self, hidden_states: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        return self.model.confidence_logits(hidden_states, markov_embed)
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return self.model.get_draft_kv_cache_layer_names()
@@ -461,8 +495,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         stage = int(m.group(1))
         rest = m.group(2)
 
-        if rest.startswith("confidence_head."):
-            return None
+        if stage == self.model.num_dspark_layers - 1 and rest.startswith("confidence_head."):
+            return f"model.{rest}"
 
         if stage == 0 and rest == "embed.weight":
             return "model.embed_tokens.weight"

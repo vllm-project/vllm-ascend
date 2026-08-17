@@ -32,6 +32,9 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
 )
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
+)
 
 
 @dataclass
@@ -542,4 +545,49 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     mock_sparse_attn_decode.assert_called_once()
     mock_sparse_attn_prefill.assert_called_once()
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
+    assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
+
+
+@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
+def test_sparse_attn_decode_npu_forwards_runtime_metadata(
+    mock_sparse_attention_score: MagicMock,
+) -> None:
+    q = torch.zeros(4, 2, 4)
+    kv_cache = torch.zeros(2, 6, 128, 2, 4)
+    topk_idx = torch.tensor(
+        [
+            [[0, 1], [0, -1], [2, 3], [-1, -1]],
+            [[0, 1], [1, -1], [2, 3], [3, -1]],
+        ],
+        dtype=torch.int32,
+    )
+    block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
+    seq_lens = torch.tensor([129, 385], dtype=torch.int32)
+    output = torch.empty_like(q)
+    mock_sparse_attention_score.return_value = torch.ones_like(output)
+
+    minimax_m3_sparse_attn_decode_npu(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        num_kv_heads=2,
+        sm_scale=0.5,
+        output=output,
+        decode_query_len=2,
+        block_size=128,
+    )
+
+    mock_sparse_attention_score.assert_called_once()
+    kwargs = mock_sparse_attention_score.call_args.kwargs
+    assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([2, 2], dtype=torch.int32))
+    assert kwargs["actual_seq_lengths_kv"] is seq_lens
+    assert torch.equal(
+        kwargs["select_num_idx"],
+        torch.tensor([[2, 1, 2, 0], [2, 1, 2, 1]], dtype=torch.int32),
+    )
+    assert kwargs["block_size"] == 128
+    assert kwargs["top_k"] == 2
+    assert torch.equal(output, torch.ones_like(output))
