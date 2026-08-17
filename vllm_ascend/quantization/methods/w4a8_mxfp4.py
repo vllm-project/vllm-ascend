@@ -271,6 +271,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 capturing=getattr(forward_context, "capturing", False),
                 global_redundant_expert_num=global_redundant_expert_num,
             )
+            if mc2_mask is not None:
+                # Include DP padding rows in the diagnostic workload. Together
+                # with the DP-rank offset above, this guarantees identical
+                # physical-rank loads even when only some DP ranks have real
+                # requests; finalize still removes the padded outputs.
+                mc2_mask = torch.ones_like(mc2_mask)
 
         if x.dtype not in [torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(x.dtype)

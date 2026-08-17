@@ -81,6 +81,7 @@ class TestAscendW4A8MXFP4ForcedLoadBalance(TestBase):
         method.dp_group = SimpleNamespace(world_size=1, rank_in_group=0)
 
         topk_weights = torch.full((10, 2), 0.5, dtype=torch.float32)
+        mc2_mask = torch.tensor([True, False, True, False, True, False, True, False, True, False])
         mock_select_experts.return_value = (topk_weights, torch.zeros((10, 2), dtype=torch.int64))
         moe_comm_method = MagicMock()
         moe_comm_method.fused_experts.return_value = torch.ones((10, 16), dtype=torch.bfloat16)
@@ -102,8 +103,10 @@ class TestAscendW4A8MXFP4ForcedLoadBalance(TestBase):
             renormalize=True,
             num_experts=8,
             enable_force_load_balance=True,
+            mc2_mask=mc2_mask,
         )
 
         fused_input = moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
         per_expert_load = torch.bincount(fused_input.topk_ids.flatten(), minlength=8).reshape(4, 2)
         self.assertTrue(torch.equal(per_expert_load, torch.tensor([[3, 2], [3, 2], [3, 2], [3, 2]])))
+        self.assertTrue(torch.equal(fused_input.routing.mc2_mask, torch.ones_like(mc2_mask)))
