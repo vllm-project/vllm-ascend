@@ -1,0 +1,71 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_BUFFSIZE: "1024"
+  HCCL_CONNECT_TIMEOUT: "600"
+  HCCL_EXEC_TIMEOUT: "600"
+  HCCL_ALGO: "level0:fullmesh"
+  OMP_NUM_THREADS: "28"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "32000"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--data-parallel-size"
+  - "2"
+  - "--async-scheduling"
+  - "--enable-expert-parallel"
+  - "--max-num-seqs"
+  - "200"
+  - "--no-enable-prefix-caching"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--speculative_config"
+  - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
+  - "--additional-config"
+  - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}'
+  - "--quantization"
+  - "ascend"
+  - "--trust-remote-code"
+
+
+_benchmarks_perf2: &benchmarks_perf
+  acc:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_in131072_bs100_deepseek
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1024
+    batch_size: 8
+    request_rate: 0
+    baseline: 350.897
+    threshold: 0.95
+    temperature: 0
+    ignore_eos: True
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "DeepSeek_V31_W4A4C8_A5_Mix_16K1K_perf_test_01"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/vllm-ascend/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks_perf
