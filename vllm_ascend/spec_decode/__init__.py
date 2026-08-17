@@ -30,6 +30,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.suffix_proposer_npu import AscendSuffixProposerNPU
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -39,6 +40,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendNgramProposerNPU(vllm_config, device, runner)
     elif method == "suffix":
         return AscendSuffixDecodingProposer(vllm_config, runner)
+    elif method == "suffix_gpu":
+        return AscendSuffixProposerNPU(vllm_config, device, runner)
     elif method == "medusa":
         return AscendMedusaProposer(vllm_config, device)
     elif method == "dspark":
