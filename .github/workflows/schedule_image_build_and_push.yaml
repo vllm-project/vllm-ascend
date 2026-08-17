@@ -142,8 +142,8 @@ jobs:
       quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
       quay_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_USERNAME || vars.QUAY_USERNAME }}
       quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
-      # quay_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
-      # quay_temp_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
+      swr_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
+      swr_temp_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
       # ====================================================================
       
       # should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
