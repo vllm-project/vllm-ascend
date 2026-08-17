@@ -74,7 +74,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of `enable_flashcomm1`; it improves performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
-| `enable_sleep_mode_extra_cleanup`   | bool | `False` | Enables extra sleep-mode cleanup for RL workloads, including HCCL process-group release and ACL graph workspace cleanup. Disabled by default because wakeup may need to restore HCCL and recapture ACL graphs. |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `enable_sparse_sfa_c8`              | bool | `False` | Whether to enable the packed C8 KV cache for Sparse Flash Attention in DSA models (e.g., DeepSeek V3.2 and GLM5). This option is independent of `enable_sparse_li_c8`. SFA prefill context parallelism and Ascend 950 DCP are not supported. |
@@ -245,22 +244,17 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 
 **rl_config**
 
-`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it applies RL best-practice defaults automatically. When `enabled` is `false`, all other sub-fields are ignored.
+`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it refreshes the global Ascend configuration on every initialization, forces `AscendConfig.weight_nz_mode=0`, synchronizes `VLLM_ASCEND_ENABLE_NZ=0`, and sets `VLLM_SERVER_DEV_MODE=1`. These fixed RL behaviors are not configurable as `rl_config` sub-fields. When `enabled` is `false`, all other sub-fields are ignored.
 
-Priority is generally `rl_config` sub-fields > `additional_config` top-level keys > environment variables > code defaults. Two environment-variable exceptions are retained: an explicit `VLLM_SERVER_DEV_MODE=0` is a security opt-out, and `VLLM_BATCH_INVARIANT=1` remains enabled when `rl_config.enable_batch_invariant` is false.
+When RL mode is enabled, its fixed NZ and developer-endpoint settings take precedence over top-level configuration and environment variables. `VLLM_BATCH_INVARIANT=1` remains enabled when `rl_config.enable_batch_invariant` is false.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `false` | Master switch for RL mode. When `true`, all RL best-practice defaults below are applied. |
-| `refresh` | bool | `true` | Refresh the global Ascend configuration each time it is initialized. This ensures RL settings are reapplied in worker processes. Set to `false` to reuse the cached configuration for the same `VllmConfig` object. |
-| `sleep_mode_extra_cleanup` | bool | `false` | Same-device mode. Enables HCCL process-group release + ACL graph workspace cleanup during sleep, returning more NPU memory to the trainer at the cost of increased wakeup latency. Overrides the top-level `enable_sleep_mode_extra_cleanup`. |
-| `weight_nz_mode` | int | `0` | Both modes. Controls the FRACTAL_NZ weight layout conversion (`0`=disable, `2`=all). Value `1` is not supported in `rl_config` and fails during startup with a clear error. Overrides the top-level `weight_nz_mode`; conflicting values also fail during startup. |
+| `sleep_mode_extra_cleanup` | bool | `false` | Same-device mode. Enables HCCL process-group release + ACL graph workspace cleanup during sleep, returning more NPU memory to the trainer at the cost of increased wakeup latency. This option is available only under `rl_config`; the former top-level `enable_sleep_mode_extra_cleanup` key has been removed. |
 | `disable_expandable_segments` | bool | `true` | Same-device mode. Removes `expandable_segments` from `PYTORCH_NPU_ALLOC_CONF`, which is mutually exclusive with the CaMemAllocator pool used by sleep mode. No effect in cross-device mode. |
 | `enable_training_consistency` | bool | `false` | Both modes. Enables the FA3 attention backend used for training-inference consistency. Requires the `flash_attn_npu_v3` package and does not implicitly enable batch invariance. |
-| `enable_batch_invariant` | bool | `false` | Both modes. Provides an additional way to enable batch-invariant deterministic computation: when `true`, sets `VLLM_BATCH_INVARIANT=1`, `HCCL_DETERMINISTIC=strict`, and `LCCL_DETERMINISTIC=1` before workers are started. When `false`, an existing `VLLM_BATCH_INVARIANT` environment setting is preserved. Requires building vllm-ascend from source with `COMPILE_CUSTOM_KERNELS=1` and requires `weight_nz_mode=0`. |
-| `enable_dev_endpoints` | bool | `true` | Online mode. Sets `VLLM_SERVER_DEV_MODE=1` to expose the `/sleep`, `/wake_up`, `/pause`, and `/resume` HTTP endpoints. No effect in offline `LLM()` mode. Set to `false` to opt out. An explicit `VLLM_SERVER_DEV_MODE=0` is respected. |
-
-> **Note**: When `rl_config` and a top-level `additional_config` key are both set to different values for the same field (`weight_nz_mode`, `enable_sleep_mode_extra_cleanup`), startup fails with a clear error. Keep only one of them; `rl_config` is recommended for RL workloads.
+| `enable_batch_invariant` | bool | `false` | Both modes. Provides an additional way to enable batch-invariant deterministic computation: when `true`, sets `VLLM_BATCH_INVARIANT=1`, `HCCL_DETERMINISTIC=strict`, and `LCCL_DETERMINISTIC=1` before workers are started. When `false`, an existing `VLLM_BATCH_INVARIANT` environment setting is preserved. Requires building vllm-ascend from source with `COMPILE_CUSTOM_KERNELS=1`; RL mode already forces `weight_nz_mode=0`. |
 
 **Deployment modes**
 
@@ -307,11 +301,11 @@ llm = LLM(
 
 | Before | After |
 | ------ | ----- |
-| `export VLLM_ASCEND_ENABLE_NZ=0` | `"rl_config": {"enabled": true}` (or top-level `"weight_nz_mode": 0`) |
-| `export VLLM_SERVER_DEV_MODE=1` | `"rl_config": {"enabled": true}` (or top-level `"enable_dev_endpoints": true`) |
+| `export VLLM_ASCEND_ENABLE_NZ=0` | `"rl_config": {"enabled": true}` |
+| `export VLLM_SERVER_DEV_MODE=1` | `"rl_config": {"enabled": true}` |
 | `export VLLM_BATCH_INVARIANT=1` + `export HCCL_DETERMINISTIC=strict` + `export LCCL_DETERMINISTIC=1` | `"rl_config": {"enabled": true, "enable_batch_invariant": true}` |
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
-| top-level `"weight_nz_mode": 0` | `"rl_config": {"enabled": true, "weight_nz_mode": 0}` |
+| top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
 
 ### Example

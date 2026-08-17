@@ -360,7 +360,8 @@ class TestNPUWorker(TestBase):
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
-        mock_config.enable_sleep_mode_extra_cleanup = True
+        mock_config.rl_config.enabled = True
+        mock_config.rl_config.sleep_mode_extra_cleanup = True
         mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -425,7 +426,10 @@ class TestNPUWorker(TestBase):
             )
             for model in (target_model, draft_model)
         ]
-        mock_get_config.return_value = SimpleNamespace(weight_nz_mode=0, enable_sleep_mode_extra_cleanup=False)
+        mock_get_config.return_value = SimpleNamespace(
+            weight_nz_mode=0,
+            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=True),
+        )
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()

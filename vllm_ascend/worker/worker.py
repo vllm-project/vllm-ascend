@@ -225,7 +225,8 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
 
@@ -266,7 +267,8 @@ class NPUWorker(WorkerBase):
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 

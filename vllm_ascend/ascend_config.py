@@ -35,6 +35,11 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        if "enable_sleep_mode_extra_cleanup" in additional_config:
+            raise ValueError(
+                "additional_config.enable_sleep_mode_extra_cleanup has been removed. "
+                "Use additional_config.rl_config.sleep_mode_extra_cleanup instead."
+            )
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -148,7 +153,6 @@ class AscendConfig:
                 "only guaranteed when the recompute scheduler is enabled."
             )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
-        self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
@@ -326,7 +330,7 @@ class AscendConfig:
         self._validate_sparse_c8_kv_offload_compatibility()
 
         self.rl_config = RlConfig(additional_config.get("rl_config", {}))
-        self.rl_config.apply(self, additional_config)
+        self.rl_config.apply(self)
 
     def _validate_mc2_hierarchy_comm(self) -> None:
         if not self.enable_mc2_hierarchy_comm:
@@ -546,27 +550,17 @@ class RlConfig:
     """Unified defaults for reinforcement-learning workloads."""
 
     enabled: bool
-    refresh: bool
     sleep_mode_extra_cleanup: bool
-    weight_nz_mode: int
     disable_expandable_segments: bool
     enable_training_consistency: bool
     enable_batch_invariant: bool
-    enable_dev_endpoints: bool
 
-    _TOP_LEVEL_KEYS = {
-        "sleep_mode_extra_cleanup": "enable_sleep_mode_extra_cleanup",
-        "weight_nz_mode": "weight_nz_mode",
-    }
     _DEFAULTS = {
         "enabled": False,
-        "refresh": True,
         "sleep_mode_extra_cleanup": False,
-        "weight_nz_mode": 0,
         "disable_expandable_segments": True,
         "enable_training_consistency": False,
         "enable_batch_invariant": False,
-        "enable_dev_endpoints": True,
     }
 
     def __init__(self, config: dict[str, Any] | None = None):
@@ -578,48 +572,22 @@ class RlConfig:
         if unknown_keys:
             raise ValueError(f"Unknown rl_config keys: {sorted(unknown_keys)}")
 
-        self._explicit_keys = frozenset(config)
         for key, default in self._DEFAULTS.items():
             setattr(self, key, config.get(key, default))
         self._validate()
 
     def _validate(self) -> None:
-        for key in self._DEFAULTS.keys() - {"weight_nz_mode"}:
+        for key in self._DEFAULTS:
             value = getattr(self, key)
             if not isinstance(value, bool):
                 raise ValueError(f"rl_config.{key} must be a bool, got {type(value).__name__}: {value}.")
-        if not isinstance(self.weight_nz_mode, int) or isinstance(self.weight_nz_mode, bool):
-            raise ValueError("rl_config.weight_nz_mode must be an int with value 0 or 2.")
-        if self.weight_nz_mode == 1:
-            raise ValueError(
-                "rl_config.weight_nz_mode=1 is not supported for RL workloads. "
-                "Use rl_config.weight_nz_mode=0 (the default) instead."
-            )
-        if self.weight_nz_mode not in (0, 2):
-            raise ValueError(f"rl_config.weight_nz_mode must be 0 or 2, got {self.weight_nz_mode!r}.")
-        if self.enable_batch_invariant and self.weight_nz_mode != 0:
-            raise ValueError("rl_config.enable_batch_invariant requires rl_config.weight_nz_mode=0.")
 
-    def _check_top_level_conflicts(self, additional_config: dict[str, Any]) -> None:
-        for rl_key, top_level_key in self._TOP_LEVEL_KEYS.items():
-            if top_level_key not in additional_config:
-                continue
-            rl_value = getattr(self, rl_key)
-            if additional_config[top_level_key] != rl_value:
-                raise ValueError(
-                    f"rl_config.{rl_key}={rl_value} conflicts with "
-                    f"additional_config.{top_level_key}={additional_config[top_level_key]}. "
-                    "Remove the top-level key when using rl_config."
-                )
-
-    def apply(self, ascend_config: "AscendConfig", additional_config: dict[str, Any]) -> None:
+    def apply(self, ascend_config: "AscendConfig") -> None:
         if not self.enabled:
             return
 
-        self._check_top_level_conflicts(additional_config)
-        ascend_config.weight_nz_mode = self.weight_nz_mode
-        ascend_config.enable_sleep_mode_extra_cleanup = self.sleep_mode_extra_cleanup
-        os.environ["VLLM_ASCEND_ENABLE_NZ"] = str(self.weight_nz_mode)
+        ascend_config.weight_nz_mode = 0
+        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
         model_config = getattr(ascend_config.vllm_config, "model_config", None)
         if self.disable_expandable_segments and getattr(model_config, "enable_sleep_mode", False):
@@ -634,15 +602,7 @@ class RlConfig:
             os.environ["HCCL_DETERMINISTIC"] = "strict"
             os.environ["LCCL_DETERMINISTIC"] = "1"
 
-        # An explicit administrator opt-out takes precedence because the dev
-        # endpoints expose process-control APIs such as sleep and wake_up.
-        if self.enable_dev_endpoints and os.environ.get("VLLM_SERVER_DEV_MODE") == "0":
-            logger.warning(
-                "rl_config requested developer endpoints, but VLLM_SERVER_DEV_MODE=0 "
-                "is explicitly set; keeping the endpoints disabled."
-            )
-        else:
-            os.environ["VLLM_SERVER_DEV_MODE"] = "1" if self.enable_dev_endpoints else "0"
+        os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
 class DynamicSpecConfig:
@@ -1361,7 +1321,7 @@ def init_ascend_config(vllm_config):
     refresh = additional_config.get("refresh", False) if additional_config else False
     rl_config = additional_config.get("rl_config", {})
     if isinstance(rl_config, dict) and rl_config.get("enabled", False):
-        refresh = refresh or rl_config.get("refresh", RlConfig._DEFAULTS["refresh"])
+        refresh = True
     global _ASCEND_CONFIG
     if (
         _ASCEND_CONFIG is not None

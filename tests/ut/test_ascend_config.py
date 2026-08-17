@@ -624,13 +624,10 @@ class TestAscendConfig(TestBase):
             ascend_config = init_ascend_config(VllmConfig())
 
         self.assertFalse(ascend_config.rl_config.enabled)
-        self.assertTrue(ascend_config.rl_config.refresh)
         self.assertFalse(ascend_config.rl_config.sleep_mode_extra_cleanup)
-        self.assertEqual(ascend_config.rl_config.weight_nz_mode, 0)
         self.assertTrue(ascend_config.rl_config.disable_expandable_segments)
         self.assertFalse(ascend_config.rl_config.enable_training_consistency)
         self.assertFalse(ascend_config.rl_config.enable_batch_invariant)
-        self.assertTrue(ascend_config.rl_config.enable_dev_endpoints)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -644,7 +641,7 @@ class TestAscendConfig(TestBase):
             self.assertEqual(os.environ.get("VLLM_ASCEND_ENABLE_NZ"), "0")
             self.assertEqual(os.environ.get("VLLM_SERVER_DEV_MODE"), "1")
             self.assertNotIn("VLLM_BATCH_INVARIANT", os.environ)
-            self.assertFalse(ascend_config.enable_sleep_mode_extra_cleanup)
+            self.assertFalse(ascend_config.rl_config.sleep_mode_extra_cleanup)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -659,14 +656,12 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_can_disable_refresh(self, mock_fix_incompatible_config):
+    def test_rl_config_refresh_cannot_be_configured(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"rl_config": {"enabled": True, "refresh": False}}
 
-        first_config = init_ascend_config(test_vllm_config)
-        second_config = init_ascend_config(test_vllm_config)
-
-        self.assertIs(first_config, second_config)
+        with self.assertRaisesRegex(ValueError, "Unknown rl_config keys.*refresh"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -682,7 +677,13 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rl_config_disabled_is_noop(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"rl_config": {"enabled": False, "weight_nz_mode": 0}}
+        test_vllm_config.additional_config = {
+            "rl_config": {
+                "enabled": False,
+                "sleep_mode_extra_cleanup": True,
+                "enable_batch_invariant": True,
+            }
+        }
         with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}, clear=True):
             ascend_config = init_ascend_config(test_vllm_config)
 
@@ -691,45 +692,32 @@ class TestAscendConfig(TestBase):
             self.assertEqual(ascend_config.weight_nz_mode, 2)
             self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "2")
             self.assertNotIn("VLLM_SERVER_DEV_MODE", os.environ)
+            self.assertNotIn("VLLM_BATCH_INVARIANT", os.environ)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_conflict_with_top_level_raises(self, mock_fix_incompatible_config):
+    def test_rl_config_overrides_top_level_weight_nz_mode(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "rl_config": {"enabled": True},
             "weight_nz_mode": 2,
         }
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            self.assertRaisesRegex(ValueError, "conflicts with additional_config.weight_nz_mode"),
-        ):
-            init_ascend_config(test_vllm_config)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_matching_top_level_is_allowed(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {
-            "rl_config": {"enabled": True},
-            "weight_nz_mode": 0,
-        }
         with patch.dict(os.environ, {}, clear=True):
             ascend_config = init_ascend_config(test_vllm_config)
 
         self.assertEqual(ascend_config.weight_nz_mode, 0)
+        self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_cleanup_conflict_with_top_level_raises(self, mock_fix_incompatible_config):
+    def test_top_level_sleep_mode_extra_cleanup_is_removed(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
-            "rl_config": {"enabled": True, "sleep_mode_extra_cleanup": True},
-            "enable_sleep_mode_extra_cleanup": False,
+            "enable_sleep_mode_extra_cleanup": True,
         }
         with self.assertRaisesRegex(
             ValueError,
-            "conflicts with additional_config.enable_sleep_mode_extra_cleanup",
+            "has been removed.*rl_config.sleep_mode_extra_cleanup",
         ):
             init_ascend_config(test_vllm_config)
 
@@ -758,23 +746,12 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    @patch("vllm_ascend.ascend_config.logger.warning")
-    def test_rl_config_dev_endpoints_respects_env_optout(self, mock_warning, mock_fix_incompatible_config):
+    def test_rl_config_always_enables_dev_endpoints(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
         with patch.dict(os.environ, {"VLLM_SERVER_DEV_MODE": "0"}, clear=True):
             init_ascend_config(test_vllm_config)
-            self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "0")
-        mock_warning.assert_called_once()
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_dev_endpoints_explicit_optout(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"rl_config": {"enabled": True, "enable_dev_endpoints": False}}
-        with patch.dict(os.environ, {"VLLM_SERVER_DEV_MODE": "1"}, clear=True):
-            init_ascend_config(test_vllm_config)
-            self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "0")
+            self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "1")
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -816,35 +793,27 @@ class TestRlConfig(TestBase):
         config = RlConfig()
 
         self.assertFalse(config.enabled)
-        self.assertTrue(config.refresh)
         self.assertFalse(config.sleep_mode_extra_cleanup)
-        self.assertEqual(config.weight_nz_mode, 0)
         self.assertTrue(config.disable_expandable_segments)
         self.assertFalse(config.enable_training_consistency)
         self.assertFalse(config.enable_batch_invariant)
-        self.assertTrue(config.enable_dev_endpoints)
 
     def test_explicit_values(self):
         config = RlConfig(
             {
                 "enabled": True,
-                "refresh": False,
                 "sleep_mode_extra_cleanup": True,
                 "disable_expandable_segments": False,
                 "enable_training_consistency": True,
                 "enable_batch_invariant": True,
-                "enable_dev_endpoints": False,
             }
         )
 
         self.assertTrue(config.enabled)
-        self.assertFalse(config.refresh)
         self.assertTrue(config.sleep_mode_extra_cleanup)
-        self.assertEqual(config.weight_nz_mode, 0)
         self.assertFalse(config.disable_expandable_segments)
         self.assertTrue(config.enable_training_consistency)
         self.assertTrue(config.enable_batch_invariant)
-        self.assertFalse(config.enable_dev_endpoints)
 
     def test_unknown_key_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown rl_config keys"):
@@ -856,13 +825,10 @@ class TestRlConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "enable_batch_invariant must be a bool"):
             RlConfig({"enable_batch_invariant": 1})
 
-    def test_weight_nz_mode_validation(self):
-        with self.assertRaisesRegex(ValueError, "must be 0 or 2"):
-            RlConfig({"weight_nz_mode": 5})
-        with self.assertRaisesRegex(ValueError, "must be an int"):
-            RlConfig({"weight_nz_mode": True})
-        with self.assertRaisesRegex(ValueError, "weight_nz_mode=1 is not supported"):
-            RlConfig({"weight_nz_mode": 1})
+    def test_fixed_fields_cannot_be_configured(self):
+        for key in ("refresh", "weight_nz_mode", "enable_dev_endpoints"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, f"Unknown rl_config keys.*{key}"):
+                RlConfig({key: True})
 
     def test_non_dict_rejected(self):
         with self.assertRaisesRegex(ValueError, "must be a dict"):
