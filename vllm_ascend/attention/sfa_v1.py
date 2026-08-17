@@ -1,4 +1,5 @@
 import enum
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -482,6 +483,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
+        self.is_dots3_note_model = kwargs.get("dots3_note_model", False)
+        self.k_rope_only_layernorm = kwargs.get("k_rope_only_layernorm") if self.is_dots3_note_model else None
+        self.g_proj = kwargs.get("g_proj") if self.is_dots3_note_model else None
+        self.sdpa_gate_type = kwargs.get("sdpa_gate_type") if self.is_dots3_note_model else None
+        self.apply_mla_qkv_lora_rescale = self.is_dots3_note_model and kwargs.get("apply_mla_qkv_lora_rescale", False)
+        self.hidden_size = kwargs.get("hidden_size") if self.is_dots3_note_model else None
+        self.has_dots3_note_mla_extras = self.is_dots3_note_model and (
+            self.k_rope_only_layernorm is not None or self.g_proj is not None or self.apply_mla_qkv_lora_rescale
+        )
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
@@ -669,6 +679,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         return getattr(getattr(layer, "quant_method", None), "quant_method", None)
 
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
+        if self.has_dots3_note_mla_extras:
+            logger.warning_once(
+                "Disabling fused SFA preprocessing for Dots3 Note because it "
+                "does not apply rope-only layernorm, MLA LoRA rescale, or the "
+                "attention gate."
+            )
+            return PreprocessType.NATIVE
+
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         self._quant_type = type(quant_method) if quant_method is not None else None
         qt = self._quant_type
@@ -886,6 +904,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
+        if self.has_dots3_note_mla_extras:
+            return self._manual_kv_norm_rope_cache(
+                kv_no_split,
+                cos,
+                sin,
+                kv_cache,
+                slots,
+            )
+
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
@@ -921,6 +948,43 @@ class AscendSFAImpl(MLAAttentionImpl):
             cache_mode=cache_mode,
         )
         return None, None
+
+    def _manual_kv_norm_rope_cache(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        slots: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.kv_a_layernorm is not None
+        kv_c, k_pe = kv_no_split.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1,
+        )
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        if self.apply_mla_qkv_lora_rescale:
+            assert self.hidden_size is not None
+            kv_c_normed = kv_c_normed * math.sqrt(self.hidden_size / self.kv_lora_rank)
+
+        k_pe = k_pe.unsqueeze(1)
+        if self.k_rope_only_layernorm is not None:
+            k_pe = self.k_rope_only_layernorm(k_pe)
+        k_pe = self.rope_single(k_pe, cos, sin)
+
+        kv_c_cache = kv_c_normed.view(
+            -1,
+            self.num_kv_heads,
+            self.kv_lora_rank,
+        )
+        DeviceOperator.reshape_and_cache(
+            key=kv_c_cache,
+            value=k_pe,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slots.to(torch.int32),
+        )
+        return k_pe, kv_c_normed
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
@@ -1575,6 +1639,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
+            if self.apply_mla_qkv_lora_rescale:
+                assert self.hidden_size is not None
+                q_c = q_c * math.sqrt(self.hidden_size / self.q_lora_rank)
 
             if self.has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(
@@ -1714,6 +1781,25 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         attn_output = self._v_up_proj(attn_output)
+
+        if self.g_proj is not None:
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            gate, _ = self.g_proj(hidden_states[:num_actual_tokens])
+            gated_output = attn_output[:num_actual_tokens]
+            if self.sdpa_gate_type == "headwise" and gate.shape[-1] != self.local_num_heads:
+                gate = gate.narrow(-1, self.tp_rank * self.local_num_heads, self.local_num_heads)
+            gate = torch.sigmoid(gate.float()).to(gated_output.dtype)
+            if self.sdpa_gate_type == "elementwise":
+                gated_output = gated_output * gate.view_as(gated_output)
+            else:
+                attn_shape = gated_output.shape
+                gated_output = gated_output.reshape(
+                    -1,
+                    self.local_num_heads,
+                    self.v_head_dim,
+                ) * gate.reshape(-1, self.local_num_heads, 1)
+                gated_output = gated_output.reshape(attn_shape)
+            attn_output[:num_actual_tokens] = gated_output
 
         output = self._finalize_o_proj(
             attn_output,

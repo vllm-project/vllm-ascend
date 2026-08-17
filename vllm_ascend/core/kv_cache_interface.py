@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from typing_extensions import Self
@@ -221,6 +221,20 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class Dots3NoteMLAAttentionSpec(AscendMLAAttentionSpec):
+    """Marker for a Dots3 Note full-attention MLA cache."""
+
+    dots3_note_model: bool = field(default=True, init=False, compare=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Dots3NoteSlidingWindowMLASpec(AscendSlidingWindowMLASpec):
+    """Sliding-window Dots3 Note cache marker."""
+
+    dots3_note_model: bool = field(default=True, init=False, compare=False)
+
+
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
@@ -234,6 +248,16 @@ def register_ascend_kv_cache_specs() -> None:
     )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
+        manager_class=SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=Dots3NoteMLAAttentionSpec,
+        manager_class=CompressAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=Dots3NoteSlidingWindowMLASpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )

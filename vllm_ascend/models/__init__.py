@@ -25,3 +25,11 @@ def register_model():
     ModelRegistry.register_model(
         "Eagle3LlamaForCausalLM", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )
+    ModelRegistry.register_model(
+        "Dots3NoteForCausalLM",
+        "vllm_ascend.patch.dots3_note_model:Dots3NoteForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Dots3NoteMTPModel",
+        "vllm_ascend.patch.dots3_note_mtp:Dots3NoteMTPModel",
+    )

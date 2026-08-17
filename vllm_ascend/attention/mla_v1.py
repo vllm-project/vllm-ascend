@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
@@ -6,9 +7,11 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
+    MLADims,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
@@ -217,6 +220,8 @@ M = TypeVar("M", bound=AscendMLAMetadata)
 
 
 class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+    chunked_prefill_workspace: torch.Tensor
+
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -246,6 +251,25 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+        hf_config = vllm_config.model_config.hf_text_config
+        self.is_dots3_note_model = "dots3_note" in {
+            getattr(hf_config, "model_type", None),
+            getattr(hf_config, "original_model_type", None),
+        }
+        if self.is_dots3_note_model:
+            layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+            self.mla_dims = MLADims(
+                q_lora_rank=layer.q_lora_rank,
+                kv_lora_rank=layer.kv_lora_rank,
+                qk_nope_head_dim=layer.qk_nope_head_dim,
+                qk_rope_head_dim=layer.qk_rope_head_dim,
+                v_head_dim=layer.v_head_dim,
+            )
+            workspace_width = self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim
+            if self.chunked_prefill_workspace.shape[-1] != workspace_width:
+                self.chunked_prefill_workspace = self.chunked_prefill_workspace.new_empty(
+                    (*self.chunked_prefill_workspace.shape[:-1], workspace_width)
+                )
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -484,14 +508,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
     ):
-        if not self.chunked_prefill_enabled:
+        if not self.chunked_prefill_enabled and not self.is_dots3_note_model:
             return None
+
         num_reqs = common_attn_metadata.num_reqs
 
         num_computed_tokens_cpu = self.seq_lens - self.query_lens
         reqs_start = self.num_decodes  # prefill_start
 
         self.context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
+        if not self.chunked_prefill_enabled:
+            return None
+
         max_context_len_cpu = self.context_lens_cpu.max().item()
         if not max_context_len_cpu > 0:
             return None
@@ -560,7 +588,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             query_lens=prefill_query_lens,
             seq_lens=self.seq_lens,
-            context_lens=self.seq_lens[reqs_start:],
+            context_lens=(self.context_lens_cpu if self.is_dots3_note_model else self.seq_lens[reqs_start:]),
             input_positions=prefill_input_positions,
             block_table=self.block_table[reqs_start:, ...],
             max_query_len=max_query_len,
@@ -687,6 +715,16 @@ class PrefillMLAPreprocessResult(NamedTuple):
     value: torch.Tensor | None = None
 
 
+class Dots3NotePrefillMLAPreprocessResult(NamedTuple):
+    q_nope: torch.Tensor
+    q_pe: torch.Tensor
+    k_nope: torch.Tensor
+    k_pe: torch.Tensor
+    value: torch.Tensor
+    kv_lora: torch.Tensor | None = None
+    k_pe_cache: torch.Tensor | None = None
+
+
 class AscendMLAImpl(MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -712,6 +750,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
 
         # MLA Args
@@ -730,6 +769,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
+        self.is_dots3_note_model = kwargs.get("dots3_note_model", False)
+        self.k_rope_only_layernorm = kwargs.get("k_rope_only_layernorm") if self.is_dots3_note_model else None
+        self.g_proj = kwargs.get("g_proj") if self.is_dots3_note_model else None
+        self.sdpa_gate_type = kwargs.get("sdpa_gate_type") if self.is_dots3_note_model else None
+        self.apply_mla_qkv_lora_rescale = self.is_dots3_note_model and kwargs.get("apply_mla_qkv_lora_rescale", False)
+        self.hidden_size = kwargs.get("hidden_size") if self.is_dots3_note_model else None
+        self.has_dots3_note_mla_extras = self.is_dots3_note_model and (
+            self.k_rope_only_layernorm is not None or self.g_proj is not None or self.apply_mla_qkv_lora_rescale
+        )
+        # Dots3 Note uses different RoPE configurations for global and
+        # sliding-window layers, so every layer must use its own embedding.
+        self.use_layer_rotary_emb = self.is_dots3_note_model
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         ascend_config = get_ascend_config()
@@ -751,6 +802,273 @@ class AscendMLAImpl(MLAAttentionImpl):
         # next power of 2.
         self.num_heads_padded = 1 << (self.num_heads - 1).bit_length()
         self.head_padding = self.num_heads_padded - self.num_heads
+
+    def _needs_dots3_note_decode_fallback(self) -> bool:
+        return self.has_dots3_note_mla_extras and self.kv_lora_rank not in (128, 512)
+
+    def _needs_dots3_note_prefill_fallback(self) -> bool:
+        return self.has_dots3_note_mla_extras and (
+            self.qk_nope_head_dim not in (128, 512) or self.v_head_dim != self.qk_nope_head_dim
+        )
+
+    def _forward_prefill_unfused(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        value: torch.Tensor,
+        kv_lora: torch.Tensor | None,
+        k_pe_cache: torch.Tensor | None,
+        kv_c_and_k_pe_cache: tuple[torch.Tensor, torch.Tensor],
+        attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        prefill_meta = attn_metadata.prefill
+        assert prefill_meta is not None
+        assert kv_lora is not None
+        assert k_pe_cache is not None
+        assert self.num_kv_heads == 1, "Dots3 Note MLA prefill fallback expects MQA latent KV cache."
+        if _EXTRA_CTX.capturing:
+            raise RuntimeError(
+                "Dots3 Note MLA prefill fallback requires --enforce-eager because "
+                "Ascend FIA requires qk_nope_head_dim == v_head_dim when rope is used."
+            )
+        actual_seq_lengths = prefill_meta.actual_seq_lengths_q
+        if actual_seq_lengths is None:
+            actual_seq_lengths = [q_nope.size(0)]
+        starts = [0] + actual_seq_lengths[:-1]
+        context_lens = prefill_meta.context_lens
+        if isinstance(context_lens, torch.Tensor):
+            context_lens = context_lens.cpu().tolist()
+        if context_lens is None:
+            context_lens = [0] * len(starts)
+
+        block_size = None
+        cache_kv = None
+        cache_rope = None
+        if any(context_lens):
+            block_size = kv_c_and_k_pe_cache[0].shape[1]
+            cache_kv = kv_c_and_k_pe_cache[0].view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+            cache_rope = kv_c_and_k_pe_cache[1].view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+
+        outputs = []
+        for seq_idx, (start, end) in enumerate(zip(starts, actual_seq_lengths)):
+            context_len = int(context_lens[seq_idx])
+            context_start = 0
+            if self.sliding_window is not None and context_len > self.sliding_window:
+                context_start = context_len - self.sliding_window
+                context_len = self.sliding_window
+            q_latent_i = (
+                torch.bmm(
+                    q_nope[start:end].transpose(0, 1).contiguous(),
+                    self.W_UK_T,
+                )
+                .transpose(0, 1)
+                .to(torch.float32)
+            )
+            q_pe_i = q_pe[start:end].to(torch.float32)
+            kv_lora_i = kv_lora[start:end].to(torch.float32)
+            k_pe_i = k_pe_cache[start:end].to(torch.float32)
+            if context_len:
+                assert cache_kv is not None
+                assert cache_rope is not None
+                assert block_size is not None
+                kv_c_ctx, rope_ctx = self._gather_decode_latent_cache(
+                    cache_kv,
+                    cache_rope,
+                    prefill_meta.block_table[seq_idx],
+                    context_start,
+                    context_len,
+                    block_size,
+                )
+                kv_lora_i = torch.cat([kv_c_ctx.to(torch.float32), kv_lora_i], dim=0)
+                k_pe_i = torch.cat([rope_ctx.to(torch.float32), k_pe_i], dim=0)
+            query_len = end - start
+            key_len = context_len + query_len
+            key_positions = torch.arange(key_len, device=q_nope.device)
+            seq_outputs = []
+            query_chunk_size = 512
+            for query_start in range(0, query_len, query_chunk_size):
+                query_end = min(query_start + query_chunk_size, query_len)
+                q_latent_chunk = q_latent_i[query_start:query_end]
+                q_pe_chunk = q_pe_i[query_start:query_end]
+                scores = torch.einsum("thd,sd->hts", q_latent_chunk, kv_lora_i)
+                scores = scores + torch.einsum("thd,sd->hts", q_pe_chunk, k_pe_i)
+                query_positions = torch.arange(
+                    context_len + query_start,
+                    context_len + query_end,
+                    device=q_nope.device,
+                )
+                causal_mask = key_positions.unsqueeze(0) > query_positions.unsqueeze(1)
+                if self.sliding_window is not None:
+                    causal_mask |= key_positions.unsqueeze(0) < query_positions.unsqueeze(1) - self.sliding_window
+                scores = scores.masked_fill(causal_mask.unsqueeze(0), float("-inf"))
+                probs = torch.softmax(scores * self.scale, dim=-1)
+                seq_output = torch.einsum("hts,sd->thd", probs, kv_lora_i).to(q_nope.dtype)
+                seq_outputs.append(seq_output)
+            outputs.append(torch.cat(seq_outputs, dim=0))
+
+        latent_output = torch.cat(outputs, dim=0).transpose(0, 1).contiguous()
+        output = self._v_up_proj(latent_output)
+        return output
+
+    def _gather_decode_latent_cache(
+        self,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_start: int,
+        seq_len: int,
+        block_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.num_kv_heads == 1, "Dots3 Note MLA decode fallback expects MQA latent KV cache."
+        if seq_len == 0:
+            empty_kv = k_nope.new_empty((0, self.kv_lora_rank))
+            empty_pe = k_pe.new_empty((0, self.qk_rope_head_dim))
+            return empty_kv, empty_pe
+
+        start_block = seq_start // block_size
+        start_offset = seq_start % block_size
+        num_blocks = cdiv(start_offset + seq_len, block_size)
+        block_ids = block_table[start_block : start_block + num_blocks].to(torch.long)
+        kv_c = torch.index_select(k_nope, 0, block_ids)
+        rope = torch.index_select(k_pe, 0, block_ids)
+        kv_c = kv_c.permute(0, 2, 1, 3).reshape(-1, self.num_kv_heads, self.kv_lora_rank)
+        rope = rope.permute(0, 2, 1, 3).reshape(-1, self.num_kv_heads, self.qk_rope_head_dim)
+        kv_c = kv_c[start_offset : start_offset + seq_len]
+        rope = rope[start_offset : start_offset + seq_len]
+        return kv_c.squeeze(1), rope.squeeze(1)
+
+    def _forward_decode_unfused(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        block_size: int,
+        attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        decode_meta = attn_metadata.decode
+        assert decode_meta is not None
+        num_tokens = q_nope.size(0)
+        if _EXTRA_CTX.capturing:
+            raise RuntimeError(
+                "Dots3 Note MLA decode fallback requires --enforce-eager because "
+                f"Ascend FIA v2 does not support kv_lora_rank={self.kv_lora_rank} with rope."
+            )
+        if self.enable_kv_nz:
+            raise RuntimeError("Dots3 Note MLA decode fallback does not support enable_kv_nz.")
+
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+
+        decode_token_ends = decode_meta.actual_seq_lengths_q
+        if decode_token_ends is None:
+            decode_token_ends = list(range(1, len(decode_meta.seq_lens_list) + 1))
+
+        outputs = []
+        req_idx = 0
+        req_start = 0
+        for i in range(num_tokens):
+            while req_idx < len(decode_token_ends) and i >= decode_token_ends[req_idx]:
+                req_start = decode_token_ends[req_idx]
+                req_idx += 1
+            if req_idx >= len(decode_meta.seq_lens_list):
+                raise RuntimeError(
+                    "Dots3 Note MLA decode fallback metadata is inconsistent: "
+                    f"num_tokens={num_tokens}, seq_lens={len(decode_meta.seq_lens_list)}, "
+                    f"actual_seq_lengths_q={decode_token_ends}."
+                )
+
+            req_end = decode_token_ends[req_idx]
+            query_len = req_end - req_start
+            query_offset = i - req_start
+            seq_len = int(decode_meta.seq_lens_list[req_idx])
+            seq_len -= query_len - 1 - query_offset
+            seq_len = max(seq_len, 0)
+            load_start = 0
+            load_len = seq_len
+            if self.sliding_window is not None:
+                max_window_tokens = self.sliding_window + 1
+                if load_len > max_window_tokens:
+                    load_start = load_len - max_window_tokens
+                    load_len = max_window_tokens
+            kv_c, rope = self._gather_decode_latent_cache(
+                k_nope,
+                k_pe,
+                decode_meta.block_table[req_idx],
+                load_start,
+                load_len,
+                block_size,
+            )
+            q_nope_i = q_nope[i].to(torch.float32)
+            q_pe_i = q_pe[i].to(torch.float32)
+            scores = torch.matmul(q_nope_i, kv_c.t().to(torch.float32))
+            scores = scores + torch.matmul(q_pe_i, rope.t().to(torch.float32))
+            probs = torch.softmax(scores * self.scale, dim=-1)
+            outputs.append(torch.matmul(probs, kv_c.to(torch.float32)).to(q_nope.dtype))
+
+        latent_output = torch.stack(outputs, dim=1)
+        output = self._v_up_proj(latent_output)
+        return output
+
+    def _forward_decode_sliding_window(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        block_size: int,
+        attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        from vllm_ascend.ops.triton.dots3_note_mla import paged_sliding_window_gather
+
+        decode_meta = attn_metadata.decode
+        assert decode_meta is not None
+        assert self.num_kv_heads == 1, "Dots3 Note MLA decode fallback expects MQA latent KV cache."
+        assert self.sliding_window is not None, "Dots3 Note MLA decode fallback requires sliding-window attention."
+        if self.enable_kv_nz:
+            raise RuntimeError("Dots3 Note MLA graph fallback does not support enable_kv_nz.")
+
+        num_tokens = q_nope.size(0)
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+
+        window_size = self.sliding_window + 1
+        if q_nope.device.type == "npu":
+            latent_cache_fp32, rope_cache_fp32, valid_positions = paged_sliding_window_gather(
+                k_nope,
+                k_pe,
+                decode_meta.block_table,
+                attn_metadata.query_start_loc,
+                decode_meta.input_positions,
+                window_size,
+            )
+        else:
+            token_indices = torch.arange(num_tokens, device=q_nope.device)
+            request_ends = attn_metadata.query_start_loc[1:]
+            request_ids = (token_indices.unsqueeze(1) >= request_ends.unsqueeze(0)).sum(dim=1)
+            window_offsets = torch.arange(-self.sliding_window, 1, device=q_nope.device)
+            key_positions = decode_meta.input_positions.unsqueeze(1) + window_offsets.unsqueeze(0)
+            valid_positions = key_positions >= 0
+            key_positions = key_positions.clamp_min(0)
+            block_indices = torch.div(key_positions, block_size, rounding_mode="floor")
+            block_offsets = torch.remainder(key_positions, block_size)
+            block_ids = decode_meta.block_table[request_ids.unsqueeze(1), block_indices]
+            latent_cache_fp32 = k_nope[block_ids.long(), 0, block_offsets.long()].to(torch.float32)
+            rope_cache_fp32 = k_pe[block_ids.long(), 0, block_offsets.long()].to(torch.float32)
+
+        q_nope_fp32 = q_nope.to(torch.float32)
+        q_pe_fp32 = q_pe.to(torch.float32)
+
+        scores = torch.bmm(q_nope_fp32, latent_cache_fp32.transpose(-1, -2))
+        scores = scores + torch.bmm(q_pe_fp32, rope_cache_fp32.transpose(-1, -2))
+        scores = scores.masked_fill(~valid_positions.unsqueeze(1), float("-inf"))
+        probs = torch.softmax(scores * self.scale, dim=-1)
+        latent_output = torch.bmm(probs, latent_cache_fp32).to(q_nope.dtype)
+        latent_output = latent_output.transpose(0, 1).contiguous()
+        output = self._v_up_proj(latent_output)
+        return output
 
     @staticmethod
     def update_graph_params(
@@ -777,6 +1095,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_layers = len(attn_keys)
         if num_layers == 0:
             return
+        hf_config = vllm_config.model_config.hf_text_config if vllm_config is not None else None
+        is_dots3_note_model = "dots3_note" in {
+            getattr(hf_config, "model_type", None),
+            getattr(hf_config, "original_model_type", None),
+        }
         if _EXTRA_CTX.is_draft_model:
             attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
         attn_count = 0
@@ -816,10 +1139,13 @@ class AscendMLAImpl(MLAAttentionImpl):
 
                 seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
                 if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
-                    spec_multiple = speculative_config.num_speculative_tokens + 1
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
-                    actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
+                    if speculative_config.method == "mtp" and is_dots3_note_model:
+                        actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
+                        seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
+                    else:
+                        spec_multiple = speculative_config.num_speculative_tokens + 1
+                        seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
+                        actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
                 elif _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
                     block_table = attn_metadata_current[key].decode.block_table
@@ -899,10 +1225,12 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        if self._needs_dots3_note_decode_fallback():
+            # Dots3 Note D1024 decode uses this signed-off reduction path.
+            ql_nope = torch_npu.npu_transpose_batchmatmul(q_nope, self.W_UK_T, perm_y=(1, 0, 2))
+        else:
+            ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
+        return ql_nope, q_pe
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -1230,11 +1558,32 @@ class AscendMLAImpl(MLAAttentionImpl):
         value: torch.Tensor,
         kv_c_and_k_pe_cache: tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
+        kv_lora: torch.Tensor | None = None,
+        k_pe_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
         assert len(kv_c_and_k_pe_cache) > 1
         num_tokens = q_nope.size(0)
         prefill_meta = attn_metadata.prefill
+
+        if self._needs_dots3_note_prefill_fallback() or self.use_layer_rotary_emb:
+            context_lens = prefill_meta.context_lens
+            if isinstance(context_lens, torch.Tensor):
+                has_prefix_context = bool((context_lens > 0).any())
+            else:
+                has_prefix_context = context_lens is not None and any(context_lens)
+            if self._needs_dots3_note_prefill_fallback() or has_prefix_context:
+                return self._forward_prefill_unfused(
+                    q_nope=q_nope,
+                    q_pe=q_pe,
+                    k_nope=k_nope,
+                    k_pe=k_pe,
+                    value=value,
+                    kv_lora=kv_lora,
+                    k_pe_cache=k_pe_cache,
+                    kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
+                    attn_metadata=attn_metadata,
+                )
 
         actual_seq_lengths_q = prefill_meta.actual_seq_lengths_q
         actual_seq_lengths_kv = actual_seq_lengths_q.copy()
@@ -1301,6 +1650,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
+        if self.has_dots3_note_mla_extras:
+            self._manual_kv_norm_rope_cache(kv_no_split, cos, sin, kv_cache, slots)
+            return kv_cache[1], kv_cache[0]
+
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1333,6 +1686,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
+        if self.has_dots3_note_mla_extras:
+            return self._manual_kv_norm_rope_cache(kv_no_split, cos, sin, kv_cache, slots)
+
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1370,6 +1726,36 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    def _manual_kv_norm_rope_cache(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+    ):
+        assert self.kv_a_layernorm is not None
+        kv_c, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
+        if self.apply_mla_qkv_lora_rescale:
+            assert self.hidden_size is not None
+            kv_c_normed = kv_c_normed * math.sqrt(self.hidden_size / self.kv_lora_rank)
+
+        k_pe = k_pe.unsqueeze(1)
+        if self.k_rope_only_layernorm is not None:
+            k_pe = self.k_rope_only_layernorm(k_pe)
+        k_pe = self.rope_single(k_pe, cos, sin)
+
+        kv_c_cache = kv_c_normed.view(-1, self.num_kv_heads, self.kv_lora_rank)
+        torch_npu._npu_reshape_and_cache(
+            key=kv_c_cache,
+            value=k_pe,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_indices=slots.to(torch.int32),
+        )
+        return k_pe, kv_c_normed
+
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -1386,6 +1772,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
         num_tokens = q_nope.size(0)
+        if self._needs_dots3_note_decode_fallback():
+            if self.sliding_window is not None:
+                return self._forward_decode_sliding_window(
+                    q_nope,
+                    q_pe,
+                    k_nope,
+                    k_pe,
+                    block_size,
+                    attn_metadata,
+                )
+            return self._forward_decode_unfused(q_nope, q_pe, k_nope, k_pe, block_size, attn_metadata)
+
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
@@ -1579,6 +1977,31 @@ class AscendMLAImpl(MLAAttentionImpl):
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
         return decode_q_nope, decode_q_pe
 
+    def _get_layer_cos_sin(
+        self,
+        positions: torch.Tensor,
+        fallback_cos: torch.Tensor,
+        fallback_sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_layer_rotary_emb:
+            return fallback_cos, fallback_sin
+
+        cos_sin_cache = getattr(self.rotary_emb, "cos_sin_cache", None)
+        if cos_sin_cache is None:
+            return fallback_cos, fallback_sin
+
+        positions = positions.to(device=cos_sin_cache.device, dtype=torch.long)
+        cos_sin = cos_sin_cache.index_select(0, positions)
+        hidden_dim = cos_sin.shape[-1] // 2
+        cos_sin = cos_sin.view(-1, 2, hidden_dim).repeat(1, 1, 2)
+        cos, sin = cos_sin.chunk(2, dim=1)
+        cos = cos.squeeze(1).unsqueeze(1).unsqueeze(2)
+        sin = sin.squeeze(1).unsqueeze(1).unsqueeze(2)
+        return (
+            cos.to(device=fallback_cos.device, dtype=fallback_cos.dtype),
+            sin.to(device=fallback_sin.device, dtype=fallback_sin.dtype),
+        )
+
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1589,6 +2012,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
         cos = attn_metadata.prefill.cos
         sin = attn_metadata.prefill.sin
+        if self.use_layer_rotary_emb:
+            cos, sin = self._get_layer_cos_sin(attn_metadata.prefill.input_positions, cos, sin)
         prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
@@ -1597,15 +2022,33 @@ class AscendMLAImpl(MLAAttentionImpl):
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         )
-        prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0], self.num_kv_heads, -1)
-        prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
-        return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
+        prefill_k_pe_cache = prefill_k_pe.view(prefill_q_c.shape[0], self.num_kv_heads, -1)
+        prefill_k_pe = prefill_k_pe_cache.expand((*prefill_k_nope.shape[:-1], -1))
+        if self.has_dots3_note_mla_extras or self.use_layer_rotary_emb:
+            return Dots3NotePrefillMLAPreprocessResult(
+                prefill_q_nope,
+                prefill_q_pe,
+                prefill_k_nope,
+                prefill_k_pe,
+                prefill_value,
+                prefill_k_c_normed,
+                prefill_k_pe_cache.squeeze(1),
+            )
+        return PrefillMLAPreprocessResult(
+            prefill_q_nope,
+            prefill_q_pe,
+            prefill_k_nope,
+            prefill_k_pe,
+            prefill_value,
+        )
 
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
         cos = attn_metadata.decode.cos
         sin = attn_metadata.decode.sin
+        if self.use_layer_rotary_emb:
+            cos, sin = self._get_layer_cos_sin(attn_metadata.decode.input_positions, cos, sin)
         decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
         decode_ql_nope, decode_q_pe = self.reorg_decode_q(
             decode_ql_nope,
@@ -1644,6 +2087,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 dim=-1,
             )
             q_c = self.q_a_layernorm(q_c)  # type: ignore[misc]
+            if self.apply_mla_qkv_lora_rescale:
+                assert self.hidden_size is not None
+                q_c = q_c * math.sqrt(self.hidden_size / self.q_lora_rank)
             # allgather need contiguous data
             kv_no_split = kv_no_split.contiguous()
         else:
@@ -1724,7 +2170,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess
-        if (self.fa_quant_layer or self.enable_mlapo) and (
+        if (self.fa_quant_layer or (self.enable_mlapo and not self.has_dots3_note_mla_extras)) and (
             attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0
         ):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -1763,9 +2209,31 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_preprocess_res.value,
                 kv_cache,
                 attn_metadata,
+                kv_lora=getattr(prefill_preprocess_res, "kv_lora", None),
+                k_pe_cache=getattr(prefill_preprocess_res, "k_pe_cache", None),
             )
-
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
+
+        if self.g_proj is not None:
+            gate_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv
+            )
+            gate, _ = self.g_proj(gate_hidden_states[:num_actual_tokens])
+            attn_output = o_proj_input[:num_actual_tokens]
+            if self.sdpa_gate_type == "headwise" and gate.shape[-1] != self.num_heads:
+                rank = get_tensor_model_parallel_rank()
+                gate = gate.narrow(-1, rank * self.num_heads, self.num_heads)
+            gate = torch.sigmoid(gate.float()).to(attn_output.dtype)
+            if self.sdpa_gate_type == "elementwise":
+                attn_output = attn_output * gate.view_as(attn_output)
+            else:
+                attn_shape = attn_output.shape
+                attn_output = attn_output.reshape(-1, self.num_heads, self.v_head_dim) * gate.reshape(
+                    -1, self.num_heads, 1
+                )
+                attn_output = attn_output.reshape(attn_shape)
+            o_proj_input[:num_actual_tokens] = attn_output
+
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 

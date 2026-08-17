@@ -356,6 +356,7 @@
     - ops_moe
   source_file_dependencies:
     - vllm_ascend/ops/conv.py
+    - vllm_ascend/ops/dots3_note_audio_attention.py
     - vllm_ascend/ops/mm_encoder_attention.py
   tests:
     - tests/e2e/pull_request/one_card/test_vlm.py

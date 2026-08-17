@@ -79,6 +79,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        non_causal_multi_token_decode: bool = False,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
+        sliding_window: int | None = None,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -91,6 +94,10 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.prefix = prefix
         self.skip_topk = skip_topk
         hf_config = get_current_vllm_config().model_config.hf_text_config
+        self.is_dots3_note_model = "dots3_note" in {
+            getattr(hf_config, "model_type", None),
+            getattr(hf_config, "original_model_type", None),
+        }
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:
@@ -112,6 +119,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
             skip_topk=skip_topk,
+            sliding_window=sliding_window,
+            dots3_note_model=self.is_dots3_note_model,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             # extra args
             rotary_emb=mla_modules.rotary_emb,
@@ -121,6 +131,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             q_proj=mla_modules.q_proj,
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
+            k_rope_only_layernorm=getattr(mla_modules, "k_rope_only_layernorm", None),
+            g_proj=getattr(mla_modules, "g_proj", None),
+            sdpa_gate_type=getattr(mla_modules, "sdpa_gate_type", None),
+            apply_mla_qkv_lora_rescale=getattr(mla_modules, "apply_mla_qkv_lora_rescale", False),
+            hidden_size=hidden_size,
             o_proj=mla_modules.o_proj,
             layer_name=f"{prefix}.attn",
         )
@@ -159,9 +174,25 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     ) -> torch.Tensor:
         hidden_dim = self.hidden_size
 
-        if _EXTRA_CTX.flash_comm_v1_enabled and self.tp_size > 1 and self.is_vl_first_layer:
+        if (
+            _EXTRA_CTX.flash_comm_v1_enabled
+            and self.tp_size > 1
+            and (
+                (
+                    self.is_dots3_note_model
+                    and (
+                        _EXTRA_CTX.is_draft_model
+                        or (self.is_vl_first_layer and get_forward_context().input_ids is None)
+                    )
+                )
+                or (not self.is_dots3_note_model and self.is_vl_first_layer)
+            )
+        ):
             need_gather_q_kv = False
-            n_out = hidden_states.shape[0] // self.tp_size
+            if self.is_dots3_note_model and _EXTRA_CTX.is_draft_model:
+                n_out = (hidden_states.shape[0] + self.tp_size - 1) // self.tp_size
+            else:
+                n_out = hidden_states.shape[0] // self.tp_size
             output = torch.empty((n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
         else:
             need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled

@@ -899,6 +899,150 @@ class TestAscendSFAImpl(TestBase):
         self.impl.kv_b_proj = layer
         return layer
 
+    def test_dots3_note_extras_force_native_preprocessing(self):
+        self.impl.has_dots3_note_mla_extras = True
+        self.assertEqual(
+            self.impl._resolve_preprocess_type(torch.bfloat16),
+            PreprocessType.NATIVE,
+        )
+
+    @patch("vllm_ascend.attention.sfa_v1.DeviceOperator.reshape_and_cache")
+    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_rmsnorm_rope_cache")
+    def test_dots3_note_manual_kv_path_applies_norm_rope_and_rescale(
+        self,
+        mock_fused_kv,
+        mock_reshape_and_cache,
+    ):
+        self.impl.has_dots3_note_mla_extras = True
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 2
+        self.impl.qk_rope_head_dim = 2
+        self.impl.hidden_size = 8
+        self.impl.apply_mla_qkv_lora_rescale = True
+        self.impl.kv_a_layernorm = MagicMock(side_effect=lambda value: value + 1)
+        self.impl.k_rope_only_layernorm = MagicMock(side_effect=lambda value: value + 2)
+        self.impl.rope_single = MagicMock(side_effect=lambda value, _cos, _sin: value + 3)
+        kv_no_split = torch.tensor(
+            [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+            ]
+        )
+        kv_cache = (torch.empty(1), torch.empty(1))
+        slots = torch.tensor([1, 3], dtype=torch.int64)
+
+        k_pe, kv_c_normed = self.impl.exec_kv(
+            kv_no_split,
+            torch.empty(0),
+            torch.empty(0),
+            kv_cache,
+            slots,
+            MagicMock(),
+        )
+
+        expected_kv = (kv_no_split[:, :2] + 1) * 2
+        expected_k_pe = (kv_no_split[:, 2:].unsqueeze(1) + 2) + 3
+        torch.testing.assert_close(kv_c_normed, expected_kv)
+        torch.testing.assert_close(k_pe, expected_k_pe)
+        call_kwargs = mock_reshape_and_cache.call_args.kwargs
+        torch.testing.assert_close(call_kwargs["key"], expected_kv.unsqueeze(1))
+        torch.testing.assert_close(call_kwargs["value"], expected_k_pe)
+        self.assertIs(call_kwargs["key_cache"], kv_cache[0])
+        self.assertIs(call_kwargs["value_cache"], kv_cache[1])
+        self.assertEqual(call_kwargs["slot_mapping"].dtype, torch.int32)
+        mock_fused_kv.assert_not_called()
+
+    @patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector")
+    @patch("vllm_ascend.attention.sfa_v1.record_attention_compute_start")
+    @patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written")
+    @patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector")
+    def test_dots3_note_native_forward_rescales_q_and_applies_headwise_gate(
+        self,
+        _mock_wait_for_kv,
+        _mock_notify_kv,
+        _mock_record_attention,
+        _mock_save_kv,
+    ):
+        self.impl.preprocess_type = PreprocessType.NATIVE
+        self.impl.has_indexer = False
+        self.impl.skip_topk = True
+        self.impl.is_kv_producer = False
+        self.impl.q_lora_rank = 2
+        self.impl.kv_lora_rank = 2
+        self.impl.qk_rope_head_dim = 1
+        self.impl.local_num_heads = 2
+        self.impl.tp_rank = 1
+        self.impl.v_head_dim = 2
+        self.impl.hidden_size = 8
+        self.impl.apply_mla_qkv_lora_rescale = True
+
+        hidden_states = torch.arange(8, dtype=torch.float32).view(2, 4)
+        q_c = torch.ones(2, 2)
+        kv_no_split = torch.zeros(2, 3)
+        self.impl.fused_qkv_a_proj = MagicMock(return_value=(torch.cat([q_c, kv_no_split], dim=-1), None))
+        self.impl.q_a_layernorm = MagicMock(side_effect=lambda value: value)
+        self.impl._compose_sfa_kv_cache = MagicMock(side_effect=lambda value: value)
+        self.impl._prepare_native_hidden_states = MagicMock(return_value=hidden_states)
+        self.impl._get_sfa_kv_slot_mapping = MagicMock(return_value=torch.tensor([0, 1]))
+        parallel_context = SimpleNamespace(
+            actual_seq_lengths_query=torch.tensor([2]),
+            actual_seq_lengths_key=torch.tensor([2]),
+            kv_slot_mapping=torch.tensor([0, 1]),
+            topk_num_tokens=2,
+            gather_full_o_proj=False,
+        )
+        self.impl._get_parallel_forward_context = MagicMock(return_value=parallel_context)
+        k_pe = torch.zeros(2, 1, 1)
+        k_nope = torch.zeros(2, 1, 2)
+        self.impl.exec_kv = MagicMock(return_value=(k_pe, k_nope))
+        self.impl._prepare_kv_for_parallel = MagicMock(return_value=(None, None, None, []))
+        self.impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(2, 2, 2), torch.zeros(2, 2, 1)))
+        self.impl.rope_single = MagicMock(side_effect=lambda value, _cos, _sin: value)
+        self.impl._record_query_gather_context = MagicMock()
+        self.impl._store_parallel_kv = MagicMock(return_value=(k_pe, k_nope, None))
+        self.impl._get_indexcache_topk_indices = MagicMock(return_value=torch.zeros(2, 1, dtype=torch.int32))
+        self.impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.ones(2, 2, 2))
+        self.impl._v_up_proj = MagicMock(return_value=torch.ones(2, 4))
+        self.impl.g_proj = MagicMock(return_value=(torch.full((2, 4), -10.0), None))
+        self.impl.g_proj.return_value[0][:, 2:] = 0
+        self.impl.sdpa_gate_type = "headwise"
+        finalized = {}
+
+        def finalize(attn_output, output, _gather_full_o_proj):
+            finalized["attn_output"] = attn_output.clone()
+            output.copy_(attn_output)
+            return output
+
+        self.impl._finalize_o_proj = finalize
+        metadata = SimpleNamespace(
+            cos=torch.empty(0),
+            sin=torch.empty(0),
+            slot_mapping=torch.tensor([0, 1]),
+            num_input_tokens=2,
+            num_actual_tokens=2,
+            attn_state=AscendAttentionState.DecodeOnly,
+        )
+        output = torch.empty(2, 4)
+
+        result = self.impl.forward(
+            "model.layers.0.self_attn.attn",
+            hidden_states,
+            (torch.empty(1), torch.empty(1)),
+            metadata,
+            output=output,
+        )
+
+        expected_q_c = q_c * 2
+        torch.testing.assert_close(
+            self.impl._q_proj_and_k_up_proj.call_args.args[0],
+            expected_q_c,
+        )
+        torch.testing.assert_close(
+            finalized["attn_output"],
+            torch.full((2, 4), 0.5),
+        )
+        self.assertIs(result, output)
+
     # ============ process_weights_after_loading ============
 
     @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
