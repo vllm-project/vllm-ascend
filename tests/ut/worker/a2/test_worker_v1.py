@@ -355,6 +355,25 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_gpu_blocks, 100)
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
+    @patch("torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_sleep_uses_rl_extra_cleanup(self, mock_get_config, mock_allocator_class, mock_mem_get_info):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_get_config.return_value = SimpleNamespace(
+            rl_config=SimpleNamespace(enabled=True, sleep_mode_extra_cleanup=True)
+        )
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.sleep_wakeup_manager = MagicMock()
+
+        worker.sleep()
+
+        worker.sleep_wakeup_manager.sleep.assert_called_once_with()
+        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=("weights",))
+        self.assertEqual(mock_mem_get_info.call_count, 2)
+
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
