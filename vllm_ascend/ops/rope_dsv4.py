@@ -116,7 +116,7 @@ def get_cos_and_sin_dsa(
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
 
-                gather_idx = pos_tensor.reshape(-1, 1, 1, 1).expand(
+                gather_idx = pos_tensor.to(torch.long).reshape(-1, 1, 1, 1).expand(
                     num_tokens, 1, 1, full_rope_cos.size(-1)
                 )
                 if draft_index is None:
