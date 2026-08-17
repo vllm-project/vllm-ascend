@@ -94,6 +94,15 @@ class RemotePortInfo(TypedDict):
     host: str
 
 
+def _get_mooncake_protocol(vllm_config: VllmConfig) -> str:
+    """Resolve Mooncake protocol from kv connector extra config."""
+    mooncake_cfg = vllm_config.kv_transfer_config.get_from_extra_config("mooncake", {})
+    protocol = mooncake_cfg.get("protocol", "ascend")
+    if protocol not in {"ascend", "ubshmem"}:
+        raise ValueError(f"Unsupported mooncake protocol: {protocol!r}")
+    return protocol
+
+
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     engine_id: str
     te_rpc_port: int
@@ -2068,9 +2077,11 @@ class MooncakeConnectorWorker:
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        transfer_protocol = _get_mooncake_protocol(vllm_config)
         self.engine = global_te.get_transfer_engine(
             self.side_channel_host,
             device_name=device_name,
+            protocol=transfer_protocol,
         )
         self.te_rpc_port = self.engine.get_rpc_port()
 
