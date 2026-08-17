@@ -529,7 +529,7 @@ jobs:
         with:
           # TODO(yikun): add more hub image and a note on release policy for container image
           images: |
-            ${{ env.QUAY_REPO }}
+            swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
           # Three trigger scenarios and resulting image tags:
           # https://github.com/marketplace/actions/docker-metadata-action#typeref
           #
