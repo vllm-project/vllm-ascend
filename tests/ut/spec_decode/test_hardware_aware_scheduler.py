@@ -30,9 +30,10 @@ def _policy(
 
 
 def test_hardware_policy_can_choose_zero_tokens() -> None:
-    # The target is most efficient at the bonus-token-only shape.  A policy
-    # with min_k=0 must be able to turn speculation off for every request.
-    policy = _policy({1: 1.0, 2: 10.0, 3: 10.0, 4: 10.0, 5: 10.0, 6: 10.0, 7: 10.0, 8: 10.0})
+    # The target is most efficient at the bonus-token-only shape.  The
+    # profile key includes one bonus-token row per request, so a two-request
+    # batch starts at verification width 2.
+    policy = _policy({2: 1.0, 3: 10.0, 4: 10.0, 5: 10.0, 6: 10.0, 7: 10.0, 8: 10.0})
     survival = torch.tensor([[0.1, 0.1, 0.1], [0.1, 0.1, 0.1]])
 
     lengths = policy.allocate(survival)
