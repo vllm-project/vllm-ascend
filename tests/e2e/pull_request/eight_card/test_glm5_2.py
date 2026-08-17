@@ -34,6 +34,8 @@ MAIN_MODEL = "Eco-Tech/GLM-5.2-w4a8"
 SPECULATOR_MODEL = "RedHatAI/GLM-5.2-speculator.dspark"
 DSPARK_NUM_SPECULATIVE_TOKENS = 7
 MTP_NUM_SPECULATIVE_TOKENS = 3
+DSPARK_ACCEPTANCE_GOLDEN = [0.72, 0.45, 0.32, 0.21, 0.16, 0.12, 0.1]
+MTP_ACCEPTANCE_GOLDEN = [0.86, 0.63, 0.42]
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -42,6 +44,7 @@ def _run_speculative_decoding(
     speculative_config: dict[str, object],
     num_speculative_tokens: int,
     compilation_config: CompilationConfig,
+    golden: list[float],
 ) -> list[float]:
     example_prompts = [
         "Hello, my name is",
@@ -55,7 +58,7 @@ def _run_speculative_decoding(
         quantization="ascend",
         tensor_parallel_size=8,
         max_model_len=8192,
-        max_num_seqs=16,
+        max_num_seqs=4,
         enable_expert_parallel=True,
         disable_log_stats=False,
         speculative_config=speculative_config,
@@ -81,8 +84,10 @@ def _run_speculative_decoding(
 
     assert num_drafts > 0, "Speculative decoding did not generate any draft tokens"
     acceptance_per_pos = [accepted / num_drafts for accepted in num_accepted_tokens_per_pos]
-    assert any(acceptance_per_pos), "Speculative decoding did not accept any draft tokens"
-    assert all(0 <= acceptance <= 1 for acceptance in acceptance_per_pos)
+    match = all(expected - actual < 0.1 for actual, expected in zip(acceptance_per_pos, golden))
+    assert match, (
+        f"acceptance_per_pos {acceptance_per_pos} is not greater than golden {golden} (num_drafts={num_drafts})"
+    )
 
     cleanup_dist_env_and_memory()
     return acceptance_per_pos
@@ -118,6 +123,7 @@ def test_glm_5_2_dspark_acceptance_tp8() -> None:
             cudagraph_mode="FULL_DECODE_ONLY",
             cudagraph_capture_sizes=[8, 16, 24, 32],
         ),
+        golden=DSPARK_ACCEPTANCE_GOLDEN,
     )
 
 
@@ -150,4 +156,5 @@ def test_glm_5_2_mtp_acceptance_tp8() -> None:
             cudagraph_mode="FULL_DECODE_ONLY",
             cudagraph_capture_sizes=[16],
         ),
+        golden=MTP_ACCEPTANCE_GOLDEN,
     )
