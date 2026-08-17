@@ -146,7 +146,8 @@ jobs:
       quay_temp_repo: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
       # ====================================================================
       
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      # should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      should_push: true
       workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
       schedule_tag_pattern: 'main'
