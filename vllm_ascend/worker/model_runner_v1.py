@@ -2361,6 +2361,8 @@ class NPUModelRunner(GPUModelRunner):
         # forward; disable waits until a start after enable (see Dumper flags).
         self.dfx.finalize_dump_data()
 
+        self.dfx.note_kv_block_writes(scheduler_output)
+
         finished_req_ids = getattr(scheduler_output, "finished_req_ids", None)
         self.dfx.mark_finished(finished_req_ids)
 

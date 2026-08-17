@@ -64,7 +64,14 @@
     // Cap output / window / current *_token_ids (0 = unlimited). Default 1000.
     // Detection matches the full cumulative output; the report may only store a prefix.
     // If a hit is beyond this cap, ids won't appear in the JSON — set 0 to dump all.
-    "max_output_token_ids": 1000
+    "max_output_token_ids": 1000,
+    // Include each request's current GPU block_ids in report detail.
+    "include_block_ids": true,
+    // Per physical block: last KV-write wave (DFX real-step index). Off by default.
+    "block_last_write_wave": false,
+    // Per physical block: last writer request_id. Off by default.
+    // When either block_last_* is true, detail also has blocks[{block_id, ...}].
+    "block_last_writer": false
   },
 
   "detector": {

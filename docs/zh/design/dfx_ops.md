@@ -90,6 +90,16 @@ vllm serve <model> --additional-config '{
 - 截断标记：`output_token_ids_truncated` / `output_token_ids_max`（prompt 同理）。
 - **检测用完整序列，report 可能只存前缀**：`output_substring` 等命中可能在截断窗口外——JSON 里看不到该 id 不等于没命中。核对全量时设 `"max_output_token_ids": 0`。
 
+### 2.2.1a KV block 元数据（`report.*`）
+
+| 开关 | 默认 | 作用 |
+|------|------|------|
+| `report.include_block_ids` | `true` | detail 带当前请求占用的 GPU `block_ids` |
+| `report.block_last_write_wave` | `false` | 维护并写入各物理块最后写入的 DFX wave |
+| `report.block_last_writer` | `false` | 维护并写入各物理块最后写入的 `req_id` |
+
+后两项任一为 `true` 时，detail 另有 `blocks: [{block_id, last_write_wave?, last_writer_req_id?}]`（对应当前 `block_ids` 查表）。每拍 forward 后按本拍 scheduled 范围更新；wave 用 DFX `current_wave`，不用墙钟。
+
 ### 2.2.2 日志开关（`log.*`）与 dump_finish / wave 对齐
 
 配置在 JSON 顶层 `log`（**不是** `report`）：

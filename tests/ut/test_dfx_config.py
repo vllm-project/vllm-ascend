@@ -233,6 +233,9 @@ def _valid_dfx_data(**dump_overrides):
             "decode_token_ids": True,
             "max_prompt_token_ids": 1000,
             "max_output_token_ids": 1000,
+            "include_block_ids": True,
+            "block_last_write_wave": False,
+            "block_last_writer": False,
         },
     }
 

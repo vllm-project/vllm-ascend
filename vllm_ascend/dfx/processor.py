@@ -31,6 +31,11 @@ from vllm_ascend.dfx.detector.manager import DetectorManager
 from vllm_ascend.dfx.dumper import Dumper
 from vllm_ascend.dfx.input_filters import InputFilterManager, iter_batch_prompt_token_ids
 from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
+from vllm_ascend.dfx.kv_block_meta import (
+    KvBlockMetaTracker,
+    block_ids_for_request,
+    touched_block_ids,
+)
 from vllm_ascend.dfx.manual_trigger import (
     ManualTriggerManager,
     TriggerEvent,
@@ -332,6 +337,7 @@ class DfxProcessor:
                 continue
             snap = io_mgr.snapshot(runner, req_id, None, include_token_ids=True, use_cache=False)
             detail = snap.as_detail_fields()
+            detail = self._enrich_detail_with_block_meta(detail, req_id, None)
             writer.write_dump_finish(
                 req_id=req_id,
                 detail=detail,
@@ -557,6 +563,7 @@ class DfxProcessor:
             scheduler_output=getattr(self, "_scheduler_output_for_step", None),
         )
         detail = io_mgr.merge_into_detail(detail, snap)
+        detail = self._enrich_detail_with_block_meta(detail, alert.req_id, alert.req_idx)
 
         dump_count, dump_max_times = self.dumper.dump_count_snapshot(dump_armed=dump_armed)
         dump_arm_wave = None
@@ -611,6 +618,7 @@ class DfxProcessor:
             )
             entry = {"req_id": req_id, "req_idx": req_idx}
             entry.update(snap.as_detail_fields())
+            entry = self._enrich_detail_with_block_meta(entry, req_id, req_idx)
             requests_detail.append(entry)
 
         detail = trigger.to_report_detail()
@@ -637,6 +645,119 @@ class DfxProcessor:
             dump_max_times=dump_max_times,
             dump_arm_wave=dump_arm_wave,
         )
+
+    def note_kv_block_writes(self, scheduler_output: Any | None = None) -> None:
+        """Record per-block last-write wave/writer after a real forward wrote KV.
+
+        No-op when both ``report.block_last_write_wave`` and
+        ``report.block_last_writer`` are false. Uses scheduled token counts to
+        mark only the blocks touched this step.
+        """
+        if not self.dfx_config.report_block_meta_enabled():
+            return
+        runner = self.runner
+        so = scheduler_output if scheduler_output is not None else getattr(self, "_scheduler_output_for_step", None)
+        if runner is None or so is None:
+            return
+        num_scheduled = getattr(so, "num_scheduled_tokens", None)
+        if not isinstance(num_scheduled, dict) or not num_scheduled:
+            return
+        dumper = getattr(self, "dumper", None)
+        wave = 0
+        if dumper is not None and hasattr(dumper, "current_wave"):
+            try:
+                wave = int(dumper.current_wave())
+            except (TypeError, ValueError):
+                wave = 0
+        block_size = int(getattr(runner, "block_size", 0) or 0)
+        if block_size <= 0:
+            cache_cfg = getattr(getattr(runner, "vllm_config", None), "cache_config", None)
+            block_size = int(getattr(cache_cfg, "block_size", 0) or 0)
+        if block_size <= 0:
+            block_size = 16
+        tracker = KvBlockMetaTracker.get()
+        input_batch = getattr(runner, "input_batch", None)
+        req_id_to_index = getattr(input_batch, "req_id_to_index", None) if input_batch else None
+        for req_id, n_sched in num_scheduled.items():
+            if not req_id:
+                continue
+            try:
+                scheduled = int(n_sched)
+            except (TypeError, ValueError):
+                continue
+            if scheduled <= 0:
+                continue
+            req_idx = None
+            if isinstance(req_id_to_index, dict) and req_id in req_id_to_index:
+                req_idx = int(req_id_to_index[req_id])
+            all_ids = block_ids_for_request(runner, str(req_id), req_idx)
+            if not all_ids:
+                continue
+            # Prefer range from computed_before when the counter looks like
+            # "after this step" (computed >= scheduled); otherwise treat
+            # computed as before and use the scheduled span. Fallback: last
+            # ceil(scheduled/block_size) blocks (decode / chunked tail).
+            computed = self._num_computed_tokens(runner, str(req_id), req_idx)
+            if computed >= scheduled:
+                computed_before = computed - scheduled
+            else:
+                computed_before = computed
+            touched = touched_block_ids(
+                all_ids,
+                block_size=block_size,
+                num_computed_before=computed_before,
+                num_scheduled=scheduled,
+            )
+            if not touched:
+                n_tail = max(1, (scheduled + block_size - 1) // block_size)
+                touched = all_ids[-n_tail:]
+            tracker.record_writes(str(req_id), touched, wave)
+
+    @staticmethod
+    def _num_computed_tokens(runner: Any, req_id: str, req_idx: int | None) -> int:
+        requests = getattr(runner, "requests", None)
+        if requests is not None:
+            state = requests.get(req_id)
+            if state is not None:
+                n = getattr(state, "num_computed_tokens", None)
+                if n is not None:
+                    try:
+                        return int(n)
+                    except (TypeError, ValueError):
+                        pass
+        input_batch = getattr(runner, "input_batch", None)
+        if input_batch is not None and req_idx is not None:
+            arr = getattr(input_batch, "num_computed_tokens_cpu", None)
+            if arr is not None:
+                try:
+                    return int(arr[int(req_idx)])
+                except Exception:
+                    pass
+        return 0
+
+    def _enrich_detail_with_block_meta(
+        self,
+        detail: dict[str, Any],
+        req_id: str,
+        req_idx: int | None = None,
+    ) -> dict[str, Any]:
+        """Attach ``block_ids`` / ``blocks`` according to report.* flags."""
+        include_ids = self.dfx_config.report_include_block_ids()
+        include_wave = self.dfx_config.report_block_last_write_wave()
+        include_writer = self.dfx_config.report_block_last_writer()
+        if not include_ids and not include_wave and not include_writer:
+            return detail
+        out = dict(detail)
+        ids = block_ids_for_request(self.runner, req_id, req_idx)
+        if include_ids or include_wave or include_writer:
+            out["block_ids"] = ids
+        if include_wave or include_writer:
+            out["blocks"] = KvBlockMetaTracker.get().blocks_detail(
+                ids,
+                include_wave=include_wave,
+                include_writer=include_writer,
+            )
+        return out
 
     def _batch_request_io_rows(self) -> list[tuple[str, int]]:
         """``(req_id, req_idx)`` for every request currently in the local batch."""
