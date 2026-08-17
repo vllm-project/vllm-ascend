@@ -349,29 +349,6 @@ class AscendSFADCPMetadataBuilder(
         self._update_dsa_cp_slot_mapping_for_dcp(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
 
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool = False,
-        **kwargs,
-    ) -> AscendSFAMetadata:
-        return self._build_with_metadata_view(
-            common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None),
-        )
-
-    def build_for_drafting(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        draft_index: int,
-        **kwargs,
-    ) -> AscendSFAMetadata:
-        return self._build_with_metadata_view(
-            common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=draft_index),
-        )
-
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
