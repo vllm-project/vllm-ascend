@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+# CI correction: atomic 8B plus draft cases exceed the 32 GiB vNPU budget.
 import os
 from unittest.mock import patch
 

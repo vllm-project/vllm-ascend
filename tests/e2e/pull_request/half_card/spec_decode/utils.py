@@ -1,3 +1,5 @@
+"""Model definitions shared by the half-card speculative-decoding tests."""
+
 from __future__ import annotations
 
 import os

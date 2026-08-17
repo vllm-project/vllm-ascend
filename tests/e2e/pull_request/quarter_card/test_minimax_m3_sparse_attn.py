@@ -9,7 +9,7 @@ Triton sparse-attention reference.
 Default sparse-attention backend selection runs both Triton and torch_npu.
 Select one backend with::
 
-    pytest tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
+    pytest tests/e2e/pull_request/quarter_card/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
 
 Test cases are adapted from
 ``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py`` and

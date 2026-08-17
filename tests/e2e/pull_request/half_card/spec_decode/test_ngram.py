@@ -1,3 +1,5 @@
+"""N-gram decoding with an 8B BF16 target on a 32 GiB vNPU."""
+
 from __future__ import annotations
 
 from typing import Any

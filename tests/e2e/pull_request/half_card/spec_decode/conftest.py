@@ -1,3 +1,5 @@
+"""Shared fixtures for the half-card speculative-decoding tests."""
+
 from __future__ import annotations
 
 import random

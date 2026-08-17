@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import subprocess
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import pytest
 import regex as re
@@ -138,14 +140,20 @@ def test_collect_paths_and_basic_path_helpers():
 
 def test_route_helpers():
     # Use a controlled runner_mapping that covers all convention directories
-    # documented in test_config.yaml (a2_2, a2, a3_8, a3_4, a3_2, 310p). The real
-    # config only defines a subset because the corresponding test directories
-    # don't exist in the repo today, but the routing logic supports all of them.
+    # documented in test_config.yaml. A2 UTs default to the quarter-card vNPU,
+    # with an explicit half-card exception for the statically largest file.
+    # The synthetic a3_8 entry covers main's eight-card routing, while the
+    # other synthetic entries exercise routing keys whose corresponding
+    # directories don't exist in the repo today.
     select_tests._load_runner_mapping(
         {
             "runner_mapping": {
+                "tests/ut/attention/a2/test_attention_v1_precision.py": {"default": "a2_half_x1"},
+                "tests/ut/attention/a2/test_mla_precision.py": {"default": "a2_half_x1"},
+                "tests/e2e/pull_request/quarter_card": {"default": "a2_quarter_x1"},
+                "tests/e2e/pull_request/half_card": {"default": "a2_half_x1"},
                 "tests/ut/.+/a2_2": {"default": "a2_x2"},
-                "tests/ut/.+/a2": {"default": "a2_x1"},
+                "tests/ut/.+/a2": {"default": "a2_quarter_x1"},
                 "tests/ut/.+/a3_8": {"default": "a3_x8"},
                 "tests/ut/.+/a3_4": {"default": "a3_x4"},
                 "tests/ut/.+/a3_2": {"default": "a3_x2"},
@@ -161,8 +169,23 @@ def test_route_helpers():
     assert select_tests._pytest_node_file_path("tests/e2e/test_x.py::TestCase::test_a") == "tests/e2e/test_x.py"
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == (2, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py::test_case") == (2, select_tests.NpuType.A2)
-    assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == (1, select_tests.NpuType.A2)
+    assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
+    assert select_tests._route_ut_dir("tests/ut/mod/a2") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
     assert select_tests._route_ut_dir("tests/ut/mod/a3_8/test_x.py") == (8, select_tests.NpuType.A3)
+    assert select_tests._route_ut_dir("tests/ut/attention/a2/test_attention_v1_precision.py") == (
+        1,
+        select_tests.NpuType.A2_HALF,
+    )
+    assert select_tests._route_ut_dir("tests/ut/attention/a2/test_mla_precision.py::test_case") == (
+        1,
+        select_tests.NpuType.A2_HALF,
+    )
     assert select_tests._route_ut_dir("tests/ut/mod/a3_4/test_x.py") == (4, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/a3_2/test_x.py") == (2, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/310p/test_x.py") == (1, select_tests.NpuType._310P)
@@ -171,6 +194,14 @@ def test_route_helpers():
     assert select_tests._route_e2e_dir("tests/e2e/pull_request/eight_card/") == (8, select_tests.NpuType.A3)
     assert select_tests._route_e2e_dir("tests/e2e/pull_request/two_card/") == (2, select_tests.NpuType.A3)
     assert select_tests._route_e2e_dir("tests/e2e/pull_request/one_card/") == (1, select_tests.NpuType.A2)
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/half_card/") == (
+        1,
+        select_tests.NpuType.A2_HALF,
+    )
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/quarter_card/") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
     assert select_tests._route_e2e_dir("tests/e2e/other/") is None
     assert select_tests._route_e2e_file("tests/e2e/pull_request/four_card/test_x_310p.py") == (
         4,
@@ -188,6 +219,77 @@ def test_route_helpers():
         8,
         select_tests.NpuType.A3,
     )
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/half_card/test_x.py") == (
+        1,
+        select_tests.NpuType.A2_HALF,
+    )
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/quarter_card/test_x.py::test_case") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
+
+
+def test_filter_runner_types_keeps_only_requested_groups():
+    groups = defaultdict(
+        list,
+        {
+            (0, select_tests.NpuType.CPU): ["tests/ut/test_cpu.py"],
+            (1, select_tests.NpuType.A2_QUARTER): ["tests/e2e/quarter.py"],
+            (1, select_tests.NpuType.A2_HALF): ["tests/e2e/half.py"],
+            (1, select_tests.NpuType.A2): ["tests/e2e/full.py"],
+        },
+    )
+
+    select_tests._filter_runner_types(groups, ["a2_quarter", "a2_half"])
+
+    assert set(groups) == {
+        (1, select_tests.NpuType.A2_QUARTER),
+        (1, select_tests.NpuType.A2_HALF),
+    }
+
+
+def test_run_selected_tests_continues_after_target_failure(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    call_log = tmp_path / "pytest-calls.log"
+    fake_pytest = fake_bin / "pytest"
+    fake_pytest.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$CALL_LOG"\n'
+        'if [[ "$*" == *test_first.py* ]]; then exit 1; fi\n'
+        "exit 0\n"
+    )
+    fake_pytest.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CALL_LOG"] = str(call_log)
+    env["RUNNER_TEMP"] = str(tmp_path)
+    script = Path(__file__).with_name("run_selected_tests.sh")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "a2_quarter",
+            "1",
+            "with-device",
+            "tests/fake/test_first.py",
+            "tests/fake/test_second.py",
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    calls = call_log.read_text().splitlines()
+    assert completed.returncode == 1
+    assert len(calls) == 2
+    assert "test_first.py" in calls[0]
+    assert "test_second.py" in calls[1]
+    assert "FAILED: tests/fake/test_first.py" in completed.stdout
+    assert "PASSED: tests/fake/test_second.py" in completed.stdout
 
 
 def test_scan_ut_test_dir(tmp_path):
@@ -237,7 +339,10 @@ def test_scan_e2e_test_dir(tmp_path, capsys):
     assert "does not match any runner pattern" in capsys.readouterr().err
 
     one_card = tmp_path / "tests" / "e2e" / "pull_request" / "one_card"
-    one_card.mkdir(parents=True)
+    half_card = tmp_path / "tests" / "e2e" / "pull_request" / "half_card"
+    quarter_card = tmp_path / "tests" / "e2e" / "pull_request" / "quarter_card"
+    for path in (one_card, half_card, quarter_card):
+        path.mkdir(parents=True)
     test_one = one_card / "test_one.py"
     test_310p = one_card / "test_one_310p.py"
     helper = one_card / "helper.py"
@@ -252,6 +357,15 @@ def test_scan_e2e_test_dir(tmp_path, capsys):
     nodeid = f"{test_one}::test_specific_case"
     select_tests._scan_e2e_test_dir(nodeid, groups)
     assert nodeid in groups[(1, select_tests.NpuType.A2)]
+
+    test_half = half_card / "test_half.py"
+    test_quarter = quarter_card / "test_quarter.py"
+    test_half.write_text("")
+    test_quarter.write_text("")
+    select_tests._scan_e2e_test_dir(str(half_card), groups)
+    select_tests._scan_e2e_test_dir(str(quarter_card), groups)
+    assert groups[(1, select_tests.NpuType.A2_HALF)] == [str(test_half)]
+    assert groups[(1, select_tests.NpuType.A2_QUARTER)] == [str(test_quarter)]
 
     parent = tmp_path / "tests" / "e2e" / "pull_request"
     two_card = parent / "two_card"
@@ -279,6 +393,18 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
                     "image_tag": "a2-img",
                     "csrc_cache_target": "a2-arm64-ubuntu",
                 },
+                "a2-half-runner": {
+                    "chip": "a2_half",
+                    "npu_num": 1,
+                    "image_tag": "a2-img",
+                    "csrc_cache_target": "a2-arm64-ubuntu",
+                },
+                "a2-quarter-runner": {
+                    "chip": "a2_quarter",
+                    "npu_num": 1,
+                    "image_tag": "a2-img",
+                    "csrc_cache_target": "a2-arm64-ubuntu",
+                },
             }
         )
     )
@@ -286,6 +412,8 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
     runners = select_tests._load_runners()
     assert select_tests._find_runner(0, select_tests.NpuType.CPU, runners).label == "cpu-runner"
     assert select_tests._find_runner(1, select_tests.NpuType.A2, runners).label == "a2-runner"
+    assert select_tests._find_runner(1, select_tests.NpuType.A2_HALF, runners).label == "a2-half-runner"
+    assert select_tests._find_runner(1, select_tests.NpuType.A2_QUARTER, runners).label == "a2-quarter-runner"
     assert select_tests._find_runner(2, select_tests.NpuType.A2, runners) is None
     assert select_tests._resolve_to_runners(
         {select_tests._DEFAULT_KEY: ["tests/ut/b.py", "tests/ut/a.py"], (1, select_tests.NpuType.A2): ["e2e.py"]},
@@ -331,6 +459,50 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
     select_tests._write_output([], [])
     assert "has_tests=false" in output.read_text()
     assert "csrc_cache_target_ids=[]" in output.read_text()
+
+
+def test_virtual_npu_partition_counts():
+    runners = [
+        select_tests.RunnerInfo(
+            1,
+            select_tests.NpuType.A2_HALF,
+            "a2-half-runner",
+            "a2-img",
+            "a2-arm64-ubuntu",
+        ),
+        select_tests.RunnerInfo(
+            1,
+            select_tests.NpuType.A2_QUARTER,
+            "a2-quarter-runner",
+            "a2-img",
+            "a2-arm64-ubuntu",
+        ),
+    ]
+    groups = {
+        (1, select_tests.NpuType.A2_HALF): [f"half-{i}.py" for i in range(3)],
+        (1, select_tests.NpuType.A2_QUARTER): [f"quarter-{i}.py" for i in range(6)],
+    }
+
+    resolved = select_tests._resolve_to_runners(
+        groups,
+        runners,
+        partition_config={"a2_half_x1": 3, "a2_quarter_x1": 6},
+    )
+
+    half_groups = [group for group in resolved if group["npu_type"] == "a2_half"]
+    quarter_groups = [group for group in resolved if group["npu_type"] == "a2_quarter"]
+    assert len(half_groups) == 3
+    assert len(quarter_groups) == 6
+    assert {group["partition"] for group in half_groups} == {"1-3", "2-3", "3-3"}
+    assert {group["partition"] for group in quarter_groups} == {
+        "1-6",
+        "2-6",
+        "3-6",
+        "4-6",
+        "5-6",
+        "6-6",
+    }
+    assert {group["csrc_cache_target"] for group in resolved} == {"a2-arm64-ubuntu"}
 
 
 def test_get_changed_files(monkeypatch):
@@ -679,12 +851,17 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     user-specified paths, regardless of ``optional: false`` modules that
     would otherwise pull in the full suite."""
     test_root = tmp_path / "tests"
+    e2e_quarter_card = test_root / "e2e" / "pull_request" / "quarter_card"
+    e2e_half_card = test_root / "e2e" / "pull_request" / "half_card"
     e2e_one_card = test_root / "e2e" / "pull_request" / "one_card"
     e2e_two_card = test_root / "e2e" / "pull_request" / "two_card"
     e2e_four_card = test_root / "e2e" / "pull_request" / "four_card"
     e2e_eight_card = test_root / "e2e" / "pull_request" / "eight_card"
-    for path in (e2e_one_card, e2e_two_card, e2e_four_card, e2e_eight_card):
+    for path in (e2e_quarter_card, e2e_half_card, e2e_one_card, e2e_two_card, e2e_four_card, e2e_eight_card):
         path.mkdir(parents=True)
+    quarter_a = e2e_quarter_card / "test_quarter_a.py"
+    quarter_b = e2e_quarter_card / "test_quarter_b.py"
+    half_a = e2e_half_card / "test_half_a.py"
     one_a = e2e_one_card / "test_one_a.py"
     one_b = e2e_one_card / "test_one_b.py"
     one_310p = e2e_one_card / "test_one_310p.py"
@@ -692,7 +869,7 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     two_b = e2e_two_card / "test_two_b.py"
     four_a = e2e_four_card / "test_four_a.py"
     eight_a = e2e_eight_card / "test_eight_a.py"
-    for path in (one_a, one_b, one_310p, two_a, two_b, four_a, eight_a):
+    for path in (quarter_a, quarter_b, half_a, one_a, one_b, one_310p, two_a, two_b, four_a, eight_a):
         path.write_text("")
 
     # Module with ``optional: false`` would normally pull in the entire e2e
@@ -703,6 +880,8 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
             "optional": False,
             "source_file_dependencies": ["src/any.py"],
             "tests": [
+                "tests/e2e/pull_request/quarter_card",
+                "tests/e2e/pull_request/half_card",
                 "tests/e2e/pull_request/one_card",
                 "tests/e2e/pull_request/two_card",
                 "tests/e2e/pull_request/four_card",
@@ -711,6 +890,8 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
         },
     ]
     runner_mapping = {
+        "tests/e2e/pull_request/quarter_card": {"default": "a2_quarter_x1"},
+        "tests/e2e/pull_request/half_card": {"default": "a2_half_x1"},
         "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
         "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
         "tests/e2e/pull_request/four_card": {"default": "a3_x4", "310p": "310p_x4"},
@@ -722,6 +903,8 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     runner_file.write_text(
         json.dumps(
             {
+                "a2-quarter-runner": {"chip": "a2_quarter", "npu_num": 1},
+                "a2-half-runner": {"chip": "a2_half", "npu_num": 1},
                 "a2-runner": {"chip": "a2", "npu_num": 1},
                 "a3-runner-2": {"chip": "a3", "npu_num": 2},
                 "a3-runner-4": {"chip": "a3", "npu_num": 4},
@@ -735,6 +918,9 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
 
     # Use repo-relative paths because the script's _is_e2e_path / routing
     # patterns expect paths starting with "tests/".
+    rel_quarter_a = "tests/e2e/pull_request/quarter_card/test_quarter_a.py"
+    rel_quarter_b = "tests/e2e/pull_request/quarter_card/test_quarter_b.py"
+    rel_half_a = "tests/e2e/pull_request/half_card/test_half_a.py"
     rel_one_a = "tests/e2e/pull_request/one_card/test_one_a.py"
     rel_one_b = "tests/e2e/pull_request/one_card/test_one_b.py"
     rel_one_310p = "tests/e2e/pull_request/one_card/test_one_310p.py"
@@ -742,6 +928,7 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     rel_two_b = "tests/e2e/pull_request/two_card/test_two_b.py"
     rel_four_a = "tests/e2e/pull_request/four_card/test_four_a.py"
     rel_eight_a = "tests/e2e/pull_request/eight_card/test_eight_a.py"
+    rel_e2e_quarter = "tests/e2e/pull_request/quarter_card"
     rel_e2e_one = "tests/e2e/pull_request/one_card"
     rel_ut_file = "tests/ut/test_ut.py"
     rel_missing = "tests/e2e/pull_request/one_card/does_not_exist.py"
@@ -769,6 +956,21 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     assert test_groups[0]["npu_type"] == "a2"
     assert test_groups[0]["num_npus"] == 1
     assert test_groups[0]["tests"].split() == [rel_one_a]
+
+    # Fractional-card files, directories, and nodeids use their dedicated runners.
+    test_groups, _, _ = run_explicit(rel_half_a)
+    assert test_groups[0]["runner"] == "a2-half-runner"
+    assert test_groups[0]["npu_type"] == "a2_half"
+
+    test_groups, _, _ = run_explicit(rel_e2e_quarter)
+    selected = {t for g in test_groups for t in g["tests"].split()}
+    assert selected == {rel_quarter_a, rel_quarter_b}
+    assert {g["runner"] for g in test_groups} == {"a2-quarter-runner"}
+
+    quarter_nodeid = f"{rel_quarter_a}::TestClass::test_method"
+    test_groups, _, _ = run_explicit(quarter_nodeid)
+    assert test_groups[0]["tests"].split() == [quarter_nodeid]
+    assert test_groups[0]["npu_type"] == "a2_quarter"
 
     # 2. Multiple files spanning different runners.
     test_groups, _, _ = run_explicit(rel_one_a, rel_two_a, rel_four_a, rel_eight_a)

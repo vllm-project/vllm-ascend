@@ -76,6 +76,8 @@ _RUNNER_LABEL_PATH = _SCRIPT_DIR / "runner_label.json"
 
 class NpuType(str, Enum):
     A2 = "a2"
+    A2_HALF = "a2_half"
+    A2_QUARTER = "a2_quarter"
     A3 = "a3"
     _310P = "310p"
     A5 = "a5"
@@ -653,6 +655,19 @@ def _resolve_to_runners(
     return result
 
 
+def _filter_runner_types(
+    all_groups: dict[RunnerKey, list[str]],
+    allowed_types: list[str] | None,
+) -> None:
+    """Keep only groups whose runner type was explicitly requested."""
+    if not allowed_types:
+        return
+    allowed = {NpuType(value) for value in allowed_types}
+    for key in list(all_groups):
+        if key[1] not in allowed:
+            del all_groups[key]
+
+
 def _write_output(
     test_groups: list[dict],
     matched_modules: list[str],
@@ -755,6 +770,12 @@ def main():
         type=str,
         default=None,
         help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
+    )
+    parser.add_argument(
+        "--npu-types",
+        nargs="+",
+        choices=[npu_type.value for npu_type in NpuType],
+        help="Temporarily limit output to the listed runner types after normal test selection.",
     )
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
@@ -893,6 +914,8 @@ def main():
                     filtered.append(t)
             all_groups[key] = filtered
         _dedup_groups(all_groups)
+
+    _filter_runner_types(all_groups, args.npu_types)
 
     runners = _load_runners()
     estimated_times = _load_estimated_times(meta)

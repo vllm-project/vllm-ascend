@@ -1,3 +1,4 @@
+# CI correction: model plus ACL graph capture exceeds the 32 GiB vNPU budget.
 from collections.abc import Sequence
 
 import vllm

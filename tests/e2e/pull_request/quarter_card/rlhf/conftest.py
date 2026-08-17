@@ -224,7 +224,7 @@ def ok(resp) -> bool:
 
 
 def sleep(url, level=1, mode="abort"):
-    return requests.post(f"{url}/sleep", params={"level": level, "mode": mode}, timeout=15).status_code
+    return requests.post(f"{url}/sleep", params={"level": level, "mode": mode}, timeout=60).status_code
 
 
 def wake(url, tags=None):
