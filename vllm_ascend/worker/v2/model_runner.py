@@ -210,6 +210,8 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
+        if isinstance(self.pcp_manager, AscendPCPManager):
+            self.pcp_manager.set_mtp_enabled(self.speculative_config is not None)
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
