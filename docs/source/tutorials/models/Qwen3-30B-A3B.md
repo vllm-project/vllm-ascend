@@ -52,6 +52,8 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
+For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
+
 === "A3 series"
 
     **Docker Run:**
