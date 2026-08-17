@@ -19,7 +19,8 @@
 import math
 import sys
 from collections.abc import Callable
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -35,7 +36,10 @@ from tests.ut.attention.utils import (  # noqa: E402
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl  # noqa: E402
+from vllm_ascend.attention.context_parallel.sfa_cp import (  # noqa: E402
+    AscendSFACPImpl,
+    AscendSFADCPImpl,
+)
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -50,6 +54,13 @@ _MAX_SIG_REL_ERR = 1e-2  # max |out-ref| / peak |ref|
 _MAX_MEAN_SIG_ERR = 5e-3  # mean |out-ref| / mean |ref|
 _MAX_REL_ERR = 1e-2  # max per-element rel err where |ref| >= floor
 _SIG_FLOOR_FRAC = 5e-1  # floor = this fraction of peak |ref|
+
+
+def _make_dcp_impl(rank: int) -> AscendSFADCPImpl:
+    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.dcp_size = 2
+    impl.dcp_rank = rank
+    return impl
 
 
 def _validate_spec(spec: BatchSpec) -> None:
@@ -842,3 +853,40 @@ def test_sfa_cp_correctness(
         dtype=dtype,
         tensor_parallel_size=tensor_parallel_size,
     )
+
+
+@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
+def test_sfa_dcp_routes_native_output_merge_to_fused_a2a(fused_combine) -> None:
+    impl = _make_dcp_impl(rank=1)
+    device_group = object()
+    impl.dcp_group = SimpleNamespace(device_group=device_group)
+    output = torch.empty(3, 4, 8)
+    lse = torch.empty(3, 4, 1, dtype=torch.float32)
+    expected = torch.empty(3, 2, 8)
+    fused_combine.return_value = expected
+
+    actual = impl._merge_dcp_outputs(output, lse)
+
+    assert actual is expected
+    fused_combine.assert_called_once_with(output, lse, 2, 1, device_group)
+
+
+@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
+def test_sfa_dsa_dcp_routes_token_scatter_to_fused_a2a(fused_combine) -> None:
+    impl = _make_dcp_impl(rank=1)
+    device_group = object()
+    impl.dcp_group = SimpleNamespace(device_group=device_group)
+    output = torch.empty(4, 2, 8)
+    lse = torch.empty(4, 2, 1, dtype=torch.float32)
+    expected = torch.empty(2, 2, 8)
+    fused_combine.return_value = expected
+    dsa_cp_context = SimpleNamespace(
+        num_tokens_pad=4,
+        local_start=2,
+        local_end_with_pad=4,
+    )
+
+    actual = impl._merge_dcp_outputs(output, lse, dsa_cp_context)
+
+    assert actual is expected
+    fused_combine.assert_called_once_with(output, lse, 2, 0, device_group)
