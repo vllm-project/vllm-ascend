@@ -19,15 +19,45 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
+import vllm_ascend.models.qwen3_omni_dspark as qwen3_omni_dspark
 
 
 class TestQwen3DSparkWeightLoading:
     """Tests for Qwen3 DSpark weight loading."""
+
+    def test_qwen3_omni_uses_dedicated_backbone(self) -> None:
+        assert qwen3_omni_dspark.AscendQwen3OmniDSparkForCausalLM.model_cls is qwen3_omni_dspark.Qwen3OmniDSparkModel
+
+    def test_rotation_path_uses_target_model_quantization(self) -> None:
+        target_model_config = SimpleNamespace(
+            model="/models/qwen3-omni",
+            quantization="ascend",
+        )
+        vllm_config = SimpleNamespace(
+            model_config=target_model_config,
+            load_config=SimpleNamespace(),
+            quant_config=None,
+        )
+        target_quant_config = SimpleNamespace(
+            quant_description={"optional": {"quarot": {"rotation_map": {"global_rotation": "rotation.safetensors"}}}}
+        )
+
+        with patch.object(
+            qwen3_dspark.VllmConfig,
+            "get_quantization_config",
+            return_value=target_quant_config,
+        ) as mock_get_quantization_config:
+            result = qwen3_dspark.get_rotation_path(vllm_config)
+
+        mock_get_quantization_config.assert_called_once_with(target_model_config, vllm_config.load_config)
+        assert result == Path("/models/qwen3-omni/rotation.safetensors")
 
     def test_rotates_only_fc_weights(self) -> None:
         """Rotate FC weights and preserve all other weights before delegation."""

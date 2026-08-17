@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -7,7 +8,22 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 
-from vllm_ascend.models.llama_eagle3 import get_rotation_matrix, get_rotation_path
+from vllm_ascend.models.llama_eagle3 import get_rotation_matrix
+
+
+def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
+    """Resolve QuaRot metadata from the target rather than the draft config."""
+    target_model_config = vllm_config.model_config
+    if getattr(target_model_config, "quantization", None) is None:
+        return None
+
+    target_quant_config = VllmConfig.get_quantization_config(target_model_config, vllm_config.load_config)
+    try:
+        quant_description = target_quant_config.quant_description
+        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
+    except (AttributeError, KeyError, TypeError):
+        return None
+    return Path(target_model_config.model) / rotation_relative_path
 
 
 # Process the first linear weight with rotation matrix, if the target model uses rotary quantization
@@ -65,7 +81,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 config=config,
                 prefix=maybe_prefix(model_prefix, "confidence_head"),
             )
-        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
+        self.rotation_path = get_rotation_path(vllm_config)
 
     @staticmethod
     def _get_confidence_relative_name(
