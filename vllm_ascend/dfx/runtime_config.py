@@ -91,6 +91,11 @@ _DEFAULTS: dict[str, Any] = {
         # waves then off. Skips max_times / cooldown / input filters.
         # Needs dump.enabled=true and reload > 0.
         "manual_trigger": False,
+        # Effective msprobe JSON path (seeded from ascend dump_config_path at
+        # bootstrap when null). Hot-change → recreate debugger.
+        "msprobe_config_path": None,
+        # One-shot: recreate msprobe debugger from current path, then clear.
+        "reload_msprobe": False,
     },
     "ascend_log": {
         "level": "INFO",
@@ -407,6 +412,7 @@ class DfxRuntimeConfig:
         ensure_file: bool = False,
         sync_mode: str | None = None,
         reload_interval_seconds: float | int | None = None,
+        msprobe_config_path: str | None = None,
     ) -> None:
         # None → default ``<cwd>/dfx/config/dfx_config.json`` (not an "explicit" path).
         self._explicit_config_path = config_path is not None
@@ -432,6 +438,8 @@ class DfxRuntimeConfig:
         self._bootstrap_persisted = False
         self._bg_reloader_started = False
         self._bg_thread: threading.Thread | None = None
+        # Seed into bootstrap merge when dump.msprobe_config_path is still null.
+        self._startup_msprobe_config_path = (str(msprobe_config_path).strip() if msprobe_config_path else None) or None
 
         # In-memory merge always. ``ensure_file=True`` persists immediately (tests /
         # rare callers). Production AscendConfig uses False; worker leader calls
@@ -500,6 +508,11 @@ class DfxRuntimeConfig:
         # Persist startup hot-reload interval for visibility (runtime gate is still
         # ``self._reload_interval`` only).
         merged["reload_interval_seconds"] = self._reload_interval
+        # Seed visible msprobe path when JSON left it null.
+        dump = merged.setdefault("dump", {})
+        cur = dump.get("msprobe_config_path")
+        if (cur is None or (isinstance(cur, str) and not cur.strip())) and self._startup_msprobe_config_path:
+            dump["msprobe_config_path"] = self._startup_msprobe_config_path
         return _normalize_config_sections(merged)
 
     def _write_data_unlocked(self, data: dict[str, Any]) -> None:
@@ -781,6 +794,45 @@ class DfxRuntimeConfig:
     def manual_trigger(self) -> bool:
         """True when manual dump is armed (continuous or remaining count > 0)."""
         return self.manual_trigger_count() > 0
+
+    def dump_msprobe_config_path(self) -> str | None:
+        """Effective msprobe JSON path from ``dump.msprobe_config_path`` (or None)."""
+        raw = self.dump.get("msprobe_config_path")
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            return None
+        path = raw.strip()
+        return path or None
+
+    def dump_reload_msprobe(self) -> bool:
+        """One-shot flag to recreate the msprobe debugger."""
+        return bool(self.dump.get("reload_msprobe", False))
+
+    def consume_reload_msprobe(self) -> bool:
+        """If ``reload_msprobe`` is true, clear it (persist on writer) and return True."""
+        if not self.dump_reload_msprobe():
+            return False
+        self.dump["reload_msprobe"] = False
+        if _is_json_writer():
+            if self.save({"dump": {"reload_msprobe": False}}):
+                logger.info(
+                    "[DFX runtime_config] reload_msprobe consumed → false path=%s %s",
+                    self.config_path,
+                    _process_role_tag(),
+                )
+            else:
+                logger.warning(
+                    "[DFX runtime_config] reload_msprobe cleared in-memory but failed to persist path=%s %s",
+                    self.config_path,
+                    _process_role_tag(),
+                )
+        else:
+            logger.debug(
+                "[DFX runtime_config] reload_msprobe cleared in-memory (non-writer) %s",
+                _process_role_tag(),
+            )
+        return True
 
     def input_filter_configs(self) -> list[dict[str, Any]]:
         """Normalized ``input_filter.filters`` for ``InputFilterManager``."""
@@ -1436,6 +1488,17 @@ class DfxRuntimeConfig:
                     data["dump"]["manual_trigger"] = False
             else:
                 raise ValueError("dump.manual_trigger must be bool or non-negative int")
+        msprobe_path = data["dump"].get("msprobe_config_path")
+        if msprobe_path is not None and not isinstance(msprobe_path, str):
+            raise ValueError("dump.msprobe_config_path must be str or null")
+        if isinstance(msprobe_path, str) and not msprobe_path.strip():
+            data["dump"]["msprobe_config_path"] = None
+        reload_msprobe = data["dump"].get("reload_msprobe")
+        if reload_msprobe is not None and not isinstance(reload_msprobe, bool):
+            if reload_msprobe in (0, 1):
+                data["dump"]["reload_msprobe"] = bool(reload_msprobe)
+            else:
+                raise ValueError("dump.reload_msprobe must be bool")
         save_sensitive = data["report"].get("save_sensitive_info")
         if save_sensitive is not None and not isinstance(save_sensitive, bool):
             if save_sensitive in (0, 1):

@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
 
 from vllm_ascend.dfx.dfx_types import DumpFinishMeta, DumpPhase
@@ -98,6 +100,10 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         # True after construction-time debugger probe finishes. Late success
         # under ACLGraph may miss already-captured graphs.
         self._startup_debugger_done = False
+        # Last path applied to ascend_config / debugger (hot-reload recreate).
+        self._applied_msprobe_config_path: str | None = getattr(
+            getattr(runner, "ascend_config", None), "dump_config_path", None
+        )
 
         self._apply_observability_switches()
 
@@ -126,12 +132,89 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         self._try_init_debugger()
         self._enforce_dump_requires_debugger()
         self._startup_debugger_done = True
+        self._applied_msprobe_config_path = getattr(
+            getattr(self.runner, "ascend_config", None), "dump_config_path", None
+        )
 
     def _try_init_debugger(self) -> None:
         """Init debugger once when absent (startup or lazy reload retry)."""
         if self._debugger is not None:
             return
         self._init_debugger(self.runner.compilation_config.cudagraph_mode)
+
+    def _teardown_debugger(self) -> None:
+        """Drop the current msprobe debugger so it can be reconstructed."""
+        if bool(getattr(self, "_msprobe_dump_active", False)):
+            with suppress(Exception):
+                self.set_msprobe_dump_state(False)
+            self._msprobe_dump_active = False
+        self._pending_dump = False
+        self._pending_dump_req_id = None
+        self._pending_dump_skip_quota = False
+        self._dump_needs_forward = False
+        self._dump_forward_seen = False
+        dbg = getattr(self, "_debugger", None)
+        if dbg is not None and hasattr(dbg, "stop"):
+            with suppress(Exception):
+                dbg.stop()
+        self._debugger = None
+        self._debugger_started = False
+        self._aclgraph_hooks_installed = False
+        self._uses_aclgraph_dumper = False
+
+    def recreate_msprobe_debugger(self, *, reason: str = "config") -> bool:
+        """Tear down and rebuild PrecisionDebugger / AclGraphDumper.
+
+        Updates ``ascend_config.dump_config_path`` from
+        ``dump.msprobe_config_path`` when set. Returns True if a recreate ran.
+        """
+        cfg_path = self.dfx_config.dump_msprobe_config_path()
+        ascend = getattr(self.runner, "ascend_config", None)
+        if cfg_path and ascend is not None:
+            ascend.dump_config_path = cfg_path
+        target = getattr(ascend, "dump_config_path", None) if ascend is not None else None
+
+        was_acl = bool(getattr(self, "_uses_aclgraph_dumper", False)) or (
+            bool(getattr(self, "_startup_debugger_done", False))
+            and getattr(self.runner, "compilation_config", None) is not None
+            and self.runner.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        )
+        logger.info(
+            "[Anomaly msprobe] recreating debugger reason=%s path=%s %s",
+            reason,
+            target,
+            self.dump_rank_tag(),
+        )
+        if was_acl:
+            logger.warning(
+                "[Anomaly msprobe] recreating under ACLGraph/cudagraph — dump "
+                "may be empty until worker restart if graphs were already "
+                "captured %s",
+                self.dump_rank_tag(),
+            )
+        self._teardown_debugger()
+        self._init_debugger(self.runner.compilation_config.cudagraph_mode)
+        self._enforce_dump_requires_debugger()
+        self._applied_msprobe_config_path = getattr(ascend, "dump_config_path", None) if ascend else None
+        return True
+
+    def maybe_recreate_msprobe_debugger(self) -> bool:
+        """Recreate debugger when path changes or ``reload_msprobe`` is set."""
+        reload = self.dfx_config.dump_reload_msprobe()
+        cfg_path = self.dfx_config.dump_msprobe_config_path()
+        ascend = getattr(self.runner, "ascend_config", None)
+        current = getattr(ascend, "dump_config_path", None) if ascend is not None else None
+        # Prefer DFX path when set; else keep ascend path.
+        desired = cfg_path if cfg_path is not None else current
+        applied = getattr(self, "_applied_msprobe_config_path", None)
+        path_changed = (desired or "") != (applied or "") or (cfg_path is not None and cfg_path != current)
+        if not reload and not path_changed:
+            return False
+        reason = "reload_msprobe" if reload else "msprobe_config_path"
+        ok = self.recreate_msprobe_debugger(reason=reason)
+        if reload:
+            self.dfx_config.consume_reload_msprobe()
+        return ok
 
     def _enforce_dump_requires_debugger(self) -> None:
         """If dump is enabled but debugger is unavailable, force dump off.
@@ -399,6 +482,7 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
                 "[DFX dumper] config applied (limits unchanged) %s",
                 self.dump_rank_tag(),
             )
+        self.maybe_recreate_msprobe_debugger()
         self._enforce_dump_requires_debugger()
 
     def handle_anomaly_alert(

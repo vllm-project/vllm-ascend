@@ -16,7 +16,7 @@ vllm serve <model> --additional-config '{
 | 项 | 说明 |
 |----|------|
 | `dfx_config_reload_interval > 0` | **必须**，否则改 JSON / `manual_trigger` 不生效 |
-| `dump_config_path` | msprobe 配置；无则无法落 dump。默认各 DP **共享**同一路径；仅当显式 `dump_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，`ascend_config` 会物化为 `<source_dir>/dp<rank>/...` 副本（热更请改副本）。多 DP 同写一份 `dump_path` 可能互相干扰，建议隔离或分 `dump_path`。 |
+| `dump_config_path` | msprobe 配置；无则无法落 dump。默认各 DP **共享**同一路径；仅当显式 `dump_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，`ascend_config` 会物化为 `<source_dir>/dp<rank>/...` 副本（热更请改副本）。多 DP 同写一份 `dump_path` 可能互相干扰，建议隔离或分 `dump_path`。启动写入 DFX JSON 的 `dump.msprobe_config_path`（可见/可热改）。 |
 | 每 EngineCore 可读 JSON | 多 DP **不**用满编 world 做 config sync。默认共享同一 `dfx_config` 路径；仅当显式 `dfx_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，路径拆成 `dp<rank>` 副本（`ascend_config` 物化，与 sync 机制正交）。热更同步：有 `inner_dp_world` 则本 DP 内 broadcast，否则各 rank **file poll**（见 [dfx_design.md](./dfx_design.md) §2.2）。 |
 | **同 EngineCore 内配置一致** | 各 TP/PP 须读**同一份** `dfx_config`（同路径）。尤其 `dump.enabled`：热更关时 pending-OR 有 fast-path，TP 间不一致会挂死（见 §3） |
 
@@ -25,6 +25,15 @@ vllm serve <model> --additional-config '{
 - 当存在 `VLLM_DP_RANK` 且显式 `dfx_config_isolate_by_dp=true` 时，默认路径会拆分为：`<cwd>/dfx/config/dp<rank>/dfx_config.json`（路径隔离；热更仍走 per-DP `inner_dp` / file poll，**不是**跨 DP 满编 world）。
 
 **默认全关开销**：`dfx_config_reload_interval=0` 且各 detector / `dump.enabled` 均为关时，无 config 集体通信；热更关时跳过每步 filter 刷新；检测门控直接跳过。async / TP>1 下 pending-OR 在「热更关 + `dump.enabled=false`」时走 fast-path 跳过 `all_reduce`（同 EngineCore 内 `dump.enabled` 须一致，见 §3）。
+
+### 1.1 msprobe 路径热更（`dump.msprobe_config_path` / `reload_msprobe`）
+
+| 字段 | 作用 |
+|------|------|
+| `dump.msprobe_config_path` | 当前生效的 msprobe JSON；bootstrap 从 `dump_config_path`/`dump_config` 写入。改路径 → 下一拍热更 **重建 debugger** |
+| `dump.reload_msprobe` | 一次性：`true` → 用当前路径重建 debugger，然后清回 `false`（同路径改算子名单时用） |
+
+ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只改磁盘 msprobe 文件、两个字段都不变 → **不会**自动重建。
 
 ## 2. 常用操作
 
@@ -73,7 +82,7 @@ vllm serve <model> --additional-config '{
 
 ### 2.2 手动 `manual_trigger`
 
-1. 确认热更已开、`dump.enabled=true`、`dump_config_path` 有效（**不必**开 detector）。  
+1. 确认热更已开、`dump.enabled=true`、`dump.msprobe_config_path`（或启动时的 `dump_config_path`）有效（**不必**开 detector）。  
 2. 将 JSON 中 `"manual_trigger"` 设为：  
    - `true`：**一直 dump**——每个「有本地 batch 请求」的真实 `execute_model` 拍都 arm，直到改回 `false`（不会自动清掉）；  
    - 正整数 `N`：在接下来 **N** 个有本地 batch 的真实拍上各 arm 一次，每拍减 1，到 `0`/`false` 为止；  
