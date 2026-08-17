@@ -25,12 +25,12 @@ stay within the configured tolerance.
 Scenario (2026-08-17):
   TP2 + quantization (W4A4), max-model-len=40960, max-num-batched-tokens=16384,
   max-num-seqs=64, batch_size=32, cudagraph_capture_sizes=[64].
+  Sampling is temporarily greedy (temperature=0, top_k/top_p disabled) until
+  the eagle3 accuracy fix lands upstream; restore temperature=0.6, top_k=20,
+  top_p=0.95 afterwards.
 
-The dataset is ``vllm-ascend/gsm8k-lite`` (32 questions), the same lite GSM8K
-dataset used by the existing qwen3-30b accuracy case; the full
-``vllm-ascend/gsm8k`` is also registered but not used by current accuracy
-cases. |V2-V1| <= 3.13pp (1 question of 32) is a starting tolerance and must
-be confirmed by the team before finalizing.
+The dataset is ``vllm-ascend/gsm8k`` (full, 1319 questions).
+|V2-V1| <= 2.00pp (about 26 questions of 1319).
 """
 
 import os
@@ -42,22 +42,23 @@ from tools.aisbench import run_aisbench_cases
 
 MODEL = os.environ.get("QWEN3_32B_W4A4_MODEL_PATH", "vllm-ascend/Qwen3-32B-W4A4")
 
-# GSM8K lite: 32 questions, 1 question == 100/32 == 3.125pp (rounded to 3.13pp).
-MAX_ACCURACY_DELTA_PP = 3.13
+# GSM8K full: 1319 questions; team-confirmed tolerance |V2-V1| <= 2.00pp
+# (about 26 questions).
+MAX_ACCURACY_DELTA_PP = 2.0
 
 _BENCH_CASE = {
     "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
+    "dataset_path": "vllm-ascend/gsm8k",
     "request_conf": "vllm_api_general_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "num_prompts": 32,
     "max_out_len": 32768,
     "batch_size": 32,
     # Temporarily force greedy decoding until the eagle3 accuracy fix lands
-    # upstream. When the eagle3 PR is merged, restore the original sampling:
-    # temperature=0.6 (aisbench accuracy default); top_k/top_p are not
-    # configured for this case.
+    # upstream. When the eagle3 PR is merged, restore the original sampling
+    # parameters: temperature=0.6, top_k=20, top_p=0.95.
     "temperature": 0,
+    # "top_k": 20,
+    # "top_p": 0.95,
     "baseline": 100,
     "threshold": 100,
 }
