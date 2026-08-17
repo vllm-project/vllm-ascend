@@ -325,7 +325,10 @@ def lmhead_all_to_all(
             f"logits.shape[0] ({logits.shape[0]}) must be divisible by world_size ({world_size}) for lmhead_all_to_all."
         )
     vocab_per_partition = logits.shape[-1]
-    # [N, V/P] -> [P, N/P, V/P]
+    # [N, V/P] -> [P, N/P, V/P]. The `.contiguous()` is a no-op on the live
+    # lm-head path (fresh matmul output), but load-bearing for the spec-decode
+    # reduce-sample callers, whose input is a vocab-truncated last-dim slice
+    # (non-contiguous whenever the vocab shard is padded): view() would fail.
     input_ = logits.contiguous().view(world_size, -1, vocab_per_partition)
     output = torch.empty_like(input_)
     dist.all_to_all_single(output, input_, group=comm_group.device_group)
