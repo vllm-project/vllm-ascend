@@ -683,7 +683,15 @@ class TestAscendConfig(TestBase):
                 "enable_batch_invariant": True,
             }
         }
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}, clear=True):
+        allocator_config = "page_size:1g,expandable_segments:True"
+        with patch.dict(
+            os.environ,
+            {
+                "VLLM_ASCEND_ENABLE_NZ": "2",
+                "PYTORCH_NPU_ALLOC_CONF": allocator_config,
+            },
+            clear=True,
+        ):
             ascend_config = init_ascend_config(test_vllm_config)
 
             # rl_config is a no-op when the master switch is off: the env var is
@@ -692,6 +700,7 @@ class TestAscendConfig(TestBase):
             self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "2")
             self.assertNotIn("VLLM_SERVER_DEV_MODE", os.environ)
             self.assertNotIn("VLLM_BATCH_INVARIANT", os.environ)
+            self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], allocator_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
