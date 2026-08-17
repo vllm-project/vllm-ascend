@@ -86,7 +86,7 @@ def test_deepseek_v4_mtp_eager():
 
 
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
-@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("max_tokens", [1024])
 @pytest.mark.parametrize("enforce_eager", [True])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
@@ -126,6 +126,6 @@ def test_dspark_spec_decoding(
         Counter,
         Vector,
     )
-    golden = [0.82, 0.62, 0.42, 0.25, 0.12]
-    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+    golden = [0.83, 0.74, 0.65, 0.59, 0.52]
+    match = all(a >= b - 0.03 for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
