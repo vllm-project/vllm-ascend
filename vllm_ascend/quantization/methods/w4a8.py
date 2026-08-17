@@ -23,6 +23,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
@@ -122,6 +123,10 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     """
 
     def __init__(self):
+        logger.warning_once(
+            "W4A8_DYNAMIC linear quantization is deprecated and will be removed in the next release. "
+            "Please migrate to alternative quantization methods."
+        )
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         self.is_per_channel_weight = self.group_size == 0
@@ -149,13 +154,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         self._force_kimi_shared_expert_per_channel = True
 
     def _local_scale_bias(self, layer: torch.nn.Module, tp_rank: int | None = None) -> torch.Tensor:
-        """Combine the offline scale-bias shards owned by this projection.
-
-        ModelSlim stores row-parallel ``scale_bias`` with 16 columns, one for
-        each offline input shard.  A runtime TP rank may own more than one of
-        those shards (all 16 when shared-expert DP disables TP), so selecting a
-        single column is only correct for TP16.
-        """
+        """Combine the offline scale-bias shards owned by this projection."""
         scale_bias = layer.scale_bias
         if scale_bias.dim() != 2:
             return scale_bias
@@ -522,6 +521,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         # NOTE: the weights are quantized from bf16 to int4 through a per-channel quantization process
         self.is_per_channel_weight = self.group_size == 0
+        if not self.is_per_channel_weight:
+            logger.warning_once(
+                "W4A8_DYNAMIC MoE per-group quantization is deprecated and will be removed in the next release. "
+                "Please migrate to alternative quantization methods."
+            )
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         # NOTE: new quantize weights: 2 int4 pack into int8
         self.new_quant_version = quant_version == "1.0.0"

@@ -271,8 +271,6 @@ def quant_apply_mlp(
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     situ_activation = activation if isinstance(activation, SituActivationConfig) else None
-    if situ_activation is not None and dynamic_eplb:
-        raise NotImplementedError("SiTU does not support dynamic EPLB TensorLists.")
     if situ_activation is not None and mxfp_quant_dtype == QuantType.W4A16MXFP:
         raise NotImplementedError("SiTU requires the fused W4A8 quantization path.")
     if situ_activation is not None:

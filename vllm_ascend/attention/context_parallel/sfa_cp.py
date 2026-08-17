@@ -739,6 +739,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         attn_metadata,
         actual_seq_lengths_query,
         actual_seq_lengths_key,
+        block_table=None,
     ):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."

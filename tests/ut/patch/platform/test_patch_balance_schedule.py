@@ -20,11 +20,11 @@ What is guarded here (everything reachable from CPU UT):
 * the module-level class swaps actually took effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
-* the 3 balance deltas remain present in ``schedule()`` (intent lock);
+* the 4 platform deltas remain present in ``schedule()`` (intent lock);
 * the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
   at vllm-ascend's pinned vLLM release tag (read from
   ``.github/vllm-release-tag.commit`` -- the same file CI uses), modulo exactly
-  those 3 deltas. Reading the tag from the pin file means a pin advance
+  those 4 deltas. Reading the tag from the pin file means a pin advance
   auto-flips this guard to the new tag until the copy is re-synced.
 
 What is NOT guarded here (structurally unreachable without a real engine):
@@ -127,6 +127,39 @@ def test_balance_config_fallback_accepts_legacy_top_level_config():
         assert _balance_scheduling_enabled(vllm_config) is True
 
 
+@pytest.mark.parametrize(
+    ("use_consumer_partial_group_hits", "mamba_visible_during_schedule"),
+    [(False, False), (True, True)],
+)
+def test_disabled_balance_hides_mamba_only_from_producer_lookup(
+    monkeypatch,
+    use_consumer_partial_group_hits,
+    mamba_visible_during_schedule,
+):
+    observed = []
+
+    def fake_schedule(self, throttle_prefills=False):
+        observed.append(self.has_mamba_layers)
+        return "scheduled"
+
+    monkeypatch.setattr(BalanceScheduler.__bases__[0], "schedule", fake_schedule)
+    scheduler = BalanceScheduler.__new__(BalanceScheduler)
+    scheduler._balance_enabled = False
+    scheduler._use_consumer_partial_group_hits = use_consumer_partial_group_hits
+    scheduler.has_mamba_layers = True
+
+    assert scheduler.schedule() == "scheduled"
+    assert observed == [mamba_visible_during_schedule]
+    assert scheduler.has_mamba_layers is True
+
+
+def test_upstream_schedule_reads_mamba_flag_only_for_partial_group_lookup():
+    src = inspect.getsource(BalanceScheduler.__bases__[0].schedule)
+
+    assert src.count("self.has_mamba_layers") == 1
+    assert "find_longest_cache_hit_per_group" in src
+
+
 @pytest.mark.parametrize("balance_enabled", [False, True])
 def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balance_enabled):
     def fake_scheduler_init(self, *args, **kwargs):
@@ -216,7 +249,7 @@ def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
 
 
 def _schedule_body_ast(source: str) -> str:
-    """Canonical AST dump of a ``schedule`` method body with the 3 balance
+    """Canonical AST dump of a ``schedule`` method body with the 4 platform
     deltas stripped, so the remainder can be compared verbatim against the
     pinned release tag's ``schedule()``. AST-based on purpose: it is blind to
     comments and whitespace, so the only differences that surface are real code
@@ -231,6 +264,7 @@ def _schedule_body_ast(source: str) -> str:
         copy as ``if request_queue is None: break`` and in upstream as
         ``assert request_queue is not None``. Both are stripped so the two
         bodies align.
+      * delta 4 -- the consumer-only partial-group cache lookup gate.
     """
     tree = ast.parse(textwrap.dedent(source))
     func = next(
@@ -240,6 +274,11 @@ def _schedule_body_ast(source: str) -> str:
     assert func is not None, "no schedule() in source"
 
     class _BalanceDeltaStripper(ast.NodeTransformer):
+        def visit_BoolOp(self, node: ast.BoolOp):  # noqa: N802
+            self.generic_visit(node)
+            node.values = [value for value in node.values if "_use_consumer_partial_group_hits" not in ast.dump(value)]
+            return node
+
         def visit_If(self, node: ast.If):  # noqa: N802
             test = ast.dump(node.test)
             # delta 1: disabled-path early return.
@@ -347,6 +386,9 @@ def test_balance_deltas_present_in_schedule():
 
     # delta 3: `if request_queue is None: break` replaces upstream's assert.
     assert "if request_queue is None:" in src
+
+    # delta 4: producer schedulers never use the consumer-only per-group lookup.
+    assert "self._use_consumer_partial_group_hits" in src
 
 
 # ---------------------------------------------------------------------------

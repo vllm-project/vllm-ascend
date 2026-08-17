@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 ARG CANN_QUAY_URL="quay.io/ascend/cann"
-ARG CANN_VERSION="9.0.1"
+ARG CANN_VERSION="9.1.0"
 ARG BASE_OS="ubuntu22.04"
 FROM ${CANN_QUAY_URL}:${CANN_VERSION}-910b-${BASE_OS}-py3.12
 

@@ -21,6 +21,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
+import torch.nn as nn
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -153,3 +155,130 @@ class TestDisableFlashCommV1Context:
         with pytest.raises(RuntimeError, match="boom"), _disable_flash_comm_v1_context():
             raise RuntimeError("boom")
         assert ctx.flash_comm_v1_enabled is True
+
+
+class TestQuaRotDraftBoundaries:
+    """CPU tests for QuaRot alignment at every draft-model boundary."""
+
+    @staticmethod
+    def _make_proposer() -> AscendSpecDecodeBaseProposer:
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "dspark"
+        proposer.device = torch.device("cpu")
+        proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(model="target"))
+        return proposer
+
+    def test_anti_rotates_each_aux_hidden_state_fc_block(self, monkeypatch):
+        proposer = self._make_proposer()
+        rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        fc = nn.Linear(10, 2, bias=False)
+        initial_weight = torch.arange(1.0, 21.0).reshape(2, 10)
+        fc.weight.data.copy_(initial_weight)
+        proposer.model = SimpleNamespace(model=SimpleNamespace(fc=fc))
+        monkeypatch.setattr(proposer, "_load_quarot_rotation", lambda _: rotation)
+
+        proposer._maybe_anti_rotate_fc()
+
+        expected = torch.matmul(initial_weight.reshape(2, 5, 2), rotation).reshape(2, 10)
+        torch.testing.assert_close(fc.weight, expected)
+        torch.testing.assert_close(proposer._quarot_rotation, rotation)
+
+    def test_anti_rotates_k3_mla_context_projection(self, monkeypatch):
+        proposer = self._make_proposer()
+        rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        context_proj = nn.Linear(10, 2, bias=False)
+        initial_weight = torch.arange(1.0, 21.0).reshape(2, 10)
+        context_proj.weight.data.copy_(initial_weight)
+        proposer.model = SimpleNamespace(model=SimpleNamespace(context_proj=context_proj))
+        monkeypatch.setattr(proposer, "_load_quarot_rotation", lambda _: rotation)
+
+        proposer._maybe_anti_rotate_fc()
+
+        expected = torch.matmul(initial_weight.reshape(2, 5, 2), rotation).reshape(2, 10)
+        torch.testing.assert_close(context_proj.weight, expected)
+        torch.testing.assert_close(proposer._quarot_rotation, rotation)
+
+    def test_copies_unrotated_shared_weight_without_mutating_target(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        target = nn.Linear(2, 3, bias=False)
+        draft = nn.Linear(2, 3, bias=False)
+        target_weight = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        target.weight.data.copy_(target_weight)
+        original_target = target.weight.detach().clone()
+
+        copied = proposer._copy_unrotated_shared_weight(draft, target, "draft embed_tokens.weight")
+
+        assert copied is True
+        torch.testing.assert_close(draft.weight, target_weight @ proposer._quarot_rotation.T)
+        torch.testing.assert_close(target.weight, original_target)
+
+    def test_shared_weight_shape_mismatch_keeps_draft_weight(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        draft = nn.Linear(3, 3, bias=False)
+        original_draft = draft.weight.detach().clone()
+
+        copied = proposer._copy_unrotated_shared_weight(draft, target, "draft lm_head.weight")
+
+        assert copied is False
+        torch.testing.assert_close(draft.weight, original_draft)
+
+    def test_materializes_unrotated_layer_for_none_placeholder(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        target = nn.Linear(2, 3, bias=False)
+        target_weight = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        target.weight.data.copy_(target_weight)
+        original_target = target.weight.detach().clone()
+
+        prepared = proposer._prepare_unrotated_shared_layer(
+            None,
+            target,
+            "draft embed_tokens.weight",
+        )
+
+        assert prepared is not None
+        assert prepared is not target
+        torch.testing.assert_close(
+            prepared.weight,
+            target_weight @ proposer._quarot_rotation.T,
+        )
+        torch.testing.assert_close(target.weight, original_target)
+
+    def test_materialized_layer_reuses_noncopyable_comm_group(self):
+        class NonCopyableCommGroup:
+            def __deepcopy__(self, memo):
+                del memo
+                raise TypeError("cannot pickle ProcessGroup")
+
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        target.comm_group = NonCopyableCommGroup()
+
+        prepared = proposer._prepare_unrotated_shared_layer(
+            None,
+            target,
+            "draft embed_tokens.weight",
+        )
+
+        assert prepared is not None
+        assert prepared.comm_group is target.comm_group
+        assert prepared.weight is not target.weight
+        assert prepared.weight.data_ptr() != target.weight.data_ptr()
+        torch.testing.assert_close(prepared.weight, target.weight)
+
+    def test_incompatible_quarot_shared_layer_fails_instead_of_aliasing(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        draft = nn.Linear(3, 3, bias=False)
+
+        with pytest.raises(ValueError, match="refusing to alias"):
+            proposer._prepare_unrotated_shared_layer(
+                draft,
+                target,
+                "draft lm_head.weight",
+            )

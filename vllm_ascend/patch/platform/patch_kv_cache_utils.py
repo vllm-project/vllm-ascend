@@ -8,16 +8,21 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+
+_orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -54,6 +59,75 @@ def _ascend_resolve_kv_cache_block_sizes(
         return scheduler_block_size, hash_block_size
 
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+
+def _try_get_full_allocation_fallback_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    if any(isinstance(spec, HiddenStateCacheSpec) for spec in kv_cache_spec.values()):
+        return None
+    if any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()):
+        return None
+
+    has_mla = any(isinstance(spec, MLAAttentionSpec) for spec in kv_cache_spec.values())
+    has_regular_swa = any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
+    if not (has_mla and has_regular_swa):
+        return None
+
+    full_block_sizes = {spec.block_size for spec in kv_cache_spec.values() if isinstance(spec, FullAttentionSpec)}
+    full_attention_block_size = next(iter(full_block_sizes)) if len(full_block_sizes) == 1 else None
+    promoted_specs = kv_cache_spec.copy()
+    for layer_name, spec in kv_cache_spec.items():
+        if not isinstance(spec, SlidingWindowSpec):
+            continue
+        page_size_padded = None
+        block_size = full_attention_block_size or spec.block_size
+        if spec.page_size_padded is not None:
+            unpadded_page_size = spec.unpadded_page_size_bytes * block_size // spec.block_size
+            page_size_padded = max(spec.page_size_padded, unpadded_page_size)
+        promoted_specs[layer_name] = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=spec.num_kv_heads,
+            head_size=spec.head_size,
+            head_size_v=spec.head_size_v,
+            dtype=spec.dtype,
+            kv_quant_mode=spec.kv_quant_mode,
+            page_size_padded=page_size_padded,
+            indexes_kv_by_block_stride=spec.indexes_kv_by_block_stride,
+            sliding_window=spec.sliding_window,
+        )
+
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(promoted_specs)
+    if uniform_spec is None:
+        return None
+    vllm.v1.core.kv_cache_utils.logger.warning(
+        "KV cache page sizes cannot be unified; treating sliding-window "
+        "layers as full attention for cache allocation. Sliding-window "
+        "attention compute is unchanged."
+    )
+    return vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_type(uniform_spec)
+
+
+def get_kv_cache_groups(vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]) -> list[KVCacheGroupSpec]:
+    try:
+        return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    except NotImplementedError as exc:
+        fallback_groups = _try_get_full_allocation_fallback_groups(kv_cache_spec)
+        if fallback_groups is None:
+            spec_summary = sorted(
+                {
+                    (type(spec).__name__, spec.block_size, spec.page_size_bytes, spec.page_size_padded)
+                    for spec in kv_cache_spec.values()
+                }
+            )
+            raise NotImplementedError(
+                "KV cache page-size unification failed and the vllm-ascend "
+                "full-allocation fallback could not build a uniform KV cache "
+                "group. Detected specs are listed as "
+                "(type, block_size, page_size_bytes, page_size_padded): "
+                f"{spec_summary}."
+            ) from exc
+        return fallback_groups
 
 
 def group_and_unify_kv_cache_specs(
@@ -246,6 +320,7 @@ def _get_kv_cache_config_deepseek_v4(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils.get_kv_cache_groups = get_kv_cache_groups
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and

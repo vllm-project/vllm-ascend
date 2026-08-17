@@ -171,6 +171,32 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.device == output.device
 
 
+def test_output_norm_gate_uses_kda_fused_triton_kernel():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.o_norm = SimpleNamespace(
+        weight=nn.Parameter(torch.randn(3)),
+        eps=1e-6,
+    )
+    core_attn_out = torch.randn(1, 4, 2, 3)
+    output_gate = torch.randn(4, 2, 3)
+    expected = torch.randn_like(core_attn_out)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.apply_kda_rms_norm_sigmoid_gate",
+        return_value=expected,
+    ) as fused_norm_gate:
+        actual = attention._apply_output_norm_gate(core_attn_out, output_gate)
+
+    assert actual is expected
+    fused_norm_gate.assert_called_once_with(
+        core_attn_out,
+        output_gate,
+        attention.o_norm.weight,
+        attention.o_norm.eps,
+    )
+
+
 def test_conv_post_load_processing_packs_kernel_layout_in_place():
     attention = _make_conv_pack_attention()
     convs = (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d)
