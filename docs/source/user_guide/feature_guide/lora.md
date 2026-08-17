@@ -34,5 +34,5 @@ LoRA is supported for both dense and mixture-of-experts (MoE) models. The curren
 | Non-quantized | Supported | Supported |
 | W8A8 dynamic quantization | Supported | Supported |
 
-Enable the EP All-to-All mode with `--enable-expert-parallel`. Other MoE quantization methods, Fused MC2, and dynamic
-EPLB are not supported with LoRA. Set `VLLM_ASCEND_ENABLE_FUSED_MC2=0` when using MoE LoRA.
+Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA. Set
+`VLLM_ASCEND_ENABLE_FUSED_MC2=0` when using MoE LoRA.
