@@ -66,7 +66,6 @@ class TestAscendConfig(TestBase):
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
-        self.assertFalse(ascend_config.enable_moe_lora_dual_stream)
         self.assertFalse(ascend_config.enable_kv_nz)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
@@ -87,7 +86,6 @@ class TestAscendConfig(TestBase):
                 "fusion_ops_gmmswigluquant": False,
             },
             "multistream_overlap_shared_expert": True,
-            "enable_moe_lora_dual_stream": True,
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
@@ -95,7 +93,6 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
-        self.assertTrue(ascend_config.enable_moe_lora_dual_stream)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)

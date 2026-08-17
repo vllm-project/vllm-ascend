@@ -74,7 +74,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
-| `enable_moe_lora_dual_stream`       | bool | `False` | Whether to overlap quantized MoE LoRA with base expert GMM on an auxiliary NPU stream. Supports eager and ACLGraph execution for TP with the AllGather backend, without EP or fully sharded LoRA. The auxiliary stream and event dependencies are captured and replayed as part of ACLGraph. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `enable_sleep_mode_extra_cleanup`   | bool | `False` | Enables extra sleep-mode cleanup for RL workloads, including HCCL process-group release and ACL graph workspace cleanup. Disabled by default because wakeup may need to restore HCCL and recapture ACL graphs. |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |

@@ -29,18 +29,15 @@ the MoE wrapper is mapped.
 
 from __future__ import annotations
 
-from functools import cache
-
 import torch
-import torch_npu  # noqa: F401 -- registers torch.npu
 from torch import nn
+from vllm import envs
 from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 
@@ -49,12 +46,6 @@ _MOE_LORA_INDEX_FIELDS = (
     "permuted_lora_indices",
     "exchanged_lora_indices",
 )
-
-
-@cache
-def _get_moe_lora_aux_stream() -> torch.npu.Stream:
-    """Return the process-local NPU stream used by MoE LoRA overlap."""
-    return torch.npu.Stream()
 
 
 def has_lora(lora_context) -> bool:
@@ -197,41 +188,29 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
 
 
 def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids):
-    """Build the combined LoRA/expert index in dispatched-row order.
+    """Recover per-permuted-row (expert_id, lora_slot) for the dispatched rows.
 
     npu_moe_init_routing semantics (verified empirically): ``expanded_row_idx``
     is indexed by the ORIGINAL flat (token, k) position and gives where that
-    pair landed in the expert-sorted array -- not the reverse. Build each
-    original pair's ``lora_slot * num_experts + expert_id`` first, then scatter
-    it directly to that destination. This avoids materializing an inverse
-    permutation with ``argsort`` and lets w13/w2 reuse the same combined index.
-
-    A negative value marks a row whose adapter is absent or disabled, matching
-    the sentinel consumed by the BGMV kernels. Every tensor shape depends only
-    on input shapes, so the path remains ACLGraph-capturable without host sync.
+    pair landed in the expert-sorted array -- not the reverse. So recovering
+    "which (token, k) pair does sorted row i hold" needs the inverse permutation
+    of ``expanded``, not a direct gather by it. ``argsort`` output shape ==
+    input shape (value-independent), so this stays graph-capturable -- no
+    ``.item()``/data-dependent host sync.
     """
     top_k = lora_context.top_k
-    expanded = torch.abs(expanded_row_idx).reshape(-1).to(torch.long)
-    expert_per_pair = topk_ids.reshape(-1).to(torch.long)
+    expanded = torch.abs(expanded_row_idx)
+    inv_perm = torch.argsort(expanded)
+    expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
 
     # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
     # (host-known constant). Clamping defensively to the last index is a no-op
     # in normal operation but keeps the gather graph-safe.
-    orig_pair = torch.arange(expanded.numel(), device=expanded.device, dtype=torch.long)
-    orig_token = orig_pair // top_k
+    orig_token = inv_perm // top_k
     token_lora_indices = lora_context.punica_wrapper.token_lora_indices
     orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
-    lora_per_pair = token_lora_indices[orig_token].to(torch.long)
-
-    lora_idx_safe = lora_per_pair.clamp(min=0)
-    enabled = (lora_per_pair >= 0) & lora_context.adapter_enabled[lora_idx_safe].bool()
-    num_experts = lora_context.w13_lora_a_stacked[0].shape[1]
-    combined_per_pair = lora_idx_safe.mul_(num_experts).add_(expert_per_pair)
-    combined_per_pair.masked_fill_(~enabled, -1)
-
-    combined_idx = torch.empty_like(combined_per_pair)
-    combined_idx.scatter_(0, expanded, combined_per_pair)
-    return combined_idx
+    lora_per_row = token_lora_indices[orig_token]
+    return expert_per_row, lora_per_row
 
 
 def _recover_moe_lora_routing_all2all(
@@ -277,22 +256,15 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
     Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
 
     Args:
-        lora_routing: A pre-computed combined index for AllGather, or an
-            ``(expert_per_row, lora_per_row)`` tuple for AlltoAll.
+        lora_routing: (expert_per_row, lora_per_row) pre-computed by the
+            caller via _recover_moe_lora_routing (AllGather) or
+            _recover_moe_lora_routing_all2all (AlltoAll).
     """
-    if torch.is_tensor(lora_routing):
-        combined_idx = lora_routing
-        expert_per_row = None
-        lora_per_row = None
-        num_rows = combined_idx.numel()
-    else:
-        expert_per_row, lora_per_row = lora_routing
-        combined_idx = None
-        num_rows = expert_per_row.numel()
+    expert_per_row, lora_per_row = lora_routing
     # EP rank may receive 0 dispatched tokens when all tokens route to
     # experts on other ranks. Skip LoRA to avoid passing empty tensors
     # to add_lora_fused_moe (which can trigger NPU kernel crashes).
-    if num_rows == 0:
+    if expert_per_row.numel() == 0:
         return
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
@@ -303,7 +275,6 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         adapter_enabled=lora_context.adapter_enabled,
         fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
-        combined_idx=combined_idx,
     )
 
 
@@ -313,18 +284,10 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
     is the activation output that fed the base down GMM.
     """
-    if torch.is_tensor(lora_routing):
-        combined_idx = lora_routing
-        expert_per_row = None
-        lora_per_row = None
-        num_rows = combined_idx.numel()
-    else:
-        expert_per_row, lora_per_row = lora_routing
-        combined_idx = None
-        num_rows = expert_per_row.numel()
+    expert_per_row, lora_per_row = lora_routing
     # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
     # kernel crashes with empty tensors.
-    if num_rows == 0:
+    if expert_per_row.numel() == 0:
         return
     offset = 0
     if lora_context.fully_sharded:
@@ -340,7 +303,6 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         fully_sharded=lora_context.fully_sharded,
         offset=offset,
         token_lora_mapping=lora_per_row,
-        combined_idx=combined_idx,
     )
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for
@@ -376,8 +338,11 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_size = moe_parallel_config.tp_size
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
-        self._enable_aux_cuda_stream = get_ascend_config().enable_moe_lora_dual_stream
-        self._init_lora_stream_context()
+        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        # _build_lora_context is inherited from vLLM, whose GPU constructor
+        # normally initializes these fields. Ascend deliberately skips it.
+        self._lora_stream = None
+        self._events = None
         self.enable_moe_shared_loras = False
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
@@ -390,29 +355,9 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         if shared_experts is not None:
             self._shared_experts = shared_experts
 
-    def _init_lora_stream_context(self) -> None:
-        """Initialize NPU synchronization objects for AllGather LoRA overlap.
-
-        These objects must be created before ACLGraph capture. During capture,
-        the persistent stream and events only enqueue fork/join dependencies;
-        no stream or event resource is allocated from the captured forward.
-        """
-        self._lora_stream: torch.npu.Stream | None = None
-        self._events: tuple[torch.npu.Event, ...] | None = None
-        if not self._enable_aux_cuda_stream or self.use_ep:
-            return
-        self._lora_stream = _get_moe_lora_aux_stream()
-        self._events = tuple(torch.npu.Event() for _ in range(4))
-
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
-        # Ascend currently overlaps only the TP + AllGather path. Keep EP on
-        # its existing single-stream schedule even if an auxiliary stream was
-        # initialized before the final parallel configuration was published.
-        if self.use_ep:
-            lora_context.aux_stream = None
-            lora_context.events = None
         return lora_context
 
     # ------------------------------------------------------------------

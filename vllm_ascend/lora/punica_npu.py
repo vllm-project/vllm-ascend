@@ -353,7 +353,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         *,
         topk_weights: torch.Tensor | None = None,
         sorted_token_ids: torch.Tensor | None = None,
-        expert_ids: torch.Tensor | None,
+        expert_ids: torch.Tensor,
         num_tokens_post_padded: torch.Tensor | None = None,
         max_lora_rank: int = 0,
         top_k_num: int = 1,
@@ -364,7 +364,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
-        combined_idx: torch.Tensor | None = None,
     ) -> None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
@@ -387,32 +386,26 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         bgmv_expand skip any row whose index is negative (leaving the
         zero-initialized shrink buffer / unmodified ``y`` in place), so
         inactive rows get a zero delta for free -- no Python-level branching
-        needed. The AllGather caller can pass this ``combined_idx`` directly
-        after scattering it into dispatched-row order; the AlltoAll caller
-        continues to provide separate expert and LoRA indices here.
+        needed.
         """
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
+        if token_lora_mapping is None:
+            token_lora_mapping = self.token_lora_indices
+
         x2d = x.view(-1, x.shape[-1])
         y2d = y.view(-1, y.shape[-1])
-        if combined_idx is None:
-            if expert_ids is None:
-                raise AssertionError("expert_ids is required when combined_idx is not provided.")
-            if token_lora_mapping is None:
-                token_lora_mapping = self.token_lora_indices
-            expert_idx = expert_ids.view(-1).to(torch.long)
-            num_experts = lora_a_stacked[0].shape[1]
+        expert_idx = expert_ids.view(-1).to(torch.long)
+        num_experts = lora_a_stacked[0].shape[1]
 
-            lora_idx_safe = token_lora_mapping.clamp(min=0)
-            enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
-            combined_idx = torch.where(
-                enabled,
-                lora_idx_safe * num_experts + expert_idx,
-                torch.full_like(token_lora_mapping, -1),
-            ).contiguous()
-        else:
-            combined_idx = combined_idx.view(-1)
+        lora_idx_safe = token_lora_mapping.clamp(min=0)
+        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+        combined_idx = torch.where(
+            enabled,
+            lora_idx_safe * num_experts + expert_idx,
+            torch.full_like(token_lora_mapping, -1),
+        ).contiguous()
 
         cur_offset = offset
         for slice_idx in range(len(lora_a_stacked)):
