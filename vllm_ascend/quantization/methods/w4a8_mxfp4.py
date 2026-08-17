@@ -37,6 +37,52 @@ from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_lo
 from .registry import register_scheme
 
 
+def _force_load_balance_topk_ids(
+    topk_ids: torch.Tensor,
+    *,
+    num_experts: int,
+    ep_size: int,
+    capturing: bool,
+    global_redundant_expert_num: int = 0,
+) -> torch.Tensor:
+    """Build deterministic, exactly rank-balanced routing for debug runs."""
+    if capturing:
+        raise RuntimeError("Forced W4A8 MXFP MoE load balancing is supported only outside graph capture.")
+    if topk_ids.ndim != 2:
+        raise ValueError(f"Expected topk_ids to be 2-D, but received shape {tuple(topk_ids.shape)}.")
+    if num_experts <= 0:
+        raise ValueError(f"num_experts must be positive, but received {num_experts}.")
+    if topk_ids.shape[1] > num_experts:
+        raise ValueError(f"top_k ({topk_ids.shape[1]}) cannot exceed the number of experts ({num_experts}).")
+    if global_redundant_expert_num:
+        raise RuntimeError(
+            "Forced W4A8 MXFP MoE load balancing does not support redundant EPLB experts because "
+            "logical balance does not guarantee equal physical-rank load."
+        )
+    if ep_size <= 0 or num_experts % ep_size != 0:
+        raise ValueError(
+            f"num_experts ({num_experts}) must be divisible by EP size ({ep_size}) for exact per-rank load balancing."
+        )
+
+    total_rows = topk_ids.numel()
+    if total_rows == 0:
+        return topk_ids
+    if total_rows % ep_size != 0:
+        raise ValueError(
+            f"Routed rows ({total_rows}) must be divisible by EP size ({ep_size}) for exact per-rank load balancing."
+        )
+
+    num_local_experts = num_experts // ep_size
+    row_indices = torch.arange(total_rows, dtype=torch.int64, device=topk_ids.device)
+    ep_rank_ids = torch.remainder(row_indices, ep_size)
+    local_expert_ids = torch.remainder(
+        torch.div(row_indices, ep_size, rounding_mode="floor"),
+        num_local_experts,
+    )
+    balanced_ids = ep_rank_ids * num_local_experts + local_expert_ids
+    return balanced_ids.reshape_as(topk_ids).to(topk_ids.dtype)
+
+
 @register_scheme("W4A8_MXFP", "linear")
 class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_MXFP (Microscaling) quantization."""
@@ -206,17 +252,20 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             tid2eid=tid2eid,
         )
 
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
+        forward_context = get_forward_context()
         if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
+            topk_ids = _force_load_balance_topk_ids(
+                topk_ids,
+                num_experts=num_logical_experts,
+                ep_size=self.ep_group.world_size,
+                capturing=getattr(forward_context, "capturing", False),
+                global_redundant_expert_num=global_redundant_expert_num,
+            )
 
         if x.dtype not in [torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(x.dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = forward_context.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,

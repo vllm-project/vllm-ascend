@@ -15,7 +15,6 @@ from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import moe_mlp as moe_mlp_module
 from vllm_ascend.ops.fused_moe.moe_mlp import (
     cumsum_group_list,
-    synthetic_balance_group_list,
     quant_apply_mlp,
     unified_apply_mlp,
     unquant_apply_mlp,
@@ -63,30 +62,6 @@ class TestCumsumGroupList(unittest.TestCase):
                 with self.assertRaises(NotImplementedError) as excinfo:
                     cumsum_group_list(self.glist_dict[0], src_list_type, dst_list_type)
                 self.assertIn("This feature is under development.", str(excinfo.exception))
-
-
-class TestSyntheticBalanceGroupList(unittest.TestCase):
-    def test_balances_count_group_list_and_preserves_total(self):
-        group_list = torch.tensor([0, 7, 1, 2], dtype=torch.int64)
-        result = synthetic_balance_group_list(group_list, group_list_type=1)
-        self.assertTrue(torch.equal(result, torch.tensor([3, 3, 2, 2])))
-        self.assertEqual(result.sum(), group_list.sum())
-        self.assertEqual(result.dtype, group_list.dtype)
-
-    def test_balances_cumulative_group_list_and_preserves_total(self):
-        group_list = torch.tensor([0, 7, 8, 10], dtype=torch.int32)
-        result = synthetic_balance_group_list(group_list, group_list_type=0)
-        self.assertTrue(torch.equal(result, torch.tensor([3, 6, 8, 10], dtype=torch.int32)))
-        self.assertEqual(result[-1], group_list[-1])
-        self.assertEqual(result.dtype, group_list.dtype)
-
-    def test_rejects_sparse_group_list(self):
-        with self.assertRaisesRegex(ValueError, "supports only count"):
-            synthetic_balance_group_list(torch.tensor([[0, 2], [3, 1]]), group_list_type=2)
-
-    def test_rejects_empty_group_list(self):
-        with self.assertRaisesRegex(ValueError, "non-empty 1-D"):
-            synthetic_balance_group_list(torch.tensor([], dtype=torch.int64), group_list_type=1)
 
 
 class TestW4A8RuntimeFlags(unittest.TestCase):
@@ -303,7 +278,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         expected = torch.randn(2, 8)
         mlp_compute_input = MoEMlpComputeInput(
             hidden_states=hidden_states,
-            group_list=torch.tensor([3, 1], dtype=torch.int64),
+            group_list=torch.tensor([2, 2], dtype=torch.int64),
             group_list_type=1,
             dynamic_scale=None,
             topk_scales=None,
@@ -321,7 +296,6 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         )
 
         with (
-            patch.object(moe_mlp_module, "ENABLE_MOE_SYNTHETIC_BALANCE", False),
             patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp", return_value=expected) as mock_unquant,
             patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp") as mock_quant,
         ):
@@ -331,39 +305,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         mock_unquant.assert_called_once()
         self.assertEqual(mock_unquant.call_args.kwargs["activation"], "silu")
         self.assertFalse(mock_unquant.call_args.kwargs["need_trans"])
-        self.assertTrue(torch.equal(mock_unquant.call_args.kwargs["group_list"], torch.tensor([3, 1])))
         mock_quant.assert_not_called()
-
-    def test_request_applies_synthetic_group_list_balance_when_enabled(self):
-        hidden_states = torch.randn(4, 8)
-        expected = torch.randn(4, 8)
-        mlp_compute_input = MoEMlpComputeInput(
-            hidden_states=hidden_states,
-            group_list=torch.tensor([0, 4], dtype=torch.int64),
-            group_list_type=1,
-            dynamic_scale=None,
-            topk_scales=None,
-            weights=MoEWeights(
-                w1=torch.randn(2, 16, 8),
-                w2=torch.randn(2, 8, 8),
-                w1_bias=torch.randn(2, 16),
-                w2_bias=torch.randn(2, 8),
-            ),
-            quant=MoEQuantParams(quant_type=QuantType.NONE),
-            fusion=False,
-            activation="silu",
-            need_trans=False,
-            dynamic_eplb=False,
-        )
-
-        with (
-            patch.object(moe_mlp_module, "ENABLE_MOE_SYNTHETIC_BALANCE", True),
-            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp", return_value=expected) as mock_unquant,
-        ):
-            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
-
-        self.assertIs(output, expected)
-        self.assertTrue(torch.equal(mock_unquant.call_args.kwargs["group_list"], torch.tensor([2, 2])))
 
     def test_request_quant_path(self):
         for quant_type, mxfp_dtype in (
