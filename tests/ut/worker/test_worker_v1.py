@@ -483,6 +483,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
+    @patch("vllm_ascend.worker.worker.enable_custom_op")
     @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.worker.worker.torch.npu.set_device")
     @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
@@ -497,6 +498,7 @@ class TestNPUWorker(TestBase):
         mock_empty_cache,
         mock_set_device,
         mock_get_device_type,
+        mock_enable_custom_op,
         mock_init_triton,
         mock_init_dist_env,
         mock_snapshot_cls,
@@ -539,6 +541,7 @@ class TestNPUWorker(TestBase):
             result = worker._init_device()
 
             mock_init_dist_env.assert_called_once()
+            mock_enable_custom_op.assert_called_once_with()
             self.assertEqual(str(result), "npu:0")
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)

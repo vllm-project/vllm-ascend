@@ -2,6 +2,9 @@ from vllm import ModelRegistry
 
 
 def register_model():
+    from .shieldstral import patch_mistral3_text_model
+
+    patch_mistral3_text_model()
     ModelRegistry.register_model(
         "KimiLinearForCausalLM",
         "vllm_ascend.models.kimi_k3:AscendKimiLinearForCausalLM",
