@@ -141,7 +141,7 @@ def test_sfa_dcp_sparse_indices_3d_input(interleave_size: int) -> None:
         )
 
 
-def test_sfa_dcp_torch_merge_handles_invalid_lse() -> None:
+def test_sfa_dcp_torch_output_merge_handles_invalid_lse() -> None:
     output = torch.tensor(
         [
             [[[1.0]], [[3.0]]],
@@ -155,12 +155,11 @@ def test_sfa_dcp_torch_merge_handles_invalid_lse() -> None:
         ]
     )
 
-    merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=2)
+    actual = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=2)
+    torch.testing.assert_close(actual, torch.tensor([[[3.0], [7.0]]]))
 
-    torch.testing.assert_close(merged, torch.tensor([[[3.0], [7.0]]]))
-
-    dsa_merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=1)
-    torch.testing.assert_close(dsa_merged, torch.tensor([[[3.0]], [[7.0]]]))
+    dsa_actual = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=1)
+    torch.testing.assert_close(dsa_actual, torch.tensor([[[3.0]], [[7.0]]]))
 
 
 @patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
@@ -177,6 +176,26 @@ def test_sfa_dcp_routes_native_output_merge_to_fused_a2a(fused_combine) -> None:
 
     assert actual is expected
     fused_combine.assert_called_once_with(output, lse, 2, 1, device_group)
+
+
+@patch("vllm_ascend.attention.context_parallel.sfa_cp.AscendSFADCPImpl._all_to_all_dcp_tensor")
+@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
+def test_sfa_dcp_can_route_output_merge_to_original_torch(fused_combine, all_to_all, monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_SFA_DCP_FUSED_A2A", "0")
+    impl = _make_impl(rank=1)
+    impl.dcp_group = SimpleNamespace(device_group=object())
+    output = torch.empty(3, 4, 8)
+    lse = torch.empty(3, 4, 1, dtype=torch.float32)
+    output_recv = torch.randn(2, 3, 2, 8)
+    lse_recv = torch.randn(2, 3, 2, 1)
+    all_to_all.side_effect = [output_recv, lse_recv]
+
+    actual = impl._merge_dcp_outputs(output, lse)
+
+    expected = impl._merge_dcp_outputs_with_torch(output_recv, lse_recv.squeeze(-1), token_dim=2)
+    torch.testing.assert_close(actual, expected)
+    assert all_to_all.call_count == 2
+    fused_combine.assert_not_called()
 
 
 @patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
