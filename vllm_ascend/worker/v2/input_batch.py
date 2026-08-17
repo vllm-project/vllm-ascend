@@ -63,7 +63,7 @@ class AscendInputBuffers(InputBuffers):
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
 
-@dataclass
+@dataclass(kw_only=True)
 class AscendInputBatch(InputBatch):
     """Input batch for Ascend NPUs."""
 

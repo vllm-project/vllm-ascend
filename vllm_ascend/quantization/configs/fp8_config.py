@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -37,6 +38,8 @@ class AscendFp8Config(Fp8Config):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.quant_description = {}
+        self.is_per_tensor_fp8 = self.weight_block_size is None
+        self.mistral4_dynamic_channelwise = False
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -57,6 +60,20 @@ class AscendFp8Config(Fp8Config):
                 f"vLLM Ascend supports dynamic activation quantization for native FP8 checkpoints, "
                 f"but this one declares `activation_scheme: {self.activation_scheme}`."
             )
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper) -> None:
+        module_prefixes = [f"{name}." for name in self.ignored_layers]
+        mapped_prefixes = hf_to_vllm_mapper.apply_list(module_prefixes)
+        self.ignored_layers = [name.removesuffix(".") for name in mapped_prefixes]
+
+    @staticmethod
+    def _is_mistral4_model() -> bool:
+        try:
+            hf_config = get_current_vllm_config().model_config.hf_config
+        except Exception:
+            return False
+        text_config = getattr(hf_config, "text_config", hf_config)
+        return getattr(text_config, "model_type", None) == "mistral4"
 
     def get_quant_method(
         self,
@@ -90,6 +107,29 @@ class AscendFp8Config(Fp8Config):
             if is_linear:
                 return AscendUnquantizedLinearMethod()
             return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid)
+
+        if self.is_per_tensor_fp8 and self._is_mistral4_model():
+            if is_linear:
+                layer.ascend_quant_method = FP8_METHOD
+                scheme_class = get_scheme_class("W8A8FP8_DYNAMIC", "linear")
+                assert scheme_class is not None
+                logger.warning_once(
+                    "A2 per-tensor FP8 keeps serialized weights but uses dynamic "
+                    "activation quantization; checkpoint static activation scales "
+                    "are not consumed."
+                )
+                return AscendLinearMethod(scheme_class())
+
+            if is_moe:
+                layer.ascend_quant_method = FP8_METHOD
+                scheme_class = get_scheme_class("W8A8FP8_DYNAMIC", "moe")
+                assert scheme_class is not None
+                return AscendFusedMoEMethod(
+                    scheme_class(),
+                    layer.moe_config,
+                    tid2eid=tid2eid,
+                )
+            return None
 
         self._verify_block_quantization()
         logger.info_once("Using the vLLM Ascend block-wise fp8 Quantization now!")

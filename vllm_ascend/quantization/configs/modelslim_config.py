@@ -96,9 +96,18 @@ _MINIMAX_M3_PACKED_MODULES = {
     "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
 }
 
+_MISTRAL3_PACKED_MODULES = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+}
+
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
     "minimax_m3": _MINIMAX_M3_PACKED_MODULES,
     "minimax_m3_vl": _MINIMAX_M3_PACKED_MODULES,
+    "mistral3": _MISTRAL3_PACKED_MODULES,
+    "mistral4": _MISTRAL3_PACKED_MODULES,
     "qwen3_moe": {
         "qkv_proj": [
             "q_proj",

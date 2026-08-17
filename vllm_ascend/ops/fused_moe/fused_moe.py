@@ -225,6 +225,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             with self._sequence_parallel_context():
                 shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
                 if self.ascend_shared_experts is None:
+                    if self.is_internal_router:
+                        gate = self.gate
+                        assert gate is not None
+                        if hasattr(gate, "weight_fp32"):
+                            router_logits = F.linear(hidden_states.float(), gate.weight_fp32)
+                        else:
+                            router_logits, _ = gate(hidden_states)
                     return self.routed_experts.forward_impl(
                         hidden_states=hidden_states,
                         router_logits=router_logits,
@@ -236,6 +243,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if self.is_internal_router:
                     gate = self.gate
                     assert gate is not None
+                    if not hasattr(gate, "weight_fp32"):
+                        router_logits, _ = gate(hidden_states)
+                        before_routed_experts = torch.npu.current_stream().record_event()
+                        after_routed_experts = torch.npu.current_stream().record_event()
+                        routed_out, fused_moe_events = self.routed_experts.forward_impl(
+                            hidden_states=hidden_states,
+                            router_logits=router_logits,
+                            input_ids=input_ids,
+                        )
+                        fused_moe_events.before_routed_experts = before_routed_experts
+                        fused_moe_events.after_routed_experts = after_routed_experts
+                        shared_out = self.ascend_shared_experts.forward(
+                            hidden_states,
+                            fused_moe_events,
+                        )
+                        return shared_out, routed_out
                     # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
                     # increase with extra hidden states. We also assume that all gate
                     # linear is unquantized so that we the weight is pre-casted in

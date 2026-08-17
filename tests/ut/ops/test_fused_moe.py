@@ -1411,3 +1411,80 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     )
     assert result[0] is shared_out
     assert result[1] is routed_out
+
+
+def test_forward_impl_applies_internal_router_without_shared_expert_wrapper(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4)
+    stale_router_logits = hidden_states.clone()
+    expected_router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+
+    gate = nn.Module()
+    gate.weight_fp32 = nn.Parameter(torch.randn(3, 4), requires_grad=False)
+    runner.gate = gate
+    runner.routed_experts = SimpleNamespace(
+        forward_impl=MagicMock(return_value=routed_out)
+    )
+    runner.ascend_shared_experts = None
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: True))
+
+    with patch.object(
+        fused_moe_module.F,
+        "linear",
+        return_value=expected_router_logits,
+    ) as linear:
+        result = runner._forward_impl(
+            hidden_states,
+            stale_router_logits,
+            shared_experts_input=None,
+        )
+
+    linear.assert_called_once_with(hidden_states.float(), gate.weight_fp32)
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=expected_router_logits,
+        input_ids=None,
+    )
+    assert result is routed_out
+
+def test_forward_impl_uses_gate_without_cached_fp32_weight(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4)
+    stale_router_logits = hidden_states.clone()
+    expected_router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    shared_out = torch.randn(2, 4)
+    routed_events = FusedMoEEvents(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
+    )
+    gate = nn.Module()
+    gate.forward = MagicMock(return_value=(expected_router_logits, None))
+    runner.gate = gate
+    runner.routed_experts = SimpleNamespace(
+        forward_impl=MagicMock(return_value=(routed_out, routed_events))
+    )
+    runner.ascend_shared_experts = None
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: True))
+
+    result = runner._forward_impl(
+        hidden_states,
+        stale_router_logits,
+        shared_experts_input=None,
+    )
+
+    gate.forward.assert_called_once_with(hidden_states)
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=expected_router_logits,
+        input_ids=None,
+    )
+    assert result[0] is routed_out
