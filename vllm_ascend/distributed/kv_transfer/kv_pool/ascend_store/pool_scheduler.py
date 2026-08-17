@@ -115,6 +115,9 @@ class KVPoolScheduler:
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        kv_event_config = getattr(vllm_config, "kv_events_config", None)
+        self.enable_kv_events = getattr(kv_event_config, "enable_kv_cache_events", False) is True
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -879,6 +882,7 @@ class KVPoolScheduler:
             num_saved_tokens=0,
             token_ids=(request.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request.prompt_token_ids),
+            prefill_end_tokens=len(request.prompt_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
@@ -918,8 +922,9 @@ class KVPoolScheduler:
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=new_block_ids_by_group,
             num_saved_tokens=0,
-            token_ids=(request_real.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
+            token_ids=(request_real.all_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request_real.prompt_token_ids),
+            prefill_end_tokens=len(request_real.all_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
@@ -946,12 +951,27 @@ class KVPoolScheduler:
         # Reused buffers must save every step; otherwise only explicit
         # save_decode_cache keeps Decode increments.
         req_tuple = self._unfinished_requests.get(req_id)
-        is_decoding = req_tuple is not None and req_tuple[0].num_computed_tokens >= req_tuple[0].num_prompt_tokens
-        if is_decoding and not self.save_decode_cache and not self.layerwise_offload:
-            return None
+        num_computed_tokens = cached_reqs.num_computed_tokens[i]
         request_tracker = self._request_trackers.get(req_id)
         if request_tracker is None:
             raise ValueError(f"Request {req_id} is not in _request_trackers, but it is scheduled to be cached")
+        prefill_end_tokens = request_tracker.prefill_end_tokens or request_tracker.num_prompt_tokens or 0
+        is_decoding = num_computed_tokens >= prefill_end_tokens
+        if is_decoding and not self.save_decode_cache and not self.layerwise_offload:
+            return None
+        if is_decoding and force_skip_save and self.save_decode_cache:
+            # Do not count complete Prefill blocks as newly generated Decode
+            # data. Preserve an unaligned prompt tail so the mixed
+            # Prompt/Decode block is stored once Decode completes it. The
+            # worker may still deduplicate the initial prefix against the
+            # backend to keep the hash chain recoverable after an eviction.
+            prefill_save_boundary = (
+                prefill_end_tokens // self.cache_transfer_granularity * self.cache_transfer_granularity
+            )
+            request_tracker.num_saved_tokens = max(
+                request_tracker.num_saved_tokens,
+                prefill_save_boundary,
+            )
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
         if req_tuple:
             request = req_tuple[0]
@@ -972,12 +992,16 @@ class KVPoolScheduler:
                 kvpool_cached_tokens=num_current_tokens,
                 can_load=True,
             )
+        # save_decode_cache is intentionally narrower than
+        # consumer_is_to_put: a consumer keeps skipping prefill writes and is
+        # allowed to publish only once it reaches decode.
+        skip_save = force_skip_save and not (is_decoding and self.save_decode_cache)
         return self._build_req_meta(
             request_tracker,
             request.block_hashes,
             load_spec,
             request.prompt_token_ids,
-            force_skip_save,
+            skip_save,
         )
 
     def _process_async_load_request(
@@ -1001,6 +1025,7 @@ class KVPoolScheduler:
             allocated_block_ids_by_group=block_ids,
             num_saved_tokens=0,
             num_prompt_tokens=len(request.prompt_token_ids),
+            prefill_end_tokens=len(request.prompt_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
@@ -1058,9 +1083,12 @@ class KVPoolScheduler:
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        if not force_skip_save:
+        if self.can_put:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
+                # A decode block is normally allocated before the step that
+                # fills it. Decode offload must therefore inspect boundary
+                # steps even when this tick allocated no new block.
                 if (
                     not new_block_ids
                     and not self.tp_mismatch
@@ -1111,9 +1139,9 @@ class KVPoolScheduler:
         self.sending_event_id += 1
         return using_id
 
-    def touch_sending_mamba_blocks(self, req_meta: ReqMeta):
+    def touch_sending_mamba_blocks(self, req_meta: ReqMeta) -> None:
         """
-        keep the reference of all non-null mamba blocks that will send to external kv store
+        Keep the reference of all non-null Mamba blocks sent to the external store.
         """
         if not self.use_hybrid or not self.num_speculative_blocks_by_group or not req_meta.can_save:
             return
@@ -1136,10 +1164,12 @@ class KVPoolScheduler:
             )
             current_step_sending.extend([block_id for block_id in non_spec_block_ids if block_id > 0])
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
-        assert self._block_pool is not None
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
         self.sending_events[using_event_id] = 0
         self.sending_blocks[using_event_id] = current_step_sending
+
+    def has_pending_push_work(self) -> bool:
+        return bool(self.sending_events)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
@@ -1161,7 +1191,11 @@ class KVPoolScheduler:
                 self.sending_events.pop(event_id, None)
                 if to_free_block_ids:
                     logger.debug("event %s free blocks: %s", event_id, to_free_block_ids)
-                    self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
+                    # Release the tail first so a shared prefix is the last
+                    # reference returned to the eviction queue.
+                    self._block_pool.free_blocks(
+                        [self._block_pool.blocks[block_id] for block_id in reversed(to_free_block_ids)]
+                    )
             else:
                 self.sending_events[event_id] = total
 
