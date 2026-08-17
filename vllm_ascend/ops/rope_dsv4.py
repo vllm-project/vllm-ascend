@@ -125,12 +125,8 @@ def get_cos_and_sin_dsa(
 
                     batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
                 else:
-                    torch.gather(
-                        full_rope_cos, 0, gather_idx, out=buf_cos[draft_index - 1][:num_tokens]
-                    )
-                    torch.gather(
-                        full_rope_sin, 0, gather_idx, out=buf_sin[draft_index - 1][:num_tokens]
-                    )
+                    torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[draft_index - 1][:num_tokens])
+                    torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[draft_index - 1][:num_tokens])
                     batch_result[config_key][group_name] = (
                         buf_cos[draft_index - 1][:num_tokens],
                         buf_sin[draft_index - 1][:num_tokens],
