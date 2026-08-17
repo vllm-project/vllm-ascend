@@ -128,10 +128,18 @@ class HardwareAwarePrefixPolicy:
                     dtype=torch.int64,
                 )
                 expected_accepts = num_reqs + mandatory_accepts + prefix
-                token_counts = candidate_totals
+                # Verification always includes one bonus-token row per
+                # request in addition to the selected speculative prefixes.
+                # The hardware profile is keyed by this actual verification
+                # width, rather than by the proposal count alone.
+                token_counts = candidate_totals + num_reqs
                 goodput = expected_accepts / self._lookup_latency(token_counts)
                 baseline_expected = num_reqs + mandatory_accepts
-                baseline_total = torch.tensor(base_total, device=survival.device, dtype=torch.int64)
+                baseline_total = torch.tensor(
+                    num_reqs + base_total,
+                    device=survival.device,
+                    dtype=torch.int64,
+                )
                 baseline_goodput = baseline_expected / self._lookup_latency(baseline_total)
                 all_goodput = torch.cat((baseline_goodput.reshape(1), goodput))
                 best_offset = int(torch.argmax(all_goodput).item())
@@ -141,7 +149,7 @@ class HardwareAwarePrefixPolicy:
                 best_total = base_total
                 self.last_goodput = float(
                     ((num_reqs + (survival[:, :mandatory].sum() if mandatory else 0.0))
-                     / self.cost_model.latency(max(1, base_total)))
+                     / self.cost_model.latency(max(1, num_reqs + base_total)))
                 )
             self._best_total_tokens = max(
                 base_total,
