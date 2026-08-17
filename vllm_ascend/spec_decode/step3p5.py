@@ -419,7 +419,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+            common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(self.runner.seq_lens, num_reqs_padded, 0)
             common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                 self.runner.optimistic_seq_lens_cpu, num_reqs_padded
             )
@@ -452,9 +452,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             : common_attn_metadata.num_actual_tokens
         ]
 
-        self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[0][num_reqs_padded:].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
+        common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+            common_attn_metadata.seq_lens, num_reqs_padded, 0
+        )
 
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)

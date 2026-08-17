@@ -896,9 +896,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor, slicing_length
             )
             if self.method == "dflash":
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+                    common_attn_metadata.seq_lens, num_reqs_padded, 0
+                )
             else:
-                common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+                    self.runner.seq_lens, num_reqs_padded, 0
+                )
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     self.runner.optimistic_seq_lens_cpu, num_reqs_padded
                 )
@@ -937,19 +941,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             inputs_embeds = None
 
-        # Update slot_mapping for different speculative.
-        # NOTE: Currently, we only remake the slot_mapping, because it's the
-        # only tensor which will be used in current FIA.
-        # Strictly speaking, `query_start_loc`, `seq_lens` should also have
-        # their memory allocated separately for each step just like `slot_mapping`.
+        # Keep step-0 attention inputs in their persistent metadata buffers.
         slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
 
-        self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[0][num_reqs_padded:].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
+        common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+            common_attn_metadata.seq_lens, num_reqs_padded, 0
+        )
 
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
@@ -1588,7 +1588,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                     common_attn_metadata.block_table_tensor, input_batch_size
                 )
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, input_batch_size)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     common_attn_metadata.seq_lens_cpu, input_batch_size
                 )
@@ -1633,10 +1632,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # The loop part
         used_update_positions += 1
 
-        # Clone the data so that when calculating the data at position 2 and position 3
-        # in the merged graph, it does not affect position 1
+        seq_lens_size = (
+            input_batch_size
+            if draft_index == 1 and aclgraph_runtime_mode == CUDAGraphMode.FULL
+            else common_attn_metadata.seq_lens.shape[0]
+        )
+        common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+            common_attn_metadata.seq_lens, seq_lens_size, draft_index
+        )
+
+        # Clone the remaining data so that when calculating the data at position
+        # 2 and position 3 in the merged graph, it does not affect position 1.
         # FIXME(lilinsiman)
-        common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
         if common_attn_metadata.seq_lens_cpu is not None:
             common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
         if common_attn_metadata._seq_lens_cpu is not None:
@@ -1732,10 +1739,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.slot_mapping_group[draft_index][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
-
-        self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[draft_index][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]]
 
         self.query_start_loc_group[draft_index][: common_attn_metadata.query_start_loc.shape[0]].copy_(
             common_attn_metadata.query_start_loc
@@ -2094,6 +2097,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             tensor = tensor[:desired_size]
         return tensor
+
+    def _copy_seq_lens_to_step_buffer(self, tensor, desired_size, draft_index):
+        buf = self.seq_lens_group[draft_index]
+        copy_size = min(tensor.shape[0], desired_size)
+        if tensor.data_ptr() != buf.data_ptr():
+            buf[:copy_size].copy_(tensor[:copy_size])
+        buf[copy_size:].zero_()
+        return buf[:desired_size]
 
     def _adjust_block_table_tensor(self, tensor, desired_size):
         if desired_size <= tensor.shape[0]:
