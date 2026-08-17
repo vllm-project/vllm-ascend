@@ -565,6 +565,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
@@ -600,6 +601,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
@@ -660,6 +662,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
@@ -720,6 +723,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
