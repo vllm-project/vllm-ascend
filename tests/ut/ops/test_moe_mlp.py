@@ -2,7 +2,7 @@ import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import torch
 import torch_npu  # noqa: F401  -- registers torch.npu used by the module under test
@@ -878,6 +878,49 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         # exact GELU (approximate='none') differs from tanh; ensure 'none' used.
         self.assertFalse(torch.allclose(m.captured["x"], F.gelu(gate, approximate="tanh") * up, atol=1e-6))
         self.assertTrue(torch.allclose(m.captured["x"], expected, atol=1e-6))
+
+    def test_w4a4_mxfp4_gelu_preserves_logical_dtypes_and_requant_mode(self):
+        gate_up = torch.randn(1, 8, dtype=torch.bfloat16)
+        requantized = torch.zeros(1, 2, dtype=torch.uint8)
+        requant_scale = torch.ones(1, dtype=torch.uint8)
+        stream_patch, _ = _patch_npu_stream()
+        kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
+        kwargs.update(
+            hidden_states=torch.zeros(1, 2, dtype=torch.uint8),
+            w1=torch.zeros(1, 8, 1, dtype=torch.uint8),
+            w2=torch.zeros(1, 2, 1, dtype=torch.uint8),
+            use_mxfp_quant=True,
+            mxfp_quant_dtype=QuantType.W4A4MXFP,
+            act_quant_type=MXFP4_TEST_DTYPE,
+            weight_quant_type=MXFP4_TEST_DTYPE,
+            scale_type=torch.float32,
+            per_token_scale_type=torch.float32,
+        )
+
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up], create=True) as mock_gmm,
+            patch.object(
+                DeviceOperator,
+                "npu_dynamic_quant",
+                return_value=(requantized, requant_scale),
+            ) as mock_dynamic_quant,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 2)),
+            patch(f"{MOE_MLP}.ensure_mxfp8_moe_available"),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            quant_apply_mlp(**kwargs)
+
+        gmm1_kwargs = mock_gmm.call_args.kwargs
+        self.assertEqual(gmm1_kwargs["x_dtype"], MXFP4_TEST_DTYPE)
+        self.assertEqual(gmm1_kwargs["weight_dtype"], MXFP4_TEST_DTYPE)
+        self.assertEqual(gmm1_kwargs["scale_dtype"], torch.float32)
+        self.assertEqual(gmm1_kwargs["per_token_scale_dtype"], torch.float32)
+        mock_dynamic_quant.assert_called_once_with(
+            ANY,
+            act_quant_type=MXFP4_TEST_DTYPE,
+            use_mxfp_quant=True,
+        )
 
     def test_w4a16_gelu_uses_antiquant_path(self):
         """W4A16 + gelu: antiquant GMM1 -> gelu·up -> antiquant GMM2, no requant."""
