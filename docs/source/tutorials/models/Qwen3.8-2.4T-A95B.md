@@ -71,7 +71,7 @@ Select the A3 image and start the docker image on each node. Refer to
 
 ```{code-block} bash
   :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a3
 export NAME=vllm-ascend
 
 docker run --rm \
