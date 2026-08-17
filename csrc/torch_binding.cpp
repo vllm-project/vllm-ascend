@@ -2073,8 +2073,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> chunk_gat
 
     TORCH_CHECK(K % 16 == 0, "K must be a multiple of 16, got ", K);
     TORCH_CHECK(V % 16 == 0, "V must be a multiple of 16, got ", V);
-    TORCH_CHECK(K <= 128, "K must be <= 128, got ", K);
-    TORCH_CHECK(V <= 128, "V must be <= 128, got ", V);
+    TORCH_CHECK(K <= 64, "K must be <= 64 (310P UB), got ", K);
+    TORCH_CHECK(V <= 64, "V must be <= 64 (310P UB), got ", V);
     TORCH_CHECK(B <= 32, "Batch size B must be <= 32, got ", B);
     TORCH_CHECK(Hv <= 64, "Hv must be <= 64, got ", Hv);
 

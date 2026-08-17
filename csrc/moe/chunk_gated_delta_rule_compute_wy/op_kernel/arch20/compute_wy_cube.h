@@ -23,9 +23,9 @@ using WyMmBiasType = MatmulType<TPosition::VECCALC, CubeFormat::ND, float>;
 using WyMatmulNoTrans = matmul::MatmulImpl<WyMmAType, WyMmBType, WyMmCType, WyMmBiasType>;
 using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, WyMmBiasType>;
 
-// GM staging: A_half(64*128) + B_half(64*128). Cube writes C directly to UB.
-// Doubling applies U/W separately so N <= 128 (no stacked 256-wide staging).
-constexpr uint32_t WY_CUBE_MAX_HEAD = 128;
+// GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
+// Doubling applies U/W separately so N <= MAX_HEAD (no stacked 2N-wide staging).
+constexpr uint32_t WY_CUBE_MAX_HEAD = 64;
 constexpr uint32_t WY_CUBE_CHUNK = 64;
 constexpr uint32_t WY_CUBE_STAGING_A_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
 constexpr uint32_t WY_CUBE_STAGING_B_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);

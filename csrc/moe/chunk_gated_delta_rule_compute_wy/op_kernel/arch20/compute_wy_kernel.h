@@ -21,7 +21,8 @@ constexpr uint32_t BLOCK_BYTES = 32;
 constexpr uint32_t HALF_PER_BLOCK = BLOCK_BYTES / sizeof(half);
 constexpr uint32_t FLOAT_PER_BLOCK = BLOCK_BYTES / sizeof(float);
 constexpr uint32_t FLOAT_VEC_LEN = 64;
-constexpr uint32_t MAX_SAFE_HEAD_DIM = 128;
+// Must match host tiling: 310P UB is 192KB, so K/V=128 cannot fit InitBuffer.
+constexpr uint32_t MAX_SAFE_HEAD_DIM = 64;
 constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 // ||A||_inf below this value bounds the forward solve by 1/(1-threshold),
 // leaving ample fp16 headroom for the fast Cube doubling path.
