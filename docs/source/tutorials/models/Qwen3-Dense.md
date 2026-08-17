@@ -1,4 +1,4 @@
-# Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B, W8A8, W4A4, W8A8SC-310)
+# Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B)
 
 ## 1 Introduction
 
