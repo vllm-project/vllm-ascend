@@ -203,6 +203,26 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        return self.apply_with_stream(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+            maybe_current_stream=None,
+        )
+
+    def apply_with_stream(
+        self,
+        layer: "AscendRoutedExperts",
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
+        maybe_current_stream=None,
+    ) -> torch.Tensor:
         topk_weights = topk_weights.to(x.dtype)
 
         if self.use_expert_weight_list:
@@ -257,7 +277,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 is_per_channel_weight=True,
-            )
+            ),
+            maybe_current_stream=maybe_current_stream,
         )
 
     @staticmethod

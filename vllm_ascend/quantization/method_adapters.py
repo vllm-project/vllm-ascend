@@ -252,7 +252,18 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts=None,
         shared_experts_input: torch.Tensor | None = None,
+        maybe_current_stream=None,
     ) -> torch.Tensor:
+        if hasattr(self.quant_method, "apply_with_stream"):
+            return self.quant_method.apply_with_stream(  # type: ignore
+                layer=layer,
+                x=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                shared_experts=shared_experts,
+                shared_experts_input=shared_experts_input,
+                maybe_current_stream=maybe_current_stream,
+            )
         return self.quant_method.apply(
             layer=layer,
             x=x,

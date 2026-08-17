@@ -1296,8 +1296,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         e_q_quant_done = main_stream.record_event()
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_q_quant_done)
+        with torch.npu.stream(aux_stream):
+            aux_stream.wait_event(e_q_quant_done)
             kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
 
         wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
@@ -1306,8 +1306,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
         e_part2_start = main_stream.record_event()
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_part2_start)
+        with torch.npu.stream(aux_stream):
+            aux_stream.wait_event(e_part2_start)
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
         if is_prefill:
@@ -1329,8 +1329,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_part3_start)
+        with torch.npu.stream(aux_stream):
+            aux_stream.wait_event(e_part3_start)
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)

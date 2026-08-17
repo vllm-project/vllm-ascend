@@ -146,6 +146,7 @@ def quant_apply_mlp(
     swiglu_alpha: float = 1.0,
     swiglu_beta: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
+    s=None,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     act_name = getattr(activation, "value", activation)
@@ -463,7 +464,9 @@ def quant_apply_mlp(
             else:
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        if s is None:
+            s = torch.npu.current_stream()
+        before_gmm2_evt = s.record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -608,7 +611,7 @@ def unquant_apply_mlp(
     return hidden_states, None
 
 
-def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput, s=None) -> torch.Tensor:
     """
     Unified MoE MLP entry.
     Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
@@ -712,4 +715,5 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         use_w4a8_per_channel_gmm_swiglu=mlp_compute_input.quant.use_w4a8_per_channel_gmm_swiglu,
+        s=s,
     )
