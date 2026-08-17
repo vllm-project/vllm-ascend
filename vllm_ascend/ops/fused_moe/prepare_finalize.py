@@ -318,6 +318,40 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         return input_ids
 
 
+class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
+    """A5 MegaMoE owns dispatch, compute, and combine inside the fused backend."""
+
+    def prepare(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        enable_shared_expert_dp: bool = False,
+        replace_allreduce: bool = False,
+        quant_type=QuantType.NONE,
+    ) -> MoEPrepareOutput:
+        return MoEPrepareOutput(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            mc2_mask=None,
+            padded_hidden_states_shape=None,
+            pertoken_scale=None,
+        )
+
+    def pad_and_split_input_ids(
+        self,
+        input_ids,
+    ):
+        return input_ids
+
+    def finalize(
+        self,
+        hidden_states: torch.Tensor,
+        reduce_results: bool,
+        padded_hidden_states_shape: torch.Size | None = None,
+    ) -> torch.Tensor:
+        return hidden_states
+
+
 class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     """
     MoE communication strategy using All-Gather + Reduce-Scatter on EP group.
