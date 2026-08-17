@@ -152,7 +152,12 @@ def test_current_hardware_profile_uses_device_config() -> None:
     assert get_current_hardware_profile() is expected_profile
 
 
-def test_current_hardware_profile_is_dynamo_safe() -> None:
+def test_current_hardware_profile_is_dynamo_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CPU UTs expose a mocked NPU backend that is not importable as
+    # ``torch.npu``. Keep accelerator stream discovery out of this test so it
+    # only exercises hardware-profile tracing.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+
     def use_profile_capability(value: torch.Tensor) -> torch.Tensor:
         if get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
             return value + 1
