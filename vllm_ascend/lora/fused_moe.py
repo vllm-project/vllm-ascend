@@ -347,7 +347,17 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_size = moe_parallel_config.tp_size
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
-        self._enable_aux_cuda_stream = get_ascend_config().enable_moe_lora_dual_stream
+        ascend_config = get_ascend_config()
+        enable_moe_lora_dual_stream = ascend_config.enable_moe_lora_dual_stream
+        vllm_config = getattr(ascend_config, "vllm_config", None)
+        model_config = getattr(vllm_config, "model_config", None)
+        graph_mode = model_config is not None and not model_config.enforce_eager
+        self._enable_aux_cuda_stream = enable_moe_lora_dual_stream and not graph_mode
+        if enable_moe_lora_dual_stream and graph_mode:
+            logger.warning_once(
+                "enable_moe_lora_dual_stream is eager-only and has been disabled for ACLGraph mode. "
+                "Quantized MoE LoRA will use its graph-safe single-stream path."
+            )
         self._init_lora_stream_context()
         self.enable_moe_shared_loras = False
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1

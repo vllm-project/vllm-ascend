@@ -189,6 +189,7 @@ def test_dynamic_int8_allgather_lora_overlaps_into_separate_deltas() -> None:
     assert parallel.call_args_list[1].args[2:] == (events[2], events[3], aux_stream)
     assert apply_w13.call_args.kwargs["gate_up_out"] is not gate_up_out
     assert apply_w2.call_args.kwargs["down_out"] is not down_out
+    assert apply_w13.call_args.kwargs["gate_up_out"].data_ptr() == apply_w2.call_args.kwargs["down_out"].data_ptr()
     assert torch.all(activation.call_args.args[0] == 2)
 
 
@@ -199,14 +200,22 @@ def test_moe_lora_aux_stream_gating() -> None:
         aux_stream=object(),
         events=tuple(object() for _ in range(4)),
     )
-    with patch("torch.npu.is_current_stream_capturing", return_value=False):
+    with (
+        patch("torch.compiler.is_compiling", return_value=False),
+        patch("torch.npu.is_current_stream_capturing", return_value=False),
+    ):
         assert _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
         assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLTOALL)
 
     context.fully_sharded = True
     assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
     context.fully_sharded = False
-    with patch("torch.npu.is_current_stream_capturing", return_value=True):
+    with patch("torch.compiler.is_compiling", return_value=True):
+        assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
+    with (
+        patch("torch.compiler.is_compiling", return_value=False),
+        patch("torch.npu.is_current_stream_capturing", return_value=True),
+    ):
         assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
 
 

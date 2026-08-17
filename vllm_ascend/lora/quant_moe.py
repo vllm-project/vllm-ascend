@@ -155,6 +155,11 @@ def _can_use_moe_lora_aux_stream(lora_context, comm_type: MoECommType) -> bool:
     events = getattr(lora_context, "events", None)
     if aux_stream is None or events is None or len(events) < 4:
         return False
+    # Dynamo runs before ACLGraph capture. Keep the compiled graph on the
+    # original single-stream path so ACLGraph can capture/replay it; eager
+    # execution still uses the auxiliary stream.
+    if torch.compiler.is_compiling():
+        return False
     # Multi-stream ACLGraph capture needs dedicated graph lifecycle support.
     # Preserve the existing graph-safe single-stream implementation for now.
     return not torch.npu.is_current_stream_capturing()
@@ -179,10 +184,20 @@ def _execute_moe_lora_in_parallel(
     return base_result, lora_result
 
 
-def _new_lora_delta(x: torch.Tensor, lora_b_stacked: tuple[torch.Tensor, ...]) -> torch.Tensor:
-    """Allocate a delta matching the concatenated LoRA B outputs."""
-    output_size = sum(weight.shape[-2] for weight in lora_b_stacked)
-    return x.new_empty((*x.shape[:-1], output_size))
+def _lora_output_size(lora_b_stacked: tuple[torch.Tensor, ...]) -> int:
+    return sum(weight.shape[-2] for weight in lora_b_stacked)
+
+
+def _new_lora_delta_workspace(
+    x: torch.Tensor,
+    w13_lora_b_stacked: tuple[torch.Tensor, ...],
+    w2_lora_b_stacked: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, int, int]:
+    """Allocate one workspace reused by the non-overlapping w13/w2 deltas."""
+    w13_output_size = _lora_output_size(w13_lora_b_stacked)
+    w2_output_size = _lora_output_size(w2_lora_b_stacked)
+    workspace = x.new_empty((*x.shape[:-1], max(w13_output_size, w2_output_size)))
+    return workspace, w13_output_size, w2_output_size
 
 
 @register_quant_moe_lora_impl(
@@ -268,7 +283,12 @@ def _apply_dynamic_int8_moe_lora(
 
     use_aux_stream = _can_use_moe_lora_aux_stream(lora_context, comm_type)
     if use_aux_stream:
-        lora_delta_w13 = _new_lora_delta(hidden_states, lora_context.w13_lora_b_stacked)
+        lora_delta_workspace, w13_output_size, w2_output_size = _new_lora_delta_workspace(
+            hidden_states,
+            lora_context.w13_lora_b_stacked,
+            lora_context.w2_lora_b_stacked,
+        )
+        lora_delta_w13 = lora_delta_workspace[..., :w13_output_size]
 
         def lora_w13_fn() -> None:
             # Ascend BGMV expand currently accumulates into y. Zero on the
@@ -338,7 +358,10 @@ def _apply_dynamic_int8_moe_lora(
         )
 
     if use_aux_stream:
-        lora_delta_w2 = _new_lora_delta(activated, lora_context.w2_lora_b_stacked)
+        # W13 has already joined the main stream. The main-stream activation
+        # and quantization are ordered before the W2 start event, so the same
+        # storage can safely be cleared and reused by the W2 auxiliary work.
+        lora_delta_w2 = lora_delta_workspace[..., :w2_output_size]
 
         def lora_w2_fn() -> None:
             lora_delta_w2.zero_()
