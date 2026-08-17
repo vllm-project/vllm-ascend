@@ -170,7 +170,17 @@ def test_manual_trigger_manager_paths(tmp_path):
         "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
         return_value=False,
     ):
-        # Consumes count even when this rank does not arm.
+        # Continuous true: consume path still runs; value stays true.
+        assert mgr.consume_once(allow_arm=True) is None
+    assert cfg.manual_trigger() is True
+    assert cfg.manual_trigger_continuous() is True
+
+    # Int count: consume even when this rank does not arm.
+    cfg._data["dump"]["manual_trigger"] = 1
+    with patch(
+        "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
+        return_value=False,
+    ):
         assert mgr.consume_once(allow_arm=True) is None
     assert cfg.manual_trigger() is False
 

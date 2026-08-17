@@ -204,9 +204,10 @@ thread that file-polls the JSON and applies `ascend_log` (`level` + `debug`) via
 write the file. Initial levels are applied at AscendConfig construction; the thread
 re-applies after subsequent file changes. Workers keep step-driven sync only.
 
-Inside the DFX JSON, `dump.manual_trigger: true` is consumed by `ManualTriggerManager` on the next
-successful hot-reload (then persisted back to `false`). The trigger arms one msprobe dump without
-consuming `max_times` or cooldown; it still requires `dump.enabled` and an initialized debugger.
+Inside the DFX JSON, `dump.manual_trigger: true` keeps arming an msprobe dump on every nonempty
+real `execute_model` wave until you set it back to `false` (not auto-cleared). A positive int `N`
+arms the next `N` waves then clears. Skips `max_times` / cooldown; still requires `dump.enabled`
+and an initialized debugger.
 **Requires `dfx_config_reload_interval > 0`** — with interval `0`, editing `manual_trigger` in the
 JSON has no effect.
 

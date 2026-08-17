@@ -75,13 +75,13 @@ vllm serve <model> --additional-config '{
 
 1. 确认热更已开、`dump.enabled=true`、`dump_config_path` 有效（**不必**开 detector）。  
 2. 将 JSON 中 `"manual_trigger"` 设为：  
-   - `true`：兼容旧行为，等价于 `1`（只 dump 一次）；  
-   - 正整数 `N`：在接下来 **N** 个「有本地 batch 请求」的真实 `execute_model` 拍上各 arm 一次，每拍减 1，到 `0`/`false` 为止；  
+   - `true`：**一直 dump**——每个「有本地 batch 请求」的真实 `execute_model` 拍都 arm，直到改回 `false`（不会自动清掉）；  
+   - 正整数 `N`：在接下来 **N** 个有本地 batch 的真实拍上各 arm 一次，每拍减 1，到 `0`/`false` 为止；  
    - `false` / `0`：关闭。  
 3. 等待**有真实请求的 batch** 的下一拍 `execute_model`（空闲 / `execute_dummy_batch` / **空 batch 清理拍** **不会**消费）。  
-4. 若 `dump.enabled=false`：**不消费**剩余次数并打日志，修好后再等下一拍。  
-5. 每成功消费一次写回剩余次数（最后一次写回 `false`）；日志可搜 `manual_trigger` / `[DFX manual_trigger]`。  
-6. **Report**：每次 arm 写一份 `manual_trigger` 报告；`detail.requests` 含该拍 batch **全部**请求的 prompt/output（`save_sensitive_info` 控制是否带 token ids）；`detail.manual_trigger_remaining_after` 为消费后剩余次数。
+4. 若 `dump.enabled=false`：**不消费**（`true` 也不清；int 次数不减）并打日志，修好后再等下一拍。  
+5. `true` 模式不写回 JSON；int 模式每成功消费一次写回剩余次数（最后一次写回 `false`）。日志可搜 `manual_trigger` / `[DFX manual_trigger]`。  
+6. **Report**：每次 arm 写一份 `manual_trigger` 报告；`detail.requests` 含该拍 batch **全部**请求的 prompt/output（`save_sensitive_info` 控制是否带 token ids）；`detail.manual_trigger_remaining_after` 为消费后剩余（`true` 时仍为 `true`）。
 
 ### 2.2.1 Report 截断（查命中时）
 
@@ -157,7 +157,7 @@ vllm serve <model> --additional-config '{
 | 现象 | 常见原因 | 处理 |
 |------|----------|------|
 | 改 JSON 不生效 | `dfx_config_reload_interval=0`；或改了非本 DP 的文件 | 启动项 `>0`；确认本 EngineCore leader 可读路径 |
-| `manual_trigger` 一直 true / 无 dump | `dump.enabled=false`；服务空闲只走 dummy；或热更关 | 开 `dump.enabled`；打真实请求；确认 interval |
+| `manual_trigger` 为 true 仍无 dump | `dump.enabled=false`；服务空闲只走 dummy；或热更关 | 开 `dump.enabled`；打真实请求；确认 interval；要停则改 `false` |
 | 多 DP 挂死 / 集体通信超时 | 曾用满编 world 做 config sync；一侧 idle 一侧 busy | **禁止**跨 DP world config；用 per-DP `inner_dp` 或 file poll（现行代码已如此） |
 | TP>1 挂在 dump pending-OR / `all_reduce` | 同 EngineCore 内各 TP 的 `dump.enabled`（或整份 JSON）不一致：热更关时一侧走 fast-path 跳过 OR，另一侧仍进 `all_reduce` | **同一 EngineCore 共用一份** `dfx_config_path`（或同默认路径）；勿给不同 TP 挂不同 JSON / 不同 `dump.enabled` |
 | 检测有 short / report 但无 msprobe 文件 | `dump.enabled=false`；或冷却 / 配额；或 early PP | 开 dump 并设 `max_times>0`；查 cooldown；dump 仅 last-PP |

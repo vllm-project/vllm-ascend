@@ -278,17 +278,20 @@ def test_manual_trigger_skips_quota():
     InputFilterManager.reset_for_tests()
 
 
-def test_consume_manual_trigger_persists_false(tmp_path: Path):
+def test_consume_manual_trigger_true_stays_continuous(tmp_path: Path):
     cfg = make_dfx_config(tmp_path)
     cfg_path = cfg.config_path
     assert cfg.save({"dump": {"manual_trigger": True}})
     assert cfg.manual_trigger() is True
+    assert cfg.manual_trigger_continuous() is True
     assert cfg.manual_trigger_count() == 1
     assert cfg.consume_manual_trigger() is True
-    assert cfg.manual_trigger() is False
+    assert cfg.manual_trigger() is True
+    assert cfg.manual_trigger_continuous() is True
     reloaded = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert reloaded["dump"]["manual_trigger"] is False
-    assert cfg.consume_manual_trigger() is False
+    assert reloaded["dump"]["manual_trigger"] is True
+    assert cfg.consume_manual_trigger() is True
+    assert cfg.manual_trigger() is True
 
 
 def test_consume_manual_trigger_decrements_count(tmp_path: Path):

@@ -26,12 +26,11 @@
     "max_times": 0,
     // Cooldown seconds between auto dumps.
     "cooldown_seconds": 300,
-    // Remaining manual dump waves. false/0 = off; true = one-shot (compat);
-    // positive int N = arm on the next N real execute_model waves that have a
-    // non-empty local batch (decrements toward 0). Needs dump.enabled=true +
-    // reload_interval > 0; skips quota / cooldown / input filters.
-    // On each consume: arms dump and writes one report with that wave's
-    // batch requests' prompt/output (counts; ids if save_sensitive_info).
+    // Manual dump arm. false/0 = off; true = dump every nonempty real
+    // execute_model wave until set false; positive int N = next N waves
+    // then off. Needs dump.enabled=true + reload_interval > 0; skips quota /
+    // cooldown / input filters. Each arm writes one report for that wave's
+    // batch (counts; ids if save_sensitive_info).
     "manual_trigger": false
   },
 

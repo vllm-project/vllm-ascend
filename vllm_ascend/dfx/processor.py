@@ -123,8 +123,8 @@ class DfxProcessor:
         scheduler_output: Any | None,
     ) -> bool:
         # Hot-reload off: config/filters are static after init. Skip sync +
-        # filter rebuild; still honor startup one-shots (manual_trigger /
-        # print_input) on real waves.
+        # filter rebuild; still honor startup manual_trigger /
+        # print_input on real waves.
         if not self.dfx_config.hot_reload_enabled:
             trigger = self.manual_triggers.consume_once(allow_arm=allow_arm, scheduler_output=scheduler_output)
             if trigger is not None:
