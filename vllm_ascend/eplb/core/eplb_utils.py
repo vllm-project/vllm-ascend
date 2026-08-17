@@ -77,7 +77,6 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         except Exception as e:
             logger.error("[eplb/omni] Failed to initialize OmniPlanner: %s", e)
             raise
-
     expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size
@@ -90,7 +89,14 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         assert not eplb_enable, "EPLB must used in expert parallelism."
         return None, None, None, n_redundant
 
-    if expert_map_path:
+    if expert_map_path and eplb_config.enable_omni_eplb:
+        planner.config.pattern_path = expert_map_path
+        planner.init_expert_mapping()
+        log2phy = planner.get_log2phy(layer_id)
+        local_expert_map = planner.get_local_expert_map(layer_id)
+        n_redundant = planner.get_global_n_redundant(layer_id)
+        return None, local_expert_map, log2phy, n_redundant # _, _, _, global_n_redundant
+    elif expert_map_path:
         eplb_enable = True
         global_placement, physical_count = expert_file_to_tensor(expert_map_path, layer_id)
         n_redundant = physical_count - n_experts
@@ -119,6 +125,12 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         if eplb_enable
         else None
     )
+        
+    # if moe_config.ep_rank == 0  and layer_id==7:
+    #     torch.save(global_placement, f"/data/kww/eplb-dump/omni_global_placement_{moe_config.num_experts}.pt")
+    #     torch.save(log2phy, f"/data/kww/eplb-dump/omni_log2phy_{moe_config.num_experts}.pt")
+    #     torch.save(n_redundant, f"/data/kww/eplb-dump/omni_n_redundant_{moe_config.num_experts}.pt")
+        # torch.save(global_expert_map, f"/data/kww/eplb-dump/omni_global_expert_map_{moe_config.num_experts}.pt")
 
     return torch.stack(global_expert_map), local_expert_map, log2phy, n_redundant
 
