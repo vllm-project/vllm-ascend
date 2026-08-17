@@ -18,7 +18,7 @@ requires = [
     "setuptools>=64",
     "setuptools-scm>=8",
     "transformers==5.14.1",
-    "torch-npu==2.10.0.post2",
+    "torch-npu==2.10.0.post4",
     "torch==2.10.0",
     "torchvision",
     "wheel",
@@ -29,7 +29,7 @@ requires = [
     "fastapi<0.124.0",
     "compressed_tensors>=0.11.0",
     "arctic-inference==0.1.1",
-    "triton-ascend==3.2.1"
+    "triton-ascend==3.2.2"
 ]
 build-backend = "setuptools.build_meta"
 
