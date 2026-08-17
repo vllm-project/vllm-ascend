@@ -71,6 +71,7 @@ class AscendInputBatch(InputBatch):
     seq_lens_np: np.ndarray
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
+    pcp_global_slot_mappings: torch.Tensor | None = None
 
     @classmethod
     def make_dummy(

@@ -387,6 +387,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             return
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
+                if attn_meta is None:
+                    continue
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
 
