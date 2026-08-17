@@ -226,6 +226,14 @@ def _deepseek_v2_mla_attention_init(
     elif 0 <= layer_id < len(_index_topk_pattern):
         _skip_topk = _index_topk_pattern[layer_id] == "S"
 
+    # The skip pattern only governs backbone layers. MTP/nextn layers
+    # (layer_id >= num_hidden_layers) must never start with skip_topk=True:
+    # they compute their own indices at draft step 0 and toggle at runtime
+    # via set_skip_topk (index_share_for_mtp_iteration). Matches upstream
+    # deepseek_v2.py behavior.
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
+
     skip_indexer_init = _should_skip_indexer_init(config, prefix, _skip_topk)
     if self.is_v32 and not skip_indexer_init:
         self.indexer_rope_emb = get_rope(
@@ -283,7 +291,7 @@ def _deepseek_v2_mla_attention_init(
         cache_config,
         quant_config,
         prefix,
-        skip_topk=_skip_topk,
+        skip_topk=_skip_topk and not is_mtp_layer,
     )
 
 
