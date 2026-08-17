@@ -166,7 +166,10 @@ class DfxProcessor:
         """
         if not allow_arm or not self.dfx_config.print_input_token_ids_once():
             return False
-        rows = iter_batch_prompt_token_ids(self.runner)
+        rows = iter_batch_prompt_token_ids(
+            self.runner,
+            scheduler_output=getattr(self, "_scheduler_output_for_step", None),
+        )
         if not rows:
             logger.debug(
                 "[DFX print_input] print_input_token_ids_once set but no prompt_token_ids in batch; defer consume"
@@ -551,6 +554,7 @@ class DfxProcessor:
             alert.req_id,
             alert.req_idx,
             include_token_ids=include_ids,
+            scheduler_output=getattr(self, "_scheduler_output_for_step", None),
         )
         detail = io_mgr.merge_into_detail(detail, snap)
 
@@ -595,6 +599,7 @@ class DfxProcessor:
 
         include_ids = self.dfx_config.report_save_sensitive_info()
         io_mgr = RequestIoSnapshotManager.get()
+        so = getattr(self, "_scheduler_output_for_step", None)
         requests_detail: list[dict[str, Any]] = []
         for req_id, req_idx in batch_rows:
             snap = io_mgr.snapshot(
@@ -602,6 +607,7 @@ class DfxProcessor:
                 req_id,
                 req_idx,
                 include_token_ids=include_ids,
+                scheduler_output=so,
             )
             entry = {"req_id": req_id, "req_idx": req_idx}
             entry.update(snap.as_detail_fields())
