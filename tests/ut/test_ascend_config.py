@@ -703,8 +703,9 @@ class TestAscendConfig(TestBase):
             self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], allocator_config)
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.warning")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_overrides_top_level_weight_nz_mode(self, mock_fix_incompatible_config):
+    def test_rl_config_overrides_top_level_weight_nz_mode(self, mock_fix_incompatible_config, mock_warning):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "rl_config": {"enabled": True},
@@ -715,6 +716,25 @@ class TestAscendConfig(TestBase):
 
         self.assertEqual(ascend_config.weight_nz_mode, 0)
         self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
+        mock_warning.assert_called_once_with(
+            "RL config requires weight_nz_mode=0; overriding AscendConfig.weight_nz_mode from %s to 0.",
+            2,
+        )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_keeps_zero_weight_nz_mode_without_warning(self, mock_fix_incompatible_config, mock_warning):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "rl_config": {"enabled": True},
+            "weight_nz_mode": 0,
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.weight_nz_mode, 0)
+        mock_warning.assert_not_called()
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

@@ -584,6 +584,11 @@ class RlConfig:
         if not self.enabled:
             return
 
+        if ascend_config.weight_nz_mode != 0:
+            logger.warning(
+                "RL config requires weight_nz_mode=0; overriding AscendConfig.weight_nz_mode from %s to 0.",
+                ascend_config.weight_nz_mode,
+            )
         ascend_config.weight_nz_mode = 0
         os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
