@@ -31,8 +31,6 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
@@ -217,7 +215,7 @@ class NPUPlatform(Platform):
         use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
-        if selected_backend == AttentionBackendEnum.FLASH_ATTN and _validate_fa3_backend(key, attn_selector_config):
+        if _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
@@ -376,7 +374,6 @@ class NPUPlatform(Platform):
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
-        _enable_fa3_for_training_consistency(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
         _update_compilation_modes(vllm_config, ascend_config)
@@ -665,10 +662,10 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             )
             att_config.flash_attn_version = None
 
-        # Notify user that the backend will be managed by Ascend plugins,
-        # and for training-inference consistency, when att_config.backend
-        # == AttentionBackendEnum.FLASH_ATTN,it is NOT reset to None
-        if getattr(att_config, "backend", None) is not None and att_config.backend != AttentionBackendEnum.FLASH_ATTN:
+        # Notify the user that the backend will be managed by Ascend plugins.
+        # FA3 is selected directly in get_attn_backend_cls when RL training
+        # consistency is enabled, so it does not depend on this field.
+        if getattr(att_config, "backend", None) is not None:
             logger.info(
                 "User specified attention backend '%s'. Note that Ascend NPU "
                 "will use its registered plugin backend instead. Resetting to None.",
@@ -1251,12 +1248,6 @@ def _disable_expandable_segments() -> None:
     if updated_configs != npu_alloc_configs:
         os.environ["PYTORCH_NPU_ALLOC_CONF"] = updated_configs
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
-
-
-def _enable_fa3_for_training_consistency(vllm_config: VllmConfig, ascend_config) -> None:
-    rl_config = ascend_config.rl_config
-    if rl_config.enabled and rl_config.enable_training_consistency:
-        vllm_config.attention_config.backend = AttentionBackendEnum.FLASH_ATTN
 
 
 def _validate_fa3_backend(key, _attn_selector_config):
