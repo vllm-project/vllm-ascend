@@ -200,23 +200,21 @@ def test_moe_lora_aux_stream_gating() -> None:
         aux_stream=object(),
         events=tuple(object() for _ in range(4)),
     )
-    with (
-        patch("torch.compiler.is_compiling", return_value=False),
-        patch("torch.npu.is_current_stream_capturing", return_value=False),
-    ):
-        assert _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
-        assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLTOALL)
+    assert _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
+    assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLTOALL)
 
     context.fully_sharded = True
     assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
     context.fully_sharded = False
-    with patch("torch.compiler.is_compiling", return_value=True):
-        assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
+
+    # MoE is an opaque custom op. Its real implementation is invoked during
+    # ACLGraph capture, where the pre-created stream/event fork and join must
+    # remain active so both streams are recorded into the graph.
     with (
-        patch("torch.compiler.is_compiling", return_value=False),
+        patch("torch.compiler.is_compiling", return_value=True),
         patch("torch.npu.is_current_stream_capturing", return_value=True),
     ):
-        assert not _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
+        assert _can_use_moe_lora_aux_stream(context, MoECommType.ALLGATHER)
 
 
 def test_execute_moe_lora_in_parallel_orders_npu_events() -> None:
@@ -253,6 +251,46 @@ def test_execute_moe_lora_in_parallel_orders_npu_events() -> None:
     aux_stream.wait_event.assert_called_once_with(start_event)
     done_event.record.assert_called_once_with(aux_stream)
     main_stream.wait_event.assert_called_once_with(done_event)
+
+
+@pytest.mark.skipif(not torch.npu.is_available(), reason="requires an Ascend NPU")
+def test_execute_moe_lora_in_parallel_supports_aclgraph_replay() -> None:
+    static_input = torch.ones(16, device="npu", dtype=torch.float32)
+    aux_stream = torch.npu.Stream()
+    events = tuple(torch.npu.Event() for _ in range(2))
+
+    def run_parallel() -> torch.Tensor:
+        lora_delta = torch.empty_like(static_input)
+
+        def base_fn() -> torch.Tensor:
+            return static_input * 2
+
+        def lora_fn() -> None:
+            lora_delta.copy_(static_input * 3)
+
+        base_output, _ = _execute_moe_lora_in_parallel(
+            base_fn,
+            lora_fn,
+            events[0],
+            events[1],
+            aux_stream,
+        )
+        return base_output.add_(lora_delta)
+
+    # Initialize lazy stream/event resources before capture, matching model
+    # warmup followed by ACLGraph capture in the runner.
+    run_parallel()
+    torch.npu.synchronize()
+
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        output = run_parallel()
+
+    static_input.fill_(2)
+    graph.replay()
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(output.cpu(), torch.full((16,), 10.0))
 
 
 @pytest.mark.parametrize(

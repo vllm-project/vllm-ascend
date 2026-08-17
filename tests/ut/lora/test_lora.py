@@ -82,7 +82,7 @@ def test_ascend_fused_moe_lora_initializes_npu_aux_stream() -> None:
     assert wrapper._events == tuple(events)
 
 
-def test_ascend_fused_moe_lora_disables_aux_stream_for_graph_mode() -> None:
+def test_ascend_fused_moe_lora_initializes_aux_stream_for_graph_mode() -> None:
     parallel_config = SimpleNamespace(tp_size=8, tp_rank=3, ep_rank=0, use_ep=False)
     base_layer = SimpleNamespace(
         moe_config=SimpleNamespace(
@@ -100,18 +100,20 @@ def test_ascend_fused_moe_lora_disables_aux_stream_for_graph_mode() -> None:
         enable_moe_lora_dual_stream=True,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(enforce_eager=False)),
     )
+    aux_stream = object()
+    events = [object() for _ in range(4)]
 
     with (
         patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
         patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
         patch("vllm_ascend.lora.fused_moe.get_ascend_config", return_value=ascend_config),
-        patch("vllm_ascend.lora.fused_moe._get_moe_lora_aux_stream") as get_aux_stream,
+        patch("vllm_ascend.lora.fused_moe._get_moe_lora_aux_stream", return_value=aux_stream),
+        patch("vllm_ascend.lora.fused_moe.torch.npu.Event", side_effect=events),
     ):
         wrapper = AscendFusedMoEWithLoRA(base_layer)
 
-    assert wrapper._lora_stream is None
-    assert wrapper._events is None
-    get_aux_stream.assert_not_called()
+    assert wrapper._lora_stream is aux_stream
+    assert wrapper._events == tuple(events)
 
 
 def test_moe_lora_apply_uses_adapter_enabled() -> None:

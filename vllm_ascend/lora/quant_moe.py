@@ -146,23 +146,20 @@ def _validate_dynamic_int8_activations(
 
 
 def _can_use_moe_lora_aux_stream(lora_context, comm_type: MoECommType) -> bool:
-    """Return whether this invocation can safely overlap base GMM and LoRA."""
+    """Return whether this invocation can safely overlap base GMM and LoRA.
+
+    The MoE runner is an opaque custom op, so its real implementation executes
+    during ACLGraph capture rather than Dynamo tracing. The stream and events
+    are created before capture, and the event fork/join in
+    ``_execute_moe_lora_in_parallel`` becomes part of the captured graph.
+    """
     if comm_type != MoECommType.ALLGATHER:
         return False
     if getattr(lora_context, "use_ep", False) or getattr(lora_context, "fully_sharded", False):
         return False
     aux_stream = getattr(lora_context, "aux_stream", None)
     events = getattr(lora_context, "events", None)
-    if aux_stream is None or events is None or len(events) < 4:
-        return False
-    # Dynamo runs before ACLGraph capture. Keep the compiled graph on the
-    # original single-stream path so ACLGraph can capture/replay it; eager
-    # execution still uses the auxiliary stream.
-    if torch.compiler.is_compiling():
-        return False
-    # Multi-stream ACLGraph capture needs dedicated graph lifecycle support.
-    # Preserve the existing graph-safe single-stream implementation for now.
-    return not torch.npu.is_current_stream_capturing()
+    return aux_stream is not None and events is not None and len(events) >= 4
 
 
 def _execute_moe_lora_in_parallel(
