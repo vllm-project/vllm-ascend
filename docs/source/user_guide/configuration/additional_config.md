@@ -302,7 +302,7 @@ llm = LLM(
 | ------ | ----- |
 | `export VLLM_ASCEND_ENABLE_NZ=0` | `"rl_config": {"enabled": true}` |
 | `export VLLM_SERVER_DEV_MODE=1` | `"rl_config": {"enabled": true}` |
-| `export VLLM_BATCH_INVARIANT=1` + `export HCCL_DETERMINISTIC=strict` + `export LCCL_DETERMINISTIC=1` | `"rl_config": {"enabled": true, "enable_batch_invariant": true}` |
+| `export VLLM_BATCH_INVARIANT=1` | `"rl_config": {"enabled": true, "enable_batch_invariant": true}` |
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
