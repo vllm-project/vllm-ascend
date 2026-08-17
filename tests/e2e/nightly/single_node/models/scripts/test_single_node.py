@@ -7,6 +7,8 @@ import subprocess
 import sys
 from typing import Any
 
+os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+
 import openai
 import psutil
 import pytest

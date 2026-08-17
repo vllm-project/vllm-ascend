@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import regex as re
+from vllm import envs as envs_vllm
 
 from tests.e2e.nightly.multi_node.scripts.utils import (
     get_available_port,
@@ -282,6 +283,36 @@ class MultiNodeConfigLoader:
         if missing:
             raise KeyError(f"Missing required config fields: {missing}")
 
+    @staticmethod
+    def _resolve_runner_deployment(deploy: dict[str, Any], use_v2_model_runner: bool) -> tuple[str, dict[str, Any]]:
+        """Merge the selected model-runner overrides into one deployment."""
+        cmd = deploy.get("server_cmd", "")
+        envs = dict(deploy["envs"])
+        runner_configs = deploy.get("runner_configs")
+        if runner_configs is None:
+            return cmd, envs
+        if not isinstance(runner_configs, dict):
+            raise TypeError("deployment.runner_configs must be a mapping")
+
+        runner_name = "v2" if use_v2_model_runner else "v1"
+        if runner_name not in runner_configs:
+            raise KeyError(f"deployment.runner_configs.{runner_name} is required")
+        runner_config = runner_configs[runner_name]
+        if not isinstance(runner_config, dict):
+            raise TypeError(f"deployment.runner_configs.{runner_name} must be a mapping")
+
+        runner_envs = runner_config.get("envs", {})
+        if not isinstance(runner_envs, dict):
+            raise TypeError(f"deployment.runner_configs.{runner_name}.envs must be a mapping")
+        envs.update(runner_envs)
+
+        cmd_suffix = runner_config.get("server_cmd_suffix", "")
+        if not isinstance(cmd_suffix, str):
+            raise TypeError(f"deployment.runner_configs.{runner_name}.server_cmd_suffix must be a string")
+        if cmd_suffix:
+            cmd = f"{cmd.rstrip()}\n{cmd_suffix.lstrip()}"
+        return cmd, envs
+
     @classmethod
     def _parse_nodes(cls, cfg: dict) -> list[NodeInfo]:
         num_nodes = cfg["num_nodes"]
@@ -297,15 +328,15 @@ class MultiNodeConfigLoader:
         cluster_ips = cls._resolve_cluster_ips(cfg, num_nodes)
 
         nodes: list[NodeInfo] = []
+        use_v2_model_runner = bool(envs_vllm.VLLM_USE_V2_MODEL_RUNNER)
         for idx, deploy in enumerate(deployments):
-            cmd = deploy.get("server_cmd", "")
-            envs = deploy["envs"]
+            cmd, deployment_envs = cls._resolve_runner_deployment(deploy, use_v2_model_runner=use_v2_model_runner)
             nodes.append(
                 NodeInfo(
                     index=idx,
                     ip=cluster_ips[idx],
                     server_cmd=cmd,
-                    envs=envs,
+                    envs=deployment_envs,
                     headless="--headless" in cmd,
                 )
             )
