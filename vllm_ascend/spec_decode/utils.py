@@ -357,6 +357,17 @@ class DynamicSpecScheduler:
             ),
         )
 
+        # A stale hardware profile must not reduce the proposal budget far
+        # below the confidence-budget policy that is already known to work.
+        # The floor is expressed as a ratio so it follows the confidence
+        # scheduler when its budget is updated. Set to 0 to disable it after
+        # a workload-specific profile has been validated.
+        self.hardware_min_budget_ratio = float(
+            method_params.get("hardware_min_budget_ratio", 0.8)
+        )
+        if not 0.0 <= self.hardware_min_budget_ratio <= 1.0:
+            raise ValueError("hardware_min_budget_ratio must be in [0, 1]")
+
         self._steps_since_budget_update = 0
 
         # Shared buffers
@@ -584,7 +595,20 @@ class DynamicSpecScheduler:
         )
 
         if self.hardware_policy is not None:
-            self.num_verify_tokens = self.hardware_policy.allocate(survival)
+            # Keep the confidence budget alive as a cheap safety signal. The
+            # update itself is amortized by budget_update_interval and avoids
+            # the profile selecting a much smaller K solely because a sparse
+            # latency table rounded a candidate to the wrong graph shape.
+            self.compute_verify_budget(survival)
+            min_total_tokens = math.ceil(
+                num_reqs
+                * self.budget_k
+                * self.hardware_min_budget_ratio
+            )
+            self.num_verify_tokens = self.hardware_policy.allocate(
+                survival,
+                min_total_tokens=min_total_tokens,
+            )
         else:
             self.compute_verify_budget(survival)
             self.num_verify_tokens = self.allocate_verify_budget(survival)

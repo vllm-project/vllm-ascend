@@ -53,6 +53,18 @@ def test_hardware_policy_allocates_prefixes_globally() -> None:
     assert lengths.tolist() == [3, 3]
 
 
+def test_hardware_policy_respects_minimum_total_budget() -> None:
+    policy = _policy(
+        {1: 1.0, 2: 10.0, 3: 10.0, 4: 10.0, 5: 10.0, 6: 10.0},
+        max_draft_tokens=3,
+    )
+    survival = torch.tensor([[0.1, 0.1, 0.1], [0.1, 0.1, 0.1]])
+
+    lengths = policy.allocate(survival, min_total_tokens=4)
+
+    assert int(lengths.sum().item()) >= 4
+
+
 def test_hardware_policy_uses_nearest_profiled_shape() -> None:
     model = HardwareCostModel.from_dict(
         {
