@@ -71,7 +71,7 @@ on:
       mem_deps:
         description: 'Memcache and Memfabric versions (JSON object: {"memcache":["date","version"],"memfabric":["date","version"]})'
         required: false
-        default: '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}'
+        default: '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}'
         type: string
       torch_npu:
         description: 'Torch NPU version and date (JSON array: ["date", "version"])'
@@ -150,10 +150,10 @@ jobs:
       
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
-        MEMCACHE_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memcache[1] }}
-        MEMCACHE_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memcache[0] }}
-        MEMFABRIC_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memfabric[1] }}
-        MEMFABRIC_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memfabric[0] }}
+        MEMCACHE_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[1] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[0] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[1] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[0] }}
         TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[1] }}
         TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[0] }}
         ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0_20260731131545"]')[0]) || '' }}
@@ -193,10 +193,10 @@ jobs:
 
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
-        MEMCACHE_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memcache[1] }}
-        MEMCACHE_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memcache[0] }}
-        MEMFABRIC_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memfabric[1] }}
-        MEMFABRIC_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260813.8","1.2.0"],"memfabric":["20260813.5","1.2.0"]}').memfabric[0] }}
+        MEMCACHE_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[1] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[0] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[1] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[0] }}
         TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[1] }}
         TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[0] }}
         ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0_20260731131545"]')[0]) || '' }}
