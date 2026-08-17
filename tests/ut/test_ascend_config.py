@@ -332,9 +332,11 @@ class TestAscendConfig(TestBase):
         )
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.AscendConfig._is_megamoe_supported_by_config")
     @patch("vllm_ascend.ascend_config.logger.info_once")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once):
+    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once, mock_is_megamoe):
+        mock_is_megamoe.return_value = True
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         with patch.dict(

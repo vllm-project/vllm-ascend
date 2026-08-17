@@ -1,4 +1,3 @@
-import importlib.util
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -12,7 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -31,16 +30,8 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
-_CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
-    "w8a8",
-    "w4a8",
-    "w8a8_dynamic",
-    "w4a8_dynamic",
-    "quanttype.w8a8",
-    "quanttype.w4a8",
-}
 
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -64,33 +55,6 @@ def override_mrv2_in_profile_run(enabled: bool):
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
-
-
-def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-    hf_text_config = vllm_config.model_config.hf_text_config
-    hidden_size = getattr(hf_text_config, "hidden_size", None)
-    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
-        hidden_size = vllm_config.model_config.get_hidden_size()
-    if hidden_size is None:
-        return False
-    hidden_size = int(hidden_size)
-    # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
-    # the dispatch / FFN / combine cube tiles require hidden in the closed
-    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
-    # outside this range (e.g. small Qwen variants with hidden=896, or any
-    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
-    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
-        return False
-
-    quant_type = getattr(
-        vllm_config.model_config.hf_text_config,
-        "moe_quantize",
-        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
-    )
-    if quant_type is None:
-        return True
-    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
-    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
 
 @contextmanager
@@ -308,11 +272,13 @@ def _select_a3_moe_comm_method(
     vllm_config: VllmConfig,
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
-        # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
-        mega_moe_enable = get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
-        if (_MEGA_MOE_SUPPORTED and mega_moe_enable) or dispatch_ffn_combine_enable:
-            return MoECommType.FUSED_MC2
+        # TODO: drop the EP-size guard when mega_moe supports larger EP size
+        if _MEGA_MOE_SUPPORTED:
+            if get_ep_group().world_size <= 64:
+                return MoECommType.FUSED_MC2
+        else:
+            if get_ep_group().world_size <= 32:
+                return MoECommType.FUSED_MC2
 
     if num_tokens is None or num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
