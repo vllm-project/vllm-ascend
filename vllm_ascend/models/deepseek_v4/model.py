@@ -813,6 +813,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # Pre-hc_head residual stream buffer for the MTP draft. Only needed
         # when speculative decoding is enabled; allocating it unconditionally
         # would permanently cost max_num_batched_tokens * hc_dim per rank.
+        spec_config = vllm_config.speculative_config
         self._mtp_hidden_buffer = (
             torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -820,7 +821,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
-            if vllm_config.speculative_config is not None
+            if spec_config is not None and spec_config.method == "mtp"
             else None
         )
 
