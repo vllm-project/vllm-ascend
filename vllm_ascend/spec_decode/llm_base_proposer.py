@@ -224,6 +224,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
         )
+        self._lmhead_tp_pad_buffers: dict[str, torch.Tensor] = {}
         metadata_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
         num_mtp_draft_slots = max(self.num_speculative_tokens - 1, 0) * self.runner.max_num_reqs
         slot_mapping_lens = self.runner.max_num_tokens + num_mtp_draft_slots
@@ -265,6 +266,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_eagle = self.runner.use_eagle
         self.draft_window_size = None
         self.sliding_window = None
+
+    def _pad_lmhead_tp_tensor(
+        self,
+        key: str,
+        tensor: torch.Tensor,
+        target_size: int,
+        pad_value: float = 0,
+    ) -> torch.Tensor:
+        buffer = self._lmhead_tp_pad_buffers.get(key)
+        if (
+            buffer is None
+            or buffer.shape[0] < target_size
+            or buffer.shape[1:] != tensor.shape[1:]
+            or buffer.dtype != tensor.dtype
+            or buffer.device != tensor.device
+        ):
+            buffer = tensor.new_empty((target_size,) + tensor.shape[1:])
+            self._lmhead_tp_pad_buffers[key] = buffer
+
+        copy_size = min(tensor.shape[0], target_size)
+        buffer[:copy_size].copy_(tensor[:copy_size])
+        buffer[copy_size:target_size].fill_(pad_value)
+        return buffer[:target_size]
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -1126,8 +1150,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ori_token_indices_to_sample = None
 
         if lmhead_tp_enable():
-            token_indices_to_sample = nn.functional.pad(
-                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+            token_indices_to_sample = self._pad_lmhead_tp_tensor(
+                "token_indices_to_sample",
+                token_indices_to_sample,
+                max_num_reqs_across_dp,
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
@@ -1322,9 +1348,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
-                token_indices_to_sample = nn.functional.pad(
+                token_indices_to_sample = self._pad_lmhead_tp_tensor(
+                    "token_indices_to_sample",
                     token_indices_to_sample,
-                    (0, max_num_reqs_across_dp - num_indices),
+                    max_num_reqs_across_dp,
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
@@ -2145,13 +2172,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = token_indices_to_sample[:num_indices]
         else:
             # Padding to the target length.
-            pad_size = num_indices - tensor.shape[0]
             if is_logits:
                 # logits: shape [seq_len, vocab_size], Padding at the end of the seq dimension.
-                tensor = nn.functional.pad(tensor, (0, 0, 0, pad_size), value=-1e9)
+                tensor = self._pad_lmhead_tp_tensor("logits", tensor, num_indices, -1e9)
             else:
                 # draft_token_ids: shape [seq_len], Padding at the end
-                tensor = nn.functional.pad(tensor, (0, pad_size))
+                tensor = self._pad_lmhead_tp_tensor("draft_token_ids", tensor, num_indices)
             token_indices_to_sample = ori_token_indices_to_sample
 
         return tensor, token_indices_to_sample

@@ -548,8 +548,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
-            token_indices_to_sample = torch.nn.functional.pad(
-                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+            token_indices_to_sample = self._pad_lmhead_tp_tensor(
+                "token_indices_to_sample",
+                token_indices_to_sample,
+                max_num_reqs_across_dp,
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
