@@ -60,6 +60,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
         for p in self.patches:
             p.start()
+            self.addCleanup(p.stop)
 
     def _create_layer(self):
         # Patch methods and dependencies for VocabParallelEmbedding

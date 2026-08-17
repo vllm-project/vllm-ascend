@@ -1,4 +1,4 @@
-# Qwen3.5-27B/Qwen3.6-27B
+# Qwen3.5-27B & Qwen3.6-27B
 
 ## 1 Introduction
 

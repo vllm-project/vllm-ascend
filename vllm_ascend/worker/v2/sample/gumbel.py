@@ -20,8 +20,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.utils import vllm_version_is
-
 
 @triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
 def _temperature_kernel(
@@ -62,16 +60,10 @@ def apply_temperature(
         temperature: Tensor containing the temperature value for each request.
     """
     num_tokens, vocab_size = logits.shape
-    # BLOCK_SIZE keeps BF16/FP16 logits and the FP32 working vector within
-    # the Ascend A2/A3 UB limit of 1572864 bits (192 KB):
-    #   32768 * (16 + 32) bits = 1572864 bits
-    # The previous value 44032 overflowed UB when vLLM v0.26+ stopped
-    # upcasting logits to FP32 upstream and the kernel started receiving
-    # BF16/FP16 logits (44032 * 48 bits = 2113536 bits > 1572864).
-    if vllm_version_is("0.26.0"):
-        BLOCK_SIZE = 32768
-    else:
-        BLOCK_SIZE = 44032
+    # BLOCK_SIZE fits the FP32 working vector within the Ascend A2/A3 UB limit
+    # (192 KB). Upstream restores the FP32 logit upcast (vllm #49033), so on
+    # main / v0.27.1 the kernel gets FP32 logits and 44032 * 32 bits fits.
+    BLOCK_SIZE = 44032
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _temperature_kernel[(num_tokens, num_blocks)](
         logits,
