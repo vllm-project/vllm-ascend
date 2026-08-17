@@ -504,7 +504,7 @@ jobs:
       - name: Create multi-arch manifest
         env:
           FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
-          TO_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
+          TO_IMAGE: ${{ env.QUAY_TEMP_REPO }}
           DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile' }}
           SHA: ${{ github.sha }}
         run: |
@@ -689,7 +689,7 @@ jobs:
       - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
         env:
           FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
-          TO_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
+          TO_IMAGE: ${{ env.QUAY_TEMP_REPO }}
         run: |
           set -euo pipefail
           SUFFIX=""
