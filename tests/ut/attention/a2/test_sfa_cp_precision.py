@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -158,3 +161,40 @@ def test_sfa_dcp_torch_merge_handles_invalid_lse() -> None:
 
     dsa_merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=1)
     torch.testing.assert_close(dsa_merged, torch.tensor([[[3.0]], [[7.0]]]))
+
+
+@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
+def test_sfa_dcp_routes_native_output_merge_to_fused_a2a(fused_combine) -> None:
+    impl = _make_impl(rank=1)
+    device_group = object()
+    impl.dcp_group = SimpleNamespace(device_group=device_group)
+    output = torch.empty(3, 4, 8)
+    lse = torch.empty(3, 4, 1, dtype=torch.float32)
+    expected = torch.empty(3, 2, 8)
+    fused_combine.return_value = expected
+
+    actual = impl._merge_dcp_outputs(output, lse)
+
+    assert actual is expected
+    fused_combine.assert_called_once_with(output, lse, 2, 1, device_group)
+
+
+@patch("vllm_ascend.attention.context_parallel.sfa_cp.sfa_dcp_a2a_fused_combine")
+def test_sfa_dsa_dcp_routes_token_scatter_to_fused_a2a(fused_combine) -> None:
+    impl = _make_impl(rank=1)
+    device_group = object()
+    impl.dcp_group = SimpleNamespace(device_group=device_group)
+    output = torch.empty(4, 2, 8)
+    lse = torch.empty(4, 2, 1, dtype=torch.float32)
+    expected = torch.empty(2, 2, 8)
+    fused_combine.return_value = expected
+    dsa_cp_context = SimpleNamespace(
+        num_tokens_pad=4,
+        local_start=2,
+        local_end_with_pad=4,
+    )
+
+    actual = impl._merge_dcp_outputs(output, lse, dsa_cp_context)
+
+    assert actual is expected
+    fused_combine.assert_called_once_with(output, lse, 2, 0, device_group)
