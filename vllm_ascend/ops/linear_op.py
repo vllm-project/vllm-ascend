@@ -298,7 +298,8 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix)
+        is_first_vl_attention = extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix
+        need_all_gather = not is_first_vl_attention or bool(_EXTRA_CTX.first_layer_input_is_sp_sharded)
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 

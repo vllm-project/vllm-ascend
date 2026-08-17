@@ -35,7 +35,12 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    derive_first_layer_input_is_sp_sharded,
+    get_first_layer_input_source,
+    override_first_layer_input_source,
+)
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -152,7 +157,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
-        with communicator_switch():
+        with (
+            communicator_switch(),
+            override_first_layer_input_source(self.model_runner.get_first_layer_input_source()),
+        ):
             return super().capture(
                 model,
                 model_state,
@@ -186,6 +194,11 @@ class ModelWithContext(nn.Module):
             _EXTRA_CTX.capturing = True
         if self.is_draft_model:
             _EXTRA_CTX.is_draft_model = True
+            _EXTRA_CTX.first_layer_input_is_sp_sharded = derive_first_layer_input_is_sp_sharded(
+                get_first_layer_input_source(),
+                flash_comm_v1_enabled=bool(_EXTRA_CTX.flash_comm_v1_enabled),
+                is_draft_model=True,
+            )
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 

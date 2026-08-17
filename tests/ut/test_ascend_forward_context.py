@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vllm_ascend import ascend_forward_context as afc
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import FirstLayerInputSource, MoECommType
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +15,106 @@ def reset_mc2_tokens_capacity(monkeypatch):
         afc,
         "get_ascend_config",
         lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "flash_comm_v1_enabled", "is_draft_model", "expected"),
+    [
+        (FirstLayerInputSource.MODEL_EMBEDDING, True, False, True),
+        (FirstLayerInputSource.PRECOMPUTED_EMBEDDING, True, False, False),
+        (FirstLayerInputSource.NOT_APPLICABLE, True, False, False),
+        (FirstLayerInputSource.MODEL_EMBEDDING, False, False, False),
+        (FirstLayerInputSource.MODEL_EMBEDDING, True, True, False),
+    ],
+)
+def test_derive_first_layer_input_is_sp_sharded(
+    source,
+    flash_comm_v1_enabled,
+    is_draft_model,
+    expected,
+):
+    assert (
+        afc.derive_first_layer_input_is_sp_sharded(
+            source,
+            flash_comm_v1_enabled=flash_comm_v1_enabled,
+            is_draft_model=is_draft_model,
+        )
+        is expected
+    )
+
+
+def test_first_layer_input_source_scope_restores_after_exit_and_exception():
+    assert afc.get_first_layer_input_source() == FirstLayerInputSource.NOT_APPLICABLE
+
+    with afc.override_first_layer_input_source(FirstLayerInputSource.MODEL_EMBEDDING):
+        assert afc.get_first_layer_input_source() == FirstLayerInputSource.MODEL_EMBEDDING
+        with afc.override_first_layer_input_source(FirstLayerInputSource.PRECOMPUTED_EMBEDDING):
+            assert afc.get_first_layer_input_source() == FirstLayerInputSource.PRECOMPUTED_EMBEDDING
+        assert afc.get_first_layer_input_source() == FirstLayerInputSource.MODEL_EMBEDDING
+
+    assert afc.get_first_layer_input_source() == FirstLayerInputSource.NOT_APPLICABLE
+
+    with (
+        pytest.raises(RuntimeError, match="scope failure"),
+        afc.override_first_layer_input_source(FirstLayerInputSource.MODEL_EMBEDDING),
+    ):
+        raise RuntimeError("scope failure")
+
+    assert afc.get_first_layer_input_source() == FirstLayerInputSource.NOT_APPLICABLE
+
+
+@pytest.mark.parametrize(
+    ("is_first_pp_rank", "has_input_ids", "has_inputs_embeds", "expected"),
+    [
+        (True, True, False, FirstLayerInputSource.MODEL_EMBEDDING),
+        (True, False, True, FirstLayerInputSource.PRECOMPUTED_EMBEDDING),
+        (True, True, True, FirstLayerInputSource.PRECOMPUTED_EMBEDDING),
+        (False, True, False, FirstLayerInputSource.NOT_APPLICABLE),
+    ],
+)
+def test_infer_v1_first_layer_input_source(
+    is_first_pp_rank,
+    has_input_ids,
+    has_inputs_embeds,
+    expected,
+):
+    input_ids = torch.empty(1, dtype=torch.long) if has_input_ids else None
+    inputs_embeds = torch.empty(1, 4) if has_inputs_embeds else None
+
+    assert (
+        afc.infer_first_layer_input_source(
+            is_first_pp_rank=is_first_pp_rank,
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("is_first_pp_rank", "supports_mm_inputs", "is_encoder_decoder", "expected"),
+    [
+        (True, False, False, FirstLayerInputSource.MODEL_EMBEDDING),
+        (True, True, False, FirstLayerInputSource.PRECOMPUTED_EMBEDDING),
+        (True, True, True, FirstLayerInputSource.MODEL_EMBEDDING),
+        (False, True, False, FirstLayerInputSource.NOT_APPLICABLE),
+        (False, False, False, FirstLayerInputSource.NOT_APPLICABLE),
+    ],
+)
+def test_infer_mrv2_first_layer_input_source(
+    is_first_pp_rank,
+    supports_mm_inputs,
+    is_encoder_decoder,
+    expected,
+):
+    assert (
+        afc.infer_mrv2_first_layer_input_source(
+            is_first_pp_rank=is_first_pp_rank,
+            supports_mm_inputs=supports_mm_inputs,
+            is_encoder_decoder=is_encoder_decoder,
+        )
+        == expected
     )
 
 

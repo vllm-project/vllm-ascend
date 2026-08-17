@@ -1,11 +1,19 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
+from vllm_ascend.ascend_forward_context import (
+    FirstLayerInputSource,
+    get_first_layer_input_source,
+)
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.model_runner import (
+    NPUModelRunner,
     flashcomm_dispatch_wrapper,
 )
 from vllm_ascend.worker.v2.sp_utils import (
@@ -99,3 +107,72 @@ def test_flashcomm_dense_threshold_and_moe_behavior():
         ),
     ):
         assert _flashcomm_enabled(config, 1)
+
+
+def test_mrv2_runner_source_accounts_for_pp_rank():
+    runner = object.__new__(NPUModelRunner)
+    runner.supports_mm_inputs = True
+    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+
+    runner.is_first_pp_rank = True
+    assert runner.get_first_layer_input_source() == FirstLayerInputSource.PRECOMPUTED_EMBEDDING
+
+    runner.is_first_pp_rank = False
+    assert runner.get_first_layer_input_source() == FirstLayerInputSource.NOT_APPLICABLE
+
+
+def test_mrv2_execute_restores_input_source_after_exception():
+    runner = object.__new__(NPUModelRunner)
+    runner.vllm_config = _config()
+
+    with (
+        patch.object(
+            runner,
+            "get_first_layer_input_source",
+            return_value=FirstLayerInputSource.MODEL_EMBEDDING,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.flashcomm_dispatch_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.GPUModelRunner.execute_model",
+            side_effect=RuntimeError("forward failure"),
+        ),
+        pytest.raises(RuntimeError, match="forward failure"),
+    ):
+        runner.execute_model(MagicMock())
+
+    assert get_first_layer_input_source() == FirstLayerInputSource.NOT_APPLICABLE
+
+
+def test_mrv2_graph_capture_uses_runner_input_source():
+    manager = object.__new__(ModelAclGraphManager)
+    manager.model_runner = MagicMock()
+    manager.model_runner.get_first_layer_input_source.return_value = FirstLayerInputSource.PRECOMPUTED_EMBEDDING
+
+    def capture(*args, **kwargs):
+        assert get_first_layer_input_source() == FirstLayerInputSource.PRECOMPUTED_EMBEDDING
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.communicator_switch",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.ModelCudaGraphManager.capture",
+            side_effect=capture,
+        ),
+    ):
+        manager.capture(
+            torch.nn.Identity(),
+            MagicMock(),
+            MagicMock(),
+            None,
+            MagicMock(),
+            [],
+            MagicMock(),
+        )
+
+    manager.model_runner.get_first_layer_input_source.assert_called_once_with()
+    assert get_first_layer_input_source() == FirstLayerInputSource.NOT_APPLICABLE

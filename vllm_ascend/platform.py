@@ -426,6 +426,8 @@ class NPUPlatform(Platform):
         """
         # NOTE(Ronald1995): avoid circular import.
         from vllm_ascend.ascend_forward_context import (
+            derive_first_layer_input_is_sp_sharded,
+            get_first_layer_input_source,
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
@@ -528,6 +530,11 @@ class NPUPlatform(Platform):
             "in_profile_run": in_profile_run,
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,
+            "first_layer_input_is_sp_sharded": derive_first_layer_input_is_sp_sharded(
+                get_first_layer_input_source(),
+                flash_comm_v1_enabled=flash_comm_v1_enabled,
+                is_draft_model=is_draft_model,
+            ),
         }
 
 

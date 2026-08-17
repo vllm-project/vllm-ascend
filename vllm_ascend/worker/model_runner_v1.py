@@ -196,6 +196,7 @@ from vllm_ascend.worker.utils import AscendKVBlockZeroer
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
     get_mc2_tokens_capacity,
+    infer_first_layer_input_source,
     select_moe_comm_method,
     set_ascend_forward_context,
     set_mc2_mask,
@@ -2079,6 +2080,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded,
                 intermediate_tensors,
             )
+            first_layer_input_source = infer_first_layer_input_source(
+                is_first_pp_rank=get_pp_group().is_first_rank,
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+            )
 
             # update global cos, sin
             update_cos_sin(positions)
@@ -2118,6 +2124,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                first_layer_input_source=first_layer_input_source,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -3382,6 +3389,11 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
+            first_layer_input_source = infer_first_layer_input_source(
+                is_first_pp_rank=get_pp_group().is_first_rank,
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+            )
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
@@ -3441,6 +3453,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                first_layer_input_source=first_layer_input_source,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
