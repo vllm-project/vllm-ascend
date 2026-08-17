@@ -479,7 +479,8 @@ jobs:
 
       - name: Create multi-arch manifest
         env:
-          IMAGE: quay.io/atlas-ci/vllm-atlas-temp
+          FROM_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
+          TO_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -488,9 +489,9 @@ jobs:
                     Dockerfile.a5 Dockerfile.a5.openEuler; do
             echo "Merging ${df} into multi-arch manifest..."
             docker buildx imagetools create \
-              -t "${IMAGE}:${df}-${SHA}" \
-              "${IMAGE}:${df}-arm64-${SHA}" \
-              "${IMAGE}:${df}-amd64-${SHA}"
+              -t "${TO_IMAGE}:${df}-${SHA}" \
+              "${FROM_IMAGE}:${df}-arm64-${SHA}" \
+              "${FROM_IMAGE}:${df}-amd64-${SHA}"
           done
 
       # - name: Download arm64 digests
