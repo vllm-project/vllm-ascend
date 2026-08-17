@@ -103,6 +103,15 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
+      - name: GLM-5.1-w8a8c8-128k-1k-90-50-PD
+        config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+#      - name: GLM-5.2-w8a8c8-128k-1k-90-50-PD
+#        config_file_path: GLM-5.2-W8A8C8-128k-1k-90-50-PD.yaml
+#        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+#        size: 4
+
   double_node:
     test_config:
       - name: multi-node-qwen3-dp
@@ -133,6 +142,19 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_128k_90_50.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
+
+      - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function
+        config_file_path: GLM-5.1-W8A8C8-A3_198k_function.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
+        size: 2
+#      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_128k
+#        config_file_path: GLM-5.2-W8A8C8-A3_128k_90_50.yaml
+#        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
+#        size: 2
+#      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_198k_function
+#        config_file_path: GLM-5.2-W8A8C8-A3_198k_function.yaml
+#        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
+#        size: 2
       - name: multi-node-deepseek-v3.1
         config_file_path: DeepSeek-V3.1-BF16.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config

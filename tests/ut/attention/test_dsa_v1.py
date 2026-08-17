@@ -320,6 +320,68 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
     assert req_metadata.slot_mapping is None
 
 
+@pytest.mark.parametrize("for_drafting", [False, True])
+def test_build_classifies_short_speculative_extends_as_decodes(
+    for_drafting: bool,
+):
+    builder = _make_builder(compressor_ratio=1)
+    builder.decode_threshold = 8
+    query_start_loc = torch.tensor([0, 7, 14], dtype=torch.int32)
+    seq_lens = torch.tensor([20, 14], dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=14,
+        num_input_tokens=14,
+        max_query_len=7,
+        context_parallel_metadata=None,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        positions=torch.arange(14, dtype=torch.int64),
+        seq_lens=seq_lens,
+        _seq_lens_cpu=seq_lens,
+        seq_lens_cpu=None,
+        is_prefilling=torch.tensor([False, True]),
+        slot_mapping=torch.arange(14, dtype=torch.int32),
+        block_table_tensor=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
+        attn_state=MagicMock(),
+    )
+    req_metadata = MagicMock()
+    builder.build_req_metadata = MagicMock(return_value=req_metadata)
+    builder.build_req_metadata_for_drafting = MagicMock(return_value=req_metadata)
+    builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
+
+    with (
+        patch(
+            "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
+            return_value=False,
+        ),
+        patch.object(
+            DeviceOperator,
+            "format_dsa_slot_mapping",
+            return_value=torch.zeros((14, 2), dtype=torch.int32),
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
+            return_value=(torch.ones(14), torch.zeros(14)),
+        ),
+    ):
+        if for_drafting:
+            metadata = builder.build_for_drafting(
+                common_attn_metadata=common_attn_metadata,
+                draft_index=1,
+            )
+        else:
+            metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+                common_ratio_to_sas_metadata={},
+            )
+
+    assert metadata.num_decodes == 2
+    assert metadata.num_decode_tokens == 14
+    assert metadata.num_prefills == 0
+
+
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
     builder = _make_builder(compressor_ratio=1)
     builder.common_ratio_to_sas_metadata = {}

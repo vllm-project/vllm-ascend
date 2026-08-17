@@ -61,10 +61,11 @@ on:
         options:
           - release
           - daily
-      cann_version:
-        description: 'CANN version for base image tag'
+      base_image_tag:
+        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
         required: false
-        default: '2026.08.03'
+        default: '{"cann_version":"2026.08.03","base_image_date":"auto"}'
+        type: string
       bisect_good_commit:
         description: 'explicit good commit for bisect (overrides good_table lookup)'
       bisect_args_json:
@@ -190,7 +191,8 @@ jobs:
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
       quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
-      cann_version: ${{ inputs.cann_version }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}

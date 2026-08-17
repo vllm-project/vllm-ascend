@@ -4,7 +4,7 @@
 
 test_cases:
   - name: "Qwen3.6-35B-A3B-in16k-out1k-0-128-32"
-    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w4a8"
     envs:
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
@@ -64,7 +64,7 @@ test_cases:
         baseline: 548.2128
         threshold: 0.97
   - name: "Qwen3.6-35B-A3B-in984k-out1k-0-4-2"
-    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w4a8"
     envs:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       HCCL_OP_EXPANSION_MODE: "AIV"
@@ -121,7 +121,7 @@ test_cases:
         baseline: 2.2225
         threshold: 0.97
   - name: "Qwen3.6-35B-A3B-in128k-out1k-90-60-15"
-    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w4a8"
     envs:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       HCCL_OP_EXPANSION_MODE: "AIV"
