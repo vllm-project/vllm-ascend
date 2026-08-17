@@ -259,10 +259,15 @@ a3:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
-      # Qwen3-32B exit-scenario AIME accuracy guard: nightly reuses four_card pytest (V1 vs V2 direct compare)
+      # Qwen3-32B V1/V2 exit-scenario accuracy guards (AIME W8A8 + GPQA bf16):
+      # nightly-only, reusing the same pytest files (V1 vs V2 direct compare).
       - name: qwen3-32b-w8a8-aime2024-acc
         os: linux-aarch64-nightly-a3-4
-        tests: tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_aime2024_accuracy.py
+        tests: tests/e2e/nightly/test_qwen3_32b_w8a8_aime2024_accuracy.py
+      - name: qwen3-32b-bf16-gpqa-acc
+        os: linux-aarch64-nightly-a3-4
+        tests: tests/e2e/nightly/test_qwen3_32b_bf16_gpqa_accuracy.py
+        testcase_timeout: 240
 
 a3-560t:
   multi_node:

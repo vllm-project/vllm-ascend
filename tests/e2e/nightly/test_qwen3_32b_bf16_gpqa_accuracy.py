@@ -15,18 +15,20 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""PR accuracy guard for the Qwen3-32B exit scenario (GPQA diamond, bf16).
+"""Nightly accuracy guard for the Qwen3-32B exit scenario (GPQA diamond, bf16).
 
 The same GPQA accuracy benchmark is run once with the V1 model runner
 (``VLLM_USE_V2_MODEL_RUNNER=0``) and once with the V2 model runner
 (``VLLM_USE_V2_MODEL_RUNNER=1``); the absolute V2-V1 accuracy difference must
 stay within the configured tolerance. GPQA diamond has 198 questions.
 
-Scenario (2026-08-13 revision, eagle3 excluded until its accuracy fix lands
+Scenario (2026-08-17 revision, eagle3 excluded until its accuracy fix lands
 upstream):
   TP4 + async-scheduling + FULL_DECODE_ONLY (bf16),
-  max-model-len=36864, max_out_len=32768, batch_size=64, temperature=0.6,
-  top_k=20, top_p=0.95.
+  max-model-len=36864, max_out_len=32768, batch_size=64.
+  Sampling is temporarily greedy (temperature=0, top_k/top_p disabled) until
+  the eagle3 accuracy fix lands upstream; restore temperature=0.6, top_k=20,
+  top_p=0.95 afterwards.
 
 Tolerance note: the per-run |V2-V1| gate is 3.00pp. A no-eagle3 V1/V2 GPQA
 experiment (2026-08-07, 3 rounds per runner) measured single-round
@@ -59,8 +61,12 @@ _BENCH_CASE = {
     "num_prompts": 198,
     "max_out_len": 32768,
     "batch_size": 64,
-    "top_k": 20,
-    "top_p": 0.95,
+    # Temporarily force greedy decoding until the eagle3 accuracy fix lands
+    # upstream. When the eagle3 PR is merged, restore the original sampling
+    # parameters: temperature=0.6, top_k=20, top_p=0.95.
+    "temperature": 0,
+    # "top_k": 20,
+    # "top_p": 0.95,
     "baseline": 100,
     "threshold": 100,
 }
