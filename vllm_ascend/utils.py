@@ -811,7 +811,7 @@ def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 
 
-def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
+def enable_sp(vllm_config=None) -> bool:
     global _ENABLE_SP
     if vllm_config is None:
         try:
@@ -833,16 +833,12 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             except RuntimeError:
                 _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
-        if not _ENABLE_SP and enable_shared_expert_dp:
-            _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
-
     return bool(_ENABLE_SP)
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
+    return get_ascend_config().enable_shared_expert_dp
 
 
 def is_moe_model(vllm_config: VllmConfig):

@@ -268,6 +268,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             num_scheduled_tokens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
+            is_prefilling_np=np.array([True, True, False, False]),
             dcp_local_seq_lens=None,
             positions=torch.arange(8, dtype=torch.int32),
             attn_state=None,
@@ -288,6 +289,11 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         common_metadata = call["common_attn_metadata"]
         assert common_metadata.num_actual_tokens == 5
         assert common_metadata.num_input_tokens == expected_input_tokens
+        if caller != "default":
+            assert torch.equal(
+                common_metadata.is_prefilling,
+                torch.tensor([True, True, False, False]),
+            )
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
     assert calls[1][cache_name]["first_group"] is True
