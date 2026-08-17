@@ -50,6 +50,7 @@ class NodeInfo:
     cp_size: int = 1
     sp_size: int = 1
     pp_size: int = 1
+    node_group: int = -1
 
     @property
     def devices_per_rank(self) -> int:
@@ -293,6 +294,7 @@ class ExternalDPConfigLoader:
                     sp_size=int(node.get("sp_size", 1)),
                     dp_address=str(node["dp_address"]),
                     pp_size=int(node.get("pp_size", 1)),
+                    node_group=int(node.get("node_group", -1)),
                 )
             )
         return nodes
@@ -365,24 +367,26 @@ class ExternalDPConfigLoader:
     @staticmethod
     def _validate_node_parallel_config(config: ExternalDPConfig) -> None:
         for node_index, node in enumerate(config.nodes):
-            parallel_sizes = {
+            is_group_node = node.node_group >= 0
+            parallel_sizes = {n: v for n, v in {
                 "dp_size": node.dp_size,
-                "dp_size_local": node.dp_size_local,
                 "tp_size": node.tp_size,
                 "cp_size": node.cp_size,
                 "sp_size": node.sp_size,
                 "pp_size": node.pp_size,
-            }
-            invalid_sizes = {name: value for name, value in parallel_sizes.items() if value < 1}
-            if invalid_sizes:
-                raise ValueError(f"node {node_index} parallel sizes must be >= 1: {invalid_sizes}")
+                **({"dp_size_local": node.dp_size_local} if not
+                    (is_group_node and node.dp_size_local == 0) else {}),
+            }.items() if v < 1}
+            if parallel_sizes:
+                raise ValueError(f"node {node_index} parallel sizes must be >= 1: {parallel_sizes}")
             if node.dp_rank_start < 0:
                 raise ValueError(f"node {node_index} dp_rank_start must be >= 0")
-            if node.devices_per_node > config.npu_per_node:
+            if not is_group_node and node.devices_per_node > config.npu_per_node:
                 raise ValueError(
                     f"node {node_index} uses {node.devices_per_node} NPUs, but npu_per_node is {config.npu_per_node}"
                 )
-            if node.dp_rank_start + node.dp_size_local > node.dp_size:
+            if not (is_group_node and node.dp_size_local == 0) and \
+                    node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
 
 
@@ -397,7 +401,12 @@ class RankResolver:
         ranks: list[RankInfo] = []
         for node_index, node_info in enumerate(self.config.nodes):
             role = role_by_node_index[node_index]
-            ranks.extend(self._expand_node(node_index, role, node_info))
+            ranks.extend(
+                self._expand_node(
+                    node_index, role, node_info,
+                    self.config.nodes, self.config.npu_per_node,
+                )
+            )
         return ranks
 
     def _role_by_node_index(self) -> dict[int, str]:
@@ -412,16 +421,37 @@ class RankResolver:
         return role_by_index
 
     @staticmethod
-    def _expand_node(node_index: int, role: str, node_info: NodeInfo) -> list[RankInfo]:
+    def _expand_node(
+        node_index: int,
+        role: str,
+        node_info: NodeInfo,
+        all_nodes: list[NodeInfo],
+        devices_per_node: int,
+    ) -> list[RankInfo]:
         ranks: list[RankInfo] = []
+        if node_info.node_group >= 0:
+            group_nodes = [
+                (idx, n) for idx, n in enumerate(all_nodes)
+                if n.node_group == node_info.node_group
+            ]
+        else:
+            group_nodes = [(node_index, node_info)]
+
+        devices_per_rank = (
+            node_info.tp_size * node_info.cp_size
+            * node_info.sp_size * node_info.pp_size
+        )
+        group_devices: list[int] = []
+        for idx, _ in group_nodes:
+            base = idx * devices_per_node
+            group_devices.extend(range(base, base + devices_per_node))
+
         for local_rank in range(node_info.dp_size_local):
             dp_rank = node_info.dp_rank_start + local_rank
             port = node_info.port_start + local_rank
-            device_range = range(
-                local_rank * node_info.devices_per_rank,
-                (local_rank + 1) * node_info.devices_per_rank,
-            )
-            visible_devices = ",".join(str(device) for device in device_range)
+            offset = local_rank * devices_per_rank
+            device_range = group_devices[offset:offset + devices_per_rank]
+            visible_devices = ",".join(str(d) for d in device_range)
             ranks.append(
                 RankInfo(
                     node_index=node_index,
