@@ -17,7 +17,6 @@ _server_cmd: &server_cmd
   - "--distributed-executor-backend"
   - "mp"
   - "--async-scheduling"
-  - "--enable-expert-parallel"
   - "--gpu-memory-utilization"
   - "0.9"
   - "--quantization"

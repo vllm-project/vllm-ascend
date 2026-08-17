@@ -63,7 +63,7 @@ _benchmarks_perf2: &benchmarks_perf
 
 test_cases:
   - name: "DeepSeek_V31_W4A4C8_A5_Mix_16K1K_perf_test_01"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/vllm-ascend/DeepSeek-V3.1-w4a4c8-mxfp4"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       <<: *envs
     server_cmd: *server_cmd
