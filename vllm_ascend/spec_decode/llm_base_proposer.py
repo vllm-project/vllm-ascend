@@ -1121,11 +1121,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
-            if get_ascend_config().enable_reduce_sample:
-                tp_size = get_lmhead_tp_group().world_size
-                # Round up to a multiple of tp_size so lmhead_all_to_all's
-                # view(world_size, -1, V/P) reshape cannot fail on unequal split.
-                max_num_reqs_across_dp = ((max_num_reqs_across_dp + tp_size - 1) // tp_size) * tp_size
             # It is necessary to evaluate the case where num_indices becomes large
             # in the context of the dummy‑run accompaniment of p‑eagle.
             if num_indices > max_num_reqs_across_dp:
@@ -1331,11 +1326,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
-                if get_ascend_config().enable_reduce_sample:
-                    tp_size = get_lmhead_tp_group().world_size
-                    # Round up to a multiple of tp_size so lmhead_all_to_all's
-                    # view(world_size, -1, V/P) reshape cannot fail on unequal split.
-                    max_num_reqs_across_dp = ((max_num_reqs_across_dp + tp_size - 1) // tp_size) * tp_size
                 token_indices_to_sample = nn.functional.pad(
                     token_indices_to_sample,
                     (0, max_num_reqs_across_dp - num_indices),
