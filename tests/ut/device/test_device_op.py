@@ -87,12 +87,14 @@ def test_gmm_swiglu_custom_v2_covers_tensor_and_scale_layouts(single_tensor, per
 
 
 @pytest.mark.parametrize("use_mxfp_quant", [False, True], ids=["pertoken", "mx"])
-def test_a5_gmm_swiglu_routes_supported_quant_modes_to_custom_v2(use_mxfp_quant):
+def test_a5_gmm_swiglu_keeps_supported_quant_modes_on_torch_npu_v2(use_mxfp_quant):
     num_tokens, num_experts, hidden_size, intermediate_size = 2, 3, 4, 8
     expected = (torch.zeros(num_tokens, intermediate_size // 2), torch.ones(num_tokens))
     with (
-        mock.patch("vllm_ascend.device.device_op.enable_gmm_swiglu_quant_v2_custom_op", return_value=True),
-        mock.patch.object(BaseDeviceAdaptor, "npu_grouped_matmul_swiglu_quant", return_value=expected) as custom_v2,
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
+            return_value=expected,
+        ) as torch_npu_v2,
         mock.patch.object(A5DeviceAdaptor, "maybe_normalize_mxfp_scale_layout", side_effect=lambda scale: scale),
     ):
         output = A5DeviceAdaptor.npu_grouped_matmul_swiglu_quant(
@@ -111,7 +113,10 @@ def test_a5_gmm_swiglu_routes_supported_quant_modes_to_custom_v2(use_mxfp_quant)
 
     assert output[0] is expected[0]
     assert output[1] is expected[1]
-    call_kwargs = custom_v2.call_args.kwargs
+    call_kwargs = torch_npu_v2.call_args.kwargs
+    assert len(call_kwargs["weight"]) == 1
+    assert len(call_kwargs["weight_scale"]) == 1
+    assert call_kwargs["group_list_type"] == 1
     expected_mode = 2 if use_mxfp_quant else 0
     assert call_kwargs["dequant_mode"] == expected_mode
     assert call_kwargs["quant_mode"] == expected_mode

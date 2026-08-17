@@ -29,7 +29,7 @@ from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES, get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import AscendDeviceType, enable_gmm_swiglu_quant_v2_custom_op, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
@@ -1217,27 +1217,32 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         swiglu_limit: float = 0.0,
         mxfp_quant_dtype: QuantType | None = None,
     ):
-        if bias is not None:
-            raise NotImplementedError("grouped_matmul_swiglu_quant_v2 on A5 does not support bias.")
-
         if not use_mxfp_quant:
-            if not enable_gmm_swiglu_quant_v2_custom_op():
-                raise RuntimeError("The custom grouped_matmul_swiglu_quant_v2 operator is unavailable on A5.")
-            return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            if act_quant_type == torch.float8_e4m3fn:
+                weights = weight if isinstance(weight, list) else [weight]
+                weight_scales = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+                return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                    x=x,
+                    weight=weights,
+                    weight_scale=weight_scales,
+                    x_scale=x_scale,
+                    group_list=group_list,
+                    group_list_type=group_list_type,
+                    dequant_mode=0 if dequant_mode is None else dequant_mode,
+                    dequant_dtype=torch.float32 if dequant_dtype is None else dequant_dtype,
+                    quant_mode=0 if quant_mode is None else quant_mode,
+                    quant_dtype=act_quant_type if quant_dtype is None else quant_dtype,
+                )
+            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
                 weight=weight,
+                group_list=group_list,
                 weight_scale=weight_scale,
                 x_scale=x_scale,
-                group_list=group_list,
+                bias=bias,
                 group_list_type=group_list_type,
-                dequant_mode=0 if dequant_mode is None else dequant_mode,
-                dequant_dtype=torch.float32 if dequant_dtype is None else dequant_dtype,
-                quant_mode=0 if quant_mode is None else quant_mode,
-                quant_dtype=act_quant_type if quant_dtype is None else quant_dtype,
-                transpose_weight=transpose_weight,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
                 swiglu_limit=swiglu_limit,
+                use_mxfp_quant=False,
             )
 
         # W4A8 mxfp
@@ -1281,22 +1286,23 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             out = torch_npu.npu_swiglu(hidden_states)
             out_scale = None
         else:
-            if not enable_gmm_swiglu_quant_v2_custom_op():
-                raise RuntimeError("The custom grouped_matmul_swiglu_quant_v2 operator is unavailable on A5.")
-            out, out_scale = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            weights = weight if isinstance(weight, list) else [weight]
+            weight_scales = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+            out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
-                weight=weight,
+                weight=weights,
                 group_list=group_list,
-                weight_scale=weight_scale,
+                weight_scale=weight_scales,
                 x_scale=x_scale,
                 group_list_type=group_list_type,
                 dequant_mode=2 if dequant_mode is None else dequant_mode,
                 quant_mode=2 if quant_mode is None else quant_mode,
                 dequant_dtype=torch.float32 if dequant_dtype is None else dequant_dtype,
                 quant_dtype=act_quant_type if quant_dtype is None else quant_dtype,
-                transpose_weight=transpose_weight,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
+                x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
+                weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
+                weight_scale_dtype=torch_npu.float8_e8m0fnu,
+                x_scale_dtype=torch_npu.float8_e8m0fnu,
             )
         return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale)
 
