@@ -484,36 +484,38 @@ jobs:
           username: ${{ inputs.QUAY_TEMP_USERNAME }}
           password: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
+      - name: Download arm64 digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-arm64
+          merge-multiple: true
+
+      - name: Download amd64 digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Create multi-arch manifest
         env:
-          FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com
+          FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
           TO_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
+          DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile' }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for df in Dockerfile Dockerfile.310p Dockerfile.310p.openEuler \
-                    Dockerfile.a3 Dockerfile.a3.openEuler Dockerfile.openEuler \
-                    Dockerfile.a5 Dockerfile.a5.openEuler; do
-            echo "Merging ${df} into multi-arch manifest..."
-            docker buildx imagetools create \
-              -t "${TO_IMAGE}:${df}-${SHA}" \
-              "${FROM_IMAGE}:${df}-arm64-${SHA}" \
-              "${FROM_IMAGE}:${df}-amd64-${SHA}"
-          done
-
-      # - name: Download arm64 digests
-      #   uses: actions/download-artifact@v8
-      #   with:
-      #     path: ${{ runner.temp }}/digests
-      #     pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-arm64
-      #     merge-multiple: true
-
-      # - name: Download amd64 digests
-      #   uses: actions/download-artifact@v8
-      #   with:
-      #     path: ${{ runner.temp }}/digests
-      #     pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
-      #     merge-multiple: true
+          TAG="${TO_IMAGE}:${DOCKERFILE}-${SHA}"
+          DIGESTS=$(printf "$FROM_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          echo "Digests: $DIGESTS"
+          echo "Creating multi-arch manifest tag: $TAG"
+          docker buildx imagetools create \
+            -t "$TAG" \
+            $DIGESTS
 
       # - name: Prepare suffix
       #   id: suffix
