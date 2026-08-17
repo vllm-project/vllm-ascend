@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-04 01:39+0000\n"
+"POT-Creation-Date: 2026-08-17 01:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -108,6 +108,14 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
 "using-docker)。"
 
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:28
+msgid ""
+"For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
+"later `-310p` image)."
+msgstr ""
+"对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
+"`-310p` 镜像）。"
+
 #: ../../source/tutorials/models/Qwen3-VL-Embedding.md
 msgid "A3 series"
 msgstr "A3 系列"
@@ -120,35 +128,35 @@ msgstr "A2 系列"
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:114
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:116
 msgid ""
 "After a successful docker run, you can verify the running container service "
 "by executing the `docker ps` command."
 msgstr "Docker 运行成功后，您可以通过执行 `docker ps` 命令来验证正在运行的容器服务。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:116
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:118
 msgid "4.2 Source Code Installation"
 msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:118
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:120
 msgid ""
 "If you don't want to use the docker image as above, you can also build all "
 "from source:"
 msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:120
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:122
 msgid ""
 "Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
 msgstr "从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:122
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:124
 msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
 " on each node."
 msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:124
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:126
 msgid "5 Online Service Deployment"
 msgstr "5 在线服务部署"
 
@@ -156,11 +164,11 @@ msgstr "5 在线服务部署"
 msgid "A3/A2 series"
 msgstr "A3/A2 系列"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:160
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:162
 msgid "Required  Parameter Descriptions:"
 msgstr "必需参数说明："
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:162
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:164
 msgid ""
 "`--compilation-config` For Atlas 300I DUO, due to limited hardware streams, "
 "the size of cudagraph_capture_sizes is restricted."
@@ -168,11 +176,11 @@ msgstr ""
 "`--compilation-config` 对于Atlas 300I "
 "DUO，由于硬件流数量有限，cudagraph_capture_sizes的大小受到限制。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:166
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:168
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:168
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:170
 msgid ""
 "`--max-model-len` represents the context length, which is the maximum value "
 "of the input plus output for a single request. For Atlas 300I DUO if "
@@ -184,7 +192,7 @@ msgstr ""
 "DUO，如果自动解析得到较大的上下文长度，分配该掩码（O(max_model_len^2)）可能会超出NPU内存并触发OOM。请务必设置一个明确且保守的值，例如"
 "--max-model-len 1024。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:170
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:172
 msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
@@ -193,29 +201,29 @@ msgstr ""
 "常见问题提示：如果遇到问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:172
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:174
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:174
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:176
 msgid "Once your server is started, you can verify by follow command:"
 msgstr "服务器启动后，您可以通过以下命令进行验证："
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:176
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:178
 msgid "Service Verification:"
 msgstr "服务验证："
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:187
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:189
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:189
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:191
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
 "`embedding` field. Example output:"
 msgstr "服务返回 HTTP 200 OK，并包含 `embedding` 字段的 JSON 响应。示例输出："
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:224
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:226
 msgid ""
 "For more usage examples, please reference the "
 "[examples](https://github.com/vllm-"
@@ -224,39 +232,39 @@ msgstr ""
 "更多使用示例，请参考[示例](https://github.com/vllm-"
 "project/vllm/tree/main/examples/pooling/embed)"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:226
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:228
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:228
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:230
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:230
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:232
 msgid "Using MTEB"
 msgstr "使用 MTEB"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:232
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:234
 msgid "Refer to [MTEB](https://docs.mteb.org/) for details."
 msgstr "详细信息请参考 [MTEB](https://docs.mteb.org/)。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:234
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:236
 msgid "Run follow code to execute the accuracy evaluation."
 msgstr "运行以下代码执行精度评估。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:262
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:264
 msgid "After execution, you can get the result."
 msgstr "执行后，您可以获得结果。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:264
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:266
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:266
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:268
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:268
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:270
 msgid ""
 "Run performance of `Qwen3-VL-Embedding-2B` as an example. Refer to [vllm "
 "benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more "
@@ -265,20 +273,20 @@ msgstr ""
 "以 `Qwen3-VL-Embedding-2B` 的性能运行为例。更多详细信息请参考 [vllm "
 "基准测试](https://docs.vllm.ai/en/latest/benchmarking/cli/)。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:271
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:273
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例。运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:277
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:279
 msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，您可以获得性能评估结果。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:279
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:281
 msgid "9 FAQ"
 msgstr "9 常见问题"
 
-#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:281
+#: ../../source/tutorials/models/Qwen3-VL-Embedding.md:283
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "

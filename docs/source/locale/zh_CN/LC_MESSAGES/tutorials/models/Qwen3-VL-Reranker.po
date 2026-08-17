@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-04 01:39+0000\n"
+"POT-Creation-Date: 2026-08-17 01:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -108,6 +108,14 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
 "using-docker)。"
 
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:28
+msgid ""
+"For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
+"later `-310p` image)."
+msgstr ""
+"对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
+"`-310p` 镜像）。"
+
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md
 msgid "A3 series"
 msgstr "A3 系列"
@@ -120,43 +128,43 @@ msgstr "A2 系列"
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:114
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:116
 msgid ""
 "After a successful docker run, you can verify the running container service "
 "by executing the `docker ps` command."
 msgstr "Docker 运行成功后，您可以通过执行 `docker ps` 命令来验证正在运行的容器服务。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:116
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:118
 msgid "4.2 Source Code Installation"
 msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:118
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:120
 msgid ""
 "If you don't want to use the docker image as above, you can also build all "
 "from source:"
 msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:120
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:122
 msgid ""
 "Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
 msgstr "从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:122
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:124
 msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
 " on each node."
 msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:124
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:126
 msgid "5 Online Service Deployment"
 msgstr "5 在线服务部署"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:126
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:128
 msgid "5.1 Chat Template"
 msgstr "5.1 聊天模板"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:128
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:130
 msgid ""
 "The Qwen3-VL-Reranker model requires a specific chat template for proper "
 "formatting. Create a file named `qwen3_vl_reranker.jinja` with the following"
@@ -165,7 +173,7 @@ msgstr ""
 "Qwen3-VL-Reranker 模型需要特定的聊天模板才能正确格式化。创建一个名为 `qwen3_vl_reranker.jinja` "
 "的文件，内容如下："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:156
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:158
 msgid ""
 "Save this file to a location of your choice (e.g., "
 "`./qwen3_vl_reranker.jinja`)."
@@ -175,11 +183,11 @@ msgstr "将此文件保存到您选择的位置（例如 `./qwen3_vl_reranker.ji
 msgid "A3/A2 series"
 msgstr "A3/A2 系列"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:198
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:200
 msgid "Required  Parameter Descriptions:"
 msgstr "必需参数说明："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:200
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:202
 msgid ""
 "`--compilation-config` For Atlas 300I DUO, due to limited hardware streams, "
 "the size of cudagraph_capture_sizes is restricted."
@@ -187,11 +195,11 @@ msgstr ""
 "`--compilation-config` 对于Atlas 300I "
 "DUO，由于硬件流数量有限，cudagraph_capture_sizes的大小受到限制。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:204
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:206
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:206
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:208
 msgid ""
 "`--max-model-len` represents the context length, which is the maximum value "
 "of the input plus output for a single request. For Atlas 300I DUO if "
@@ -203,7 +211,7 @@ msgstr ""
 "DUO，如果自动解析得到较大的上下文长度，分配此掩码（O(max_model_len^2)）可能会超出NPU内存并触发OOM。请务必设置明确且保守的值，例如"
 "--max-model-len 1024。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:208
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:210
 msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
@@ -212,29 +220,29 @@ msgstr ""
 "常见问题提示：如果遇到问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:210
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:212
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:212
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:214
 msgid "Once your server is started, you can verify by follow command:"
 msgstr "服务器启动后，您可以通过以下命令进行验证："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:214
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:216
 msgid "Service Verification:"
 msgstr "服务验证："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:223
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:225
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:225
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:227
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
 "`relevance_score` field. Example output:"
 msgstr "服务返回 HTTP 200 OK，JSON 响应中包含 `relevance_score` 字段。示例输出："
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:256
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:258
 msgid ""
 "For more usage examples, please reference the "
 "[examples](https://github.com/vllm-"
@@ -243,39 +251,39 @@ msgstr ""
 "更多使用示例，请参考[示例](https://github.com/vllm-"
 "project/vllm/tree/main/examples/pooling/score)"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:258
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:260
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:260
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:262
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:262
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:264
 msgid "Using MTEB"
 msgstr "使用 MTEB"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:264
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:266
 msgid "Refer to [MTEB](https://docs.mteb.org/) for details."
 msgstr "详细信息请参考 [MTEB](https://docs.mteb.org/)。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:266
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:268
 msgid "Run follow code to execute the accuracy evaluation."
 msgstr "运行以下代码执行精度评估。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:299
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:301
 msgid "After execution, you can get the result."
 msgstr "执行后，您可以获得结果。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:301
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:303
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:303
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:305
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:305
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:307
 msgid ""
 "Run performance of `Qwen3-VL-Reranker-2B` as an example. Refer to [vllm "
 "benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more "
@@ -284,20 +292,20 @@ msgstr ""
 "以 `Qwen3-VL-Reranker-2B` 的性能测试为例。更多详细信息请参考 [vllm "
 "基准测试](https://docs.vllm.ai/en/latest/benchmarking/cli/)。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:308
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:310
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例。运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:314
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:316
 msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，您可以获得性能评估结果。"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:316
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:318
 msgid "9 FAQ"
 msgstr "9 常见问题"
 
-#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:318
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:320
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-04 01:39+0000\n"
+"POT-Creation-Date: 2026-08-17 01:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -115,12 +115,20 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
 "using-docker)。"
 
+#: ../../source/tutorials/models/Qwen3-Embedding.md:29
+msgid ""
+"For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
+"later `-310p` image)."
+msgstr ""
+"对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
+"`-310p` 镜像）。"
+
 #: ../../source/tutorials/models/Qwen3-Embedding.md
 msgid "A3 series"
 msgstr "A3 系列"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:36
-#: ../../source/tutorials/models/Qwen3-Embedding.md:65
+#: ../../source/tutorials/models/Qwen3-Embedding.md:38
+#: ../../source/tutorials/models/Qwen3-Embedding.md:67
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
@@ -132,35 +140,35 @@ msgstr "A2 系列"
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:119
+#: ../../source/tutorials/models/Qwen3-Embedding.md:121
 msgid ""
 "After a successful docker run, you can verify the running container service "
 "by executing the `docker ps` command."
 msgstr "Docker 运行成功后，您可以通过执行 `docker ps` 命令来验证正在运行的容器服务。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:121
+#: ../../source/tutorials/models/Qwen3-Embedding.md:123
 msgid "4.2 Source Code Installation"
 msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:123
+#: ../../source/tutorials/models/Qwen3-Embedding.md:125
 msgid ""
 "If you don't want to use the docker image as above, you can also build all "
 "from source:"
 msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:125
+#: ../../source/tutorials/models/Qwen3-Embedding.md:127
 msgid ""
 "Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
 msgstr "从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:127
+#: ../../source/tutorials/models/Qwen3-Embedding.md:129
 msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
 " on each node."
 msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:129
+#: ../../source/tutorials/models/Qwen3-Embedding.md:131
 msgid "5 Online Service Deployment"
 msgstr "5 在线服务部署"
 
@@ -168,11 +176,11 @@ msgstr "5 在线服务部署"
 msgid "A3/A2 series"
 msgstr "A3/A2 系列"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:165
+#: ../../source/tutorials/models/Qwen3-Embedding.md:167
 msgid "Required  Parameter Descriptions:"
 msgstr "必需参数说明："
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:167
+#: ../../source/tutorials/models/Qwen3-Embedding.md:169
 msgid ""
 "`--compilation-config` For Atlas 300I DUO, due to limited hardware streams, "
 "the size of cudagraph_capture_sizes is restricted."
@@ -180,11 +188,11 @@ msgstr ""
 "`--compilation-config` 对于Atlas 300I "
 "DUO，由于硬件流数量有限，cudagraph_capture_sizes的大小受到限制。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:171
+#: ../../source/tutorials/models/Qwen3-Embedding.md:173
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:173
+#: ../../source/tutorials/models/Qwen3-Embedding.md:175
 msgid ""
 "`--max-model-len` represents the context length, which is the maximum value "
 "of the input plus output for a single request. For Atlas 300I DUO if "
@@ -196,7 +204,7 @@ msgstr ""
 "DUO，如果自动解析得到较大的上下文长度，分配该掩码（O(max_model_len^2)）可能会超出NPU内存并触发OOM。请务必设置一个明确且保守的值，例如"
 "--max-model-len 1024。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:175
+#: ../../source/tutorials/models/Qwen3-Embedding.md:177
 msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
@@ -205,29 +213,29 @@ msgstr ""
 "常见问题提示：如果遇到问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:177
+#: ../../source/tutorials/models/Qwen3-Embedding.md:179
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:179
+#: ../../source/tutorials/models/Qwen3-Embedding.md:181
 msgid "Once your server is started, you can verify by follow command:"
 msgstr "服务器启动后，您可以通过以下命令进行验证："
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:181
+#: ../../source/tutorials/models/Qwen3-Embedding.md:183
 msgid "Service Verification:"
 msgstr "服务验证："
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:192
+#: ../../source/tutorials/models/Qwen3-Embedding.md:194
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:194
+#: ../../source/tutorials/models/Qwen3-Embedding.md:196
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
 "`embedding` field. Example output:"
 msgstr "服务返回 HTTP 200 OK，并带有包含 `embedding` 字段的 JSON 响应。示例输出："
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:227
+#: ../../source/tutorials/models/Qwen3-Embedding.md:229
 msgid ""
 "For more usage examples, please reference the "
 "[examples](https://github.com/vllm-"
@@ -236,39 +244,39 @@ msgstr ""
 "更多使用示例，请参考[示例](https://github.com/vllm-"
 "project/vllm/tree/main/examples/pooling/embed)"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:229
+#: ../../source/tutorials/models/Qwen3-Embedding.md:231
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:231
+#: ../../source/tutorials/models/Qwen3-Embedding.md:233
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:233
+#: ../../source/tutorials/models/Qwen3-Embedding.md:235
 msgid "Using MTEB"
 msgstr "使用 MTEB"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:235
+#: ../../source/tutorials/models/Qwen3-Embedding.md:237
 msgid "Refer to [MTEB](https://docs.mteb.org/) for details."
 msgstr "详情请参考 [MTEB](https://docs.mteb.org/)。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:237
+#: ../../source/tutorials/models/Qwen3-Embedding.md:239
 msgid "Run follow code to execute the accuracy evaluation."
 msgstr "运行以下代码执行精度评估。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:265
+#: ../../source/tutorials/models/Qwen3-Embedding.md:267
 msgid "After execution, you can get the result."
 msgstr "执行后，您可以获得结果。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:267
+#: ../../source/tutorials/models/Qwen3-Embedding.md:269
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:269
+#: ../../source/tutorials/models/Qwen3-Embedding.md:271
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:271
+#: ../../source/tutorials/models/Qwen3-Embedding.md:273
 msgid ""
 "Run performance of `Qwen3-Embedding-0.6B` as an example. Refer to [vllm "
 "benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more "
@@ -277,20 +285,20 @@ msgstr ""
 "以 `Qwen3-Embedding-0.6B` 的性能运行为例。更多详情请参考 [vllm "
 "基准测试](https://docs.vllm.ai/en/latest/benchmarking/cli/)。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:274
+#: ../../source/tutorials/models/Qwen3-Embedding.md:276
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例。运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:280
+#: ../../source/tutorials/models/Qwen3-Embedding.md:282
 msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，您可以获得性能评估结果。"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:282
+#: ../../source/tutorials/models/Qwen3-Embedding.md:284
 msgid "9 FAQ"
 msgstr "9 常见问题"
 
-#: ../../source/tutorials/models/Qwen3-Embedding.md:284
+#: ../../source/tutorials/models/Qwen3-Embedding.md:286
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "

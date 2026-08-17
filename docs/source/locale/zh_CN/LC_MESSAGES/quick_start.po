@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-08 05:20+0000\n"
+"POT-Creation-Date: 2026-08-17 01:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -331,15 +331,33 @@ msgstr ""
 " load the files, and couldn't find them in the cached "
 "files.`），请运行以下命令使用ModelScope作为替代："
 
-#: ../../source/quick_start.md:263
+#: ../../source/quick_start.md:264
+#, python-format
+msgid ""
+"If you encounter custom-op security verification errors while running "
+"inference on Atlas 950DT, refer to [Pooling enables UB and UBoE for 950DT "
+"and "
+"950PR](https://gitcode.com/Ascend/memcache/wiki/%E6%B1%A0%E5%8C%96%E4%BD%BF%E8%83%BD950DT%E5%92%8C950PR%E7%9A%84UB%E5%92%8CUBoE.md)"
+" and run the following commands:"
+msgstr ""
+"如果在Atlas "
+"950DT上运行推理时遇到自定义算子安全校验错误，请参考[池化使能950DT和950PR的UB和UBoE](https://gitcode.com/Ascend/memcache/wiki/%E6%B1%A0%E5%8C%96%E4%BD%BF%E8%83%BD950DT%E5%92%8C950PR%E7%9A%84UB%E5%92%8CUBoE.md)并运行以下命令："
+
+#: ../../source/quick_start.md:266
+msgid ""
+"Each NPU will prompt for confirmation when running the first command. You "
+"must manually enter `Y` for all of them."
+msgstr "运行第一条命令时，每个NPU都会提示确认。您必须为所有NPU手动输入`Y`。"
+
+#: ../../source/quick_start.md:273
 msgid "This section shows ascend platform is successfully detected in vllm:"
 msgstr "此部分显示vllm中成功检测到昇腾平台："
 
-#: ../../source/quick_start.md:272
+#: ../../source/quick_start.md:282
 msgid "This section shows the final output:"
 msgstr "此部分显示最终输出："
 
-#: ../../source/quick_start.md:281
+#: ../../source/quick_start.md:291
 msgid ""
 "This section shows process exits after offline inference, and does not "
 "affect actual inference:"
@@ -349,7 +367,7 @@ msgstr "此部分显示进程在离线推理后退出，不影响实际推理：
 msgid "OpenAI Completions API"
 msgstr "OpenAI Completions API"
 
-#: ../../source/quick_start.md:294
+#: ../../source/quick_start.md:304
 msgid ""
 "vLLM can also be deployed as a server that implements the OpenAI API "
 "protocol. Run the following command to start the vLLM server with the "
@@ -358,23 +376,23 @@ msgstr ""
 "vLLM也可以部署为实现OpenAI "
 "API协议的服务器。运行以下命令，使用[Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)模型启动vLLM服务器："
 
-#: ../../source/quick_start.md:305
+#: ../../source/quick_start.md:315
 msgid "If you see a log as below:"
 msgstr "如果您看到如下日志："
 
-#: ../../source/quick_start.md:314
+#: ../../source/quick_start.md:324
 msgid "Congratulations, you have successfully started the vLLM server!"
 msgstr "恭喜，您已成功启动vLLM服务器！"
 
-#: ../../source/quick_start.md:316
+#: ../../source/quick_start.md:326
 msgid "You can query the list of models:"
 msgstr "您可以查询模型列表："
 
-#: ../../source/quick_start.md:324
+#: ../../source/quick_start.md:334
 msgid "You can also query the model with input prompts:"
 msgstr "您也可以使用输入提示查询模型："
 
-#: ../../source/quick_start.md:339
+#: ../../source/quick_start.md:349
 msgid ""
 "vLLM is serving as a background process, you can use `kill -2 $VLLM_PID` to "
 "stop the background process gracefully, which is similar to `Ctrl-C` for "
@@ -382,11 +400,11 @@ msgid ""
 msgstr ""
 "vLLM作为后台进程运行，您可以使用`kill -2 $VLLM_PID`优雅地停止后台进程，类似于使用`Ctrl-C`停止前台vLLM进程："
 
-#: ../../source/quick_start.md:348
+#: ../../source/quick_start.md:358
 msgid "The output is as below:"
 msgstr "输出如下："
 
-#: ../../source/quick_start.md:357
+#: ../../source/quick_start.md:367
 msgid "Finally, you can exit the container by using `ctrl-D`."
 msgstr "最后，您可以使用`ctrl-D`退出容器。"
 

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-17 01:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -50,33 +50,43 @@ msgstr ""
 "2），解码服务器为192.0.0.3（decoder 1）和192.0.0.4（decoder "
 "2）。每台服务器使用8个NPU和16个芯片部署一个服务实例。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:9
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:10
+msgid ""
+"This limitation applies to models with a DeepSeek-V3.2-style architecture "
+"that use the Sparse Flash Attention (SFA) backend, such as DeepSeek-V3.2, "
+"GLM-5.1, and GLM-5.2. When using Decode Context Parallelism (DCP) with these"
+" models, enable it on both the prefiller and decoder nodes, or disable it on"
+" both. Enabling DCP on only one side can cause known accuracy issues."
+msgstr ""
+"此限制适用于采用DeepSeek-V3.2风格架构并使用稀疏Flash注意力（SFA）后端的模型，例如DeepSeek-V3.2、GLM-5.1和GLM-5.2。在这些模型上使用解码上下文并行（DCP）时，请在预填充节点和解码节点上同时启用，或同时禁用。仅在一侧启用DCP可能会导致已知的精度问题。"
+
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:13
 msgid "Verify Multi-Node Communication Environment"
 msgstr "验证多节点通信环境"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:11
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:15
 msgid "Physical Layer Requirements"
 msgstr "物理层要求"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:13
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:17
 msgid ""
 "The physical machines must be located on the same LAN, with network "
 "connectivity."
 msgstr "物理机必须位于同一局域网内，且网络互通。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:14
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:18
 msgid ""
 "All NPUs must be interconnected. Intra-node connectivity is via HCCS, and "
 "inter-node connectivity is via RDMA."
 msgstr "所有 NPU 必须互联。节点内通过 HCCS 连接，节点间通过 RDMA 连接。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:16
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:20
 msgid "Verification Process"
 msgstr "验证流程"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:18
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:27
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:83
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:22
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:31
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:87
 msgid ""
 "Execute the following commands on each node in sequence. The results must "
 "all be `success` and the status must be `UP`:"
@@ -86,39 +96,39 @@ msgstr "依次在每个节点上执行以下命令。结果必须全部为 `succ
 msgid "A3"
 msgstr "A3"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:25
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:81
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:29
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:85
 msgid "Single Node Verification:"
 msgstr "单节点验证："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:42
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:98
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:46
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:102
 msgid "Check NPU HCCN Configuration:"
 msgstr "检查 NPU HCCN 配置："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:44
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:100
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:48
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:104
 msgid ""
 "Ensure that the hccn.conf file exists in the environment. If using Docker, "
 "mount it into the container."
 msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其挂载到容器内。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:50
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:106
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:54
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:110
 msgid "Get NPU IP Addresses"
 msgstr "获取 NPU IP 地址"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:57
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:61
 msgid "Get superpodid and SDID"
 msgstr "获取 superpodid 和 SDID"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:63
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:112
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:67
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:116
 msgid "Cross-Node PING Test"
 msgstr "跨节点 PING 测试"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:70
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:119
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:74
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:123
 msgid "Check NPU TLS Configuration"
 msgstr "检查 NPU TLS 配置"
 
@@ -126,19 +136,19 @@ msgstr "检查 NPU TLS 配置"
 msgid "A2"
 msgstr "A2"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:128
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
 msgid "Run with Docker"
 msgstr "使用 Docker 运行"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:130
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:134
 msgid "Start a Docker container on each node."
 msgstr "在每个节点上启动一个 Docker 容器。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:174
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:178
 msgid "Install Mooncake"
 msgstr "安装 Mooncake"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:176
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:180
 msgid ""
 "Mooncake is the serving platform for Kimi, a leading LLM service provided by"
 " Moonshot AI. Installation and Compilation Guide: "
@@ -150,45 +160,45 @@ msgstr ""
 "平台。安装与编译指南：<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-"
 "and-use-binaries> 首先，我们需要获取Mooncake项目。参考以下命令："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:183
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:187
 msgid "(Optional) Replace go install url if the network is poor"
 msgstr "（可选）如果网络状况不佳，请替换 go install 的 URL"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:190
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:194
 msgid "Install mpi"
 msgstr "安装 mpi"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:196
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:200
 msgid ""
 "Install the relevant dependencies. The installation of Go is not required."
 msgstr "安装相关依赖。不需要安装 Go。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:202
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:206
 msgid "Compile and install"
 msgstr "编译并安装"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:212
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:216
 msgid "Set environment variables"
 msgstr "设置环境变量"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:214
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:218
 msgid "**Note:**"
 msgstr "**注意：**"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:216
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:220
 msgid "Adjust the Python path according to your specific Python installation"
 msgstr "根据您的具体 Python 安装调整 Python 路径"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:217
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:221
 msgid ""
 "Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`"
 msgstr "确保 `/usr/local/lib` 和 `/usr/local/lib64` 在您的 `LD_LIBRARY_PATH` 中"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:223
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:227
 msgid "Prefiller/Decoder Deployment"
 msgstr "预填充器/解码器部署"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:225
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:229
 msgid ""
 "We can run the following scripts to launch a server on the prefiller/decoder"
 " node, respectively. Please note that each P/D node will occupy ports "
@@ -200,11 +210,11 @@ msgstr ""
 "num_chips 的端口来初始化 socket 监听器。为避免出现问题，应防止端口冲突。此外，请确保每个节点的 engine_id "
 "是唯一分配的，以避免冲突。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:227
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:231
 msgid "kv_port Configuration Guide"
 msgstr "kv_port 配置指南"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:229
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:233
 msgid ""
 "On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, "
 "which randomly allocates ports within range `[20000, 20000 + npu_per_node × "
@@ -215,43 +225,43 @@ msgstr ""
 "20000 + npu_per_node × 1000)` 范围内随机分配端口。如果 `kv_port` "
 "与此范围重叠，可能会发生间歇性端口冲突。为避免此问题，请根据下表配置 `kv_port`："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid "NPUs per Node"
 msgstr "每节点 NPU 数量"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid "Reserved Port Range"
 msgstr "保留端口范围"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid "Recommended kv_port"
 msgstr "推荐的 kv_port"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid "8"
 msgstr "8"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid "20000 - 27999"
 msgstr "20000 - 27999"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid ">= 28000"
 msgstr ">= 28000"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid "16"
 msgstr "16"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid "20000 - 35999"
 msgstr "20000 - 35999"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:136
 msgid ">= 36000"
 msgstr ">= 36000"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:237
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:241
 msgid ""
 "If you occasionally see `zmq.error.ZMQError: Address already in use` during "
 "startup, it may be caused by kv_port conflicting with randomly allocated "
@@ -261,11 +271,11 @@ msgstr ""
 "如果您在启动时偶尔看到 `zmq.error.ZMQError: Address already in use`，可能是由于 kv_port "
 "与随机分配的 AscendDirectTransport 端口冲突。请增加您的 kv_port 值以避开保留范围。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:244
 msgid "launch_online_dp.py"
 msgstr "launch_online_dp.py"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:242
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:246
 msgid ""
 "Use `launch_online_dp.py` to launch external dp vllm servers. "
 "[launch_online_dp.py](https://github.com/vllm-project/vllm-"
@@ -275,11 +285,11 @@ msgstr ""
 "服务器。[launch_online_dp.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:245
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:249
 msgid "run_dp_template.sh"
 msgstr "run_dp_template.sh"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:247
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:251
 msgid ""
 "Modify `run_dp_template.sh` on each node. "
 "[run_dp_template.sh](https://github.com/vllm-project/vllm-"
@@ -289,7 +299,7 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/external_online_dp/run_dp_template.sh)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:250
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:254
 msgid ""
 "`launch_online_dp.py` starts `dp-size-local` vLLM instances and passes seven"
 " positional arguments to `run_dp_template.sh`. The examples below correspond"
@@ -299,215 +309,215 @@ msgstr ""
 "local`个vLLM实例，并向`run_dp_template.sh`传递七个位置参数。以下示例对应[启动服务](#start-the-"
 "service)。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Launcher option"
 msgstr "启动器选项"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Template value"
 msgstr "模板值"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Meaning"
 msgstr "含义"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "Example value"
 msgstr "示例值"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Constraints"
 msgstr "约束条件"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`--dp-size`"
 msgstr "`--dp-size`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`$3` / `--data-parallel-size`"
 msgstr "`$3` / `--data-parallel-size`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Total DP ranks in the group."
 msgstr "组内DP总秩数。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "P: `2`; D: `32`"
 msgstr "P：`2`；D：`32`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid ""
 "Positive integer; identical within the same group. Total ranks must cover "
 "`[0, dp-size)` without overlap."
 msgstr "正整数；同一组内必须一致。总秩数必须覆盖`[0, dp-size)`且不重叠。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`--tp-size`"
 msgstr "`--tp-size`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`$7` / `--tensor-parallel-size`"
 msgstr "`$7` / `--tensor-parallel-size`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "NPUs used by each instance."
 msgstr "每个实例使用的NPU数量。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "P: `8`; D: `1`"
 msgstr "P：`8`；D：`1`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid ""
 "Positive integer; `dp-size-local * tp-size` must not exceed available NPUs "
 "on the node."
 msgstr "正整数；`dp-size-local * tp-size`不得超过节点上可用的NPU数量。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`--dp-size-local`"
 msgstr "`--dp-size-local`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Number of template invocations"
 msgstr "模板调用次数"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "DP instances on this node."
 msgstr "此节点上的DP实例数。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "P: `2`; D: `16`"
 msgstr "P：`2`；D：`16`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid ""
 "If set to `-1`, it defaults to `dp-size`. Otherwise, `1 <= dp-size-local <= "
 "dp-size`."
 msgstr "如果设置为`-1`，则默认为`dp-size`。否则，`1 <= dp-size-local <= dp-size`。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`--dp-rank-start`"
 msgstr "`--dp-rank-start`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`$4` / `--data-parallel-rank` = `dp-rank-start + i`"
 msgstr "`$4` / `--data-parallel-rank` = `dp-rank-start + i`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "First DP rank on this node."
 msgstr "此节点上的第一个DP秩。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "P: `0`; D: `0` or `16`"
 msgstr "P：`0`；D：`0`或`16`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid ""
 "Non-negative integer; the assigned rank range must be within `dp-size` and "
 "not overlap."
 msgstr "非负整数；分配的秩范围必须在`dp-size`内且不重叠。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`--dp-address`"
 msgstr "`--dp-address`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`$5` / `--data-parallel-address`"
 msgstr "`$5` / `--data-parallel-address`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "DP master address."
 msgstr "DP主节点地址。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3`"
 msgstr "P：`192.0.0.1`或`192.0.0.2`；D：`192.0.0.3`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid ""
 "The IP address must be reachable and identical within the same DP group."
 msgstr "IP地址必须可达，且在同一DP组内必须一致。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`--dp-rpc-port`"
 msgstr "`--dp-rpc-port`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`$6` / `--data-parallel-rpc-port`"
 msgstr "`$6` / `--data-parallel-rpc-port`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "DP master RPC port."
 msgstr "DP主节点RPC端口。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`12321`"
 msgstr "`12321`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Free, reachable port; identical within a DP group."
 msgstr "空闲且可达的端口；同一DP组内必须一致。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`--vllm-start-port`"
 msgstr "`--vllm-start-port`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`$2` / `--port` = `vllm-start-port + i`"
 msgstr "`$2` / `--port` = `vllm-start-port + i`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "First local API port."
 msgstr "第一个本地API端口。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`7100`, then `7101`, ..."
 msgstr "`7100`，然后是`7101`，..."
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Consecutive free ports; must match the proxy configuration."
 msgstr "连续的空闲端口；必须与代理配置匹配。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "Computed by the launcher"
 msgstr "由启动器计算"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "`$1` / `ASCEND_RT_VISIBLE_DEVICES`"
 msgstr "`$1` / `ASCEND_RT_VISIBLE_DEVICES`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "NPU IDs assigned to each instance."
 msgstr "分配给每个实例的NPU ID。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "P: `0,...,7`, `8,...,15`; D: `0` through `15`"
 msgstr "P：`0,...,7`，`8,...,15`；D：`0`到`15`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:236
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid ""
 "IDs must exist and not overlap; non-contiguous IDs require adapting the "
 "launcher."
 msgstr "ID必须存在且不重叠；非连续ID需要修改启动器。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:263
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:267
 msgid "**Note**:"
 msgstr "**注意**："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:265
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:269
 msgid ""
 "The launcher validates only argument types and required options. Check the "
 "remaining constraints before deployment."
 msgstr "启动器仅验证参数类型和必需选项。部署前请检查其余约束条件。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:266
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:270
 msgid ""
 "If speculative decoding is enabled, `num_speculative_tokens` should be "
 "subject to one of the following conditions:"
 msgstr "如果启用了投机解码，`num_speculative_tokens`应满足以下条件之一："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:267
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:271
 msgid ""
 "Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): "
 "`num_speculative_tokens` should be equal on P nodes and D nodes."
@@ -515,7 +525,7 @@ msgstr ""
 "混合 Mamba 模型（例如 Qwen-Next 和 Qwen3.5 系列）：P 节点和 D 节点上的 `num_speculative_tokens`"
 " 应相等。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:268
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:272
 msgid ""
 "Other models: `num_speculative_tokens` on P nodes should be 1, and "
 "`num_speculative_tokens` on D nodes should be greater or equal to 1."
@@ -524,7 +534,7 @@ msgstr ""
 "应大于或等于 1。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:270
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:274
 msgid "Layerwise"
 msgstr "分层式"
 
@@ -545,32 +555,32 @@ msgid "Decoder node 2"
 msgstr "解码节点 2"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:509
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:513
 msgid "Non-layerwise"
 msgstr "非分层式"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:747
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:751
 msgid "Start the service"
 msgstr "启动服务"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:760
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:764
 msgid "Example Proxy for Deployment"
 msgstr "部署示例代理"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:762
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:766
 msgid ""
 "Run a proxy server on the same node where your prefiller service instance is"
 " deployed. You can find the proxy implementation in the repository's "
 "examples directory."
 msgstr "在部署了预填充服务实例的同一节点上运行代理服务器。您可以在仓库的 examples 目录中找到代理实现。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:764
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:768
 msgid ""
 "We provide two different proxy implementations with distinct request routing"
 " behaviors:"
 msgstr "我们提供了两种具有不同请求路由行为的代理实现："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:766
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:770
 msgid ""
 "**`load_balance_proxy_layerwise_server_example.py`**: Requests are first "
 "routed to the D nodes, which then forward to the P nodes as needed.This "
@@ -585,7 +595,7 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:768
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:772
 msgid ""
 "**`load_balance_proxy_server_example.py`**: Requests are first routed to the"
 " P nodes, which then forward to the D nodes for subsequent processing.This "
@@ -598,132 +608,132 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:880
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:884
 msgid "Both proxies share the following backend options."
 msgstr "两个代理共享以下后端选项。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "Parameter"
 msgstr "参数"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "Applies to"
 msgstr "适用范围"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "Default"
 msgstr "默认值"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "Meaning and constraints"
 msgstr "含义和约束"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`--port`"
 msgstr "`--port`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "Both"
 msgstr "两者"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`8000`"
 msgstr "`8000`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`1999`"
 msgstr "`1999`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid ""
 "Proxy listen port. Must be free, reachable, and between `1` and `65535`."
 msgstr "代理监听端口。必须空闲、可达，且在`1`到`65535`之间。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`--host`"
 msgstr "`--host`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`localhost`"
 msgstr "`localhost`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`192.0.0.1`"
 msgstr "`192.0.0.1`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid ""
 "Proxy listen address. Layerwise mode requires a non-wildcard address "
 "reachable by D nodes."
 msgstr "代理监听地址。Layerwise模式要求使用D节点可访问的非通配符地址。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`--prefiller-hosts`"
 msgstr "`--prefiller-hosts`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`192.0.0.1 192.0.0.1 192.0.0.2 192.0.0.2`"
 msgstr "`192.0.0.1 192.0.0.1 192.0.0.2 192.0.0.2`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "P-instance hosts. Count must equal the number of `--prefiller-ports`."
 msgstr "P实例主机。数量必须等于`--prefiller-ports`的数量。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`--prefiller-ports`"
 msgstr "`--prefiller-ports`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`8001`"
 msgstr "`8001`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`7100 7101 7100 7101`"
 msgstr "`7100 7101 7100 7101`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "P-instance ports. Each host-port pair must be unique and reachable."
 msgstr "P实例端口。每个主机-端口对必须唯一且可达。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`--decoder-hosts`"
 msgstr "`--decoder-hosts`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "Sixteen `192.0.0.3`, then sixteen `192.0.0.4`"
 msgstr "十六个`192.0.0.3`，然后是十六个`192.0.0.4`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "D-instance hosts. Count must equal the number of `--decoder-ports`."
 msgstr "D实例主机。数量必须等于`--decoder-ports`的数量。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`--decoder-ports`"
 msgstr "`--decoder-ports`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`8002`"
 msgstr "`8002`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "`7100`-`7115` for each D host"
 msgstr "每个D主机的`7100`-`7115`"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:826
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:830
 msgid "D-instance ports. Each host-port pair must be unique and reachable."
 msgstr "D实例端口。每个主机-端口对必须唯一且可达。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:891
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:895
 msgid "**Note**"
 msgstr "**注意**"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:893
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:897
 msgid ""
 "The proxy scripts validate that each host list has the same length as its "
 "corresponding port list."
 msgstr "代理脚本会验证每个主机列表与其对应的端口列表长度是否相同。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:895
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:899
 msgid ""
 "You can get the proxy program in the repository's examples, "
 "[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
@@ -734,11 +744,11 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:897
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:901
 msgid "Benchmark"
 msgstr "基准测试"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:899
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:903
 msgid ""
 "We recommend use aisbench tool to assess performance. "
 "[aisbench](https://github.com/AISBench/benchmark) Execute the following "
@@ -747,16 +757,16 @@ msgstr ""
 "我们建议使用aisbench工具评估性能。[aisbench](https://github.com/AISBench/benchmark) "
 "执行以下命令安装aisbench"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:907
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:911
 msgid ""
 "You need to cancel the http proxy before assessing performance, as following"
 msgstr "评估性能前，您需要取消http代理，如下所示"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:915
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:919
 msgid "You can place your datasets in the dir: `benchmark/ais_bench/datasets`"
 msgstr "您可以将数据集放置在目录：`benchmark/ais_bench/datasets`中"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:916
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:920
 msgid ""
 "You can change the configuration in the dir "
 ":`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the "
@@ -764,28 +774,28 @@ msgid ""
 msgstr ""
 "您可以在目录`:benchmark/ais_bench/benchmark/configs/models/vllm_api`中更改配置。以`vllm_api_stream_chat.py`为例"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:942
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:946
 msgid ""
 "Take gsm8k dataset for example, execute the following commands to assess "
 "performance."
 msgstr "以gsm8k数据集为例，执行以下命令来评估性能。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:948
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:952
 msgid ""
 "For more details for commands and parameters for aisbench, refer to  "
 "[aisbench](https://github.com/AISBench/benchmark)"
 msgstr ""
 "有关aisbench命令和参数的更多详细信息，请参阅[aisbench](https://github.com/AISBench/benchmark)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:950
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:954
 msgid "FAQ"
 msgstr "常见问题"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:952
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:956
 msgid "1. Prefiller nodes need to warmup"
 msgstr "1.预填充节点需要预热"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:954
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:958
 msgid ""
 "Since the computation of some NPU operators requires several rounds of warm-"
 "up to achieve best performance, we recommend preheating the service with "
@@ -793,11 +803,11 @@ msgid ""
 "to-end throughput."
 msgstr "由于某些NPU算子的计算需要多轮预热才能达到最佳性能，我们建议在进行性能测试前，使用一些请求预热服务，以达到最佳端到端吞吐量。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:956
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:960
 msgid "Verification"
 msgstr "验证"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:958
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:962
 msgid "Check service health using the proxy server endpoint."
 msgstr "使用代理服务器端点检查服务健康状态。"
 

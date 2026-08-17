@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-05 06:27+0000\n"
+"POT-Creation-Date: 2026-08-17 01:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -106,42 +106,38 @@ msgid ""
 msgstr "下表是 vLLM Ascend 发布的兼容性矩阵。"
 
 #: ../../source/community/versioning_policy.md
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "vLLM Ascend"
 msgstr "vLLM Ascend"
 
 #: ../../source/community/versioning_policy.md
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "vLLM"
 msgstr "vLLM"
 
 #: ../../source/community/versioning_policy.md
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Python"
 msgstr "Python"
 
 #: ../../source/community/versioning_policy.md
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Stable CANN"
 msgstr "稳定版 CANN"
 
 #: ../../source/community/versioning_policy.md
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "PyTorch/torch_npu"
 msgstr "PyTorch/torch_npu"
 
 #: ../../source/community/versioning_policy.md
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Triton Ascend"
 msgstr "Triton Ascend"
 
 #: ../../source/community/versioning_policy.md
 msgid "Mooncake"
 msgstr "Mooncake"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.23.0rc1"
-msgstr "v0.23.0rc1"
 
 #: ../../source/community/versioning_policy.md
 msgid "v0.23.0"
@@ -166,6 +162,10 @@ msgstr "3.2.1"
 #: ../../source/community/versioning_policy.md
 msgid "v0.3.11.post1"
 msgstr "v0.3.11.post1"
+
+#: ../../source/community/versioning_policy.md
+msgid "v0.23.0rc1"
+msgstr "v0.23.0rc1"
 
 #: ../../source/community/versioning_policy.md
 msgid "v0.22.1rc1"
@@ -248,7 +248,7 @@ msgid "v0.18.0rc1"
 msgstr "v0.18.0rc1"
 
 #: ../../source/community/versioning_policy.md
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "N/A"
 msgstr "不适用"
 
@@ -480,7 +480,7 @@ msgstr "v0.7.3.post1"
 msgid "v0.7.3"
 msgstr "v0.7.3"
 
-#: ../../source/community/versioning_policy.md:63
+#: ../../source/community/versioning_policy.md:64
 msgid ""
 "If you're using v0.7.3, don't forget to install [mindie-"
 "turbo](https://pypi.org/project/mindie-turbo) as well."
@@ -488,7 +488,7 @@ msgstr ""
 "如果您正在使用 v0.7.3，请不要忘记同时安装 [mindie-turbo](https://pypi.org/project/mindie-"
 "turbo)。"
 
-#: ../../source/community/versioning_policy.md:66
+#: ../../source/community/versioning_policy.md:67
 msgid ""
 "For main branch of vLLM Ascend, we usually make it compatible with the "
 "latest vLLM release and a newer commit hash of vLLM. Please note that this "
@@ -496,365 +496,373 @@ msgid ""
 msgstr ""
 "对于 vLLM Ascend 的主分支，我们通常使其与最新的 vLLM 发布版本和更新的 vLLM 提交哈希兼容。请注意，此表格会经常更新，请定期查看。"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "main"
 msgstr "main"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "{{main_vllm_commit}}, {{main_vllm_tag}}"
 msgstr "{{main_vllm_commit}}, {{main_vllm_tag}}"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "{{main_python_version}}"
 msgstr "{{main_python_version}}"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "{{main_cann_version}}"
 msgstr "{{main_cann_version}}"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "{{main_pytorch_torch_npu_version}}"
 msgstr "{{main_pytorch_torch_npu_version}}"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "{{main_triton_ascend_version}}"
 msgstr "{{main_triton_ascend_version}}"
 
-#: ../../source/community/versioning_policy.md:72
+#: ../../source/community/versioning_policy.md:73
 msgid "Release cadence"
 msgstr "发布节奏"
 
-#: ../../source/community/versioning_policy.md:74
+#: ../../source/community/versioning_policy.md:75
 msgid "Release window"
 msgstr "发布窗口"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Date"
 msgstr "日期"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Event"
 msgstr "事件"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
+msgid "2026.07.31"
+msgstr "2026.07.31"
+
+#: ../../source/community/versioning_policy.md:63
+msgid "v0.23.0 Final release, v0.23.0"
+msgstr "v0.23.0 最终版本，v0.23.0"
+
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.07.20"
 msgstr "2026.07.20"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.23.0rc1"
 msgstr "候选发布版本，v0.23.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.06.30"
 msgstr "2026.06.30"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.22.1rc1"
 msgstr "候选发布版本，v0.22.1rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.06.16"
 msgstr "2026.06.16"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.21.0rc1"
 msgstr "候选发布版本，v0.21.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.06.03"
 msgstr "2026.06.03"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.20.2rc1"
 msgstr "候选发布版本，v0.20.2rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.04.30"
 msgstr "2026.04.30"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.19.1rc1"
 msgstr "候选发布版本，v0.19.1rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.04.24"
 msgstr "2026.04.24"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.13.0rc3"
 msgstr "候选发布版本，v0.13.0rc3"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.04.01"
 msgstr "2026.04.01"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.18.0rc1"
 msgstr "候选发布版本，v0.18.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.03.15"
 msgstr "2026.03.15"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.17.0rc1"
 msgstr "发布候选版本，v0.17.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.03.10"
 msgstr "2026.03.10"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.16.0rc1"
 msgstr "发布候选版本，v0.16.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.02.27"
 msgstr "2026.02.27"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.15.0rc1"
 msgstr "发布候选版本，v0.15.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.02.06"
 msgstr "2026.02.06"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.13.0 Final release, v0.13.0"
 msgstr "v0.13.0 最终发布版本，v0.13.0"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.01.26"
 msgstr "2026.01.26"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.14.0rc1"
 msgstr "发布候选版本，v0.14.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2026.01.24"
 msgstr "2026.01.24"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.13.0rc2"
 msgstr "发布候选版本，v0.13.0rc2"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.12.27"
 msgstr "2025.12.27"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.13.0rc1"
 msgstr "发布候选版本，v0.13.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.12.16"
 msgstr "2025.12.16"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.11.0 Final release, v0.11.0"
 msgstr "v0.11.0 最终发布版本，v0.11.0"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.12.13"
 msgstr "2025.12.13"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.12.0rc1"
 msgstr "发布候选版本，v0.12.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.12.03"
 msgstr "2025.12.03"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.11.0rc3"
 msgstr "发布候选版本，v0.11.0rc3"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.11.21"
 msgstr "2025.11.21"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.11.0rc2"
 msgstr "发布候选版本，v0.11.0rc2"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.11.10"
 msgstr "2025.11.10"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.11.0rc1"
 msgstr "发布候选版本，v0.11.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.09.30"
 msgstr "2025.09.30"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.11.0rc0"
 msgstr "发布候选版本，v0.11.0rc0"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.09.16"
 msgstr "2025.09.16"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.10.2rc1"
 msgstr "发布候选版本，v0.10.2rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.09.04"
 msgstr "2025.09.04"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.10.1rc1"
 msgstr "发布候选版本，v0.10.1rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.09.03"
 msgstr "2025.09.03"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.9.1 Final release, v0.9.1"
 msgstr "v0.9.1 最终发布版本，v0.9.1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.08.22"
 msgstr "2025.08.22"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.9.1rc3"
 msgstr "发布候选版本，v0.9.1rc3"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.08.07"
 msgstr "2025.08.07"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.10.0rc1"
 msgstr "发布候选版本，v0.10.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.08.04"
 msgstr "2025.08.04"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.9.1rc2"
 msgstr "发布候选版本，v0.9.1rc2"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.07.11"
 msgstr "2025.07.11"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.9.2rc1"
 msgstr "发布候选版本，v0.9.2rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.06.22"
 msgstr "2025.06.22"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.9.1rc1"
 msgstr "发布候选版本，v0.9.1rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.06.10"
 msgstr "2025.06.10"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.9.0rc2"
 msgstr "发布候选版本，v0.9.0rc2"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.06.09"
 msgstr "2025.06.09"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.9.0rc1"
 msgstr "发布候选版本，v0.9.0rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.05.29"
 msgstr "2025.05.29"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.7.3 post release, v0.7.3.post1"
 msgstr "v0.7.3 后续发布版本，v0.7.3.post1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.05.08"
 msgstr "2025.05.08"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.7.3 Final release, v0.7.3"
 msgstr "v0.7.3 最终发布版本，v0.7.3"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.05.06"
 msgstr "2025.05.06"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.8.5rc1"
 msgstr "发布候选版本，v0.8.5rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.04.28"
 msgstr "2025.04.28"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.8.4rc2"
 msgstr "发布候选版本，v0.8.4rc2"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.04.18"
 msgstr "2025.04.18"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.8.4rc1"
 msgstr "发布候选版本，v0.8.4rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.03.28"
 msgstr "2025.03.28"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.7.3rc2"
 msgstr "发布候选版本，v0.7.3rc2"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.03.14"
 msgstr "2025.03.14"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.7.3rc1"
 msgstr "发布候选版本，v0.7.3rc1"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "2025.02.19"
 msgstr "2025.02.19"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Release candidates, v0.7.1rc1"
 msgstr "发布候选版本，v0.7.1rc1"
 
-#: ../../source/community/versioning_policy.md:117
+#: ../../source/community/versioning_policy.md:119
 msgid "Branch policy"
 msgstr "分支策略"
 
-#: ../../source/community/versioning_policy.md:119
+#: ../../source/community/versioning_policy.md:121
 msgid "vLLM Ascend includes two branches: main and dev."
 msgstr "vLLM Ascend 包含两个分支：main 和 dev。"
 
-#: ../../source/community/versioning_policy.md:121
+#: ../../source/community/versioning_policy.md:123
 msgid ""
 "**main**: corresponds to the vLLM main branch and latest 1 or 2 release "
 "version. It is continuously monitored for quality through Ascend CI."
 msgstr "**main**：对应 vLLM 的 main 分支以及最新的 1 到 2 个发布版本。通过 Ascend CI 持续监控其质量。"
 
-#: ../../source/community/versioning_policy.md:122
+#: ../../source/community/versioning_policy.md:124
 msgid ""
 "**releases/vX.Y.Z**: development branch, created with part of new releases "
 "of vLLM. For example, `releases/v0.13.0` is the dev branch for vLLM "
@@ -863,70 +871,70 @@ msgstr ""
 "**releases/vX.Y.Z**：开发分支，随 vLLM 的部分新版本创建。例如，`releases/v0.13.0` 是 vLLM "
 "`v0.13.0` 版本的开发分支。"
 
-#: ../../source/community/versioning_policy.md:124
+#: ../../source/community/versioning_policy.md:126
 msgid ""
 "Commits should typically be merged into the main branch first, and only then"
 " backported to the dev branch, to reduce maintenance costs as much as "
 "possible."
 msgstr "提交通常应首先合并到 main 分支，然后再反向移植到 dev 分支，以尽可能降低维护成本。"
 
-#: ../../source/community/versioning_policy.md:126
+#: ../../source/community/versioning_policy.md:128
 msgid "Maintenance branch and EOL"
 msgstr "维护分支与生命周期终止"
 
-#: ../../source/community/versioning_policy.md:128
+#: ../../source/community/versioning_policy.md:130
 msgid "The table below lists branch states."
 msgstr "下表列出了分支状态。"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Branch"
 msgstr "分支"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Time Frame"
 msgstr "时间范围"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Summary"
 msgstr "摘要"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Maintained"
 msgstr "已维护"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Approximately 2-3 minor versions"
 msgstr "大约 2-3 个次要版本"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Bugfixes received; releases produced; CI commitment"
 msgstr "接收错误修复；生成发布版本；CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Unmaintained"
 msgstr "未维护"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Community-interest driven"
 msgstr "由社区兴趣驱动"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Bugfixes received; no releases produced; no CI commitment"
 msgstr "接收错误修复；不生成发布版本；无 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "End of Life (EOL)"
 msgstr "生命周期终止"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Branch no longer accepting changes"
 msgstr "分支不再接受变更"
 
-#: ../../source/community/versioning_policy.md:136
+#: ../../source/community/versioning_policy.md:138
 msgid "Branch states"
 msgstr "分支状态"
 
-#: ../../source/community/versioning_policy.md:138
+#: ../../source/community/versioning_policy.md:140
 msgid ""
 "Note that vLLM Ascend will only be released for a certain vLLM release "
 "version, not for every version. Hence, you may notice that some versions "
@@ -939,164 +947,164 @@ msgstr ""
 "`releases/v0.13.0`），而其他版本则没有（例如 `releases/v0.12.0`）。vLLM Ascend 发布分支现在遵循 "
 "`releases/vX.Y.Z` 命名约定，取代了之前的 `vX.Y.Z-dev` 格式，以与 vLLM 的分支命名标准保持一致。"
 
-#: ../../source/community/versioning_policy.md:140
+#: ../../source/community/versioning_policy.md:142
 msgid ""
 "Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM "
 "Ascend version branch and supports its latest version (such as 0.7.3), as "
 "shown below:"
 msgstr "通常，vLLM 的每个次要版本（如 0.7）对应一个 vLLM Ascend 版本分支，并支持其最新版本（如 0.7.3），如下所示："
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "State"
 msgstr "状态"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Note"
 msgstr "备注"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "CI commitment for vLLM main branch and vLLM {{main_vllm_tag}}  tag"
 msgstr "对 vLLM main 分支和 vLLM {{main_vllm_tag}} 标签的 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "releases/v0.23.0"
 msgstr "releases/v0.23.0"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "CI commitment for vLLM 0.23.0 version"
 msgstr "对 vLLM 0.23.0 版本的 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "releases/v0.18.0"
 msgstr "releases/v0.18.0"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "CI commitment for vLLM 0.18.0 version"
 msgstr "对 vLLM 0.18.0 版本的 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "releases/v0.13.0"
 msgstr "releases/v0.13.0"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "CI commitment for vLLM 0.13.0 version"
 msgstr "对 vLLM 0.13.0 版本的 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.11.0-dev"
 msgstr "v0.11.0-dev"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "CI commitment for vLLM 0.11.0 version"
 msgstr "对 vLLM 0.11.0 版本的 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.9.1-dev"
 msgstr "v0.9.1-dev"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "CI commitment for vLLM 0.9.1 version"
 msgstr "对 vLLM 0.9.1 版本的 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.7.3-dev"
 msgstr "v0.7.3-dev"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "CI commitment for vLLM 0.7.3 version"
 msgstr "对 vLLM 0.7.3 版本的 CI 承诺"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "v0.7.1-dev"
 msgstr "v0.7.1-dev"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Replaced by v0.7.3-dev"
 msgstr "已被 v0.7.3-dev 取代"
 
-#: ../../source/community/versioning_policy.md:153
+#: ../../source/community/versioning_policy.md:155
 msgid "Feature branches"
 msgstr "特性分支"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "RFC Link"
 msgstr "RFC 链接"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Scheduled Merge Time"
 msgstr "计划合并时间"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Mentor"
 msgstr "导师"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "rfc/long_seq_optimization"
 msgstr "rfc/long_seq_optimization"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid ""
 "[RFC: long sequence optimization #22693](https://github.com/vllm-"
 "project/vllm/issues/22693)"
 msgstr "[RFC：长序列优化 #22693](https://github.com/vllm-project/vllm/issues/22693)"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "930"
 msgstr "930"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "wangxiyuan"
 msgstr "wangxiyuan"
 
-#: ../../source/community/versioning_policy.md:159
+#: ../../source/community/versioning_policy.md:161
 msgid ""
 "Branch: The feature branch should be created with a prefix `rfc/` followed "
 "by the feature name, such as `rfc/feature-name`."
 msgstr "分支：特性分支应以 `rfc/` 为前缀，后跟特性名称来创建，例如 `rfc/feature-name`。"
 
-#: ../../source/community/versioning_policy.md:160
+#: ../../source/community/versioning_policy.md:162
 msgid ""
 "State: The state of the feature branch is `Maintained` until it is merged "
 "into the main branch or deleted."
 msgstr "状态：特性分支在被合并到 main 分支或删除之前，其状态为 `已维护`。"
 
-#: ../../source/community/versioning_policy.md:161
+#: ../../source/community/versioning_policy.md:163
 msgid ""
 "RFC Link: The feature branch should be created with a corresponding RFC "
 "issue. The creation of a feature branch requires an RFC and approval from at"
 " least two maintainers."
 msgstr "RFC 链接：创建特性分支时应附带相应的 RFC 议题。创建特性分支需要一份 RFC 并获得至少两名维护者的批准。"
 
-#: ../../source/community/versioning_policy.md:162
+#: ../../source/community/versioning_policy.md:164
 msgid ""
 "Scheduled Merge Time: The final goal of a feature branch is to be merged "
 "into the main branch. If it remains unmerged for more than three months, the"
 " mentor maintainer should evaluate whether to delete the branch."
 msgstr "计划合并时间：特性分支的最终目标是合并到主分支。若超过三个月未合并，导师维护者应评估是否删除该分支。"
 
-#: ../../source/community/versioning_policy.md:163
+#: ../../source/community/versioning_policy.md:165
 msgid ""
 "Mentor: The mentor should be a vLLM Ascend maintainer who is responsible for"
 " the feature branch."
 msgstr "导师：导师应为vLLM Ascend维护者，负责特性分支的管理。"
 
-#: ../../source/community/versioning_policy.md:165
+#: ../../source/community/versioning_policy.md:167
 msgid "Backward compatibility"
 msgstr "向后兼容性"
 
-#: ../../source/community/versioning_policy.md:167
+#: ../../source/community/versioning_policy.md:169
 msgid ""
 "For main branch, vLLM Ascend should work with vLLM main branch and latest 1 "
 "or 2 releases. To ensure backward compatibility, do as follows:"
 msgstr "对于主分支，vLLM Ascend应与vLLM主分支及最新1-2个版本兼容。为确保向后兼容性，请遵循以下操作："
 
-#: ../../source/community/versioning_policy.md:169
+#: ../../source/community/versioning_policy.md:171
 msgid ""
 "Both main branch and target vLLM release, such as the vLLM main branch and "
 "vLLM 0.8.4, are tested by Ascend E2E CI."
 msgstr "主分支及目标vLLM版本（例如vLLM主分支和vLLM 0.8.4）均需通过Ascend E2E CI测试。"
 
-#: ../../source/community/versioning_policy.md:170
+#: ../../source/community/versioning_policy.md:172
 msgid ""
 "To make sure that code changes are compatible with the latest 1 or 2 vLLM "
 "releases, vLLM Ascend introduces a version check mechanism inside the code. "
@@ -1109,17 +1117,17 @@ msgstr ""
 "为确保代码变更与最新1-2个vLLM版本兼容，vLLM "
 "Ascend在代码中引入了版本检查机制。该机制首先检查已安装vLLM包的版本，以决定使用哪套代码逻辑。若用户遇到`InvalidVersion`错误，可能表示安装了开发版或可编辑版的vLLM包。此时，我们提供环境变量`VLLM_VERSION`，允许用户指定要使用的vLLM包版本。"
 
-#: ../../source/community/versioning_policy.md:171
+#: ../../source/community/versioning_policy.md:173
 msgid ""
 "Document changes should be compatible with the latest 1 or 2 vLLM releases. "
 "Notes should be added if there are any breaking changes."
 msgstr "文档变更应与最新1-2个vLLM版本兼容。如有破坏性变更，需添加说明注释。"
 
-#: ../../source/community/versioning_policy.md:173
+#: ../../source/community/versioning_policy.md:175
 msgid "Document branch policy"
 msgstr "文档分支策略"
 
-#: ../../source/community/versioning_policy.md:175
+#: ../../source/community/versioning_policy.md:177
 msgid ""
 "To reduce maintenance costs, **all branch documentation content should "
 "remain consistent, and version differences can be controlled via variables "
@@ -1131,79 +1139,79 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/docs/source/conf.py)中的变量控制**。虽然这并非易事，但这是我们应努力遵循的原则。"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Version"
 msgstr "版本"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Purpose"
 msgstr "用途"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Code Branch"
 msgstr "代码分支"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "latest"
 msgstr "latest"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Doc for the latest rc release of main branch"
 msgstr "主分支最新RC版本的文档"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "`main` branch"
 msgstr "`main`分支"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "rc version"
 msgstr "rc版本"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Doc for RC released versions"
 msgstr "RC发布版本的文档"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "`vX.Y.ZrcN` --> `vX.Y.ZrcN` tag"
 msgstr "`vX.Y.ZrcN` --> `vX.Y.ZrcN`标签"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "version"
 msgstr "版本"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "Doc for historical released versions"
 msgstr "历史发布版本的文档"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:63
 msgid "`vX.Y.Z` --> `releases/vX.Y.Z` branch"
 msgstr "`vX.Y.Z` --> `releases/vX.Y.Z`分支"
 
-#: ../../source/community/versioning_policy.md:183
+#: ../../source/community/versioning_policy.md:185
 msgid "Notes:"
 msgstr "说明："
 
-#: ../../source/community/versioning_policy.md:185
+#: ../../source/community/versioning_policy.md:187
 msgid ""
 "`latest` documentation: always points to latest rc release of main branch."
 msgstr "`latest`文档：始终指向主分支的最新RC版本。"
 
-#: ../../source/community/versioning_policy.md:186
+#: ../../source/community/versioning_policy.md:188
 msgid ""
 "`rc version` documentation: there are no further updates after release."
 msgstr "`rc版本`文档：发布后不再更新。"
 
-#: ../../source/community/versioning_policy.md:187
+#: ../../source/community/versioning_policy.md:189
 msgid ""
 "`version` documentation: keep updating the `releases/vX.Y.Z` branch "
 "documentation to fix doc bugs."
 msgstr "`版本`文档：持续更新`releases/vX.Y.Z`分支文档以修复文档缺陷。"
 
-#: ../../source/community/versioning_policy.md:189
+#: ../../source/community/versioning_policy.md:191
 msgid "Software dependency management"
 msgstr "软件依赖管理"
 
-#: ../../source/community/versioning_policy.md:191
+#: ../../source/community/versioning_policy.md:193
 msgid ""
 "`torch-npu`: TorchNPU releases a stable version to "
 "[PyPI](https://pypi.org/project/torch-npu) every 3 months, a development "

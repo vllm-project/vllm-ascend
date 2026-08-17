@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-08 05:20+0000\n"
+"POT-Creation-Date: 2026-08-17 01:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -140,7 +140,7 @@ msgid ""
 "310P table below for its requirements."
 msgstr "Atlas 300I DUO 使用其平台专属的 CANN 9.1.0 软件包；其要求请参阅下表中的 310P 部分。"
 
-#: ../../source/installation.md
+#: ../../source/installation.md ../../source/installation.md:275
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
@@ -464,10 +464,6 @@ msgid "vllm-ascend:{{ vllm_ascend_version }}-310p"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-310p"
 
 #: ../../source/installation.md:275
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
-
-#: ../../source/installation.md:275
 msgid "vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler"
 
@@ -577,55 +573,73 @@ msgstr ""
 " to load the files, and couldn't find them in the cached files.`），请运行以下命令以使用"
 " ModelScope 作为替代："
 
-#: ../../source/installation.md:463
+#: ../../source/installation.md:464
+#, python-format
+msgid ""
+"If you encounter custom-op security verification errors while running "
+"inference on Atlas 950DT, refer to [Pooling enables UB and UBoE for 950DT "
+"and "
+"950PR](https://gitcode.com/Ascend/memcache/wiki/%E6%B1%A0%E5%8C%96%E4%BD%BF%E8%83%BD950DT%E5%92%8C950PR%E7%9A%84UB%E5%92%8CUBoE.md)"
+" and run the following commands:"
+msgstr ""
+"如果在Atlas "
+"950DT上运行推理时遇到自定义算子安全校验错误，请参考[池化使能950DT和950PR的UB和UBoE](https://gitcode.com/Ascend/memcache/wiki/%E6%B1%A0%E5%8C%96%E4%BD%BF%E8%83%BD950DT%E5%92%8C950PR%E7%9A%84UB%E5%92%8CUBoE.md)并运行以下命令："
+
+#: ../../source/installation.md:466
+msgid ""
+"Each NPU will prompt for confirmation when running the first command. You "
+"must manually enter `Y` for all of them."
+msgstr "每个NPU在运行第一条命令时都会提示确认。您必须手动为所有提示输入`Y`。"
+
+#: ../../source/installation.md:473
 msgid "This section shows ascend platform is successfully detected in vllm:"
 msgstr "此部分显示 vllm 中成功检测到 ascend 平台："
 
-#: ../../source/installation.md:472
+#: ../../source/installation.md:482
 msgid "This section shows the final output:"
 msgstr "此部分显示最终输出："
 
-#: ../../source/installation.md:481
+#: ../../source/installation.md:491
 msgid ""
 "This section shows process exits after offline inference, and does not "
 "affect actual inference:"
 msgstr "此部分显示进程在离线推理后退出，不影响实际推理："
 
-#: ../../source/installation.md:490
+#: ../../source/installation.md:500
 msgid "Multi-node Deployment"
 msgstr "多节点部署"
 
-#: ../../source/installation.md:492
+#: ../../source/installation.md:502
 msgid "Verify Multi-Node Communication"
 msgstr "验证多节点通信"
 
-#: ../../source/installation.md:494
+#: ../../source/installation.md:504
 msgid ""
 "First, check physical layer connectivity, then verify each node, and finally"
 " verify the inter-node connectivity."
 msgstr "首先检查物理层连接，然后验证每个节点，最后验证节点间连接。"
 
-#: ../../source/installation.md:496
+#: ../../source/installation.md:506
 msgid "Physical Layer Requirements"
 msgstr "物理层要求"
 
-#: ../../source/installation.md:498
+#: ../../source/installation.md:508
 msgid ""
 "The physical machines must be located on the same LAN, with network "
 "connectivity."
 msgstr "物理机器必须位于同一局域网内，并具有网络连通性。"
 
-#: ../../source/installation.md:499
+#: ../../source/installation.md:509
 msgid ""
 "All NPUs are connected with optical modules, and the connection status must "
 "be normal."
 msgstr "所有 NPU 均通过光模块连接，且连接状态必须正常。"
 
-#: ../../source/installation.md:501
+#: ../../source/installation.md:511
 msgid "Each Node Verification"
 msgstr "每个节点验证"
 
-#: ../../source/installation.md:503
+#: ../../source/installation.md:513
 msgid ""
 "Execute the following commands on each node in sequence. The results must "
 "all be `success` and the status must be `UP`:"
@@ -643,33 +657,33 @@ msgstr "A3 系列"
 msgid "950DT series"
 msgstr "950DT 系列"
 
-#: ../../source/installation.md:567
+#: ../../source/installation.md:577
 msgid "Interconnect Verification"
 msgstr "互连验证"
 
-#: ../../source/installation.md:569
+#: ../../source/installation.md:579
 msgid "1. Get NPU IP Addresses"
 msgstr "1.获取 NPU IP 地址"
 
-#: ../../source/installation.md:600
+#: ../../source/installation.md:610
 msgid "2. Cross-Node PING Test"
 msgstr "2.跨节点 PING 测试"
 
-#: ../../source/installation.md:607
+#: ../../source/installation.md:617
 msgid "Atlas 950 Series Server Pre-check"
 msgstr "Atlas 950 系列服务器预检查"
 
-#: ../../source/installation.md:609
+#: ../../source/installation.md:619
 msgid ""
 "This pre-check applies only to Atlas 950 series servers. Other server series"
 " can skip it."
 msgstr "此预检查仅适用于 Atlas 950 系列服务器。其他服务器系列可跳过。"
 
-#: ../../source/installation.md:611
+#: ../../source/installation.md:621
 msgid "**Prepare HiXLEP configuration paths**"
 msgstr "**准备 HiXLEP 配置路径**"
 
-#: ../../source/installation.md:613
+#: ../../source/installation.md:623
 #, python-format
 msgid ""
 "When deploying an inference service on Atlas 950 series servers, verify on "
@@ -687,17 +701,17 @@ msgstr ""
 "配置文件生成指南](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)"
 " 生成所需内容。生成 `/etc/hixlep` 时，请使用“D2D 场景”。"
 
-#: ../../source/installation.md:615
+#: ../../source/installation.md:625
 msgid "Run Container In Each Node"
 msgstr "在每个节点中运行容器"
 
-#: ../../source/installation.md:617
+#: ../../source/installation.md:627
 msgid ""
 "Using vLLM-ascend official container is more efficient to run multi-node "
 "environment."
 msgstr "使用 vLLM-ascend 官方容器可以更高效地运行多节点环境。"
 
-#: ../../source/installation.md:619
+#: ../../source/installation.md:629
 msgid ""
 "Run the following command to start the container in each node (You should "
 "download the weight to /root/.cache in advance):"
