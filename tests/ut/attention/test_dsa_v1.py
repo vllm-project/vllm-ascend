@@ -232,6 +232,7 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
         attn_state=MagicMock(),
+        causal=True,
     )
     sas_metadata = torch.full((DSA_METADATA_BUFFER_SIZE,), 1, dtype=torch.int32)
     qli_metadata = torch.full((DSA_METADATA_BUFFER_SIZE,), 2, dtype=torch.int32)
