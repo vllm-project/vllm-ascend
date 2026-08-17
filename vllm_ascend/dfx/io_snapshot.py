@@ -91,8 +91,17 @@ def output_token_count_for_request(runner: Any, req_id: str, req_idx: int | None
     return sum(1 for tid in ids if tid != -1)
 
 
-def prompt_token_count_for_request(runner: Any, req_id: str, req_idx: int | None = None) -> int:
-    ids = prompt_token_ids_for_request(runner, req_id, req_idx) if runner is not None else None
+def prompt_token_count_for_request(
+    runner: Any,
+    req_id: str,
+    req_idx: int | None = None,
+    scheduler_output: Any | None = None,
+) -> int:
+    ids = (
+        prompt_token_ids_for_request(runner, req_id, req_idx, scheduler_output=scheduler_output)
+        if runner is not None
+        else None
+    )
     return len(ids) if ids is not None else 0
 
 
@@ -217,11 +226,13 @@ class RequestIoSnapshotManager:
         *,
         include_token_ids: bool = False,
         use_cache: bool = True,
+        scheduler_output: Any | None = None,
     ) -> RequestIoSnapshot:
         """Build prompt + cumulative-output view for ``req_id``.
 
         Output prefers Store cumulative ids (async-safe). Prompt is read from
-        the runner. ``include_token_ids`` attaches full id lists when
+        the runner (MRV1 batch / MRV2 ``req_states`` / ``scheduler_output``).
+        ``include_token_ids`` attaches full id lists when
         ``report.save_sensitive_info`` is on.
         """
         if not req_id:
@@ -234,7 +245,7 @@ class RequestIoSnapshotManager:
         store = RequestDfxStore.get()
         built_output = store.cumulative_output_ids(req_id)
         if include_token_ids and runner is not None:
-            raw_prompt = prompt_token_ids_for_request(runner, req_id, req_idx)
+            raw_prompt = prompt_token_ids_for_request(runner, req_id, req_idx, scheduler_output=scheduler_output)
             prompt_ids = list(raw_prompt) if raw_prompt is not None else []
             prompt_count = len(prompt_ids)
             if built_output:
@@ -243,7 +254,7 @@ class RequestIoSnapshotManager:
                 output_ids = _filter_valid_token_ids(_raw_output_token_ids(runner, req_id, req_idx))
             output_count = len(output_ids)
         else:
-            prompt_count = prompt_token_count_for_request(runner, req_id, req_idx)
+            prompt_count = prompt_token_count_for_request(runner, req_id, req_idx, scheduler_output=scheduler_output)
             output_count = (
                 len(built_output) if built_output else output_token_count_for_request(runner, req_id, req_idx)
             )

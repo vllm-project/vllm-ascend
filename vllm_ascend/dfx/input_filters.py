@@ -327,12 +327,106 @@ def build_input_filter_chain(configs: Sequence[dict[str, Any]]) -> InputFilterCh
     return InputFilterChain(filters=filters)
 
 
+def _prompt_ids_from_req_states(
+    req_states: Any,
+    req_id: str,
+    req_idx: int | None,
+) -> list[int] | None:
+    """Read prompt ids from MRV2 ``RequestState`` (UVA CPU mirror preferred)."""
+    if req_states is None:
+        return None
+    id_map = getattr(req_states, "req_id_to_index", None)
+    idx: int | None = None
+    if req_idx is not None:
+        try:
+            idx_i = int(req_idx)
+        except (TypeError, ValueError):
+            idx_i = -1
+        if idx_i >= 0:
+            idx = idx_i
+    if idx is None and isinstance(id_map, dict):
+        mapped = id_map.get(req_id)
+        if mapped is not None:
+            try:
+                idx = int(mapped)
+            except (TypeError, ValueError):
+                return None
+    if idx is None or idx < 0:
+        return None
+
+    prompt_len = getattr(req_states, "prompt_len", None)
+    prompt_len_np = getattr(prompt_len, "np", None) if prompt_len is not None else None
+    if prompt_len_np is None:
+        return None
+    try:
+        n = int(prompt_len_np[idx])
+    except (IndexError, TypeError, ValueError):
+        return None
+    if n <= 0:
+        return []
+
+    all_token_ids = getattr(req_states, "all_token_ids", None)
+    if all_token_ids is None:
+        return None
+    # StagedWriteTensor with uva_instead_of_gpu keeps a host mirror in _uva_buf.
+    uva_buf = getattr(all_token_ids, "_uva_buf", None)
+    row = None
+    if uva_buf is not None:
+        host = getattr(uva_buf, "np", None)
+        if host is None:
+            host = getattr(uva_buf, "cpu", None)
+        if host is not None:
+            try:
+                row = host[idx, :n]
+            except (IndexError, TypeError):
+                row = None
+    if row is None:
+        gpu = getattr(all_token_ids, "gpu", None)
+        if gpu is None:
+            return None
+        try:
+            row = gpu[idx, :n]
+            if hasattr(row, "detach"):
+                row = row.detach()
+            if hasattr(row, "cpu"):
+                row = row.cpu()
+        except Exception:
+            return None
+    if hasattr(row, "tolist"):
+        return [int(x) for x in row.tolist()]
+    return [int(x) for x in row]
+
+
+def _prompt_ids_from_scheduler_output(
+    scheduler_output: Any,
+    req_id: str,
+) -> list[int] | None:
+    """First-wave MRV2: prompts live on ``scheduled_new_reqs`` before prepare_inputs."""
+    if scheduler_output is None or not req_id:
+        return None
+    new_reqs = getattr(scheduler_output, "scheduled_new_reqs", None)
+    if not new_reqs:
+        return None
+    for req in new_reqs:
+        if getattr(req, "req_id", None) != req_id:
+            continue
+        ids = getattr(req, "prompt_token_ids", None)
+        if ids is None:
+            # Some v2 paths carry prompt+partial output as prefill_token_ids.
+            ids = getattr(req, "prefill_token_ids", None)
+        if ids is None:
+            return None
+        return [int(x) for x in ids]
+    return None
+
+
 def prompt_token_ids_for_request(
     runner: Any,
     req_id: str,
     req_idx: int | None = None,
+    scheduler_output: Any | None = None,
 ) -> list[int] | None:
-    """Best-effort prompt token ids from runner request state / input batch."""
+    """Best-effort prompt token ids from runner request state / input batch / MRV2."""
     if runner is None:
         return None
     requests = getattr(runner, "requests", None)
@@ -344,35 +438,46 @@ def prompt_token_ids_for_request(
                 return [int(x) for x in ids]
 
     input_batch = getattr(runner, "input_batch", None)
-    if input_batch is None:
-        return None
-    idx = req_idx
-    if idx is None:
-        req_id_to_index = getattr(input_batch, "req_id_to_index", None)
-        if isinstance(req_id_to_index, dict):
-            idx = req_id_to_index.get(req_id)
-    if idx is None:
-        return None
-    try:
-        idx_i = int(idx)
-    except (TypeError, ValueError):
-        return None
-    token_ids_cpu = getattr(input_batch, "token_ids_cpu", None)
-    num_prompt_tokens = getattr(input_batch, "num_prompt_tokens", None)
-    if token_ids_cpu is None or num_prompt_tokens is None:
-        return None
-    if idx_i < 0 or idx_i >= len(num_prompt_tokens):
-        return None
-    n = int(num_prompt_tokens[idx_i])
-    if n <= 0:
-        return []
-    row = token_ids_cpu[idx_i, :n]
-    if hasattr(row, "tolist"):
-        return [int(x) for x in row.tolist()]
-    return [int(x) for x in row]
+    if input_batch is not None:
+        idx = req_idx
+        if idx is None:
+            req_id_to_index = getattr(input_batch, "req_id_to_index", None)
+            if isinstance(req_id_to_index, dict):
+                idx = req_id_to_index.get(req_id)
+        if idx is not None:
+            try:
+                idx_i = int(idx)
+            except (TypeError, ValueError):
+                idx_i = -1
+            token_ids_cpu = getattr(input_batch, "token_ids_cpu", None)
+            num_prompt_tokens = getattr(input_batch, "num_prompt_tokens", None)
+            if (
+                token_ids_cpu is not None
+                and num_prompt_tokens is not None
+                and idx_i >= 0
+                and idx_i < len(num_prompt_tokens)
+            ):
+                n = int(num_prompt_tokens[idx_i])
+                if n <= 0:
+                    return []
+                row = token_ids_cpu[idx_i, :n]
+                if hasattr(row, "tolist"):
+                    return [int(x) for x in row.tolist()]
+                return [int(x) for x in row]
+
+    # MRV2: persistent request table (filled after prepare_inputs / prior waves).
+    from_states = _prompt_ids_from_req_states(getattr(runner, "req_states", None), req_id, req_idx)
+    if from_states is not None:
+        return from_states
+
+    # MRV2 first prefill wave: sync_for_step runs before prepare_inputs.
+    return _prompt_ids_from_scheduler_output(scheduler_output, req_id)
 
 
-def iter_batch_prompt_token_ids(runner: Any) -> list[tuple[str, int, list[int]]]:
+def iter_batch_prompt_token_ids(
+    runner: Any,
+    scheduler_output: Any | None = None,
+) -> list[tuple[str, int, list[int]]]:
     """Collect ``(req_id, req_idx, prompt_token_ids)`` for the current batch.
 
     Skips requests whose prompt ids are unavailable.
@@ -386,18 +491,44 @@ def iter_batch_prompt_token_ids(runner: Any) -> list[tuple[str, int, list[int]]]
         for idx, req_id in enumerate(req_ids):
             if not req_id:
                 continue
-            ids = prompt_token_ids_for_request(runner, str(req_id), idx)
+            ids = prompt_token_ids_for_request(runner, str(req_id), idx, scheduler_output=scheduler_output)
             if ids is None:
                 continue
             out.append((str(req_id), idx, ids))
         return out
 
     requests = getattr(runner, "requests", None)
-    if isinstance(requests, dict):
+    if isinstance(requests, dict) and requests:
         for req_id, req in requests.items():
             if not req_id:
                 continue
-            ids = prompt_token_ids_for_request(runner, str(req_id), None)
+            ids = prompt_token_ids_for_request(runner, str(req_id), None, scheduler_output=scheduler_output)
+            if ids is None:
+                continue
+            out.append((str(req_id), -1, ids))
+        return out
+
+    # MRV2: iterate req_states, then any scheduled_new_reqs not already covered.
+    req_states = getattr(runner, "req_states", None)
+    id_map = getattr(req_states, "req_id_to_index", None) if req_states is not None else None
+    seen: set[str] = set()
+    if isinstance(id_map, dict) and id_map:
+        for req_id, idx in sorted(id_map.items(), key=lambda item: int(item[1])):
+            if not req_id:
+                continue
+            ids = prompt_token_ids_for_request(runner, str(req_id), int(idx), scheduler_output=scheduler_output)
+            if ids is None:
+                continue
+            seen.add(str(req_id))
+            out.append((str(req_id), int(idx), ids))
+
+    if scheduler_output is not None:
+        new_reqs = getattr(scheduler_output, "scheduled_new_reqs", None) or []
+        for req in new_reqs:
+            req_id = getattr(req, "req_id", None)
+            if not req_id or str(req_id) in seen:
+                continue
+            ids = prompt_token_ids_for_request(runner, str(req_id), None, scheduler_output=scheduler_output)
             if ids is None:
                 continue
             out.append((str(req_id), -1, ids))

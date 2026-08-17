@@ -15,6 +15,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
+
 from vllm_ascend.dfx.detector.base import AnomalyDetector
 from vllm_ascend.dfx.input_filters import (
     InputFilterManager,
@@ -22,7 +26,9 @@ from vllm_ascend.dfx.input_filters import (
     PromptContainsTokenIdsFilter,
     PromptLengthFilter,
     build_input_filter_chain,
+    iter_batch_prompt_token_ids,
     matches_input_token_id_prefixes,
+    prompt_token_ids_for_request,
 )
 from vllm_ascend.dfx.request_state import RequestDfxStore
 
@@ -149,3 +155,33 @@ def test_detector_skips_when_filter_rejects():
     det = AnomalyDetector()
     assert det._passes_input_filter("r1", 0, prompt_token_ids=[1, 2, 3], log=False) is False
     InputFilterManager.reset_for_tests()
+
+
+def test_prompt_token_ids_from_mrv2_req_states():
+    prompt = [10, 20, 30, 40]
+    host = np.zeros((4, 8), dtype=np.int32)
+    host[2, : len(prompt)] = np.asarray(prompt, dtype=np.int32)
+    prompt_len_np = np.zeros(4, dtype=np.int32)
+    prompt_len_np[2] = len(prompt)
+    req_states = SimpleNamespace(
+        req_id_to_index={"r_v2": 2},
+        prompt_len=SimpleNamespace(np=prompt_len_np),
+        all_token_ids=SimpleNamespace(_uva_buf=SimpleNamespace(np=host), gpu=None),
+    )
+    runner = SimpleNamespace(input_batch=None, requests=None, req_states=req_states)
+    assert prompt_token_ids_for_request(runner, "r_v2") == prompt
+    assert prompt_token_ids_for_request(runner, "r_v2", 2) == prompt
+    assert prompt_token_ids_for_request(runner, "missing") is None
+
+
+def test_prompt_token_ids_from_scheduler_new_reqs():
+    runner = SimpleNamespace(input_batch=None, requests=None, req_states=None)
+    so = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id="new1", prompt_token_ids=[7, 8, 9], prefill_token_ids=None),
+        ]
+    )
+    assert prompt_token_ids_for_request(runner, "new1", scheduler_output=so) == [7, 8, 9]
+    assert prompt_token_ids_for_request(runner, "other", scheduler_output=so) is None
+    rows = iter_batch_prompt_token_ids(runner, scheduler_output=so)
+    assert rows == [("new1", -1, [7, 8, 9])]
