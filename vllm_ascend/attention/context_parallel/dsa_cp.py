@@ -1097,6 +1097,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.indexer = kwargs.get("indexer")
         self.compressor = kwargs.get("compressor")
         self.swa_cache_layer = kwargs.get("swa_cache_layer")
+        assert self.swa_cache_layer is not None
 
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]

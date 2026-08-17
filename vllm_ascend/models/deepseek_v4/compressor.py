@@ -94,7 +94,8 @@ class Compressor(nn.Module):
         compress_ratio: int = 4,
         head_dim: int = 512,
         rotate: bool = False,
-        cache_config: CacheConfig | None = None,
+        *,
+        cache_config: CacheConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -143,7 +144,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][2],  # type: ignore[union-attr]
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][2],
             )
         elif compress_ratio == 128:
             self.state_cache = AscendCompressorStateCache(
@@ -151,7 +152,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][3],  # type: ignore[union-attr]
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][3],
             )
         else:
             raise ValueError(

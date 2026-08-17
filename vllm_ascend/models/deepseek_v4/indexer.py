@@ -243,7 +243,7 @@ class DeepseekV4Indexer(nn.Module):
         skip_topk: bool,
         use_index_cache: bool,
         quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
+        cache_config: CacheConfig,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
     ):
