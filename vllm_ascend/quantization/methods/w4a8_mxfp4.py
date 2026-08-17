@@ -22,7 +22,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -42,6 +42,8 @@ def _force_load_balance_topk_ids(
     *,
     num_experts: int,
     ep_size: int,
+    dp_size: int,
+    dp_rank: int,
     capturing: bool,
     global_redundant_expert_num: int = 0,
 ) -> torch.Tensor:
@@ -63,20 +65,25 @@ def _force_load_balance_topk_ids(
         raise ValueError(
             f"num_experts ({num_experts}) must be divisible by EP size ({ep_size}) for exact per-rank load balancing."
         )
+    if dp_size <= 0 or not 0 <= dp_rank < dp_size:
+        raise ValueError(f"Invalid DP layout: dp_size={dp_size}, dp_rank={dp_rank}.")
 
     total_rows = topk_ids.numel()
     if total_rows == 0:
         return topk_ids
-    if total_rows % ep_size != 0:
+    global_rows = total_rows * dp_size
+    if global_rows % ep_size != 0:
         raise ValueError(
-            f"Routed rows ({total_rows}) must be divisible by EP size ({ep_size}) for exact per-rank load balancing."
+            f"Global routed rows ({global_rows} = {total_rows} x DP{dp_size}) must be divisible by "
+            f"EP size ({ep_size}) for exact per-rank load balancing."
         )
 
     num_local_experts = num_experts // ep_size
-    row_indices = torch.arange(total_rows, dtype=torch.int64, device=topk_ids.device)
-    ep_rank_ids = torch.remainder(row_indices, ep_size)
+    local_row_indices = torch.arange(total_rows, dtype=torch.int64, device=topk_ids.device)
+    global_row_indices = local_row_indices * dp_size + dp_rank
+    ep_rank_ids = torch.remainder(global_row_indices, ep_size)
     local_expert_ids = torch.remainder(
-        torch.div(row_indices, ep_size, rounding_mode="floor"),
+        torch.div(global_row_indices, ep_size, rounding_mode="floor"),
         num_local_experts,
     )
     balanced_ids = ep_rank_ids * num_local_experts + local_expert_ids
@@ -151,6 +158,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     def __init__(self, *, use_weight_packed: bool = False):
         self.use_weight_packed = use_weight_packed
         self.ep_group = get_ep_group()
+        self.dp_group = get_dp_group()
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
@@ -258,6 +266,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids,
                 num_experts=num_logical_experts,
                 ep_size=self.ep_group.world_size,
+                dp_size=self.dp_group.world_size,
+                dp_rank=self.dp_group.rank_in_group,
                 capturing=getattr(forward_context, "capturing", False),
                 global_redundant_expert_num=global_redundant_expert_num,
             )
