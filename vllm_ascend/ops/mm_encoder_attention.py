@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import einops
 import torch
-import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 
@@ -72,6 +71,24 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
 
         self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        self._qkv_pad_buffers: dict[str, torch.Tensor] = {}
+
+    def _pad_qkv_tensor(self, key: str, tensor: torch.Tensor, origin_head_dim: int) -> torch.Tensor:
+        buffer = self._qkv_pad_buffers.get(key)
+        if (
+            buffer is None
+            or buffer.shape[0] < tensor.shape[0]
+            or buffer.shape[1:-1] != tensor.shape[1:-1]
+            or buffer.dtype != tensor.dtype
+            or buffer.device != tensor.device
+        ):
+            buffer = tensor.new_empty((tensor.shape[0], *tensor.shape[1:-1], MAX_PAD_SIZE))
+            self._qkv_pad_buffers[key] = buffer
+
+        padded = buffer[: tensor.shape[0]]
+        padded[..., :origin_head_dim].copy_(tensor)
+        padded[..., origin_head_dim:].zero_()
+        return padded
 
     def _reshape_qkv_to_3d(
         self,
@@ -106,10 +123,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         if not self.enable_pad:
             return q, k, v, None
         origin_head_dim = q.shape[-1]
-        pad_len = MAX_PAD_SIZE - origin_head_dim
-        q = F.pad(q, (0, pad_len), mode="constant", value=0)
-        k = F.pad(k, (0, pad_len), mode="constant", value=0)
-        v = F.pad(v, (0, pad_len), mode="constant", value=0)
+        q = self._pad_qkv_tensor("q", q, origin_head_dim)
+        k = self._pad_qkv_tensor("k", k, origin_head_dim)
+        v = self._pad_qkv_tensor("v", v, origin_head_dim)
         return q, k, v, origin_head_dim
 
     def _maybe_compute_cu_seqlens(
