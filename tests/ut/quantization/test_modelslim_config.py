@@ -152,6 +152,15 @@ class TestAscendModelSlimConfig(TestBase):
             return_success=True,
         )
 
+    def test_modelslim_moe_weight_loader_is_not_wrapped_twice(self):
+        upstream_loader = MagicMock(return_value=True)
+        weight_loader = _make_modelslim_moe_weight_loader(upstream_loader)
+
+        self.assertIs(
+            _make_modelslim_moe_weight_loader(weight_loader),
+            weight_loader,
+        )
+
     def test_get_quant_method_for_moe_installs_modelslim_weight_loader(self):
         layer = RoutedExperts.__new__(RoutedExperts)
         torch.nn.Module.__init__(layer)

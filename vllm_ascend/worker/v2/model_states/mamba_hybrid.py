@@ -53,10 +53,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
-            num_tokens = input_batch.num_tokens_after_padding
+            num_input_tokens = input_batch.num_tokens_after_padding
         else:
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
+            num_input_tokens = input_batch.num_tokens
 
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(input_batch.is_prefilling_np)
@@ -87,7 +87,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
-            num_tokens=num_tokens,
+            num_tokens=num_input_tokens,
+            num_actual_tokens=input_batch.num_tokens,
+            num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
             max_query_len=input_batch.num_scheduled_tokens.max().item(),

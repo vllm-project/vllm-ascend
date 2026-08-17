@@ -37,7 +37,7 @@ def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
 def _tensor_view_from_data_ptr(state: torch.Tensor, start_addr: int, num_elements: int) -> torch.Tensor:
     byte_offset = start_addr - state.data_ptr()
     element_size = state.element_size()
-    if byte_offset < 0 or byte_offset % element_size != 0:
+    if byte_offset < 0 or byte_offset % element_size != 0 or num_elements < 0:
         raise RuntimeError("Invalid Mamba state copy pointer.")
 
     element_offset = byte_offset // element_size
@@ -45,15 +45,24 @@ def _tensor_view_from_data_ptr(state: torch.Tensor, start_addr: int, num_element
     # logical blocks can be separated by page padding. Flatten the underlying
     # storage from this state's first element instead of requiring the logical
     # state tensor itself to be contiguous.
+    if state.numel() == 0:
+        logical_storage_span = 0
+    else:
+        if any(stride < 0 for stride in state.stride()):
+            raise RuntimeError("Negative-stride Mamba state views are not supported.")
+        logical_storage_span = 1 + sum((size - 1) * stride for size, stride in zip(state.shape, state.stride()))
+
     storage_offset = state.storage_offset()
     storage_numel = state.untyped_storage().nbytes() // element_size
+    if storage_offset + logical_storage_span > storage_numel:
+        raise RuntimeError("Mamba state view exceeds its tensor storage.")
     flat_state = state.as_strided(
-        (storage_numel - storage_offset,),
+        (logical_storage_span,),
         (1,),
         storage_offset=storage_offset,
     )
     if element_offset + num_elements > flat_state.numel():
-        raise RuntimeError("Mamba state copy range exceeds tensor storage.")
+        raise RuntimeError("Mamba state copy range exceeds the logical tensor span.")
     return flat_state.narrow(0, element_offset, num_elements)
 
 

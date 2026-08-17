@@ -60,12 +60,15 @@ _MOE_WEIGHT_LOADER_NAME_MAP = {
     "w13_scale_bias": "w13_scale",
     "w2_scale_bias": "w2_scale",
 }
+_MODELSLIM_MOE_WEIGHT_LOADER_MARKER = "_modelslim_moe_weight_loader"
 
 
 def _make_modelslim_moe_weight_loader(
     weight_loader: Callable[..., bool | None],
 ) -> Callable[..., bool | None]:
     """Map ModelSlim MoE scale-bias names to the upstream scale path."""
+    if getattr(weight_loader, _MODELSLIM_MOE_WEIGHT_LOADER_MARKER, False):
+        return weight_loader
 
     @wraps(weight_loader)
     def modelslim_moe_weight_loader(
@@ -88,6 +91,7 @@ def _make_modelslim_moe_weight_loader(
             return_success=return_success,
         )
 
+    setattr(modelslim_moe_weight_loader, _MODELSLIM_MOE_WEIGHT_LOADER_MARKER, True)
     return modelslim_moe_weight_loader
 
 

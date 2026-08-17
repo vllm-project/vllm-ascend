@@ -6,6 +6,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+import torch
+
 ROOT = Path(__file__).resolve().parents[4]
 POSTPROCESS = ROOT / "vllm_ascend" / "ops" / "triton" / "mamba" / "postprocess.py"
 PATCH_MAMBA_UTILS = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_mamba_utils.py"
@@ -13,6 +16,14 @@ PATCH_MAMBA_UTILS = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_mamba_uti
 
 def _top_level_functions(path: Path) -> dict[str, ast.FunctionDef]:
     return {node.name: node for node in ast.parse(path.read_text()).body if isinstance(node, ast.FunctionDef)}
+
+
+def _load_tensor_view_from_data_ptr():
+    function = _top_level_functions(PATCH_MAMBA_UTILS)["_tensor_view_from_data_ptr"]
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    namespace = {"torch": torch}
+    exec(compile(module, PATCH_MAMBA_UTILS, "exec"), namespace)
+    return namespace["_tensor_view_from_data_ptr"]
 
 
 def test_postprocess_keeps_only_existing_ascend_precision_kernel() -> None:
@@ -33,3 +44,28 @@ def test_patch_only_installs_existing_ascend_postprocess_kernel() -> None:
     assert "MambaBase.bind_kv_cache" not in patch_source
     assert "mamba_utils._copy_mamba_state_block" not in patch_source
     assert "mamba_utils.precopy_mamba_align_fused_kernel" not in patch_source
+
+
+def test_tensor_view_copy_is_bounded_by_logical_state_span() -> None:
+    tensor_view_from_data_ptr = _load_tensor_view_from_data_ptr()
+    backing = torch.arange(16, dtype=torch.float32)
+    state = torch.as_strided(
+        backing,
+        size=(2, 2),
+        stride=(4, 1),
+        storage_offset=2,
+    )
+
+    second_block = tensor_view_from_data_ptr(
+        state,
+        state[1].data_ptr(),
+        2,
+    )
+    assert torch.equal(second_block, backing[6:8])
+
+    with pytest.raises(RuntimeError, match="logical tensor span"):
+        tensor_view_from_data_ptr(
+            state,
+            state[1].data_ptr(),
+            3,
+        )

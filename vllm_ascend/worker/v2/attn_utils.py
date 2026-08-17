@@ -215,11 +215,16 @@ def build_attn_metadata(
         # Hybrid drafters can configure causality per KV cache group.
         group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
 
-        common_attn_metadata_extra_kwargs = (
+        common_attn_metadata_extra_kwargs = dict(
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
             if model_specific_attn_metadata is not None
             else {}
         )
+        # Model-specific metadata (for example MambaHybridAttnMetadata) can
+        # already provide is_prefilling. Merge Ascend's direct override into
+        # the same dictionary instead of passing the keyword twice.
+        if is_prefilling is not None:
+            common_attn_metadata_extra_kwargs["is_prefilling"] = is_prefilling
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -235,7 +240,6 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
-            is_prefilling=is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,
@@ -548,6 +552,12 @@ def _allocate_kv_cache(
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
+    if use_hybrid_layout and any(tensor.block_stride > 0 for tensor in kv_cache_config.kv_cache_tensors):
+        raise NotImplementedError(
+            "Packed block-stride KV cache layouts are not supported for "
+            "Ascend hybrid Attention/Mamba models. Disable cross-layer "
+            "KV-cache packing."
+        )
 
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if not kv_cache_tensor.shared_by:
@@ -669,7 +679,8 @@ def _reshape_mamba_kv_cache(
 ) -> list[torch.Tensor]:
     """Create the contiguous per-state views used by the Ascend v1 runner."""
     page_size_bytes = kv_cache_spec.page_size_bytes
-    assert raw_cache.numel() % page_size_bytes == 0
+    if raw_cache.numel() % page_size_bytes:
+        raise ValueError("Mamba cache allocation is not a whole number of pages.")
     num_blocks = raw_cache.numel() // page_size_bytes
 
     state_tensors: list[torch.Tensor] = []
@@ -679,18 +690,39 @@ def _reshape_mamba_kv_cache(
     # tensor1: [(kv_padding), conv, ...]
     # tensor2: [k,            ssm,  ...]
     # tensor3: [v,            (mamba_padding), ...]
-    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+    for state_index, (shape, dtype) in enumerate(zip(kv_cache_spec.shapes, kv_cache_spec.dtypes)):
         target_shape = (num_blocks, *shape)
-        end_idx = start_idx + torch.empty(
+        state = _view_cache_bytes(
+            raw_cache,
+            start_idx,
             target_shape,
-            device="meta",
-        ).numel() * get_dtype_size(dtype)
-        state = raw_cache[start_idx:end_idx].view(dtype).view(target_shape)
+            dtype,
+            f"Mamba state {state_index}",
+        )
         state_tensors.append(state)
-        start_idx = end_idx
+        start_idx += state.numel() * state.element_size()
 
-    assert start_idx <= raw_cache.numel()
     return state_tensors
+
+
+def _view_cache_bytes(
+    raw_cache: torch.Tensor,
+    byte_offset: int,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    cache_name: str,
+) -> torch.Tensor:
+    """Build a typed cache view after validating its byte range and alignment."""
+    if raw_cache.element_size() != 1:
+        raise TypeError(f"{cache_name} raw cache must use a byte-addressable dtype.")
+    dtype_size = get_dtype_size(dtype)
+    num_bytes = torch.empty(shape, device="meta").numel() * dtype_size
+    end_offset = byte_offset + num_bytes
+    if byte_offset < 0 or end_offset > raw_cache.numel():
+        raise ValueError(f"{cache_name} view exceeds the raw cache allocation.")
+    if (raw_cache.data_ptr() + byte_offset) % dtype_size:
+        raise ValueError(f"{cache_name} byte offset {byte_offset} is not aligned to {dtype}.")
+    return raw_cache[byte_offset:end_offset].view(dtype).view(shape)
 
 
 def _reshape_kv_cache_v2(
@@ -851,10 +883,20 @@ def _reshape_kv_cache_v2(
                 k_size = torch.empty(k_shape, device="meta").numel() * get_dtype_size(k_dtype)
                 v_size = torch.empty(v_shape, device="meta").numel() * get_dtype_size(v_dtype)
                 kv_start = raw_cache.numel() - k_size - v_size
-                if kv_start < 0:
-                    raise ValueError(f"Attention cache views exceed the allocation for {layer_name}.")
-                k_cache = raw_cache[kv_start : kv_start + k_size].view(k_dtype).view(k_shape)
-                v_cache = raw_cache[kv_start + k_size :].view(v_dtype).view(v_shape)
+                k_cache = _view_cache_bytes(
+                    raw_cache,
+                    kv_start,
+                    k_shape,
+                    k_dtype,
+                    f"Attention K cache for {layer_name}",
+                )
+                v_cache = _view_cache_bytes(
+                    raw_cache,
+                    kv_start + k_size,
+                    v_shape,
+                    v_dtype,
+                    f"Attention V cache for {layer_name}",
+                )
                 kv_caches[layer_name] = (k_cache, v_cache)
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
