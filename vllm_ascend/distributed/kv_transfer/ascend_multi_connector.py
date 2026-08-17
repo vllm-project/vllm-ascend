@@ -12,13 +12,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (
     MooncakeLayerwiseConnector,
 )
-
-logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -154,9 +152,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 offloaded = bool(hook(request, block_ids, num_computed_tokens)) or offloaded
         return offloaded
 
-    def _remember_finished_request(
-        self, emitted_requests: OrderedDict[str, None], request_id: str
-    ) -> None:
+    def _remember_finished_request(self, emitted_requests: OrderedDict[str, None], request_id: str) -> None:
         emitted_requests[request_id] = None
         emitted_requests.move_to_end(request_id)
         if len(emitted_requests) > self._MAX_TRACKED_FINISHED_REQUESTS:
@@ -168,16 +164,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         logger.warning("Ignoring KV completion for unannounced request %s", request_id)
         return False
 
-    def bind_connector_metadata(
-        self, connector_metadata: MultiKVConnectorMetadata
-    ) -> None:
+    def bind_connector_metadata(self, connector_metadata: MultiKVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
         if isinstance(connector_metadata, AscendMultiKVConnectorMetadata):
             self._async_save_sources.update(connector_metadata.async_save_sources or {})
 
-    def build_connector_meta(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> MultiKVConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MultiKVConnectorMetadata:
         metadata = super().build_connector_meta(scheduler_output)
         if not self._async_save_sources:
             return metadata
@@ -190,16 +182,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._async_save_sources = {}
         return ascend_metadata
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[set[str] | None, set[str] | None]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str] | None, set[str] | None]:
         """Emit async completions once, after every expected child completes."""
         # Only asynchronous saves need eligibility. This avoids retaining all
         # synchronous terminal request IDs indefinitely.
         self._eligible_finished_req_ids.update(
-            request_id
-            for request_id in finished_req_ids
-            if request_id in self._async_save_sources
+            request_id for request_id in finished_req_ids if request_id in self._async_save_sources
         )
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
@@ -220,9 +208,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                     )
                     continue
 
-                completed_connectors = self._finished_sending_connectors.setdefault(
-                    req_id, set()
-                )
+                completed_connectors = self._finished_sending_connectors.setdefault(req_id, set())
                 if connector_index in completed_connectors:
                     logger.debug(
                         "Ignoring duplicate KV send completion from connector %d for request %s",
@@ -317,9 +303,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
 
         return self._aggregate_request_finished(
             request,
-            lambda connector: cast(SupportsHMA, connector).request_finished_all_groups(
-                request, block_ids
-            ),
+            lambda connector: cast(SupportsHMA, connector).request_finished_all_groups(request, block_ids),
         )
 
     def request_finished(
