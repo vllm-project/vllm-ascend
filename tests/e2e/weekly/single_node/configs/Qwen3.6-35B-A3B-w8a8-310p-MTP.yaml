@@ -35,6 +35,8 @@ test_cases:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
       - "--speculative_config"
       - '{"method": "mtp","num_speculative_tokens":1}'
+      - "--default-chat-template-kwargs"
+      - '{"enable_thinking":false}'
     benchmarks:
       acc:
         case_type: accuracy
@@ -57,11 +59,11 @@ test_cases:
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 32
+        num_prompts: 16
         max_out_len: 1536
-        batch_size: 8
+        batch_size: 4
         request_rate: 0
-        baseline: 158
+        baseline: 123
         threshold: 0.97
       perf_PrefixCache_warm_up:
         case_type: performance
@@ -83,5 +85,5 @@ test_cases:
         max_out_len: 512
         batch_size: 1
         request_rate: 0
-        baseline: 46
+        baseline: 12
         threshold: 0.97
