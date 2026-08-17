@@ -23,7 +23,7 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
@@ -194,11 +194,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             and get_ascend_config().enable_fused_mc2 == 1
             and act_name != "swigluoai_uninterleave"
         )
-        use_mega_moe = fused_scale_flag and is_mega_moe_supported()
+        use_mega_moe_quant_path = fused_scale_flag and _EXTRA_CTX.use_mega_moe
         if self.use_expert_weight_list:
             w1 = layer.w13_weight_list
             w2 = layer.w2_weight_list
-            if use_mega_moe:
+            if use_mega_moe_quant_path:
                 # EPLB rearranges these lists in place. MegaMoE consumes the
                 # original INT8/NZ weights and one flattened scale per expert.
                 w1_scale = [scale.reshape(-1) for scale in layer.fused_w1_scale_list]
@@ -211,7 +211,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias = layer.fused_w1_scale_bias if fused_scale_flag else None
                 w2_scale_bias = layer.fused_w2_scale_bias if fused_scale_flag else None
 
-        elif use_mega_moe:
+        elif use_mega_moe_quant_path:
             w1 = layer.cann_mega_moe_w13_weight_list
             w1_scale = layer.cann_mega_moe_fused_w1_scale_list
             w2 = layer.cann_mega_moe_w2_weight_list
@@ -339,7 +339,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 del layer.fused_w2_scale
             torch.npu.empty_cache()
 
-        elif get_ascend_config().enable_fused_mc2 == 1 and is_mega_moe_supported():
+        elif use_cann_megamoe(get_current_vllm_config()):
             layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
             layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
             layer.cann_mega_moe_fused_w1_scale_list = list(
