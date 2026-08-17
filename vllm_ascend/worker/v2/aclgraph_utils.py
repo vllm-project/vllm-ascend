@@ -194,6 +194,12 @@ class ModelWithContext(nn.Module):
     def get_original_model(self):
         return self.original_model
 
+    def embed_input_ids(self, *args, **kwargs):
+        # Multimodal autoregressive speculators embed inputs through the model
+        # while capturing draft-model graphs. Keep this auxiliary model API
+        # available while the original model is wrapped with capture context.
+        return self.original_model.embed_input_ids(*args, **kwargs)
+
     def compute_logits(self, hidden_states: torch.Tensor):
         # draft model has `compute_logits`, which is not in ModelWithContext
         return self.original_model.compute_logits(hidden_states)
