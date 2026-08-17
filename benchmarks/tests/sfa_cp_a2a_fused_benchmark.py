@@ -107,9 +107,28 @@ def _max_across_ranks(values: list[float], device: torch.device) -> list[float]:
     return [float(value) for value in timing.cpu().tolist()]
 
 
+def _capture_graph(
+    fn: Callable[[], torch.Tensor],
+) -> tuple[Callable[[], torch.Tensor], torch.npu.NPUGraph]:
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(
+        graph,
+        capture_error_mode="thread_local",
+        auto_dispatch_capture=True,
+    ):
+        output = fn()
+
+    def replay() -> torch.Tensor:
+        graph.replay()
+        return output
+
+    return replay, graph
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare legacy two-A2A SFA DCP merge with the fused one-A2A path.")
     parser.add_argument("--scatter-tokens", action="store_true")
+    parser.add_argument("--graph", action="store_true")
     parser.add_argument("--tokens", type=int, default=8)
     parser.add_argument("--heads", type=int, default=64)
     parser.add_argument("--head-dim", type=int, default=256)
@@ -143,8 +162,8 @@ def main() -> None:
         dtype=torch.float32,
         device=device,
     )
-    baseline = lambda: _legacy_two_a2a_merge(output, lse, scatter_dim, dist.group.WORLD)
-    candidate = lambda: sfa_dcp_a2a_fused_combine(
+    baseline_eager = lambda: _legacy_two_a2a_merge(output, lse, scatter_dim, dist.group.WORLD)
+    candidate_eager = lambda: sfa_dcp_a2a_fused_combine(
         output,
         lse,
         world_size,
@@ -152,12 +171,24 @@ def main() -> None:
         dist.group.WORLD,
     )
 
-    expected = baseline()
-    actual = candidate()
+    expected = baseline_eager()
+    actual = candidate_eager()
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
     error = (actual.float() - expected.float()).abs()
     max_abs = float(error.max().item())
     max_rel = float((error / expected.float().abs().clamp_min(1e-8)).max().item())
+
+    captured_graphs = []
+    if args.graph:
+        baseline, baseline_graph = _capture_graph(baseline_eager)
+        candidate, candidate_graph = _capture_graph(candidate_eager)
+        captured_graphs.extend((baseline_graph, candidate_graph))
+        baseline()
+        candidate()
+        torch.npu.synchronize()
+    else:
+        baseline = baseline_eager
+        candidate = candidate_eager
 
     dist.barrier()
     samples = _measure_alternating(
@@ -179,6 +210,7 @@ def main() -> None:
         "world_size": world_size,
         "scatter_dim": scatter_dim,
         "scatter_mode": "tokens" if scatter_dim == 0 else "heads",
+        "execution_mode": "graph" if args.graph else "eager",
         "shape": [args.tokens, args.heads, args.head_dim],
         "dtype": "bfloat16",
         "warmup": args.warmup,
@@ -203,6 +235,7 @@ def main() -> None:
     result["wall_speedup"] = baseline_median / candidate_median
     result["wall_relative_improvement"] = 1.0 - candidate_median / baseline_median
 
+    del captured_graphs
     dist.destroy_process_group()
     if rank == 0:
         print(json.dumps(result, indent=2, sort_keys=True))
