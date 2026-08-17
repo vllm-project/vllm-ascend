@@ -669,7 +669,14 @@ jobs:
           pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
           merge-multiple: true
 
-      - name: Login to Quay Temp
+      - name: Login to SWR
+        uses: docker/login-action@v4
+        with:
+          registry: swr.cn-southwest-2.myhuaweicloud.com
+          username: ${{ secrets.swr_username }}
+          password: ${{ secrets.swr_password }}
+
+      - name: Login to Quay
         uses: docker/login-action@v4
         with:
           registry: quay.io
@@ -681,7 +688,8 @@ jobs:
 
       - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
         env:
-          IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-test
+          TO_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
         run: |
           set -euo pipefail
           SUFFIX=""
@@ -690,8 +698,8 @@ jobs:
           fi
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          TAG="${TO_IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
+          DIGESTS=$(printf "$FROM_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
           echo "Digests: $DIGESTS"
           echo "Creating multi-arch manifest tag: $TAG"
           docker buildx imagetools create \
@@ -704,9 +712,9 @@ jobs:
             CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
             PATTERN="${{ inputs.schedule_tag_pattern }}"
             if [ -n "${{ inputs.suffix }}" ]; then
-              DAILY_TAG="${IMAGE}:nightly-${PATTERN}-${{ inputs.suffix }}-cann${CANN_VERSION}-${DATE}"
+              DAILY_TAG="${TO_IMAGE}:nightly-${PATTERN}-${{ inputs.suffix }}-cann${CANN_VERSION}-${DATE}"
             else
-              DAILY_TAG="${IMAGE}:nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
+              DAILY_TAG="${TO_IMAGE}:nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
             fi
             echo "Creating daily tag: $DAILY_TAG"
             docker buildx imagetools create \
