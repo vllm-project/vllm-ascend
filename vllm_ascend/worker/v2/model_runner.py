@@ -229,6 +229,8 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             # dummy/capture must not consume the pending dump-forward window.
             self.dfx.finalize_dump_data(dump=not dummy_run)
+            if not dummy_run:
+                self.dfx.note_kv_block_writes(scheduler_output)
 
     def sample_tokens(self, grammar_output=None):
         finished_req_ids = None

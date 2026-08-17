@@ -115,6 +115,12 @@ _DEFAULTS: dict[str, Any] = {
         # Cap persisted token-id list lengths (0 = unlimited). Counts stay full.
         "max_prompt_token_ids": 1000,
         "max_output_token_ids": 1000,
+        # Persist each request's current GPU block_ids in report detail.
+        "include_block_ids": True,
+        # Track/report last write wave per physical block (see blocks[]).
+        "block_last_write_wave": False,
+        # Track/report last writer req_id per physical block (see blocks[]).
+        "block_last_writer": False,
     },
     # Per-detector nested sections. Each has ``enabled`` (default false).
     "detector": {
@@ -993,6 +999,25 @@ class DfxRuntimeConfig:
         report = self._data.get("report") or {}
         return int(report.get("max_output_token_ids", 1000))
 
+    def report_include_block_ids(self) -> bool:
+        """Whether reports include the request's current GPU ``block_ids``."""
+        report = self._data.get("report") or {}
+        return bool(report.get("include_block_ids", True))
+
+    def report_block_last_write_wave(self) -> bool:
+        """Track and report each block's last KV-write wave."""
+        report = self._data.get("report") or {}
+        return bool(report.get("block_last_write_wave", False))
+
+    def report_block_last_writer(self) -> bool:
+        """Track and report each block's last writer ``req_id``."""
+        report = self._data.get("report") or {}
+        return bool(report.get("block_last_writer", False))
+
+    def report_block_meta_enabled(self) -> bool:
+        """True when any per-block write metadata tracking is on."""
+        return self.report_block_last_write_wave() or self.report_block_last_writer()
+
     def detector_section(self, name: str) -> dict[str, Any]:
         """Return nested ``detector.<name>`` object (empty dict if missing)."""
         sec = self.detector.get(name)
@@ -1439,6 +1464,17 @@ class DfxRuntimeConfig:
             if int(max_val) < 0:
                 raise ValueError(f"report.{max_key} must be >= 0")
             data["report"][max_key] = int(max_val)
+        for block_key in (
+            "include_block_ids",
+            "block_last_write_wave",
+            "block_last_writer",
+        ):
+            block_val = data["report"].get(block_key)
+            if block_val is not None and not isinstance(block_val, bool):
+                if block_val in (0, 1):
+                    data["report"][block_key] = bool(block_val)
+                else:
+                    raise ValueError(f"report.{block_key} must be bool")
         print_once = data["input_filter"].get("print_input_token_ids_once")
         if print_once is not None and not isinstance(print_once, bool):
             if print_once in (0, 1):
