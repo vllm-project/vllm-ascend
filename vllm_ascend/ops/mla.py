@@ -62,6 +62,37 @@ class IndexerWrapper(nn.Module):
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
+    # IndexCache (index_share_for_mtp_iteration): the spec-decode proposer
+    # toggles ``skip_topk`` on this wrapper at runtime (set_skip_topk) and
+    # compacts the shared top-k buffer (compact_topk_indices). The actual
+    # indexer gate and buffer live in the inner impl (e.g. AscendSFAImpl),
+    # which is not an nn.Module and is therefore invisible to
+    # named_modules(). Expose both as properties forwarding to the impl so
+    # the upstream DeepSeekMultiTokenPredictor hooks keep working on Ascend.
+    @property
+    def skip_topk(self) -> bool:
+        return self.__dict__.get("_skip_topk", False)
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self.__dict__["_skip_topk"] = bool(value)
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is not None and hasattr(impl, "skip_topk"):
+            impl.skip_topk = self.__dict__["_skip_topk"]
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is None:
+            return None
+        return getattr(impl, "topk_indices_buffer", None)
+
+    @topk_indices_buffer.setter
+    def topk_indices_buffer(self, value: torch.Tensor | None) -> None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is not None and hasattr(impl, "topk_indices_buffer"):
+            impl.topk_indices_buffer = value
+
     def __init__(
         self,
         hidden_size: int,
@@ -94,6 +125,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.prefix = prefix
+        # Goes through the property setter above; mla_attn is not created yet,
+        # so only the backing value is stored here. MLAAttention below receives
+        # the same value and initializes the impl consistently.
         self.skip_topk = skip_topk
         # This is an upstream CUDA indexer hint. Ascend accepts it to preserve
         # constructor compatibility, but its indexer does not consume it.

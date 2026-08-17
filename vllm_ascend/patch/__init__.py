@@ -645,7 +645,11 @@
 #    How:
 #       Skip `Indexer` construction only when the layer both skips top-k and is
 #       explicitly marked `shared` in `indexer_types`. MTP layers always retain
-#       a complete `Indexer`.
+#       a complete `Indexer`. The runtime `skip_topk` handed to the MLA wrapper
+#       is additionally masked with `not is_mtp_layer` (same as upstream
+#       deepseek_v2.py): MTP layers must never start in skip mode, because they
+#       compute their own indices at draft step 0 and toggle at runtime via
+#       `set_skip_topk` (index_share_for_mtp_iteration).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:
