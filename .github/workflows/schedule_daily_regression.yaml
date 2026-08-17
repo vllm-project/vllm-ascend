@@ -309,6 +309,11 @@ jobs:
       contents: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gh CLI needs explicit repo context -- this job has no checkout step
+      # (runs on ubuntu-latest without actions/checkout), so gh cannot infer
+      # the repo from a local git remote. GH_REPO makes all gh commands in
+      # this step target the correct repository.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Open or update daily tracking issue
         env:
