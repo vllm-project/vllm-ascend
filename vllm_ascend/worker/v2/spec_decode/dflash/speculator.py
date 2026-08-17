@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 class AscendDFlashSpeculator(DFlashSpeculator):
-
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
@@ -34,9 +33,10 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
-        return [self.update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
+        self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        return [attn_metadata]
 
-    def update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
+    def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
         mirroring Eagle's ``_update_decode_attn_metadata``.
 
@@ -53,7 +53,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
             metadata.actual_seq_lengths_q = query_lens_list
-        return attn_metadata
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
