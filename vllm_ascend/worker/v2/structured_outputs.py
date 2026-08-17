@@ -46,6 +46,7 @@ def _apply_grammar_bitmask_kernel(
     block_id = tl.program_id(1)
     logits_idx = tl.load(logits_indices_ptr + bitmask_idx)
 
+    bit_mask = tl.full((32,), 1, tl.int32) << tl.arange(0, 32)
     # Sub-block tiling loop: process BLOCK_SIZE_SUB tokens per iteration
     for sub_offset in tl.range(0, BLOCK_SIZE, BLOCK_SIZE_SUB):
         global_token_offset = block_id * BLOCK_SIZE + sub_offset
@@ -56,7 +57,7 @@ def _apply_grammar_bitmask_kernel(
             mask=bitmask_offset < bitmask_stride,
             other=0,
         )
-        bitmask = ((packed_bitmask[:, None] >> (tl.arange(0, 32)[None, :])) & 1) == 0
+        bitmask = (packed_bitmask[:, None] & bit_mask[None, :]) == 0
         bitmask = bitmask.reshape(BLOCK_SIZE_SUB)
 
         # Apply: set blocked positions to -inf
