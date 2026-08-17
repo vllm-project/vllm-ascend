@@ -14,22 +14,45 @@ PROMPTS = [
     "The future of AI is",
 ]
 
+FEATURE_CONFIGS = [
+    pytest.param(
+        {
+            "enable_flashcomm1": True,
+            "enable_shared_expert_dp": False,
+        },
+        id="flashcomm-only",
+    ),
+    pytest.param(
+        {
+            "enable_flashcomm1": False,
+            "enable_shared_expert_dp": True,
+        },
+        id="shared-expert-dp-only",
+    ),
+    pytest.param(
+        {
+            "enable_flashcomm1": True,
+            "enable_shared_expert_dp": True,
+        },
+        id="flashcomm-and-shared-expert-dp",
+    ),
+]
+
 
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("model", MODELS)
-def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -> None:
+@pytest.mark.parametrize("feature_config", FEATURE_CONFIGS)
+def test_deepseek_v2_lite_flashcomm_shared_expert_dp_matrix_tp2(
+    model: str,
+    feature_config: dict[str, bool],
+    monkeypatch,
+) -> None:
     # FlashComm v1 / shared-expert-DP require HCCL_OP_EXPANSION_MODE to be unset.
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
 
-    # FlashComm1 + shared-expert-DP must stay numerically consistent with the
-    # plain eager baseline.  `additional_config` is excluded from the baseline
-    # by compare_logprobs, so the baseline runs without either flag.
-    shared_expert_dp_config = {
-        "enable_flashcomm1": True,
-        "enable_shared_expert_dp": True,
-    }
-
-    # Eager mode: FlashComm1 + shared-expert-DP vs eager baseline.
+    # Each independent feature combination must stay numerically consistent
+    # with the plain eager baseline. `additional_config` is excluded from the
+    # baseline by compare_logprobs, so the baseline has both flags disabled.
     compare_logprobs(
         runner_kwargs={
             "model_name": model,
@@ -37,12 +60,11 @@ def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -
             "enforce_eager": True,
             "tensor_parallel_size": 2,
             "enable_expert_parallel": True,
-            "additional_config": shared_expert_dp_config,
+            "additional_config": feature_config,
         },
         prompts=PROMPTS,
     )
 
-    # ACLGraph (FULL_DECODE_ONLY): FlashComm1 + shared-expert-DP vs eager baseline.
     compare_logprobs(
         runner_kwargs={
             "model_name": model,
@@ -53,7 +75,7 @@ def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -
                 "cudagraph_capture_sizes": [1, 4, 8, 16],
                 "cudagraph_mode": "FULL_DECODE_ONLY",
             },
-            "additional_config": shared_expert_dp_config,
+            "additional_config": feature_config,
         },
         prompts=PROMPTS,
     )

@@ -154,7 +154,7 @@ class AscendDSABackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_type: str = "",
+        cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
 
@@ -498,7 +498,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 split_decodes_and_prefills(
                     common_attn_metadata,
                     decode_threshold=self.decode_threshold,
-                    treat_short_extends_as_decodes=False,
                 )
             )
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
@@ -747,7 +746,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=False,
             )
         )
         num_reqs = common_attn_metadata.num_reqs
