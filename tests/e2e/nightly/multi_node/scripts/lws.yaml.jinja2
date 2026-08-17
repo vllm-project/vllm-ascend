@@ -78,11 +78,11 @@ spec:
                   "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             ports:
@@ -104,9 +104,16 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 512Gi
+{% if shared_volume_path %}
+        - name: shared-volume
+          hostPath:
+            path: {{ shared_volume_path }}
+            type: DirectoryOrCreate
+{% else %}
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
+{% endif %}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
@@ -173,11 +180,11 @@ spec:
                   "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             volumeMounts:
@@ -192,9 +199,16 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 512Gi
+{% if shared_volume_path %}
+        - name: shared-volume
+          hostPath:
+            path: {{ shared_volume_path }}
+            type: DirectoryOrCreate
+{% else %}
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
+{% endif %}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
