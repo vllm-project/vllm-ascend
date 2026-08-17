@@ -366,6 +366,14 @@ class FusedMC2CommImpl(MoECommMethod):
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
         # branch); assert the subtype so mypy resolves it off the base class.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        num_tokens = fused_experts_input.hidden_states.shape[0]
+        num_max_tokens = self.token_dispatcher.max_num_tokens_per_rank
+        if num_tokens > num_max_tokens:
+            raise ValueError(
+                f"MegaMoe received {num_tokens} tokens per rank, but its symmetric buffer "
+                f"was allocated for at most {num_max_tokens}. Increase max_num_batched_tokens "
+                "or disable fused MC2."
+            )
 
         def to_list(x):
             return x if isinstance(x, list) else [x]
@@ -451,7 +459,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            if _MEGA_MOE_SUPPORTED:
+            if _EXTRA_CTX.use_mega_moe:
                 out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
             else:
                 assert not (
