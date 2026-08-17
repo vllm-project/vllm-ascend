@@ -94,6 +94,7 @@ def test_a5_gmm_swiglu_keeps_supported_quant_modes_on_torch_npu_v2(use_mxfp_quan
         mock.patch(
             "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
             return_value=expected,
+            create=True,
         ) as torch_npu_v2,
         mock.patch.object(A5DeviceAdaptor, "maybe_normalize_mxfp_scale_layout", side_effect=lambda scale: scale),
     ):
