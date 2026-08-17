@@ -476,10 +476,17 @@ jobs:
           registry: swr.cn-southwest-2.myhuaweicloud.com
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
+      
+      - name: Login to Quay
+        uses: docker/login-action@v4
+        with:
+          registry: quay.io
+          username: ${{ inputs.QUAY_TEMP_USERNAME }}
+          password: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
       - name: Create multi-arch manifest
         env:
-          FROM_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
+          FROM_IMAGE: swr.cn-southwest-2.myhuaweicloud.com
           TO_IMAGE: quay.io/atlas-ci/vllm-atlas-temp
           SHA: ${{ github.sha }}
         run: |
