@@ -108,8 +108,10 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
         for i, connector in enumerate(self._connectors):
-            needs_full_blocks = i == chosen_connector or bool(
-                getattr(connector, "requires_full_blocks_on_update_after_alloc", False)
+            needs_full_blocks = (
+                i == chosen_connector
+                or isinstance(connector, MooncakeLayerwiseConnector)
+                or bool(getattr(connector, "requires_full_blocks_on_update_after_alloc", False))
             )
             connector.update_state_after_alloc(
                 request,
