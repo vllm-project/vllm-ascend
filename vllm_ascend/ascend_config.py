@@ -551,14 +551,12 @@ class RlConfig:
 
     enabled: bool
     sleep_mode_extra_cleanup: bool
-    disable_expandable_segments: bool
     enable_training_consistency: bool
     enable_batch_invariant: bool
 
     _DEFAULTS = {
         "enabled": False,
         "sleep_mode_extra_cleanup": False,
-        "disable_expandable_segments": True,
         "enable_training_consistency": False,
         "enable_batch_invariant": False,
     }
@@ -589,18 +587,14 @@ class RlConfig:
         ascend_config.weight_nz_mode = 0
         os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
-        model_config = getattr(ascend_config.vllm_config, "model_config", None)
-        if self.disable_expandable_segments and getattr(model_config, "enable_sleep_mode", False):
-            from vllm_ascend.platform import _disable_expandable_segments
+        from vllm_ascend.platform import _disable_expandable_segments
 
-            _disable_expandable_segments()
+        _disable_expandable_segments()
 
         # rl_config provides an additional way to enable batch invariance. It
         # must not disable a value explicitly supplied through the environment.
         if self.enable_batch_invariant:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
-            os.environ["HCCL_DETERMINISTIC"] = "strict"
-            os.environ["LCCL_DETERMINISTIC"] = "1"
 
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 

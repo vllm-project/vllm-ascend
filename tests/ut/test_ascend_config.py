@@ -625,7 +625,6 @@ class TestAscendConfig(TestBase):
 
         self.assertFalse(ascend_config.rl_config.enabled)
         self.assertFalse(ascend_config.rl_config.sleep_mode_extra_cleanup)
-        self.assertTrue(ascend_config.rl_config.disable_expandable_segments)
         self.assertFalse(ascend_config.rl_config.enable_training_consistency)
         self.assertFalse(ascend_config.rl_config.enable_batch_invariant)
 
@@ -731,8 +730,8 @@ class TestAscendConfig(TestBase):
 
             # rl_config prevails over the environment variable.
             self.assertEqual(os.environ["VLLM_BATCH_INVARIANT"], "1")
-            self.assertEqual(os.environ["HCCL_DETERMINISTIC"], "strict")
-            self.assertEqual(os.environ["LCCL_DETERMINISTIC"], "1")
+            self.assertNotIn("HCCL_DETERMINISTIC", os.environ)
+            self.assertNotIn("LCCL_DETERMINISTIC", os.environ)
             self.assertTrue(ascend_config.rl_config.enable_batch_invariant)
 
     @_clean_up_ascend_config
@@ -755,9 +754,10 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_disable_expandable_segments_same_device(self, mock_fix_incompatible_config):
+    @patch("vllm_ascend.platform.logger.info")
+    def test_rl_config_removes_expandable_segments(self, mock_info, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
-        test_vllm_config.model_config = self._make_model_config(enable_sleep_mode=True)
+        test_vllm_config.model_config = self._make_model_config(enable_sleep_mode=False)
         test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
         with patch.dict(
             os.environ,
@@ -767,17 +767,10 @@ class TestAscendConfig(TestBase):
             init_ascend_config(test_vllm_config)
             self.assertNotIn("expandable_segments", os.environ["PYTORCH_NPU_ALLOC_CONF"])
             self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], "page_size:1g")
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_rl_config_keeps_allocator_config_cross_device(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.model_config = self._make_model_config(enable_sleep_mode=False)
-        test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
-        alloc_config = "page_size:1g,expandable_segments:True"
-        with patch.dict(os.environ, {"PYTORCH_NPU_ALLOC_CONF": alloc_config}, clear=True):
-            init_ascend_config(test_vllm_config)
-            self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], alloc_config)
+        mock_info.assert_called_once_with(
+            "Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s",
+            "page_size:1g",
+        )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -794,7 +787,6 @@ class TestRlConfig(TestBase):
 
         self.assertFalse(config.enabled)
         self.assertFalse(config.sleep_mode_extra_cleanup)
-        self.assertTrue(config.disable_expandable_segments)
         self.assertFalse(config.enable_training_consistency)
         self.assertFalse(config.enable_batch_invariant)
 
@@ -803,7 +795,6 @@ class TestRlConfig(TestBase):
             {
                 "enabled": True,
                 "sleep_mode_extra_cleanup": True,
-                "disable_expandable_segments": False,
                 "enable_training_consistency": True,
                 "enable_batch_invariant": True,
             }
@@ -811,7 +802,6 @@ class TestRlConfig(TestBase):
 
         self.assertTrue(config.enabled)
         self.assertTrue(config.sleep_mode_extra_cleanup)
-        self.assertFalse(config.disable_expandable_segments)
         self.assertTrue(config.enable_training_consistency)
         self.assertTrue(config.enable_batch_invariant)
 
@@ -826,7 +816,7 @@ class TestRlConfig(TestBase):
             RlConfig({"enable_batch_invariant": 1})
 
     def test_fixed_fields_cannot_be_configured(self):
-        for key in ("refresh", "weight_nz_mode", "enable_dev_endpoints"):
+        for key in ("refresh", "weight_nz_mode", "enable_dev_endpoints", "disable_expandable_segments"):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, f"Unknown rl_config keys.*{key}"):
                 RlConfig({key: True})
 
