@@ -1051,6 +1051,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         act_quant_type: torch.dtype | None = None,
     ):
         input_dtype = act_quant_type or hidden_states.dtype
+        # On A5, float8_e4m3fn must be passed as x_dtype for MXFP8 quant.
+        # QUANT_DTYPES only contains the special quantized dtypes used by
+        # the generic path, so handle float8_e4m3fn explicitly here.
+        x_dtype = input_dtype if input_dtype in QUANT_DTYPES else None
+        if x_dtype is None and input_dtype == torch.float8_e4m3fn:
+            x_dtype = input_dtype
         return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
@@ -1061,7 +1067,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             expert_tokens_num_flag=expert_tokens_num_flag,
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
-            x_dtype=input_dtype if input_dtype in QUANT_DTYPES else None,
+            x_dtype=x_dtype,
         )
 
     @staticmethod
