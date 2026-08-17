@@ -1,4 +1,4 @@
-test_name: "GLM-5.1-744B-128k-1k-90-50-PD"
+test_name: "GLM-5.1-w8a8c8-128k-1k-90-50-PD"
 model: "Eco-Tech/GLM-5.1-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
@@ -7,8 +7,8 @@ npu_per_node: 16
 routing:
   type: "disaggregated_prefill"
   groups:
-    prefiller: [0, 1]
-    decoder: [2, 3]
+    prefiller: [ 0, 1 ]
+    decoder: [ 2, 3 ]
 
 config:
   - node_index: 0
@@ -111,7 +111,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "0",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -175,7 +174,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -242,7 +240,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "2",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -309,7 +306,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "3",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -326,14 +322,36 @@ templates:
 
 
 benchmarks:
-      perf:
-      case_type: performance
-      dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
-      request_conf: vllm_api_stream_chat
-      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-      num_prompts: 256
-      max_out_len: 1024
-      batch_size: 64
-      request_rate: 1.52
-      baseline: 1294.76
-      threshold: 0.97
+  acc_aime2025:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 32768
+    batch_size: 32
+    baseline: 93.33
+    threshold: 10
+    temperature: 1.0
+    top_p: 0.95
+  perf_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 256
+    max_out_len: 1024
+    batch_size: 64
+    request_rate: 1.52
+    baseline: 1265.6172
+    threshold: 0.97

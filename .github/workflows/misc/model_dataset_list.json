@@ -365,6 +365,7 @@
       "vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi",
       "vllm-ascend/GSM8K-in3500-bs8000-qwen3",
       "vllm-ascend/GSM8K-in2048-bs4000-ds3.2",
+      "vllm-ascend/GSM8K-in16384-bs1024-prefix0-qwen",
       "vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51",
       "vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51",
       "vllm-ascend/GSM8K_prefix99_in203738_bs1_mini",
