@@ -310,7 +310,12 @@ def _select_a3_moe_comm_method(
     if get_ascend_config().enable_fused_mc2 == 1:
         # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
         mega_moe_enable = get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
+        # dispatch_ffn_combine corrupts output for the small/ragged token
+        # shapes used by speculative decoding. The target verification forward
+        # shares the speculative config, so this guard covers both target and
+        # draft forwards. CANN MegaMoe is a separate op and remains eligible.
+        is_spec_decode = getattr(vllm_config, "speculative_config", None) is not None
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and not is_spec_decode
         if (_MEGA_MOE_SUPPORTED and mega_moe_enable) or dispatch_ffn_combine_enable:
             return MoECommType.FUSED_MC2
 

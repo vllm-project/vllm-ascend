@@ -252,6 +252,31 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
         (129, MoECommType.ALLTOALL),
     ],
 )
+def test_select_moe_comm_method_a3_spec_decode_disables_dispatch_ffn_combine(
+    monkeypatch,
+    num_tokens,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(quant_type="w4a16")
+    vllm_config.speculative_config = SimpleNamespace()
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (128, MoECommType.MC2),
+        (129, MoECommType.ALLTOALL),
+    ],
+)
 def test_select_moe_comm_method_a3_without_fused_mc2(
     monkeypatch,
     num_tokens,
