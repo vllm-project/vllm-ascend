@@ -95,16 +95,14 @@ class MoECommMethod(ABC):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
     ) -> MoEPrepareOutput:
         return self.prepare_finalize.prepare(
-            hidden_states,
-            router_logits,
-            enable_shared_expert_dp,
-            replace_allreduce,
-            quant_type,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            replace_allreduce=replace_allreduce,
+            quant_type=quant_type,
         )
 
     def finalize(

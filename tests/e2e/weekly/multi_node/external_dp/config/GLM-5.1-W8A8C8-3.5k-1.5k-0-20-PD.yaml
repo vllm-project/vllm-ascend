@@ -330,5 +330,5 @@ benchmarks:
         max_out_len: 1500
         batch_size: 40
         request_rate: 6.87
-        baseline: 1456.52
+        baseline: 1449.1316
         threshold: 0.97

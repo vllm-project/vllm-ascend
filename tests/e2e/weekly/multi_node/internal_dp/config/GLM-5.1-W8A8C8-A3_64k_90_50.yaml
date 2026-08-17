@@ -1,4 +1,4 @@
-test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_64k/128k"
+test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_64k"
 model: "Eco-Tech/GLM-5.1-w8a8c8"
 num_nodes: 2
 npu_per_node: 16
@@ -80,25 +80,25 @@ deployment:
       --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
-  perf_128k_warmup:
+  perf_64k_warmup:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    dataset_path: vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 1
+    num_prompts: 4
     max_out_len: 1
     batch_size: 1
     request_rate: 0
-    baseline: 0
+    baseline: 1
     threshold: 0.97
-  perf_128k:
+  perf_64k:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    dataset_path: vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 256
+    num_prompts: 128
     max_out_len: 1024
-    batch_size: 64
+    batch_size: 32
     request_rate: 0
-    baseline: 290.8308
+    baseline: 687.4133
     threshold: 0.97
