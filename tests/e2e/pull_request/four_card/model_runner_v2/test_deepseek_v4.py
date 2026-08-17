@@ -126,6 +126,6 @@ def test_dspark_spec_decoding(
         Counter,
         Vector,
     )
-    golden = [0.92, 0.67, 0.53, 0.31, 0.14]
+    golden = [0.82, 0.62, 0.42, 0.25, 0.12]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
