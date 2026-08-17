@@ -108,6 +108,18 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_from_file_allows_ubshmem(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"protocol": "ubshmem"}, f)
+            f.flush()
+            path = f.name
+
+        try:
+            cfg = MooncakeStoreConfig.from_file(path)
+            self.assertEqual(cfg.protocol, "ubshmem")
+        finally:
+            os.unlink(path)
+
     def test_from_file_ssd_offload(self):
         ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
         self.addCleanup(lambda: os.rmdir(ssd_path))
@@ -325,6 +337,17 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1, 0]
         result = b.exists(["k1", "k2"])
         self.assertEqual(result, [1, 0])
+
+    def test_init_rejects_unknown_protocol(self):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+            "mooncake_backend.MooncakeStoreConfig.load_from_env",
+            return_value=MagicMock(protocol="badproto"),
+        ):
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+            with self.assertRaises(NotImplementedError):
+                MooncakeBackend(MagicMock())
 
     def test_put(self):
         b = self._make_backend()
