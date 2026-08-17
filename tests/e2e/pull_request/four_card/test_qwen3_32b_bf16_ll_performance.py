@@ -120,7 +120,7 @@ def _run_ll_benchmark(env):
     return ttft, tpot
 
 
-def test_qwen3_32b_w8a8_ll_16k_v1_v2_latency_within_3pct():
+def test_qwen3_32b_bf16_ll_16k_v1_v2_latency_within_3pct():
     v1_ttft, v1_tpot = _run_ll_benchmark(_V1_ENV)
     v2_ttft, v2_tpot = _run_ll_benchmark(_V2_ENV)
     for metric, v1_value, v2_value in (("TTFT", v1_ttft, v2_ttft), ("TPOT", v1_tpot, v2_tpot)):
