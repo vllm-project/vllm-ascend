@@ -264,20 +264,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             self.speculative_config is not None
             and self.speculative_config.disable_padded_drafter_batch
         )
-        capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
-        if isinstance(capture_sizes, list) and capture_sizes:
-            capture_sizes = sorted(capture_sizes)
-            max_graph_input_size = (
-                max_num_reqs
-                if disable_padded_drafter_batch
-                else max_num_reqs * self.decode_threshold
-            )
-            max_graph_pad_size = next(
-                (size for size in capture_sizes if size >= max_graph_input_size),
-                capture_sizes[-1],
-            )
-        else:
-            max_graph_pad_size = max_num_reqs * self.decode_threshold
+        max_graph_pad_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        if not isinstance(max_graph_pad_size, int):
+            max_graph_pad_size = scheduler_config.max_num_batched_tokens
         self._max_pad_num_reqs = (
             max_graph_pad_size
             if disable_padded_drafter_batch
