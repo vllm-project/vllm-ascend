@@ -76,10 +76,12 @@ def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
 
 def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
     builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
-    builder.actual_seq_lengths_query = torch.zeros(3, dtype=torch.int32)
-    builder.actual_seq_lengths_key = torch.zeros(3, dtype=torch.int32)
-    builder.spec_actual_seq_lengths_query = None
-    builder.spec_actual_seq_lengths_key = None
+    builder.actual_seq_lengths_query = torch.tensor([3, 5, 0], dtype=torch.int32)
+    builder.actual_seq_lengths_key = torch.tensor([3, 5, 0], dtype=torch.int32)
+    builder.dsa_cp_actual_seq_lengths_query = torch.zeros(3, dtype=torch.int32)
+    builder.dsa_cp_actual_seq_lengths_key = torch.zeros(3, dtype=torch.int32)
+    builder.dsa_cp_spec_actual_seq_lengths_query = None
+    builder.dsa_cp_spec_actual_seq_lengths_key = None
     common = SimpleNamespace(
         num_reqs=2,
         num_input_tokens=5,
@@ -104,16 +106,18 @@ def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
     torch.testing.assert_close(context.slot_mapping_cp, torch.tensor([3, 4, -1], dtype=torch.int32))
     torch.testing.assert_close(context.actual_seq_lengths_query, torch.tensor([0, 2], dtype=torch.int32))
     torch.testing.assert_close(context.actual_seq_lengths_key, torch.tensor([0, 5], dtype=torch.int32))
+    torch.testing.assert_close(builder.actual_seq_lengths_query, torch.tensor([3, 5, 0], dtype=torch.int32))
+    torch.testing.assert_close(builder.actual_seq_lengths_key, torch.tensor([3, 5, 0], dtype=torch.int32))
 
 
 def test_sfa_dsa_cp_metadata_builder_masks_graph_padding() -> None:
     # TP8, graph size 80 and MTP3 produce 20 four-token request slots. With
     # nine real requests, rank 6 splits a padded slot at its local boundary.
     builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
-    builder.actual_seq_lengths_query = torch.zeros(21, dtype=torch.int32)
-    builder.actual_seq_lengths_key = torch.zeros(21, dtype=torch.int32)
-    builder.spec_actual_seq_lengths_query = None
-    builder.spec_actual_seq_lengths_key = None
+    builder.dsa_cp_actual_seq_lengths_query = torch.zeros(21, dtype=torch.int32)
+    builder.dsa_cp_actual_seq_lengths_key = torch.zeros(21, dtype=torch.int32)
+    builder.dsa_cp_spec_actual_seq_lengths_query = None
+    builder.dsa_cp_spec_actual_seq_lengths_key = None
     query_start_loc = torch.arange(0, 81, 4, dtype=torch.int32)
     seq_lens = torch.zeros(20, dtype=torch.int32)
     seq_lens[:9] = torch.arange(128, 137, dtype=torch.int32)

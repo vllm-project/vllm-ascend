@@ -1197,6 +1197,42 @@ async def handle_chat_completions(request: Request):
     return await handle_completions_impl("/chat/completions", request)
 
 
+async def handle_models_impl():
+    runtime = get_runtime()
+    request_id = next_req_id()
+    await runtime.sync_clients()
+    snapshot = runtime.scheduler.get_snapshot()
+    candidates = [(ServerRole.PREFILL, s) for s in snapshot["prefill_instances"]] + [
+        (ServerRole.DECODE, s) for s in snapshot["decode_instances"]
+    ]
+    if not candidates:
+        return JSONResponse(status_code=503, content={"error": "No available backend instances"})
+    failures: list[str] = []
+    for role, server in candidates:
+        host, port = server["host"], server["port"]
+        key = server_key(host, port)
+        try:
+            client = await runtime.get_client(role, key)
+            response = await client.get("/models", headers=auth_headers(request_id), timeout=3.0)
+            response.raise_for_status()
+            return Response(content=response.content, media_type="application/json")
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.warning("GET /models from %s:%s failed: %s", host, port, exc)
+            failures.append(f"{host}:{port}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "All backend instances failed to serve /v1/models",
+            "failed": failures,
+        },
+    )
+
+
+@app.get("/v1/models")
+async def handle_models():
+    return await handle_models_impl()
+
+
 @app.post("/reset_prefix_cache")
 async def reset_prefix_cache(request: Request):
     params = dict(request.query_params)
