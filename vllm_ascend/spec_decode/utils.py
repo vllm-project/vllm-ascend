@@ -323,7 +323,7 @@ class DynamicSpecScheduler:
                     max_batch_size=self.max_batch_size,
                     max_draft_tokens=self.num_speculative_tokens,
                     device=device,
-                    decision_interval=int(method_params.get("decision_interval", self.budget_update_interval)),
+                    decision_interval=self._hardware_decision_interval(method_params),
                 )
                 profile_temperatures = self.cost_model.confidence_temperatures
             except (OSError, TypeError, ValueError) as exc:
@@ -402,6 +402,34 @@ class DynamicSpecScheduler:
 
         # Latest result consumed by the model runner.
         self.num_verify_tokens: torch.Tensor | None = None
+
+    @staticmethod
+    def _hardware_decision_interval(method_params: dict[str, Any]) -> int:
+        """Return a safe recomputation interval for hardware-aware policy.
+
+        Recomputing the hardware allocation performs a device-side sort and
+        transfers the winning candidate index back to Python.  Doing that on
+        every decode step (``decision_interval=1``) makes the scheduler
+        host-bound for small batches.  Keep the interval configurable, but
+        protect the hot path with a conservative minimum.  Users that have a
+        workload-specific calibration can explicitly lower
+        ``min_decision_interval``.
+        """
+        configured = int(method_params.get("decision_interval", 16))
+        minimum = int(method_params.get("min_decision_interval", 8))
+        if configured <= 0 or minimum <= 0:
+            raise ValueError(
+                "decision_interval and min_decision_interval must be > 0"
+            )
+        interval = max(configured, minimum)
+        if interval != configured:
+            logger.info(
+                "Clamping hardware-aware decision_interval from %d to %d "
+                "to avoid per-step scheduler synchronization",
+                configured,
+                interval,
+            )
+        return interval
 
     def update(
         self,
