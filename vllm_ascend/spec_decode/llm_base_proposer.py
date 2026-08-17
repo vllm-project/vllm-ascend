@@ -267,6 +267,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         """Align the draft hidden-state projection with a QuaRot target."""
         if self.method not in ("dflash", "dspark"):
             return
+        # Qwen3 DSpark aligns fc.* in its model-specific weight loader and owns
+        # separate embedding/lm_head weights, so no generic alignment is needed.
+        if isinstance(self.model, Qwen3DSparkForCausalLM):
+            return
         target_model_path = self.vllm_config.model_config.model
         rotation = self._load_quarot_rotation(target_model_path)
         if rotation is None:

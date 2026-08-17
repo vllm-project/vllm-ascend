@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.speculators import algos as speculator_algos
 from vllm.utils.import_utils import LazyLoader
 
 from vllm_ascend.transformers_utils.configs.kimi_k3 import (
@@ -23,6 +24,25 @@ else:
 # the lightweight config here as well so ModelConfig can parse the draft before
 # speculative post-init normalizes its architecture.
 register_k3_dspark_config()
+
+
+# Backport vLLM #48639. v0.26 unconditionally rewrites Speculators DSpark
+# checkpoints to the legacy bonus-anchor layout and drops the checkpoint's
+# sample_from_anchor field before hf_config_override() runs.
+_orig_update_dspark = speculator_algos.SUPPORTED_SPECULATORS_TYPES["dspark"]
+
+
+def _update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
+    _orig_update_dspark(config_dict, pre_trained_config)
+    aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
+    pre_trained_config["dflash_config"] = {
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": [i - 1 for i in aux_layer_ids],
+    }
+    pre_trained_config["sample_from_anchor"] = config_dict.get("sample_from_anchor", False)
+
+
+speculator_algos.SUPPORTED_SPECULATORS_TYPES["dspark"] = _update_dspark
 
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:

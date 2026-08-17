@@ -4,7 +4,7 @@
     "cache_arch": "ARM64",
     "runner": "linux-arm64-cpu-16",
     "os": "ubuntu",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12",
     "soc_version": "ascend910b1"
   },
   "a3-arm64-ubuntu": {
@@ -12,7 +12,7 @@
     "cache_arch": "ARM64",
     "runner": "linux-arm64-cpu-16",
     "os": "ubuntu",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-ubuntu22.04-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12",
     "soc_version": "ascend910_9391"
   },
   "310p-arm64-ubuntu": {
@@ -20,7 +20,7 @@
     "cache_arch": "ARM64",
     "runner": "linux-arm64-cpu-16",
     "os": "ubuntu",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-310p-ubuntu22.04-py3.12",
     "soc_version": "ascend310p1"
   },
   "a2-arm64-openeuler": {
@@ -28,7 +28,7 @@
     "cache_arch": "ARM64",
     "runner": "linux-arm64-cpu-16",
     "os": "openeuler",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-openeuler24.03-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-openeuler24.03-py3.12",
     "soc_version": "ascend910b1"
   },
   "a3-arm64-openeuler": {
@@ -36,7 +36,7 @@
     "cache_arch": "ARM64",
     "runner": "linux-arm64-cpu-16",
     "os": "openeuler",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-openeuler24.03-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-openeuler24.03-py3.12",
     "soc_version": "ascend910_9391"
   },
   "310p-arm64-openeuler": {
@@ -44,7 +44,7 @@
     "cache_arch": "ARM64",
     "runner": "linux-arm64-cpu-16",
     "os": "openeuler",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-310p-openeuler24.03-py3.12",
     "soc_version": "ascend310p1"
   },
   "a2-x86-ubuntu": {
@@ -52,7 +52,7 @@
     "cache_arch": "X64",
     "runner": "linux-amd64-cpu-16-hk",
     "os": "ubuntu",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12",
     "soc_version": "ascend910b1"
   },
   "a3-x86-ubuntu": {
@@ -60,7 +60,7 @@
     "cache_arch": "X64",
     "runner": "linux-amd64-cpu-16-hk",
     "os": "ubuntu",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-ubuntu22.04-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12",
     "soc_version": "ascend910_9391"
   },
   "310p-x86-ubuntu": {
@@ -68,7 +68,7 @@
     "cache_arch": "X64",
     "runner": "linux-amd64-cpu-16-hk",
     "os": "ubuntu",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-310p-ubuntu22.04-py3.12",
     "soc_version": "ascend310p1"
   },
   "a2-x86-openeuler": {
@@ -76,7 +76,7 @@
     "cache_arch": "X64",
     "runner": "linux-amd64-cpu-16-hk",
     "os": "openeuler",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-openeuler24.03-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-openeuler24.03-py3.12",
     "soc_version": "ascend910b1"
   },
   "a3-x86-openeuler": {
@@ -84,7 +84,7 @@
     "cache_arch": "X64",
     "runner": "linux-amd64-cpu-16-hk",
     "os": "openeuler",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-openeuler24.03-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-openeuler24.03-py3.12",
     "soc_version": "ascend910_9391"
   },
   "310p-x86-openeuler": {
@@ -92,7 +92,7 @@
     "cache_arch": "X64",
     "runner": "linux-amd64-cpu-16-hk",
     "os": "openeuler",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-310p-openeuler24.03-py3.12",
     "soc_version": "ascend310p1"
   }
 }

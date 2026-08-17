@@ -382,7 +382,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
         [
             pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
-            pytest.param(SimpleNamespace(dspark_bonus_anchor=True), False, 1 + _NUM_SPECULATIVE_TOKENS),
+            pytest.param(SimpleNamespace(sample_from_anchor=False), False, 1 + _NUM_SPECULATIVE_TOKENS),
         ],
     )
     def test_configures_anchor_sampling(
@@ -391,7 +391,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         expected_sample_from_anchor: bool,
         expected_num_query_per_req: int,
     ) -> None:
-        """Verify the bonus-anchor flag selects the expected query layout."""
+        """Verify the anchor-sampling setting selects the expected query layout."""
         proposer = self._make_proposer(
             max_num_tokens=_MAX_NUM_TOKENS,
             num_reqs=_MAX_BATCH_SIZE,
