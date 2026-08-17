@@ -103,9 +103,6 @@ def get_cos_and_sin_dsa(
             if group_name not in registered_groups:
                 continue
 
-            curr_cos = full_rope_cos[pos_tensor]
-            curr_sin = full_rope_sin[pos_tensor]
-
             if use_cache:
                 group_buffers = (
                     _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
@@ -119,19 +116,28 @@ def get_cos_and_sin_dsa(
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
 
+                gather_idx = pos_tensor.reshape(-1, 1, 1, 1).expand(
+                    num_tokens, 1, 1, full_rope_cos.size(-1)
+                )
                 if draft_index is None:
-                    buf_cos[:num_tokens].copy_(curr_cos)
-                    buf_sin[:num_tokens].copy_(curr_sin)
+                    torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[:num_tokens])
+                    torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[:num_tokens])
 
                     batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
                 else:
-                    buf_cos[draft_index - 1][:num_tokens].copy_(curr_cos)
-                    buf_sin[draft_index - 1][:num_tokens].copy_(curr_sin)
+                    torch.gather(
+                        full_rope_cos, 0, gather_idx, out=buf_cos[draft_index - 1][:num_tokens]
+                    )
+                    torch.gather(
+                        full_rope_sin, 0, gather_idx, out=buf_sin[draft_index - 1][:num_tokens]
+                    )
                     batch_result[config_key][group_name] = (
                         buf_cos[draft_index - 1][:num_tokens],
                         buf_sin[draft_index - 1][:num_tokens],
                     )
             else:
+                curr_cos = full_rope_cos[pos_tensor]
+                curr_sin = full_rope_sin[pos_tensor]
                 batch_result[config_key][group_name] = (curr_cos, curr_sin)
 
     return RopeDataProxy(batch_result, is_cos=True), RopeDataProxy(batch_result, is_cos=False)
