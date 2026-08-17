@@ -94,3 +94,31 @@ jobs:
             SOC_VERSION=${{ steps.vars.outputs.soc_version }}
             COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           provenance: false
+
+  merge-manifest:
+    name: Merge multi-arch manifest
+    runs-on: linux-amd64-cpu-4
+    needs: build-test
+    steps:
+      - name: Login to SWR
+        uses: docker/login-action@v3
+        with:
+          registry: swr.cn-north-12.myhuaweicloud.com
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - name: Create multi-arch manifest
+        env:
+          IMAGE: swr.cn-north-12.myhuaweicloud.com/modelfoundry/triton-ascend
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for df in Dockerfile Dockerfile.310p Dockerfile.310p.openEuler \
+                    Dockerfile.a3 Dockerfile.a3.openEuler Dockerfile.openEuler \
+                    Dockerfile.a5 Dockerfile.a5.openEuler; do
+            echo "Merging ${df} into multi-arch manifest..."
+            docker buildx imagetools create \
+              -t "${IMAGE}:${df}-${SHA}" \
+              "${IMAGE}:${df}-arm64-${SHA}" \
+              "${IMAGE}:${df}-amd64-${SHA}"
+          done
