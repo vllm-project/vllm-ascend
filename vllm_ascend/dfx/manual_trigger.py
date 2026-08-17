@@ -146,21 +146,27 @@ class ManualTriggerManager:
                 remaining,
             )
             return None
+        continuous = self._dfx_config.manual_trigger_continuous()
         if not self._dfx_config.consume_manual_trigger():
             return None
         left = self._dfx_config.manual_trigger_count()
         if not should_run_anomaly_check_on_rank(self._runner):
             return None
-        logger.info(
-            "[DFX manual_trigger] dump.manual_trigger armed (remaining_after=%d)",
-            left,
-        )
+        if continuous:
+            logger.info("[DFX manual_trigger] dump.manual_trigger armed (continuous)")
+            remaining_after: bool | int = True
+        else:
+            logger.info(
+                "[DFX manual_trigger] dump.manual_trigger armed (remaining_after=%d)",
+                left,
+            )
+            remaining_after = left
         return TriggerEvent(
             trigger_type=MANUAL_TRIGGER_TYPE,
             req_id=MANUAL_TRIGGER_REQ_ID,
             detail={
                 "source": "dump.manual_trigger",
-                "manual_trigger_remaining_after": left,
+                "manual_trigger_remaining_after": remaining_after,
             },
             consume_quota=False,
         )

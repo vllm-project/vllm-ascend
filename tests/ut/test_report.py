@@ -202,6 +202,44 @@ def test_spec_sanitize_keeps_acceptance_metrics_drops_token_ids():
     assert out["output_token_count"] == 3
 
 
+def test_sanitize_decodes_nested_manual_trigger_requests():
+    class _Tok:
+        def decode(self, ids, skip_special_tokens=True):
+            return "T-" + "-".join(str(i) for i in ids)
+
+    detail = {
+        "source": "dump.manual_trigger",
+        "num_requests": 1,
+        "requests": [
+            {
+                "req_id": "r1",
+                "req_idx": 0,
+                "prompt_token_count": 3,
+                "output_token_count": 2,
+                "prompt_token_ids": [1, 2, 3],
+                "output_token_ids": [4, 5],
+            }
+        ],
+    }
+    out = sanitize_report_detail(
+        detail,
+        save_sensitive_info=True,
+        decode_token_ids=True,
+        tokenizer=_Tok(),
+    )
+    req0 = out["requests"][0]
+    assert req0["prompt_token_ids"] == [1, 2, 3]
+    assert req0["prompt_text"] == "T-1-2-3"
+    assert req0["output_text"] == "T-4-5"
+
+    redacted = sanitize_report_detail(detail, save_sensitive_info=False)
+    req0r = redacted["requests"][0]
+    assert "prompt_token_ids" not in req0r
+    assert "output_token_ids" not in req0r
+    assert req0r["prompt_token_count"] == 3
+    assert req0r["output_token_count"] == 2
+
+
 def test_dumps_report_json_keeps_int_lists_compact():
     text = dumps_report_json(
         {

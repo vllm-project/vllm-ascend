@@ -300,7 +300,7 @@ Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `
 门控（异常检测）：至少一路 `detector.<name>.enabled` 开，且 rank 合法；**不依赖** `dump.enabled` / `max_times`。另受 §2.6 过滤。`dump.enabled=true` 且 dump pending/active 时跳过再检，避免重叠 arm。  
 门控（自动 dump）：`dump.enabled` + 配额 / 冷却；`max_times == 0` 时不 auto-arm（detect / `manual_trigger` 仍可）。  
 约束：detect 与 dump **正交** — 可 detect-only、detect+dump、或 **manual-only**（`dump.enabled=true`、无 detector，仅 `manual_trigger`）。无 detector 时 dump 开只会 warn，不强制改配置。  
-`manual_trigger` 由 `ManualTriggerManager` 消费；要求 `dump.enabled` + debugger，**不要求** detector；不受 `max_times` / cooldown / InputFilterManager 限制。`dump.enabled=false` 时不消费 flag。  
+`manual_trigger` 由 `ManualTriggerManager` 消费；要求 `dump.enabled` + debugger，**不要求** detector；不受 `max_times` / cooldown / InputFilterManager 限制。`dump.enabled=false` 时不消费。`true` = 持续 arm（改回 `false` 才停）；正整数 = 剩余拍数。  
 `manual_trigger` arm 成功后写 **一份** `manual_trigger` report：`detail.requests[]` 快照当前 batch **全部**请求的 I/O（与单请求 anomaly report 不同；普通异常触发 dump 仍只写单请求 report）。  
 **前提**：`additional_config.dfx_config_reload_interval > 0`（热更为关时改 JSON 的 `manual_trigger` 不会生效）。
 

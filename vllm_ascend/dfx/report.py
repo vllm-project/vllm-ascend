@@ -81,17 +81,46 @@ def _truncate_token_ids_value(value: Any, max_len: int) -> tuple[Any, bool]:
     return value, False
 
 
+def _is_token_ids_key(key: Any) -> bool:
+    s = str(key)
+    return s in _TOKEN_ID_DETAIL_KEYS or s.endswith("_token_ids")
+
+
+def _is_list_of_dicts(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(x, dict) for x in value)
+
+
 def truncate_token_id_fields(
     detail: dict[str, Any],
     *,
     max_prompt_token_ids: int = 1000,
     max_output_token_ids: int = 1000,
 ) -> dict[str, Any]:
-    """Cap prompt/output-like ``*_token_ids`` lists; keep full ``*_token_count``."""
+    """Cap prompt/output-like ``*_token_ids`` lists; keep full ``*_token_count``.
+
+    Recurses into nested dicts and list-of-dicts (e.g. manual_trigger
+    ``detail.requests[]``).
+    """
     out = dict(detail)
     for key, value in list(out.items()):
-        is_token_ids = key in _TOKEN_ID_DETAIL_KEYS or str(key).endswith("_token_ids")
-        if not is_token_ids or not isinstance(value, list):
+        if isinstance(value, dict):
+            out[key] = truncate_token_id_fields(
+                value,
+                max_prompt_token_ids=max_prompt_token_ids,
+                max_output_token_ids=max_output_token_ids,
+            )
+            continue
+        if _is_list_of_dicts(value):
+            out[key] = [
+                truncate_token_id_fields(
+                    item,
+                    max_prompt_token_ids=max_prompt_token_ids,
+                    max_output_token_ids=max_output_token_ids,
+                )
+                for item in value
+            ]
+            continue
+        if not _is_token_ids_key(key) or not isinstance(value, list):
             continue
         count_key = _count_key_for_token_ids(str(key))
         if count_key not in out:
@@ -125,13 +154,19 @@ def decode_token_id_texts(
 
     - Flat int list → ``*_text`` (string)
     - List of int lists (e.g. per-step window) → ``*_texts`` (list[str])
+    - Nested dict / list-of-dicts (manual_trigger ``requests``) are walked.
     """
     if tokenizer is None:
         return detail
     out = dict(detail)
     for key, value in list(out.items()):
-        is_token_ids = key in _TOKEN_ID_DETAIL_KEYS or str(key).endswith("_token_ids")
-        if not is_token_ids:
+        if isinstance(value, dict):
+            out[key] = decode_token_id_texts(value, tokenizer)
+            continue
+        if _is_list_of_dicts(value):
+            out[key] = [decode_token_id_texts(item, tokenizer) for item in value]
+            continue
+        if not _is_token_ids_key(key):
             continue
         try:
             if is_int_list(value) and value:
@@ -161,6 +196,9 @@ def sanitize_report_detail(
       ``*_token_count`` (and non-token fields). No ``<redacted len=N>`` stubs.
     - ``save_sensitive_info=true``: keep token-id lists (truncated by max_*),
       optionally decode prompt/output/window/current ids to text.
+
+    Nested dicts and list-of-dicts (e.g. ``detail.requests``) follow the same
+    policy.
     """
     if not detail:
         return {}
@@ -176,8 +214,30 @@ def sanitize_report_detail(
 
     out: dict[str, Any] = {}
     for key, value in detail.items():
-        is_token_ids = key in _TOKEN_ID_DETAIL_KEYS or str(key).endswith("_token_ids")
-        if not is_token_ids:
+        if isinstance(value, dict):
+            out[key] = sanitize_report_detail(
+                value,
+                save_sensitive_info=False,
+                max_prompt_token_ids=max_prompt_token_ids,
+                max_output_token_ids=max_output_token_ids,
+                decode_token_ids=False,
+                tokenizer=None,
+            )
+            continue
+        if _is_list_of_dicts(value):
+            out[key] = [
+                sanitize_report_detail(
+                    item,
+                    save_sensitive_info=False,
+                    max_prompt_token_ids=max_prompt_token_ids,
+                    max_output_token_ids=max_output_token_ids,
+                    decode_token_ids=False,
+                    tokenizer=None,
+                )
+                for item in value
+            ]
+            continue
+        if not _is_token_ids_key(key):
             out[key] = value
             continue
         count_key = _count_key_for_token_ids(str(key))

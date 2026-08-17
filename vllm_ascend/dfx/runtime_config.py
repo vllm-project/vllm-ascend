@@ -86,10 +86,10 @@ _DEFAULTS: dict[str, Any] = {
         # Auto-arm quota only; 0 = no auto dump. Does not affect detect or manual_trigger.
         "max_times": 0,
         "cooldown_seconds": 5 * 60,
-        # Remaining manual dump waves: false/0 = off; true = 1 (compat);
-        # positive int N = arm on the next N real execute_model waves (with a
-        # non-empty local batch), decrementing toward 0. Skips max_times /
-        # cooldown / input filters. Needs dump.enabled=true and reload > 0.
+        # Manual dump arm: false/0 = off; true = keep dumping every nonempty
+        # real execute_model wave until set false; positive int N = next N
+        # waves then off. Skips max_times / cooldown / input filters.
+        # Needs dump.enabled=true and reload > 0.
         "manual_trigger": False,
     },
     "ascend_log": {
@@ -752,10 +752,15 @@ class DfxRuntimeConfig:
     def dump_cooldown_seconds(self) -> int:
         return int(self.dump.get("cooldown_seconds", 300))
 
+    def manual_trigger_continuous(self) -> bool:
+        """True when ``dump.manual_trigger`` is bool ``true`` (always-on dump)."""
+        return self.dump.get("manual_trigger", False) is True
+
     def manual_trigger_count(self) -> int:
         """Remaining manual dump waves from ``dump.manual_trigger``.
 
-        ``false``/``0`` → 0; ``true`` → 1 (backward compatible); positive int → N.
+        ``false``/``0`` → 0; ``true`` (continuous) → 1 as a positive sentinel;
+        positive int → N. Continuous mode does not decrement on consume.
         Only observed after a successful hot-reload; requires
         ``dfx_config_reload_interval > 0``.
         """
@@ -768,7 +773,7 @@ class DfxRuntimeConfig:
             return 0
 
     def manual_trigger(self) -> bool:
-        """True when at least one manual dump wave remains."""
+        """True when manual dump is armed (continuous or remaining count > 0)."""
         return self.manual_trigger_count() > 0
 
     def input_filter_configs(self) -> list[dict[str, Any]]:
@@ -816,11 +821,18 @@ class DfxRuntimeConfig:
         return True
 
     def consume_manual_trigger(self) -> bool:
-        """If remaining count > 0, decrement by one and return True.
+        """Arm one manual dump wave; return True if armed.
 
-        Persists the new value (``false`` when drained, else remaining int).
-        All ranks update in-memory; only the JSON writer persists.
+        - ``true`` (bool): continuous — leave value as ``true``, do not persist.
+        - positive int: decrement by one (``false`` when drained) and persist.
+        All ranks update in-memory for the int path; only the JSON writer persists.
         """
+        if self.manual_trigger_continuous():
+            logger.debug(
+                "[DFX runtime_config] manual_trigger continuous (true); not clearing %s",
+                _process_role_tag(),
+            )
+            return True
         remaining = self.manual_trigger_count()
         if remaining <= 0:
             return False
