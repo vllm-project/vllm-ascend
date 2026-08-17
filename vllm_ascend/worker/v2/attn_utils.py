@@ -221,10 +221,9 @@ def build_attn_metadata(
             else {}
         )
         # Model-specific metadata (for example MambaHybridAttnMetadata) can
-        # already provide is_prefilling. Merge Ascend's direct override into
-        # the same dictionary instead of passing the keyword twice.
-        if is_prefilling is not None:
-            common_attn_metadata_extra_kwargs["is_prefilling"] = is_prefilling
+        # provide a padding-aware value, which takes precedence over the
+        # default supplied by the Ascend model state.
+        group_is_prefilling = common_attn_metadata_extra_kwargs.pop("is_prefilling", is_prefilling)
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -240,6 +239,7 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            is_prefilling=group_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,

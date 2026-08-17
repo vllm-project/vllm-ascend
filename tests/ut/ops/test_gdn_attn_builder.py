@@ -589,6 +589,8 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
 
     attn_metadata = builder.build(0, common_attn_metadata)
 
+    assert attn_metadata.num_actual_tokens == 4
+    assert attn_metadata.non_spec_state_indices_tensor.shape == (4,)
     assert torch.equal(
         attn_metadata.non_spec_query_start_loc,
         torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),

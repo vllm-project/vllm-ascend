@@ -86,7 +86,7 @@ def test_mamba_model_state_inherits_upstream_state_management():
         (CUDAGraphMode.FULL, 4, 8),
     ],
 )
-def test_mamba_prepare_attn_merges_prefill_metadata_and_preserves_actual_tokens(
+def test_mamba_prepare_attn_merges_prefill_metadata_and_preserves_graph_tokens(
     cudagraph_mode,
     expected_num_reqs,
     expected_input_tokens,
@@ -129,7 +129,7 @@ def test_mamba_prepare_attn_merges_prefill_metadata_and_preserves_actual_tokens(
     )["linear_attn"]
 
     assert metadata.num_reqs == expected_num_reqs
-    assert metadata.num_actual_tokens == 5
+    assert metadata.num_actual_tokens == expected_input_tokens
     assert metadata.num_input_tokens == expected_input_tokens
     assert torch.equal(
         metadata.is_prefilling,

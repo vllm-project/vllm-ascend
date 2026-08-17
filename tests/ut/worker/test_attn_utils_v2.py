@@ -11,6 +11,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
+    MambaHybridAttnMetadata,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.dsa_v1 import (
@@ -297,3 +300,37 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
     assert calls[1][cache_name]["first_group"] is True
+
+
+def test_mrv2_model_specific_is_prefilling_takes_precedence():
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    model_specific_is_prefilling = torch.tensor([True, False])
+
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1, 1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=(
+            torch.zeros((2, 1), dtype=torch.int32),
+            torch.zeros((2, 1), dtype=torch.int32),
+        ),
+        slot_mappings=torch.zeros((2, 2), dtype=torch.int32),
+        kv_cache_config=kv_cache_config,
+        seq_lens_np=np.array([1, 1], dtype=np.int32),
+        is_prefilling=torch.tensor([False, True]),
+        model_specific_attn_metadata=MambaHybridAttnMetadata(
+            is_prefilling=model_specific_is_prefilling,
+        ),
+    )
+
+    assert len(calls) == 2
+    for call in calls:
+        assert torch.equal(
+            call["common_attn_metadata"].is_prefilling,
+            model_specific_is_prefilling,
+        )
