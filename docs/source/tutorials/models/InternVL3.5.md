@@ -1,4 +1,4 @@
-# InternVL3.5(InternVL3_5-38B/241B-A28B)
+# InternVL3.5(38B/241B-A28B)
 
 ## 1 Introduction
 
