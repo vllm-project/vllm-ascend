@@ -106,7 +106,7 @@ def test_dspark_spec_decoding(
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
         model,
-        max_model_len=1024,
+        max_model_len=4096,
         tensor_parallel_size=4,
         enable_expert_parallel=True,
         enforce_eager=enforce_eager,
@@ -127,5 +127,5 @@ def test_dspark_spec_decoding(
         Vector,
     )
     golden = [0.83, 0.74, 0.65, 0.59, 0.52]
-    match = all(a >= b - 0.03 for a, b in zip(acceptance_per_pos, golden))
+    match = all(abs(a - b) < 0.03 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
