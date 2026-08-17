@@ -962,7 +962,7 @@ class XliteWrapper:
             self.kv_caches = adapted
 
     def _adapt_hybrid_kv_caches(self, caches: list[list[torch.Tensor]]) -> list[list[torch.Tensor]]:
-        """Map hybrid caches to xlite: paged K/V for full layers, batch-major states for GDN."""
+        """Map hybrid caches to xlite: paged K/V for full layers, slot-major GDN states."""
         cfg = self.adapter_xlite_model.xlite_config
         n_layers, interval = int(cfg.n_layers), int(cfg.full_attention_interval)
         max_batch, tp = int(cfg.max_batch_size), max(int(cfg.def_tp_size), 1)
@@ -971,8 +971,20 @@ class XliteWrapper:
         conv_dim = (int(cfg.linear_num_k_heads) // tp) * k_dim * 2 + n_v * v_dim
         kernel, block_size, head_dim = int(cfg.linear_conv_kernel_dim), int(cfg.block_size), int(cfg.head_dim)
         kv_heads = max(int(cfg.n_kv_heads) // tp, 1)
-        self._xlite_hybrid_state_refs = []
+        # Slot 0 is NULL_BLOCK_ID; sparse mamba IDs are remapped into [1, max_batch].
+        num_slots = max_batch + 1
+        self._xlite_hybrid_block_to_slot: dict[int, int] = {}
+        self._xlite_hybrid_free_slots = list(range(1, num_slots))
+        self._xlite_hybrid_persistent: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self._xlite_hybrid_batch: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self._xlite_hybrid_state_refs: list[torch.Tensor] = []
+        self._xlite_hybrid_last_ids: tuple[int, ...] | None = None
+        self._xlite_hybrid_last_dense: tuple[int, ...] | None = None
+        self._xlite_hybrid_last_idx: torch.Tensor | None = None
+        self._xlite_hybrid_dirty = False
+        self._xlite_hybrid_skip = False
         adapted: list[list[torch.Tensor]] = []
+        z = self.hidden_states.new_zeros
 
         def as_kv(group: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
             ts = [t for t in group if isinstance(t, torch.Tensor)]
@@ -999,11 +1011,13 @@ class XliteWrapper:
             if ((i + 1) % interval) == 0:
                 adapted.append(list(as_kv(caches[i])))
             else:
-                conv = torch.zeros(max_batch, conv_dim, kernel, dtype=self.hidden_states.dtype, device=self.device)
-                ssm = torch.zeros(max_batch, n_v, k_dim, v_dim, dtype=self.hidden_states.dtype, device=self.device)
-                self._xlite_hybrid_state_refs.extend([conv, ssm])
-                adapted.append([conv, ssm])
-        logger.info("xlite hybrid KV adapted: layers=%s max_batch=%s", n_layers, max_batch)
+                conv_p, ssm_p = z(num_slots, conv_dim, kernel), z(num_slots, n_v, k_dim, v_dim)
+                conv_b, ssm_b = z(max_batch, conv_dim, kernel), z(max_batch, n_v, k_dim, v_dim)
+                self._xlite_hybrid_persistent.append((conv_p, ssm_p))
+                self._xlite_hybrid_batch.append((conv_b, ssm_b))
+                self._xlite_hybrid_state_refs.extend([conv_p, ssm_p, conv_b, ssm_b])
+                adapted.append([conv_b, ssm_b])
+        logger.info("xlite hybrid KV adapted: layers=%s max_batch=%s gdn_slots=%s", n_layers, max_batch, num_slots)
         return adapted
 
     @staticmethod
@@ -1024,6 +1038,114 @@ class XliteWrapper:
                 return int(bt.shape[-1]) if bt is not None and hasattr(bt, "shape") else -1
             return max(cands, key=score)
         return None
+
+    @staticmethod
+    def _gdn_state_ids(attn_metadata_raw: Any, num_reqs: int) -> torch.Tensor | None:
+        if num_reqs <= 0:
+            return None
+        from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+        metas = (
+            attn_metadata_raw.values()
+            if isinstance(attn_metadata_raw, dict)
+            else attn_metadata_raw
+            if isinstance(attn_metadata_raw, list)
+            else (attn_metadata_raw,)
+        )
+        for meta in metas:
+            if not isinstance(meta, GDNAttentionMetadata):
+                continue
+            idx = meta.non_spec_state_indices_tensor
+            if idx is None and meta.spec_state_indices_tensor is not None:
+                idx = meta.spec_state_indices_tensor[:, 0]
+            if idx is not None and idx.numel() >= num_reqs:
+                return idx[:num_reqs]
+        return None
+
+    def _hybrid_slots(self, bids: tuple[int, ...]) -> tuple[int, ...]:
+        """Remap sparse mamba block IDs into dense slots; 0 is NULL."""
+        active = {b for b in bids if b}
+        out: list[int] = []
+        for bid in bids:
+            if not bid:
+                out.append(0)
+                continue
+            slot = self._xlite_hybrid_block_to_slot.get(bid)
+            if slot is None:
+                if not self._xlite_hybrid_free_slots:
+                    for old_bid, old_slot in list(self._xlite_hybrid_block_to_slot.items()):
+                        if old_bid not in active:
+                            del self._xlite_hybrid_block_to_slot[old_bid]
+                            self._xlite_hybrid_free_slots.append(old_slot)
+                            break
+                if not self._xlite_hybrid_free_slots:
+                    raise RuntimeError(f"xlite hybrid: no free GDN slots (active={len(active)})")
+                slot = self._xlite_hybrid_free_slots.pop()
+                self._xlite_hybrid_block_to_slot[bid] = slot
+                for conv_p, ssm_p in self._xlite_hybrid_persistent:
+                    conv_p[slot].zero_()
+                    ssm_p[slot].zero_()
+            out.append(slot)
+        return tuple(out)
+
+    def _hybrid_copy(self, idx: torch.Tensor, to_batch: bool) -> None:
+        n = int(idx.numel())
+        for (conv_p, ssm_p), (conv_b, ssm_b) in zip(self._xlite_hybrid_persistent, self._xlite_hybrid_batch):
+            if to_batch:
+                conv_b[:n].copy_(conv_p.index_select(0, idx))
+                ssm_b[:n].copy_(ssm_p.index_select(0, idx))
+            else:
+                conv_p.index_copy_(0, idx, conv_b[:n])
+                ssm_p.index_copy_(0, idx, ssm_b[:n])
+
+    def _hybrid_zero_rows(self, rows: list[int], dense: tuple[int, ...]) -> None:
+        for (conv_p, ssm_p), (conv_b, ssm_b) in zip(self._xlite_hybrid_persistent, self._xlite_hybrid_batch):
+            for i in rows:
+                conv_b[i].zero_()
+                ssm_b[i].zero_()
+                if dense[i]:
+                    conv_p[dense[i]].zero_()
+                    ssm_p[dense[i]].zero_()
+
+    def _hybrid_gather(self, raw_idx: torch.Tensor | None, cached_lens: list[int], num_reqs: int) -> None:
+        """Gather GDN states; skip copies when state_indices order is unchanged."""
+        self._xlite_hybrid_skip = False
+        if num_reqs <= 0 or not getattr(self, "_xlite_hybrid_persistent", None):
+            self._xlite_hybrid_skip = True
+            return
+        bids = (
+            tuple(range(1, num_reqs + 1))
+            if raw_idx is None
+            else tuple(int(x) for x in raw_idx[:num_reqs].detach().cpu().tolist())
+        )
+        fresh = [i for i, length in enumerate(cached_lens[:num_reqs]) if int(length) == 0 and bids[i]]
+        last_idx = self._xlite_hybrid_last_idx
+        last_dense = self._xlite_hybrid_last_dense
+        if self._xlite_hybrid_last_ids == bids and last_idx is not None and last_dense is not None:
+            if fresh:
+                self._hybrid_zero_rows(fresh, last_dense)
+            self._xlite_hybrid_skip = True
+            return
+        if self._xlite_hybrid_dirty and last_idx is not None:
+            self._hybrid_copy(last_idx, to_batch=False)
+            self._xlite_hybrid_dirty = False
+        dense = bids if raw_idx is None else self._hybrid_slots(bids)
+        idx = last_idx if last_dense == dense and last_idx is not None else torch.tensor(dense, dtype=torch.long, device=self.device)
+        self._hybrid_copy(idx, to_batch=True)
+        if fresh:
+            self._hybrid_zero_rows(fresh, dense)
+        self._xlite_hybrid_last_ids = bids
+        self._xlite_hybrid_last_dense = dense
+        self._xlite_hybrid_last_idx = idx
+
+    def _hybrid_scatter(self) -> None:
+        if self._xlite_hybrid_skip:
+            self._xlite_hybrid_dirty = True
+            return
+        idx = self._xlite_hybrid_last_idx
+        if idx is not None:
+            self._hybrid_copy(idx, to_batch=False)
+            self._xlite_hybrid_dirty = False
 
     def __call__(
         self,
@@ -1155,11 +1277,11 @@ class XliteWrapper:
                 )
             num_actual_tokens = int(attn_metadata.num_actual_tokens)
             if sum(query_lens_list) != num_actual_tokens:
-                return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
-            # Refuse capture/dummy all-zero tables on decode.
-            for i, cached in enumerate(cached_lens_list):
-                if cached > 0 and int(block_tables_list[i][0]) == 0:
-                    return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+                return _ensure_output(
+                    self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                    "runnable(hybrid query_lens sum mismatch)",
+                )
+            self._hybrid_gather(self._gdn_state_ids(attn_metadata_raw, num_reqs), cached_lens_list, num_reqs)
             xlite_attn_metadata = AttnMeta()
             xlite_attn_metadata.lens = query_lens_list
             xlite_attn_metadata.cached_lens = cached_lens_list
@@ -1182,7 +1304,8 @@ class XliteWrapper:
                 )
                 if xlite_deepstack and hasattr(self.npu_runnable, "_clear_deepstack_input_embeds"):
                     self.npu_runnable._clear_deepstack_input_embeds(emb.size(0))
-            return h[:num_actual_tokens]
+            self._hybrid_scatter()
+            return _ensure_output(h[:num_actual_tokens], "xlite hybrid forward")
 
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         num_actual_tokens = attn_metadata_router.num_actual_tokens
