@@ -631,6 +631,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
+        # Request-local durable high-water marks. They are advanced only after
+        # the backend store succeeds, so a failed range is retried on the next
+        # Decode boundary instead of being lost when scheduler metadata moves
+        # forward. Keeping this on the worker also avoids rescanning the full
+        # prefix on every successful Decode save.
+        self._saved_offsets: dict[str, int] = {}
+        # Token suffix retained only after a failed store. This lets a retry
+        # publish correct KV events without copying the full request history on
+        # the normal Decode path.
+        self._retry_token_ids: dict[str, tuple[int, list[int]]] = {}
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -659,6 +669,55 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self.done_task_lock:
             self.stored_requests.pop(req_id, None)
 
+    def get_saved_offset(self, req_id: str) -> int:
+        with self.done_task_lock:
+            return self._saved_offsets.get(req_id, 0)
+
+    def record_saved_offset(self, req_id: str, token_len: int) -> None:
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                self._saved_offsets[req_id] = max(self._saved_offsets.get(req_id, 0), token_len)
+
+    def reset_saved_request(self, req_id: str) -> None:
+        with self.done_task_lock:
+            self._saved_offsets.pop(req_id, None)
+            self._retry_token_ids.pop(req_id, None)
+
+    def get_event_token_ids(self, req_meta: ReqMeta, start: int, end: int) -> list[int] | None:
+        if req_meta.token_ids is None:
+            return None
+        token_ids_start = req_meta.save_start_token
+        token_ids = req_meta.token_ids
+        with self.done_task_lock:
+            retry = self._retry_token_ids.get(req_meta.req_id)
+            if retry is not None:
+                retry_start, retry_ids = retry
+                if retry_start + len(retry_ids) == token_ids_start:
+                    token_ids_start = retry_start
+                    token_ids = retry_ids + token_ids
+        token_ids_end = token_ids_start + len(token_ids)
+        if start < token_ids_start or end > token_ids_end:
+            return []
+        return token_ids[start - token_ids_start : end - token_ids_start]
+
+    def _remember_retry_token_ids(self, req_meta: ReqMeta) -> None:
+        if not self.enable_kv_event or req_meta.token_ids is None:
+            return
+        token_ids_start = req_meta.save_start_token
+        token_ids = req_meta.token_ids.copy()
+        with self.done_task_lock:
+            retry = self._retry_token_ids.get(req_meta.req_id)
+            if retry is not None:
+                retry_start, retry_ids = retry
+                if retry_start + len(retry_ids) == token_ids_start:
+                    token_ids_start = retry_start
+                    token_ids = retry_ids + token_ids
+            self._retry_token_ids[req_meta.req_id] = (token_ids_start, token_ids)
+
+    def _clear_retry_token_ids(self, req_id: str) -> None:
+        with self.done_task_lock:
+            self._retry_token_ids.pop(req_id, None)
+
     def get_completed_events(self):
         if not self.completed_events:
             return None
@@ -679,9 +738,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def _handle_request(self, req_meta: ReqMeta):
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
             req_id = req_meta.req_id
+            tracked_request = self.is_stored_request(req_id)
             try:
                 self.worker._store_kv_tp_mismatch(req_meta)
+                if tracked_request:
+                    self.record_saved_offset(req_id, req_meta.token_len_chunk)
+                    self._clear_retry_token_ids(req_id)
             except Exception:
+                self._remember_retry_token_ids(req_meta)
                 logger.exception("Failed to store KV cache for TP-mismatch request %s", req_id)
             finally:
                 remaining = self.get_stored_request_count(req_id)
@@ -702,7 +766,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if not tracked_request:
                 return
             self._handle_stored_request(req_meta)
+            self.record_saved_offset(req_id, req_meta.token_len_chunk)
+            self._clear_retry_token_ids(req_id)
         except Exception:
+            self._remember_retry_token_ids(req_meta)
             logger.exception("Failed to store KV cache for request %s", req_id)
         finally:
             remaining = self.dec_stored_request(req_id) if tracked_request else None
@@ -734,8 +801,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if load_spec is not None
             else 0
         )
+        save_start_token = self.get_saved_offset(req_id)
 
         def should_skip(start: int, end: int) -> bool:
+            # ``save_start_token`` is the scheduler's durable high-water mark.
+            # In Decode-only mode it is initialized to the last complete
+            # Prefill boundary, so honoring it here is what prevents a Decode
+            # consumer from backfilling missing Prefill blocks. It also avoids
+            # repeatedly looking up the full request history on every Decode
+            # boundary.
+            if end <= save_start_token:
+                return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
@@ -854,7 +930,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addrs.append(addr)
                 sizes.append(size)
                 if self.enable_kv_event:
-                    token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                    token_ids = self.get_event_token_ids(req_meta, start, ends[index])
                     block_size = (
                         req_meta.original_block_size[group_id]
                         if isinstance(req_meta.original_block_size, list)
@@ -887,7 +963,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
             if current_event is not None:
                 current_event.synchronize()
-            self.m_store.put(keys, addrs, sizes)
+            put_result = self.m_store.put(keys, addrs, sizes)
+            if isinstance(put_result, list):
+                if len(put_result) != len(keys):
+                    raise RuntimeError(f"KV store backend returned {len(put_result)} results for {len(keys)} keys")
+                if not all(put_result):
+                    if self.enable_kv_event and stored_events and len(stored_events) == len(put_result):
+                        self.update_kv_event(
+                            [event for event, succeeded in zip(stored_events, put_result, strict=True) if succeeded]
+                        )
+                    raise RuntimeError(f"KV store backend partially failed to put request {req_id}")
+            elif put_result is False:
+                raise RuntimeError(f"KV store backend failed to put request {req_id}")
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
 

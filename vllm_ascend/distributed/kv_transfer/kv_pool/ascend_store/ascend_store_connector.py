@@ -93,6 +93,21 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
+        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_decode_cache", False
+        )
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        if (
+            self.kv_role == "kv_consumer"
+            and self.save_decode_cache
+            and not self.consumer_is_to_put
+            and self.use_layerwise
+        ):
+            raise ValueError(
+                "save_decode_cache on a kv_consumer does not support use_layerwise. "
+                "Layerwise reuse must persist partial blocks on every Decode step, "
+                "which is incompatible with completed-block-only Decode offload."
+            )
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -237,14 +252,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
 
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if not self.can_put:
             # A load-only consumer does not publish KV.
             return
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
-            # Don't do save if the role is kv_consumer
+        if not self.can_put:
+            # A load-only consumer has no store thread to wait for.
             return
 
         if self.use_layerwise:
@@ -288,6 +303,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
+
+    def has_pending_push_work(self) -> bool:
+        return bool(self.connector_scheduler and self.connector_scheduler.has_pending_push_work())
 
 
 class LookupKeyServer:

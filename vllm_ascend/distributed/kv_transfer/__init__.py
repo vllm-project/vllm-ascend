@@ -42,6 +42,17 @@ def register_connector():
         "AscendStoreConnector",
     )
 
+    # The upstream implementation uses CUDA events on its store path. Route
+    # the canonical vLLM name to the NPU-native AscendStore implementation so
+    # upstream MooncakeStoreConnector configurations work unchanged.
+    if "MooncakeStoreConnector" in KVConnectorFactory._registry:
+        KVConnectorFactory._registry.pop("MooncakeStoreConnector")
+    KVConnectorFactory.register_connector(
+        "MooncakeStoreConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
+        "AscendStoreConnector",
+    )
+
     KVConnectorFactory.register_connector(
         "AscendStoreConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",

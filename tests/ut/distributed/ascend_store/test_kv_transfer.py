@@ -419,6 +419,70 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 0)
 
+    def test_handle_request_only_scans_newly_savable_suffix(self):
+        t, store = self._make_thread([0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            save_start_token=32,
+            block_ids=[0, 1, 2],
+            block_hashes=[b"h0", b"h1", b"h2"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.record_saved_offset("r1", 32)
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(len(store.put_calls), 1)
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys[0].endswith(f"@{b'h2'.hex()}"))
+        self.assertEqual(t.get_saved_offset("r1"), 48)
+
+    def test_failed_store_keeps_offset_and_kv_event_tokens_for_retry(self):
+        t, store = self._make_thread([0, 0], enable_kv_event=True)
+        store.put = MagicMock(return_value=False)
+        failed_req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            save_start_token=0,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            token_ids=list(range(16)),
+            original_block_size=16,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(failed_req)
+
+        t._handle_request(failed_req)
+
+        self.assertEqual(t.get_saved_offset("r1"), 0)
+        self.assertEqual(t.get_kv_events(), [])
+
+        store.put = MagicMock()
+        retry_req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=16,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            token_ids=list(range(16, 32)),
+            original_block_size=16,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(retry_req)
+
+        t._handle_request(retry_req)
+
+        self.assertEqual(t.get_saved_offset("r1"), 32)
+        events = t.get_kv_events()
+        self.assertEqual([event.token_ids for event in events], [list(range(16)), list(range(16, 32))])
+
+        t.reset_saved_request("r1")
+        self.assertEqual(t.get_saved_offset("r1"), 0)
+
     def test_handle_request_not_in_stored(self):
         t, store = self._make_thread([0])
         req = ReqMeta(
