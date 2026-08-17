@@ -189,10 +189,16 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
             self.multimodal_config is not None and self.multimodal_config.mm_encoder_tp_mode == "data"
         )
 
-        with self._mark_composite_model(
-            vllm_config,
-            language_targets=MiniMaxM3SparseForCausalLM,
-            tower_targets={"image": MiniMaxVLVisionModel, "video": MiniMaxVLVisionModel},
+        with (
+            self._mark_language_model(
+                vllm_config,
+                targets=MiniMaxM3SparseForCausalLM,
+            ),
+            self._mark_tower_model(
+                vllm_config,
+                {"image", "video"},
+                targets=MiniMaxVLVisionModel,
+            ),
         ):
             self.model = MiniMaxM3VLModel(
                 vllm_config=vllm_config,
