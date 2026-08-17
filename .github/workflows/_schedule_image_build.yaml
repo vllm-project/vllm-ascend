@@ -473,7 +473,7 @@ jobs:
       - name: Login to SWR
         uses: docker/login-action@v3
         with:
-          registry: swr.cn-north-12.myhuaweicloud.com
+          registry: swr.cn-southwest-2.myhuaweicloud.com
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
 
