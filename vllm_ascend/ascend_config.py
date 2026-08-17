@@ -546,9 +546,11 @@ class RlConfig:
     """Unified defaults for reinforcement-learning workloads."""
 
     enabled: bool
+    refresh: bool
     sleep_mode_extra_cleanup: bool
     weight_nz_mode: int
     disable_expandable_segments: bool
+    enable_training_consistency: bool
     enable_batch_invariant: bool
     enable_dev_endpoints: bool
 
@@ -558,9 +560,11 @@ class RlConfig:
     }
     _DEFAULTS = {
         "enabled": False,
+        "refresh": True,
         "sleep_mode_extra_cleanup": False,
         "weight_nz_mode": 0,
         "disable_expandable_segments": True,
+        "enable_training_consistency": False,
         "enable_batch_invariant": False,
         "enable_dev_endpoints": True,
     }
@@ -585,9 +589,14 @@ class RlConfig:
             if not isinstance(value, bool):
                 raise ValueError(f"rl_config.{key} must be a bool, got {type(value).__name__}: {value}.")
         if not isinstance(self.weight_nz_mode, int) or isinstance(self.weight_nz_mode, bool):
-            raise ValueError("rl_config.weight_nz_mode must be an int with value 0, 1 or 2.")
-        if self.weight_nz_mode not in (0, 1, 2):
-            raise ValueError(f"rl_config.weight_nz_mode must be 0, 1 or 2, got {self.weight_nz_mode!r}.")
+            raise ValueError("rl_config.weight_nz_mode must be an int with value 0 or 2.")
+        if self.weight_nz_mode == 1:
+            raise ValueError(
+                "rl_config.weight_nz_mode=1 is not supported for RL workloads. "
+                "Use rl_config.weight_nz_mode=0 (the default) instead."
+            )
+        if self.weight_nz_mode not in (0, 2):
+            raise ValueError(f"rl_config.weight_nz_mode must be 0 or 2, got {self.weight_nz_mode!r}.")
         if self.enable_batch_invariant and self.weight_nz_mode != 0:
             raise ValueError("rl_config.enable_batch_invariant requires rl_config.weight_nz_mode=0.")
 
@@ -618,9 +627,10 @@ class RlConfig:
 
             _disable_expandable_segments()
 
-        if "enable_batch_invariant" in self._explicit_keys or self.enable_batch_invariant:
-            os.environ["VLLM_BATCH_INVARIANT"] = "1" if self.enable_batch_invariant else "0"
+        # rl_config provides an additional way to enable batch invariance. It
+        # must not disable a value explicitly supplied through the environment.
         if self.enable_batch_invariant:
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
             os.environ["HCCL_DETERMINISTIC"] = "strict"
             os.environ["LCCL_DETERMINISTIC"] = "1"
 
@@ -1349,6 +1359,9 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
+    rl_config = additional_config.get("rl_config", {})
+    if isinstance(rl_config, dict) and rl_config.get("enabled", False):
+        refresh = refresh or rl_config.get("refresh", RlConfig._DEFAULTS["refresh"])
     global _ASCEND_CONFIG
     if (
         _ASCEND_CONFIG is not None

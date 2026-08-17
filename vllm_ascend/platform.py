@@ -33,7 +33,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -376,6 +376,7 @@ class NPUPlatform(Platform):
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
+        _enable_fa3_for_training_consistency(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
         _update_compilation_modes(vllm_config, ascend_config)
@@ -1252,10 +1253,17 @@ def _disable_expandable_segments() -> None:
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
 
-def _validate_fa3_backend(key, attn_selector_config):
-    if not attn_selector_config.use_batch_invariant:
+def _enable_fa3_for_training_consistency(vllm_config: VllmConfig, ascend_config) -> None:
+    rl_config = ascend_config.rl_config
+    if rl_config.enabled and rl_config.enable_training_consistency:
+        vllm_config.attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+
+
+def _validate_fa3_backend(key, _attn_selector_config):
+    rl_config = get_ascend_config().rl_config
+    if not (rl_config.enabled and rl_config.enable_training_consistency):
         logger.info(
-            "FA3 will not be enabled when not in training-inference consistency scenario. "
+            "FA3 will not be enabled when rl_config.enable_training_consistency is false. "
             "Note that Ascend NPU will use its registered plugin backend instead."
         )
         return False

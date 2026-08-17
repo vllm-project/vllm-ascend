@@ -5,11 +5,12 @@ import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform, _validate_eplb_config
+from vllm_ascend.platform import NPUPlatform, _enable_fa3_for_training_consistency, _validate_eplb_config
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -1347,6 +1348,68 @@ class TestNPUPlatform(TestBase):
             use_sparse=False,
         )
         result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+        self.assertEqual(result, "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
+
+    def test_training_consistency_selects_fa3(self):
+        vllm_config = MagicMock()
+        ascend_config = MagicMock()
+        ascend_config.rl_config.enabled = True
+        ascend_config.rl_config.enable_training_consistency = True
+
+        _enable_fa3_for_training_consistency(vllm_config, ascend_config)
+
+        self.assertEqual(vllm_config.attention_config.backend, AttentionBackendEnum.FLASH_ATTN)
+
+    def test_training_consistency_is_ignored_when_rl_config_is_disabled(self):
+        vllm_config = MagicMock()
+        vllm_config.attention_config.backend = None
+        ascend_config = MagicMock()
+        ascend_config.rl_config.enabled = False
+        ascend_config.rl_config.enable_training_consistency = True
+
+        _enable_fa3_for_training_consistency(vllm_config, ascend_config)
+
+        self.assertIsNone(vllm_config.attention_config.backend)
+
+    @patch("vllm_ascend.platform.import_module")
+    @patch("vllm_ascend.platform.util.find_spec", return_value=object())
+    @patch("vllm_ascend.platform.get_ascend_config")
+    def test_get_attn_backend_cls_fa3_uses_training_consistency(
+        self, mock_get_ascend_config, mock_find_spec, mock_import_module
+    ):
+        mock_get_ascend_config.return_value.rl_config.enabled = True
+        mock_get_ascend_config.return_value.rl_config.enable_training_consistency = True
+        mock_import_module.return_value.flash_attn_with_kvcache = MagicMock()
+        attn_selector_config = AttentionSelectorConfig(
+            dtype=torch.float16,
+            head_size=0,
+            kv_cache_dtype=None,
+            block_size=128,
+            use_mla=False,
+            use_sparse=False,
+        )
+
+        result = self.platform.get_attn_backend_cls(AttentionBackendEnum.FLASH_ATTN, attn_selector_config)
+
+        self.assertEqual(result, "vllm_ascend.attention.fa3_v1.AscendFABackend")
+        mock_find_spec.assert_called_once_with("flash_attn_npu_v3")
+
+    @patch("vllm_ascend.platform.get_ascend_config")
+    def test_get_attn_backend_cls_fa3_disabled_without_training_consistency(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.rl_config.enabled = True
+        mock_get_ascend_config.return_value.rl_config.enable_training_consistency = False
+        attn_selector_config = AttentionSelectorConfig(
+            dtype=torch.float16,
+            head_size=0,
+            kv_cache_dtype=None,
+            block_size=128,
+            use_mla=False,
+            use_sparse=False,
+            use_batch_invariant=True,
+        )
+
+        result = self.platform.get_attn_backend_cls(AttentionBackendEnum.FLASH_ATTN, attn_selector_config)
+
         self.assertEqual(result, "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
 
     def test_get_punica_wrapper(self):
