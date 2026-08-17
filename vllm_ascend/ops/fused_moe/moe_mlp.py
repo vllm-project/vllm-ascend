@@ -18,9 +18,11 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
@@ -42,6 +44,14 @@ from vllm_ascend.utils import (
 
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
 SITU_MX_DST_TYPE_E4M3FN = 36
+ENABLE_MOE_SYNTHETIC_BALANCE = envs.VLLM_ASCEND_ENABLE_MOE_SYNTHETIC_BALANCE
+logger = init_logger(__name__)
+
+if ENABLE_MOE_SYNTHETIC_BALANCE:
+    logger.warning(
+        "MoE synthetic group_list balancing is enabled. Expert semantics are changed; "
+        "use this mode only for profiling, never for production or accuracy evaluation."
+    )
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
@@ -89,6 +99,40 @@ def cumsum_group_list(
         f"Conversion from src_list_type={src_list_type} to dst_list_type={dst_list_type} is not implemented yet. "
         "This feature is under development."
     )
+
+
+def synthetic_balance_group_list(group_list: torch.Tensor, group_list_type: int) -> torch.Tensor:
+    """Evenly divide routed rows across experts for performance diagnosis.
+
+    This deliberately changes only the grouped-matmul boundaries; it does not
+    reroute or reorder tokens. Consequently, output semantics are changed and
+    results from this mode must not be used for accuracy evaluation.
+
+    Args:
+        group_list: Expert row counts (type 1) or cumulative boundaries
+            (type 0).
+        group_list_type: Ascend grouped-matmul group-list representation.
+    """
+    if group_list_type not in (0, 1):
+        raise ValueError(
+            "Forced MoE group_list balancing supports only count (1) and "
+            f"cumulative (0) formats, but received {group_list_type}."
+        )
+    if group_list.ndim != 1 or group_list.numel() == 0:
+        raise ValueError(
+            "Forced MoE group_list balancing requires a non-empty 1-D "
+            f"tensor, but received shape {tuple(group_list.shape)}."
+        )
+
+    expert_num = group_list.shape[0]
+    total_rows = group_list[-1] if group_list_type == 0 else group_list.sum()
+    base_rows = torch.div(total_rows, expert_num, rounding_mode="floor")
+    remainder = torch.remainder(total_rows, expert_num)
+    expert_indices = torch.arange(expert_num, dtype=group_list.dtype, device=group_list.device)
+    balanced_counts = base_rows + (expert_indices < remainder).to(group_list.dtype)
+    if group_list_type == 0:
+        return balanced_counts.cumsum(dim=0, dtype=group_list.dtype)
+    return balanced_counts
 
 
 def _require_single_tensor_for_swiglu_quant(
@@ -769,6 +813,8 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     hidden_states = mlp_compute_input.hidden_states
     group_list = mlp_compute_input.group_list
     group_list_type = mlp_compute_input.group_list_type
+    if ENABLE_MOE_SYNTHETIC_BALANCE:
+        group_list = synthetic_balance_group_list(group_list, group_list_type)
     dynamic_scale = mlp_compute_input.dynamic_scale
     topk_scales = mlp_compute_input.topk_scales
     w1 = mlp_compute_input.weights.w1

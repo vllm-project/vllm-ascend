@@ -94,6 +94,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
     # `mega_moe` can be used only for moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Force an even group_list distribution across local experts. This is a
+    # diagnostic-only switch: it changes the expert boundaries without
+    # rerouting tokens and therefore must not be used for accuracy evaluation.
+    # 0, or not set: preserve the group_list produced by the token dispatcher.
+    # 1: replace count/cumulative group_list values with an even distribution.
+    "VLLM_ASCEND_ENABLE_MOE_SYNTHETIC_BALANCE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_MOE_SYNTHETIC_BALANCE", "0"))
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
