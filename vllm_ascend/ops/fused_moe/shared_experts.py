@@ -15,24 +15,24 @@
 # limitations under the License.
 #
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from functools import wraps
 
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_sp_by_pass,
     get_ascend_device_type,
     npu_stream_switch,
-    shared_expert_dp_enabled,
     shared_experts_calculation_stream,
 )
 
@@ -44,6 +44,15 @@ class FusedMoEEvents:
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
+
+
+class SharedExpertParallelMode(Enum):
+    """Effective activation and weight layout for a shared-expert forward."""
+
+    FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF = auto()  # Full activations, TP-sharded weights.
+    FLASHCOMM_ON_SHARED_EXPERT_DP_OFF = auto()  # Sharded activations, TP-sharded weights.
+    FLASHCOMM_OFF_SHARED_EXPERT_DP_ON = auto()  # Full activations, replicated weights.
+    FLASHCOMM_ON_SHARED_EXPERT_DP_ON = auto()  # Sharded activations, replicated weights.
 
 
 class AscendSharedExperts:
@@ -62,6 +71,7 @@ class AscendSharedExperts:
         quant_method: FusedMoEMethodBase,
     ):
         self.layer = layer
+        self.moe_config = moe_config
         self.hidden_size = moe_config.hidden_dim
         self.in_dtype = moe_config.in_dtype
         self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
@@ -71,6 +81,12 @@ class AscendSharedExperts:
         self.lora_context = None
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
+        # Native MoE sequence parallelism and the SP compiler pass also build
+        # shared-expert linears with replicated weights. Keep this weight-layout
+        # state independent from the runtime FlashComm decision.
+        self.weights_replicated = (
+            ascend_config.enable_shared_expert_dp or moe_config.is_sequence_parallel or enable_sp_by_pass()
+        )
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -135,12 +151,95 @@ class AscendSharedExperts:
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 
+    def parallel_mode(self) -> SharedExpertParallelMode:
+        """Resolve the effective activation/weight layout for this forward."""
+        # EP rewrites FusedMoEParallelConfig.tp_size to 1 because each routed
+        # expert is local. Shared-expert linears still span the physical TP
+        # group, so their layout must be derived from that group instead.
+        tp_size = self.moe_config.tp_group.world_size
+        if tp_size <= 1:
+            return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
+
+        activations_sharded = (
+            _EXTRA_CTX.flash_comm_v1_enabled or self.moe_config.is_sequence_parallel or enable_sp_by_pass()
+        )
+        if activations_sharded and self.weights_replicated:
+            return SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON
+        if activations_sharded:
+            return SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF
+        if self.weights_replicated:
+            return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON
+        return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
+
+    def _prepare_local_dp_input(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[int, int]]:
+        original_num_tokens = hidden_states.shape[0]
+        # See parallel_mode(): moe_config.tp_size describes routed experts in
+        # EP, while this token split follows the shared-expert TP group.
+        tp_group = self.moe_config.tp_group
+        tp_size = tp_group.world_size
+        pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
+        if pad_size > 0:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, pad_size))
+        hidden_states = torch.tensor_split(
+            hidden_states,
+            tp_size,
+            dim=0,
+        )[tp_group.rank_in_group]
+        return hidden_states, (original_num_tokens, pad_size)
+
+    def _finalize_local_dp_output(
+        self,
+        shared_out: torch.Tensor,
+        metadata: tuple[int, int],
+    ) -> torch.Tensor:
+        original_num_tokens, pad_size = metadata
+        shared_out = self.moe_config.tp_group.all_gather(shared_out, dim=0)
+        if pad_size > 0:
+            shared_out = shared_out[:original_num_tokens]
+        return shared_out
+
+    @staticmethod
+    def _prepare_flashcomm_tp_input(hidden_states: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
+
+    def _finalize_flashcomm_tp_output(self, shared_out: torch.Tensor) -> torch.Tensor:
+        # Multimodal draft-model inputs intentionally bypass the usual
+        # maybe_pad_and_reduce path. This output is different: its input was
+        # explicitly TP all-gathered above for TP-sharded weights, so reduce it
+        # directly with the physical TP group.
+        pad_size = _EXTRA_CTX.pad_size
+        if pad_size > 0:
+            shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
+        return self.moe_config.tp_group.reduce_scatter(shared_out, dim=0)
+
     def forward(self, hidden_states: torch.Tensor, fused_moe_evts: FusedMoEEvents):
+        mode = self.parallel_mode()
+        local_dp_metadata = None
+
         def maybe_wait_event(evt: torch.npu.Event | None):
             if evt is not None:
                 torch.npu.current_stream().wait_event(evt)
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+            if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON:
+                # Full activations + replicated weights: shard tokens locally,
+                # run the MLP, then gather its complete output.
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
+            elif mode is SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF:
+                # TP-sharded weights need the full activation slice. Gather the
+                # FlashComm shard before the MLP and reduce-scatter afterwards.
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                hidden_states = self._prepare_flashcomm_tp_input(hidden_states)
+            elif mode not in {
+                SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON,
+                SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF,
+            }:
+                raise AssertionError(f"Unsupported shared expert mode: {mode}")
+
             # Only used for int quantization
             has_quantized_shared_without_lora = (
                 not has_lora(self.lora_context)
@@ -237,12 +336,14 @@ class AscendSharedExperts:
         if self.multistream_overlap:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
-        # NOTE: This is exactly the opposite of
-        # `maybe_all_reduce_tensor_model_parallel`
-        moe_comm_type = _EXTRA_CTX.moe_comm_type
-        if (
-            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-            and not shared_expert_dp_enabled()
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
+        if mode is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON:
+            assert local_dp_metadata is not None
+            shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
+        elif mode is SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_OFF:
+            shared_out = self._finalize_flashcomm_tp_output(shared_out)
+        elif mode not in {
+            SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON,
+            SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF,
+        }:
+            raise AssertionError(f"Unsupported shared expert mode: {mode}")
         return shared_out

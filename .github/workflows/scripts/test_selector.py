@@ -435,20 +435,60 @@ class CodeChangeDetector:
 
         return changed_files
 
-    def parse_pr_diff_file(self, diff_file_path: str) -> dict[str, set[int]]:
+    def detect_renames(self, diff_output: str) -> dict[str, str]:
         """
-        Parse changed line numbers from PR diff file
+        Detect file renames in git diff output.
+
+        Args:
+            diff_output: diff content
+
+        Returns:
+            {old_path: new_path} - mapping from old file path to new file path
+        """
+        renames = {}
+        current_old_path = None
+        current_new_path = None
+
+        for raw_line in diff_output.split("\n"):
+            line = raw_line.rstrip("\r")
+
+            # Detect rename marker
+            if line.startswith("rename from "):
+                current_old_path = line[12:].strip()
+            elif line.startswith("rename to "):
+                current_new_path = line[10:].strip()
+                # When we have both old and new path, record the rename
+                if current_old_path and current_new_path:
+                    # Remove a/ or b/ prefix if present
+                    old_path = current_old_path[2:] if current_old_path.startswith("a/") else current_old_path
+                    new_path = current_new_path[2:] if current_new_path.startswith("b/") else current_new_path
+                    renames[old_path] = new_path
+                    current_old_path = None
+                    current_new_path = None
+
+        return renames
+
+    def parse_pr_diff_file(self, diff_file_path: str) -> tuple[dict[str, set[int]], dict[str, str]]:
+        """
+        Parse changed line numbers and detect renames from PR diff file.
 
         Args:
             diff_file_path: diff file path
+
+        Returns:
+            Tuple of (changed_files_with_lines, rename_mapping)
+            - changed_files_with_lines: {filepath: {lineno, ...}}
+            - rename_mapping: {old_path: new_path}
         """
         try:
             with open(diff_file_path, encoding="utf-8") as f:
                 diff_content = f.read()
-            return self.parse_git_diff(diff_content)
+            changed_files = self.parse_git_diff(diff_content)
+            renames = self.detect_renames(diff_content)
+            return changed_files, renames
         except Exception as e:
             print(f"Warning: Failed to read diff file: {e}")
-            return {}
+            return {}, {}
 
 
 class FunctionParser:
@@ -1170,24 +1210,74 @@ def main():
     if has_csrc_changes:
         print("\n=== CSRC Directory Changes Detected - Running Full Test Suite ===")
     else:
+        renames: dict[str, str] = {}
         if args.github_pr and diff_file:
-            changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
-            print(f"Parsed {len(changed_files_with_lines)} changed files")
+            changed_files_with_lines, renames = change_detector.parse_pr_diff_file(diff_file)
+            print(f"Parsed {len(changed_files_with_lines)} changed files:")
+            for file_path, line_set in changed_files_with_lines.items():
+                print(f"  {file_path}")
+            if renames:
+                print(f"\n=== Detected {len(renames)} Renamed File(s) - Using File-Level Matching ===")
+                for old_path, new_path in renames.items():
+                    print(f"  {old_path} -> {new_path}")
 
         if changed_files_with_lines:
             # Select test cases by precision matching
             print("\n=== Selecting Affected Test Cases ===")
             test_selector = TestSelector(selector.test_case_map)
-            selected, expand_reason = test_selector.select_tests(
-                changed_files_with_lines,
-                min_affected_lines=args.min_affected,
-                source_dir=args.source_dir,
-                enable_line_match=args.enable_line_match,
-                enable_function_match=args.enable_function_match,
-                enable_file_match=args.enable_file_match,
-                enable_skip_imports=args.skip_imports,
-                enable_dedup=args.dedup,
-            )
+
+            # For renamed files, we need file-level matching to cover both old and new paths
+            # Filter out renamed new paths from changed files
+            if renames:
+                renamed_new_paths = set(renames.values())
+                normal_files = {k: v for k, v in changed_files_with_lines.items() if k not in renamed_new_paths}
+            else:
+                normal_files = changed_files_with_lines
+
+            # Process normal files with precision matching
+            selected: list[tuple[str, dict, int]] = []
+            expand_reason = ""
+            if normal_files:
+                selected, expand_reason = test_selector.select_tests(
+                    normal_files,
+                    min_affected_lines=args.min_affected,
+                    source_dir=args.source_dir,
+                    enable_line_match=args.enable_line_match,
+                    enable_function_match=args.enable_function_match,
+                    enable_file_match=args.enable_file_match,
+                    enable_skip_imports=args.skip_imports,
+                    enable_dedup=args.dedup,
+                )
+
+            # Process renamed files: use OLD path for file-level matching
+            for old_path, new_path in renames.items():
+                rename_files = {old_path: set()}
+                rename_selected, rename_expand = test_selector.select_tests(
+                    rename_files,
+                    min_affected_lines=args.min_affected,
+                    source_dir=args.source_dir,
+                    enable_line_match=False,  # Disable line match for renames
+                    enable_function_match=False,  # Disable function match for renames
+                    enable_file_match=True,  # Enable file match for renames
+                    enable_skip_imports=args.skip_imports,
+                    enable_dedup=args.dedup,
+                )
+                selected.extend(rename_selected)
+                expand_reason += rename_expand
+                # Print file-level matched test cases for this rename
+                if rename_selected:
+                    print(f"\n=== File-Level Matched Tests for Renamed File: {old_path} -> {new_path} ===")
+                    for test_name, _, _ in rename_selected:
+                        print(f"  {test_name}")
+
+            # Deduplicate
+            seen = set()
+            deduped = []
+            for item in selected:
+                if item[0] not in seen:
+                    seen.add(item[0])
+                    deduped.append(item)
+            selected = deduped
             test_selector.print_selection(
                 selected, changed_files_with_lines, min_affected_lines=args.min_affected, expand_reason=expand_reason
             )

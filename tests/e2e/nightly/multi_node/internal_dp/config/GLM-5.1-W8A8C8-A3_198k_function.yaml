@@ -1,6 +1,6 @@
 #198k长序列只验证功能
-test_name: "multi-node-GLM-5.2-W4A8C8-MTP-A3_198k_function"
-model: "Eco-Tech/GLM-5.2-w4a8c8"
+test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function"
+model: "Eco-Tech/GLM-5.1-w8a8c8"
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
@@ -20,7 +20,7 @@ deployment:
   - envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.2-w4a8c8
+      vllm serve Eco-Tech/GLM-5.1-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -51,7 +51,7 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.2-w4a8c8
+      vllm serve Eco-Tech/GLM-5.1-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -89,7 +89,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 2
     request_rate: 0
-    baseline: 1
+    baseline: 0
     threshold: 0.97
   acc_aime2025:
     case_type: accuracy

@@ -1,4 +1,4 @@
-# Qwen3.5-397B-A17B Deployment Tutorial
+# Qwen3.5-397B-A17B
 
 ## 1 Introduction
 

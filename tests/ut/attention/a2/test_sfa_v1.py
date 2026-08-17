@@ -640,6 +640,23 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert isinstance(metadata, AscendSFAMetadata)
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
+        # TODO: Revisit this logic after ModelRunner V1 is fully removed,
+        # and remove it if ModelRunner V2 no longer depends on these per-step buffers.
+        assert metadata.cum_query_lens.data_ptr() == builder.actual_seq_lengths_query.data_ptr()
+        assert metadata.seq_lens.data_ptr() == builder.actual_seq_lengths_key.data_ptr()
+
+        draft_metadata_0 = builder.build_for_drafting(common_attn_metadata, draft_index=0)
+        draft_0_cum_query_lens = draft_metadata_0.cum_query_lens.clone()
+        draft_0_seq_lens = draft_metadata_0.seq_lens.clone()
+
+        common_attn_metadata.query_start_loc = torch.arange(0, 111, 11, dtype=torch.int32)
+        common_attn_metadata.seq_lens = torch.full((10,), 11, dtype=torch.int32)
+        draft_metadata_1 = builder.build_for_drafting(common_attn_metadata, draft_index=1)
+
+        assert draft_metadata_0.cum_query_lens.data_ptr() != draft_metadata_1.cum_query_lens.data_ptr()
+        assert draft_metadata_0.seq_lens.data_ptr() != draft_metadata_1.seq_lens.data_ptr()
+        assert torch.equal(draft_metadata_0.cum_query_lens, draft_0_cum_query_lens)
+        assert torch.equal(draft_metadata_0.seq_lens, draft_0_seq_lens)
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
