@@ -179,9 +179,6 @@ msgid ""
 "Guide](../../installation.md)."
 msgstr "更多详情，请参考[安装指南](../../installation.md)。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -627,3 +624,6 @@ msgstr ""
 "    - `--no-enable-prefix-caching` 是此 Atlas 300I DUO 示例的默认推荐，以减少内存压力。\n"
 "    - `--quantization ascend` 为 W8A8 模型启用 Ascend 量化。部署 BF16 模型时请移除该选项。\n"
 "    - 要启用 MTP 推测解码，请使用 --speculative_config '{\"method\": \"mtp\", \"num_speculative_tokens\": 1}'。我们建议将 num_speculative_tokens 设置为 1。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

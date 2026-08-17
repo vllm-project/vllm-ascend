@@ -33,6 +33,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sfa_dcp_replicated_indexer_size = 1
         runner.runner_only_attn_layers = set()
         runner.is_kv_consumer = False
+        runner.sparse_kv_offload_enabled = False
+        runner.sparse_kv_offload_config = MagicMock()
+        runner.tp_rank = 0
         runner.vllm_config = MagicMock()
         runner.vllm_config.kv_transfer_config = None
         runner.model_config = MagicMock()
@@ -748,6 +751,16 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.debugger.step.assert_not_called()
         self.assertTrue(runner._debugger_started)
 
+    def test_start_dump_data_forwards_kwargs_to_debugger_start(self):
+        debugger = MagicMock(spec=["start", "step"])
+        runner = self._build_runner(debugger)
+        runner._debugger_started = False
+
+        runner._start_dump_data(scheduled_tokens={"req-0": 42})
+
+        debugger.start.assert_called_once_with(runner.model, scheduled_tokens={"req-0": 42})
+        self.assertTrue(runner._debugger_started)
+
     @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
@@ -824,7 +837,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "sentinel"):
             runner.execute_model(scheduler_output)
 
-        runner._start_dump_data.assert_called_once_with()
+        runner._start_dump_data.assert_called_once_with(scheduled_tokens={"req0": 1})
 
 
 class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):

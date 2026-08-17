@@ -81,6 +81,7 @@ _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
+_IS_ROT_WEIGHT_USED = None
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -810,7 +811,7 @@ def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 
 
-def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
+def enable_sp(vllm_config=None) -> bool:
     global _ENABLE_SP
     if vllm_config is None:
         try:
@@ -832,16 +833,12 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             except RuntimeError:
                 _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
-        if not _ENABLE_SP and enable_shared_expert_dp:
-            _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
-
     return bool(_ENABLE_SP)
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
+    return get_ascend_config().enable_shared_expert_dp
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1542,3 +1539,25 @@ def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
     if raw is None:
         return None
     return raw.decode(encoding)
+
+
+def is_rot_weight_used(vllm_config: VllmConfig = None):
+    global _IS_ROT_WEIGHT_USED
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+    if _IS_ROT_WEIGHT_USED is None and vllm_config is not None:
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None)
+        _IS_ROT_WEIGHT_USED = quant_description.get("is_rot_used", False) if quant_description is not None else False
+    return _IS_ROT_WEIGHT_USED
+
+
+def enable_sfa(vllm_config) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if hf_text_config is None:
+        return False
+    return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")

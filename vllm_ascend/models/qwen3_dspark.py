@@ -7,7 +7,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 
-from vllm_ascend.patch.worker.patch_draft_quarot import get_rotataion_matrix, get_rotation_path
+from vllm_ascend.models.llama_eagle3 import get_rotation_matrix, get_rotation_path
 
 
 # Process the first linear weight with rotation matrix, if the target model uses rotary quantization
@@ -58,9 +58,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
-        self.enable_confidence_head = bool(
-            getattr(config, "enable_confidence_head", hasattr(config, "markov_head_type"))
-        )
+        self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
         if self.enable_confidence_head:
             model_prefix = maybe_prefix(prefix, "model")
             self.model.confidence_head = DSparkConfidenceHead(
@@ -98,7 +96,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         all_weights = list(weights)
         if self.rotation_path is not None:
             processed_weights: list[tuple[str, torch.Tensor]] = []
-            rotation_weight = get_rotataion_matrix(self.rotation_path)
+            rotation_weight = get_rotation_matrix(self.rotation_path)
             for name, loaded_weight in all_weights:
                 if "fc." in name:
                     loaded_weight = process_weight(loaded_weight, rotation_weight)
