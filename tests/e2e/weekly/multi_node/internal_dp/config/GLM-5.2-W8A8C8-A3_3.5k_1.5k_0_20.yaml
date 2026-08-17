@@ -1,5 +1,5 @@
-test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_3.5k_1.5k_0_50"
-model: "Eco-Tech/GLM-5.1-w8a8c8"
+test_name: "multi-node-GLM-5.2-W8A8C8-MTP-A3_3.5k_1.5k_0_20"
+model: "Eco-Tech/GLM-5.2-w8a8c8"
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
@@ -15,30 +15,33 @@ env_common: &env_common
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   SERVER_PORT: 8077
 
+cluster_hosts:
+  - "141.61.81.131"
+  - "141.61.81.33"
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
 deployment:
   - envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.1-w8a8c8
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
-      --data-parallel-size 8
-      --data-parallel-size-local 4
+      --data-parallel-size 2
+      --data-parallel-size-local 1
       --data-parallel-start-rank 0
       --data-parallel-address $LOCAL_IP
       --enable-expert-parallel
       --data-parallel-rpc-port 12981
-      --tensor-parallel-size 4
+      --tensor-parallel-size 16
       --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
       --seed 1024
       --tool-call-parser glm47
       --reasoning-parser glm45
       --enable-auto-tool-choice
-      --max-num-seqs 32
-      --max-model-len 133120
-      --max-num-batched-tokens 4096
+      --max-num-seqs 12
+      --max-model-len 16384
+      --max-num-batched-tokens 8192
       --trust-remote-code
       --gpu-memory-utilization 0.92
       --quantization ascend
@@ -46,31 +49,31 @@ deployment:
       --no-enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": false}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   -
     envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.1-w8a8c8
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
-      --data-parallel-size 8
-      --data-parallel-size-local 4
-      --data-parallel-start-rank 4
+      --data-parallel-size 2
+      --data-parallel-size-local 1
+      --data-parallel-start-rank 1
       --headless
       --data-parallel-address $MASTER_IP
       --enable-expert-parallel
       --data-parallel-rpc-port 12981
-      --tensor-parallel-size 4
+      --tensor-parallel-size 16
       --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
       --seed 1024
       --tool-call-parser glm47
       --reasoning-parser glm45
       --enable-auto-tool-choice
-      --max-num-seqs 32
-      --max-model-len 133120
-      --max-num-batched-tokens 4096
+      --max-num-seqs 12
+      --max-model-len 16384
+      --max-num-batched-tokens 8192
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
@@ -78,17 +81,17 @@ deployment:
       --no-enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": false}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
-  perf_TPOT50:
+  perf_TPOT20:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_in3500_bs400
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 256
+    num_prompts: 32
     max_out_len: 1500
-    batch_size: 64
+    batch_size: 8
     request_rate: 0
-    baseline: 1267.2573
+    baseline: 324.6152
     threshold: 0.97
