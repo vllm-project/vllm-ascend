@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,7 +10,7 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform, _validate_eplb_config
+from vllm_ascend.platform import NPUPlatform, _configure_ascend_store_mamba_cache, _validate_eplb_config
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -18,6 +19,55 @@ from vllm_ascend.utils import (
 
 
 class TestNPUPlatform(TestBase):
+    class _HybridMambaModelStub:
+        @staticmethod
+        def get_mamba_state_shape_from_config(_vllm_config):
+            # fp16 page sizes: SSM = 16 KiB, conv = 256 B.  The SSM
+            # size is deliberately chosen to require a 128-token attention
+            # block with the fake one-head, head-size-64 attention config.
+            return ((8192,), (128,))
+
+        @staticmethod
+        def get_mamba_state_dtype_from_config(_vllm_config):
+            return (torch.float16, torch.float16)
+
+    class _310PHybridMambaModelStub:
+        @staticmethod
+        def get_mamba_state_shape_from_config(_vllm_config):
+            # Exactly one 16-KiB fp16 state: upstream would select 64 tokens
+            # from the backend's [128, 64] sizes without the 310P constraint.
+            return ((8192,),)
+
+        @staticmethod
+        def get_mamba_state_dtype_from_config(_vllm_config):
+            return (torch.float16,)
+
+    class _310PAttentionBackendStub:
+        @staticmethod
+        def get_preferred_block_size(_default_block_size):
+            return 64
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [128, 64]
+
+        @staticmethod
+        def get_name():
+            return "ASCEND_310P_STUB"
+
+    class _AscendAttentionBackendStub:
+        @staticmethod
+        def get_preferred_block_size(_default_block_size):
+            return 128
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [128]
+
+        @staticmethod
+        def get_name():
+            return "ASCEND_STUB"
+
     @staticmethod
     def mock_vllm_config():
         mock_vllm_config = MagicMock()
@@ -70,6 +120,86 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
+
+    @staticmethod
+    def mock_hybrid_mamba_config(
+        *,
+        block_size=None,
+        mamba_cache_mode="none",
+        enable_prefix_caching=False,
+        user_specified_block_size=False,
+        kv_connector=None,
+        kv_connector_extra_config=None,
+        speculative_method=None,
+    ):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        model_config = vllm_config.model_config
+        model_config.is_hybrid = True
+        model_config.use_mla = False
+        model_config.dtype = torch.float16
+        model_config.max_model_len = 4096
+        model_config.supports_mamba_prefix_caching = False
+        model_config.get_num_kv_heads.return_value = 1
+        model_config.get_head_size.return_value = 64
+        model_config.get_mamba_chunk_size.return_value = 128
+
+        cache_config = vllm_config.cache_config
+        cache_config.cache_dtype = "auto"
+        cache_config.calculate_kv_scales = False
+        cache_config.block_size = block_size
+        cache_config.user_specified_block_size = user_specified_block_size
+        cache_config.mamba_block_size = None
+        cache_config.user_specified_mamba_block_size = False
+        cache_config.mamba_page_size_padded = None
+        cache_config.mamba_cache_mode = mamba_cache_mode
+        cache_config.enable_prefix_caching = enable_prefix_caching
+        cache_config.kv_cache_dtype_skip_layers = []
+
+        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        vllm_config.scheduler_config.enable_chunked_prefill = True
+        if kv_connector is not None:
+            vllm_config.kv_transfer_config = SimpleNamespace(
+                kv_connector=kv_connector,
+                kv_connector_extra_config=kv_connector_extra_config,
+            )
+        if speculative_method is not None:
+            vllm_config.speculative_config = SimpleNamespace(method=speculative_method)
+        return vllm_config
+
+    def run_mamba_config_lifecycle(self, vllm_config, *, is_310p=False):
+        if is_310p:
+            with (
+                patch("vllm_ascend.platform.is_310p", return_value=True),
+                patch.object(
+                    NPUPlatform,
+                    "_find_non_ssm_backend",
+                    return_value=self._310PAttentionBackendStub,
+                ),
+                patch(
+                    "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+                    return_value=(self._310PHybridMambaModelStub, None),
+                ),
+            ):
+                self.platform.update_block_size_for_backend(vllm_config)
+            return
+
+        from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
+
+        HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
+        _configure_ascend_store_mamba_cache(vllm_config)
+        with (
+            patch("vllm_ascend.platform.is_310p", return_value=False),
+            patch.object(
+                NPUPlatform,
+                "_find_non_ssm_backend",
+                return_value=self._AscendAttentionBackendStub,
+            ),
+            patch(
+                "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+                return_value=(self._HybridMambaModelStub, None),
+            ),
+        ):
+            self.platform.update_block_size_for_backend(vllm_config)
 
     def setUp(self):
         self._enable_sp_patch = patch("vllm_ascend.utils.enable_sp", return_value=False)
@@ -1229,6 +1359,148 @@ class TestNPUPlatform(TestBase):
         self.platform.update_block_size_for_backend(vllm_config)
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
+
+    def test_mamba_config_attention_page_covers_raw_mamba_page(self):
+        vllm_config = self.mock_hybrid_mamba_config()
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        # Full attention stores K and V: 2 * head_size * fp16 bytes.
+        attention_page_size = vllm_config.cache_config.block_size * 2 * 64 * 2
+        # Stub SSM + conv state: (8192 + 128) fp16 values.
+        raw_mamba_page_size = (8192 + 128) * 2
+        self.assertGreaterEqual(attention_page_size, raw_mamba_page_size)
+        self.assertEqual(
+            vllm_config.cache_config.mamba_page_size_padded,
+            attention_page_size,
+        )
+
+    def test_mamba_config_310p_uses_128_token_auto_block_size(self):
+        vllm_config = self.mock_hybrid_mamba_config(mamba_cache_mode="align")
+
+        self.run_mamba_config_lifecycle(vllm_config, is_310p=True)
+
+        self.assertEqual(vllm_config.cache_config.block_size, 128)
+        self.assertEqual(
+            vllm_config.cache_config.mamba_block_size,
+            vllm_config.cache_config.block_size,
+        )
+        self.assertEqual(vllm_config.cache_config.mamba_page_size_padded, 128 * 2 * 64 * 2)
+        self.assertFalse(vllm_config.cache_config.user_specified_block_size)
+
+    def test_mamba_config_310p_rejects_mla(self):
+        vllm_config = self.mock_hybrid_mamba_config(mamba_cache_mode="align")
+        vllm_config.model_config.use_mla = True
+
+        with pytest.raises(RuntimeError, match="MLA is not supported on 310P"):
+            self.run_mamba_config_lifecycle(vllm_config, is_310p=True)
+
+    def test_mamba_config_ascend_store_forces_align_mode(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            kv_connector="AscendStoreConnector",
+        )
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.mamba_cache_mode, "align")
+        self.assertEqual(
+            vllm_config.cache_config.mamba_block_size,
+            vllm_config.cache_config.block_size,
+        )
+
+    def test_mamba_config_multi_connector_with_ascend_store_forces_align_mode(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "MooncakeConnector"},
+                    {"kv_connector": "AscendStoreConnector"},
+                ]
+            },
+        )
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.mamba_cache_mode, "align")
+        self.assertEqual(
+            vllm_config.cache_config.mamba_block_size,
+            vllm_config.cache_config.block_size,
+        )
+
+    def test_mamba_config_pd_connector_preserves_cache_mode(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            kv_connector="MooncakeConnector",
+        )
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.mamba_cache_mode, "none")
+        self.assertEqual(
+            vllm_config.cache_config.mamba_block_size,
+            vllm_config.model_config.max_model_len,
+        )
+
+    def test_mamba_config_extract_hidden_states_preserves_cache_mode(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            kv_connector="AscendStoreConnector",
+            speculative_method="extract_hidden_states",
+        )
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.mamba_cache_mode, "none")
+        self.assertEqual(
+            vllm_config.cache_config.mamba_block_size,
+            vllm_config.model_config.max_model_len,
+        )
+
+    def test_mamba_config_disabled_hybrid_manager_preserves_cache_mode(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            kv_connector="AscendStoreConnector",
+        )
+        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.mamba_cache_mode, "none")
+        self.assertEqual(
+            vllm_config.cache_config.mamba_block_size,
+            vllm_config.model_config.max_model_len,
+        )
+
+    def test_mamba_config_ascend_store_rejects_non_align_mode(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            kv_connector="AscendStoreConnector",
+            mamba_cache_mode="all",
+            enable_prefix_caching=True,
+        )
+        vllm_config.model_config.supports_mamba_prefix_caching = True
+
+        with pytest.raises(AssertionError, match="AscendStore"):
+            self.run_mamba_config_lifecycle(vllm_config)
+
+    def test_mamba_config_preserves_explicit_large_block_size(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            block_size=256,
+            user_specified_block_size=True,
+        )
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.block_size, 256)
+
+    def test_mamba_config_prefix_cache_aligns_mamba_block_size(self):
+        vllm_config = self.mock_hybrid_mamba_config(
+            mamba_cache_mode="align",
+            enable_prefix_caching=True,
+        )
+
+        self.run_mamba_config_lifecycle(vllm_config)
+
+        self.assertEqual(
+            vllm_config.cache_config.mamba_block_size,
+            vllm_config.cache_config.block_size,
+        )
 
     def test_validate_parallel_config_rejects_pcp_for_model_runner_v1(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

@@ -73,6 +73,51 @@ else:
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
+MAMBA_MIN_BLOCK_SIZE_310P = 128
+
+
+def _using_ascend_store(vllm_config: VllmConfig) -> bool:
+    """Return whether KV transfer uses AscendStore directly or via MultiConnector."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if not kv_transfer_config:
+        return False
+
+    if kv_transfer_config.kv_connector == "AscendStoreConnector":
+        return True
+
+    if kv_transfer_config.kv_connector != "MultiConnector":
+        return False
+
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    if not extra_config:
+        return False
+
+    connectors = extra_config.get("connectors", ())
+    return any(connector.get("kv_connector") == "AscendStoreConnector" for connector in connectors)
+
+
+def _configure_ascend_store_mamba_cache(vllm_config: VllmConfig) -> None:
+    """Apply the AscendStore cache-mode requirement for hybrid Mamba models."""
+    model_config = vllm_config.model_config
+    if (
+        not model_config
+        or not model_config.is_hybrid
+        or vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+        or not _using_ascend_store(vllm_config)
+    ):
+        return
+
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is not None and getattr(speculative_config, "method", None) == "extract_hidden_states":
+        return
+
+    cache_config = vllm_config.cache_config
+    if cache_config.mamba_cache_mode == "none":
+        cache_config.mamba_cache_mode = "align"
+    else:
+        assert cache_config.mamba_cache_mode == "align", (
+            "mamba_cache_mode only supports 'align' when AscendStore is enabled."
+        )
 
 
 class NPUPlatform(Platform):
@@ -322,25 +367,44 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
-        # TODO: NPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        using_kv_transfer_with_hybrid = (
-            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
-        )
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        if (
-            not cache_config.enable_prefix_caching
-            and using_kv_transfer_with_hybrid
-            and cache_config.mamba_cache_mode == "align"
-        ):
-            if cache_config.mamba_block_size is None or cache_config.mamba_block_size == model_config.max_model_len:
-                cache_config.mamba_block_size = cache_config.block_size
-            else:
-                # mamba_block_size must be a multiple of block_size, so that it can hand the block hash
-                assert cache_config.mamba_block_size % cache_config.block_size == 0, (
-                    f"mamba_block_size must be a multiple of block_size: {cache_config.block_size}"
-                )
+
+        # Ascend still selects block sizes for regular attention models during
+        # check_and_update_config. This hook is needed here only to replace the
+        # retired Hybrid Mamba configuration patches.
+        if not model_config or not model_config.is_hybrid:
+            return
+
+        # Hybrid Mamba models on 310P require a 128-token attention block
+        # alignment.  Establish that platform constraint before delegating the
+        # page-size calculation and Mamba padding to vLLM's official hook.
+        # Temporarily marking the block size as user-specified prevents the
+        # generic phase-1 backend preference ([128, 64] on 310P) from replacing
+        # the required 128-token minimum with 64.
+        restore_user_specified_block_size = None
+        if is_310p() and model_config and model_config.is_hybrid:
+            if model_config.use_mla:
+                raise RuntimeError("MLA is not supported on 310P currently.")
+
+            backend_cls = cls._find_non_ssm_backend(vllm_config)
+            if backend_cls is not None:
+                restore_user_specified_block_size = cache_config.user_specified_block_size
+                if cache_config.block_size is None or cache_config.block_size < MAMBA_MIN_BLOCK_SIZE_310P:
+                    cache_config.block_size = MAMBA_MIN_BLOCK_SIZE_310P
+                    logger.info(
+                        "Setting attention block size to %d tokens for hybrid Mamba models on 310P.",
+                        MAMBA_MIN_BLOCK_SIZE_310P,
+                    )
+                cache_config.user_specified_block_size = True
+
+        try:
+            # vLLM owns backend block-size selection and Hybrid Mamba page
+            # alignment. Ascend only supplies the policies above.
+            super().update_block_size_for_backend(vllm_config)
+        finally:
+            if restore_user_specified_block_size is not None:
+                cache_config.user_specified_block_size = restore_user_specified_block_size
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -361,6 +425,10 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        # AscendStore migrates Mamba state by attention-block granularity, so
+        # select the aligned cache mode before model layers are constructed.
+        _configure_ascend_store_mamba_cache(vllm_config)
 
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)

@@ -18,20 +18,16 @@ import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
+import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
+
+# Mamba block alignment and AscendStore cache-mode handling are implemented by
+# vLLM's platform hook and NPUPlatform.update_block_size_for_backend.
+import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
-import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
-from vllm_ascend.utils import is_310p
-
-if not is_310p():
-    import vllm_ascend.patch.platform.patch_mamba_config  # noqa
-else:
-    import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
-import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
-
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
-import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
+import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
