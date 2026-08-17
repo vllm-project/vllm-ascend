@@ -31,7 +31,13 @@
     // then off. Needs dump.enabled=true + reload_interval > 0; skips quota /
     // cooldown / input filters. Each arm writes one report for that wave's
     // batch (counts; ids if save_sensitive_info).
-    "manual_trigger": false
+    "manual_trigger": false,
+    // Effective msprobe JSON path. Bootstrap seeds from additional_config
+    // dump_config_path / dump_config when null. Change path (or set
+    // reload_msprobe) to recreate the debugger on the next hot-reload wave.
+    "msprobe_config_path": null,
+    // One-shot: recreate debugger from current msprobe_config_path, then false.
+    "reload_msprobe": false
   },
 
   "ascend_log": {

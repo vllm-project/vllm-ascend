@@ -131,6 +131,7 @@ class AscendConfig:
             report_dir=additional_config.get("dfx_report_dir"),
             reload_interval_seconds=self.dfx_config_reload_interval,
             ensure_file=False,
+            msprobe_config_path=self.dump_config_path,
         )
         # Path / hot-reload / persisted flags already logged by DfxRuntimeConfig.
         # Apply ascend_log immediately (API/EngineCore and workers). Workers also

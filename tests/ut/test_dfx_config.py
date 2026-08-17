@@ -73,6 +73,31 @@ def test_dfx_config_hot_reload_and_defaults(tmp_path: Path):
     assert cfg.detector_get("spec_acceptance", "window") == 33
 
 
+def test_msprobe_config_path_seeded_and_reload_flag(tmp_path: Path):
+    cfg_path = tmp_path / "dfx_config.json"
+    msprobe = str(tmp_path / "msprobe.json")
+    cfg = DfxRuntimeConfig(
+        cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        sync_mode="file",
+        reload_interval_seconds=5,
+        msprobe_config_path=msprobe,
+    )
+    assert cfg.dump_msprobe_config_path() == msprobe
+    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert payload["dump"]["msprobe_config_path"] == msprobe
+    assert payload["dump"]["reload_msprobe"] is False
+
+    payload["dump"]["reload_msprobe"] = True
+    cfg_path.write_text(json.dumps(payload), encoding="utf-8")
+    cfg._last_reload_ts = 0.0
+    assert cfg.sync_dfx_config() is True
+    assert cfg.dump_reload_msprobe() is True
+    assert cfg.consume_reload_msprobe() is True
+    assert cfg.dump_reload_msprobe() is False
+
+
 @pytest.mark.parametrize(
     "payload, getter, default, expected, err_match",
     [
@@ -209,6 +234,8 @@ def _valid_dfx_data(**dump_overrides):
         "max_times": 0,
         "cooldown_seconds": 300,
         "manual_trigger": False,
+        "msprobe_config_path": None,
+        "reload_msprobe": False,
     }
     dump.update(dump_overrides)
     return {
