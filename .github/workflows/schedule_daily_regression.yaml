@@ -302,6 +302,7 @@ jobs:
     if: >-
       always() &&
       needs.daily-gate.result == 'failure' &&
+      github.event_name != 'pull_request' &&
       !(github.event_name == 'workflow_dispatch' && inputs.skip_notify == 'true')
     runs-on: ubuntu-latest
     permissions:
