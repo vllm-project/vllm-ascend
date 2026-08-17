@@ -94,6 +94,21 @@ def test_sfa_remap_sparse_indices_supports_dynamic_top_k(top_k: int) -> None:
 
 
 @torch.inference_mode()
+def test_sfa_remap_sparse_indices_preserves_large_integer_precision() -> None:
+    indices = torch.tensor(
+        [[16_777_216, 16_777_217, 16_777_344, -1]],
+        dtype=torch.int32,
+        device="npu",
+    )
+
+    expected = _reference_remap(indices, 2, 0, 128)
+    actual = torch.empty_like(indices)
+    torch.ops._C_ascend.sfa_remap_sparse_indices(indices, actual, 2, 0, 128)
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@torch.inference_mode()
 def test_sfa_cp_backend_uses_ascendc_remap() -> None:
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
     impl.dcp_size = 16
