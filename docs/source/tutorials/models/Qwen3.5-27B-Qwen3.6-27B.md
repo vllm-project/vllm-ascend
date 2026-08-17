@@ -214,7 +214,7 @@ pip show vllm-ascend
 
 Expected result: The version information of `vllm-ascend` is displayed, confirming a successful installation.
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
@@ -524,7 +524,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     ```shell
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.1"
+    local_ip="192.xx.xx.1"
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -589,7 +589,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     ```shell
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.2"
+    local_ip="192.xx.xx.2"
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -658,9 +658,9 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 
     ```shell
     # p0 (Prefill node 0)
-    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 192.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
     # d0 (Decode node 0)
-    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 192.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
 5. Run the proxy server on the prefill master node.
@@ -672,27 +672,27 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     ```shell
     python load_balance_proxy_server_example.py \
       --port 1999 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --prefiller-hosts \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
       --prefiller-ports \
         7100 7101 7102 7103 7104 7105 7106 7107 \
       --decoder-hosts \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
       --decoder-ports \
         7100 7101 7102 7103 7104 7105 7106 7107 \
     ```
@@ -934,7 +934,7 @@ After about several minutes, you can get the performance evaluation result.
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 

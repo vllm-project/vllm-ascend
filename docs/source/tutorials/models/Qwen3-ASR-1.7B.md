@@ -189,7 +189,7 @@ The following settings are starting points rather than globally optimal configur
 | High throughput | Increase request concurrency after establishing the latency baseline | Monitor NPU memory and end-to-end latency; do not use synthetic text-only requests as a proxy for ASR traffic. |
 | Long audio | Increase `--max-model-len` only as required | On Atlas 300I DUO, keep the value conservative because attention-mask memory grows with the configured maximum length. |
 
-For general parameter tuning, refer to the [Performance Tuning Guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
+For general parameter tuning, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
 
 ## 10 FAQ
 

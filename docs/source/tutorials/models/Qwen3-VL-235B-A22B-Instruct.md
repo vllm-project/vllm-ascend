@@ -195,7 +195,7 @@ Expected result: The version information for both packages is displayed, confirm
 
 For more details, please refer to the [Installation Guide](../../installation.md).
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
@@ -546,7 +546,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, first validate the service without prefix caching before enabling additional cache features.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` is recommended on decode nodes to reduce decode dispatch overhead.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -654,7 +654,7 @@ After several minutes, you can get the performance evaluation result. This rando
 | Long context | Multi-node MP | 16 A3 NPUs | W8A8 | Use TP across each node and DP across nodes. Lower image count or context length if OOM occurs. |
 | Low latency | 1P1D PD disaggregation | 32 A3 NPUs | W8A8 | Separate prefill and decode resources and enable full decode ACLGraph on decode nodes. |
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 
@@ -673,7 +673,7 @@ After several minutes, you can get the performance evaluation result. This rando
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Recommended tuning order
 

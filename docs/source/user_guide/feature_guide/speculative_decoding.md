@@ -453,7 +453,7 @@ Key configuration parameters:
 
 5. **`shared_storage_path`**: Directory where hidden states will be saved as `.safetensors` files (one per request).
 
-## Dynamic Speculative Decoding {: #dynamic-speculative-decoding }
+## Dynamic Speculative Decoding
 
 Dynamic Speculative Decoding adapts the number of draft tokens (K) at runtime, instead of always using a fixed `num_speculative_tokens`. This helps keep speculative decoding beneficial as concurrency and draft confidence change. vLLM Ascend currently provides two approaches:
 
@@ -603,7 +603,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   }'
 ```
 
-## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
+## Block Verify and Entropy Verify
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 

@@ -76,13 +76,13 @@ Select an image based on your machine type and start the docker image on your no
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-### 4.2 Source Code Installation {: #42-source-code-installation }
+### 4.2 Source Code Installation
 
 If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
@@ -362,7 +362,7 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (jemalloc, tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 

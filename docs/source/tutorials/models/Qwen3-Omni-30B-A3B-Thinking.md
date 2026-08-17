@@ -232,7 +232,7 @@ vllm serve your_model_path \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
     --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
-    --port 8000 
+    --port 8000
 ```
 
 !!! note
@@ -367,7 +367,7 @@ As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, an
     | Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
     +=============================+============+==========+==========+=======+=========+=========+
     | Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
-    +-----------------------------+------------+----------+----------+-------+---------+---------+ 
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
     +-----------------------------+-----------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
@@ -568,7 +568,7 @@ vllm serve your_model_path \
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
