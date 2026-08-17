@@ -222,7 +222,10 @@ class KVPoolWorker:
         self.load_async = extra_config.get("load_async", False)
         self._invalid_block_ids: set[int] = set()
         self._invalid_block_ids_lock = threading.Lock()
+        self._retired_store_req_ids: set[str] = set()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.save_decode_cache = extra_config.get("save_decode_cache", False)
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
@@ -390,7 +393,7 @@ class KVPoolWorker:
 
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
         partitions = None
-        if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
+        if self.kv_role == "kv_consumer" and self.can_put:
             num_hidden_layers = model_config.hf_text_config.num_hidden_layers
             partition_list_str = extra_config.get("prefill_pp_layer_partition", None)
             prefill_pp_size = int(extra_config.get("prefill_pp_size", 1))
@@ -769,7 +772,7 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
-            elif can_save:
+            elif self.can_put:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
                     self.m_store,
@@ -833,7 +836,7 @@ class KVPoolWorker:
             self.kv_recv_thread.start()
             ready_event.wait()
         else:
-            if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put:
+            if self.can_put:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.m_store,
@@ -1679,7 +1682,7 @@ class KVPoolWorker:
         """
         if not self.use_layerwise_transfer:
             return
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if not self.can_put:
             return
         for request in requests:
             if request.can_save is None or not request.can_save:
@@ -3139,6 +3142,7 @@ class KVPoolWorker:
         mask_num: int = 0,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        save_start_token: int = 0,
     ) -> tuple[list[str], list[list[int]], list[list[int]], list[int]]:
         """Walk chunks x sub-keys; emit (keys, addrs, sizes, block_ids) for backend put/get.
 
@@ -3158,6 +3162,8 @@ class KVPoolWorker:
             shard_rank=shard_rank,
             shard_size=shard_size,
         ):
+            if end <= save_start_token:
+                continue
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
                 effective_rank = self.tp_rank * self.num_sub_keys + sub_idx
@@ -3227,6 +3233,7 @@ class KVPoolWorker:
                 mask_num=0,
                 shard_rank=self.pcp_rank,
                 shard_size=self.pcp_size,
+                save_start_token=send_thread.get_saved_offset(req_id),  # type: ignore[attr-defined]
             )
             if not keys:
                 return
@@ -3245,7 +3252,11 @@ class KVPoolWorker:
                 len(keys),
                 keys[:3],
             )
-            self.m_store.put(keys, addrs, sizes)
+            put_result = self.m_store.put(keys, addrs, sizes)
+            if isinstance(put_result, list) and (len(put_result) != len(keys) or not all(put_result)):
+                raise RuntimeError(f"KV store backend partially failed to put TP-mismatch request {req_id}")
+            if put_result is False:
+                raise RuntimeError(f"KV store backend failed to put TP-mismatch request {req_id}")
 
             if self.enable_kv_events:
                 event_block_size = (
@@ -3261,7 +3272,7 @@ class KVPoolWorker:
                     if idx >= len(req_meta.block_hashes):
                         break
                     block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
-                    token_ids = req_meta.token_ids[start:end] if req_meta.token_ids is not None else None
+                    token_ids = send_thread.get_event_token_ids(req_meta, start, end)  # type: ignore[attr-defined]
                     stored_events.append(
                         BlockStored(
                             block_hashes=[block_hash],
@@ -3287,6 +3298,20 @@ class KVPoolWorker:
             for req_id in meta.preempted_req_ids:
                 if isinstance(send_thread, (KVCacheStoreSendingThread, KVCacheStoreLayerSendingThread)):
                     send_thread.delete_finished_stored_request(req_id)
+                if isinstance(send_thread, KVCacheStoreSendingThread):
+                    send_thread.reset_saved_request(req_id)
+                    self._retired_store_req_ids.discard(req_id)
+            if isinstance(send_thread, KVCacheStoreSendingThread):
+                for req_id in finished_req_ids:
+                    if send_thread.is_stored_request(req_id):
+                        self._retired_store_req_ids.add(req_id)
+                    else:
+                        send_thread.reset_saved_request(req_id)
+                        self._retired_store_req_ids.discard(req_id)
+                for req_id in self._retired_store_req_ids.copy():
+                    if not send_thread.is_stored_request(req_id):
+                        send_thread.reset_saved_request(req_id)
+                        self._retired_store_req_ids.discard(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
             # Saves complete synchronously in wait_for_save(), so the scheduler
             # never waits for a request-level finished_sending notification.
@@ -3697,7 +3722,7 @@ class KVPoolWorker:
         return []
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
-        if self.use_mamba and isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
+        if isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
             if ce := self.kv_send_thread.get_completed_events():
                 return AscendStoreKVConnectorWorkerMetadata(ce)
         return None
