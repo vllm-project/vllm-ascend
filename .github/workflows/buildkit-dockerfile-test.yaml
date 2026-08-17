@@ -82,7 +82,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: swr.cn-north-12.myhuaweicloud.com/modelfoundry/triton-ascend:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
+          tags: swr.cn-north-12.myhuaweicloud.com/modelfoundry/vllm-ascend:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
           build-args: |
             CANN_QUAY_URL=swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann
             APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
@@ -109,7 +109,7 @@ jobs:
 
       - name: Create multi-arch manifest
         env:
-          IMAGE: swr.cn-north-12.myhuaweicloud.com/modelfoundry/triton-ascend
+          IMAGE: swr.cn-north-12.myhuaweicloud.com/modelfoundry/vllm-ascend
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
