@@ -16,7 +16,7 @@ from vllm_ascend.quantization.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, AscendDeviceType
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -80,6 +80,30 @@ class TestAscendModelSlimConfig(TestBase):
         hf_quant_cfg = {"quant_method": ""}
         result = AscendModelSlimConfig.override_quantization_method(hf_quant_cfg, None)
         self.assertIsNone(result)
+
+    @patch("torch.npu.is_available", return_value=True)
+    def test_override_native_mxfp8_only_on_a5(self, _mock_is_available):
+        with patch(
+            "vllm_ascend.quantization.modelslim_config.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ):
+            result = AscendModelSlimConfig.override_quantization_method(
+                {"quant_method": "mxfp8"}, None
+            )
+            self.assertEqual(result, ASCEND_QUANTIZATION_METHOD)
+            result = AscendModelSlimConfig.override_quantization_method(
+                {"quant_method": "unsupported_quant"}, None
+            )
+            self.assertIsNone(result)
+
+        with patch(
+            "vllm_ascend.quantization.modelslim_config.get_ascend_device_type",
+            return_value=AscendDeviceType.A3,
+        ):
+            result = AscendModelSlimConfig.override_quantization_method(
+                {"quant_method": "mxfp8"}, None
+            )
+            self.assertIsNone(result)
 
     def test_get_quant_method_for_linear(self):
         mock_config = MagicMock()

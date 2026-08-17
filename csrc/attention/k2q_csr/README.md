@@ -8,7 +8,7 @@ qTile ping-pong、`q_global_offset`、SIMT 路径隔离）。
 ## 调用
 
 ```python
-from vllm_ascend.attention.k2q_csr import npu_k2q_csr
+from vllm_ascend.models.minimax_m3.ops.k2q_csr import npu_k2q_csr
 
 row_ptr, q_ind, slot = npu_k2q_csr(
     q2k,              # int32 [H, T, topk]
@@ -22,7 +22,8 @@ row_ptr, q_ind, slot = npu_k2q_csr(
 )
 ```
 
-底层等价于 ``torch.ops._C_ascend.npu_k2q_csr(...)``（见 ``vllm_ascend/attention/k2q_csr.py``）。
+底层等价于 ``torch.ops._C_ascend.npu_k2q_csr(...)``（见
+``vllm_ascend/models/minimax_m3/ops/k2q_csr.py``）。
 
 | 参数 | 含义 |
 |------|------|

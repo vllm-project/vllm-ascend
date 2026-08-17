@@ -519,7 +519,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.quant_description = quant_config if quant_config is not None else {}
         self._is_mxfp8_checkpoint = False
         self._ignored_layers: list[str] = []
-        self._weight_block_size: list[int] | None = None
         self._detect_foreign_config()
         self._apply_extra_quant_adaptations()
         self.model_type: str | None = None
@@ -537,7 +536,6 @@ class AscendModelSlimConfig(QuantizationConfig):
             return
 
         self._is_mxfp8_checkpoint = True
-        self._weight_block_size = self.quant_description.get("weight_block_size", [1, 32])
 
         # Normalise ignored_layers: strip "language_model." and keep
         # both "model." and bare variants for robust prefix matching.
@@ -593,14 +591,10 @@ class AscendModelSlimConfig(QuantizationConfig):
             if torch.npu.is_available():
                 if not quant_method:
                     return ASCEND_QUANTIZATION_METHOD
-
-                from vllm.platforms import current_platform
-
-                supported = current_platform.supported_quantization
-                if supported and quant_method not in supported:
+                if quant_method == "mxfp8" and get_ascend_device_type() == AscendDeviceType.A5:
                     logger.warning(
-                        "Model config specifies quantization '%s', which is "
-                        "not directly supported on NPU. Remapping to '%s'.",
+                        "Remapping native '%s' checkpoint quantization to the "
+                        "Ascend ModelSlim compatibility path on A5 ('%s').",
                         quant_method,
                         ASCEND_QUANTIZATION_METHOD,
                     )

@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.attention.msa_m3_npu_new import (
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
