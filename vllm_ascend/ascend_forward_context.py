@@ -282,10 +282,94 @@ def _select_a3_moe_comm_method(
     return MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
 
+_A5_MEGA_MOE_QUANT_NAMES = {
+    "mxfp4",
+    "mxfp8",
+    "w8a8_mxfp8",
+    "w4a4_mxfp4",
+    "w4a8_mxfp",
+    "w4a8_mxfp4",
+}
+
+
+def _is_a5_mega_moe_supported_quant(quant_type: str | None) -> bool:
+    if quant_type is None:
+        return False
+    return quant_type.lower() in _A5_MEGA_MOE_QUANT_NAMES
+
+
+def _get_config_value(config: Any, name: str) -> Any:
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def _get_first_config_value(config: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        value = _get_config_value(config, name)
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_quant_type(quant_type: Any) -> str | None:
+    if quant_type is None:
+        return None
+    if isinstance(quant_type, str):
+        return quant_type
+    name = getattr(quant_type, "name", None)
+    if isinstance(name, str):
+        return name
+    return str(quant_type)
+
+
+def _extract_quant_type_from_description(quant_description: Any) -> str | None:
+    if not isinstance(quant_description, dict):
+        return None
+    quant_type = _get_first_config_value(quant_description, ("moe_quantize", "quantize", "model_quant_type"))
+    if quant_type is not None:
+        return _normalize_quant_type(quant_type)
+
+    moe_keywords = ("moe", "expert", "gate_up_proj", "down_proj", "w13", "w2")
+    for key, value in quant_description.items():
+        if not isinstance(key, str) or not any(keyword in key.lower() for keyword in moe_keywords):
+            continue
+        quant_type = _normalize_quant_type(value)
+        if quant_type is not None:
+            return quant_type
+    return None
+
+
+def _get_moe_quant_type(vllm_config: VllmConfig) -> str | None:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    quant_type = _get_first_config_value(hf_text_config, ("moe_quantize", "quantize"))
+    if quant_type is not None:
+        return _normalize_quant_type(quant_type)
+
+    quantization_config = _get_config_value(hf_text_config, "quantization_config")
+    quant_type = _get_first_config_value(
+        quantization_config,
+        ("moe_quantize", "quantize", "moe_quant_type", "quant_type", "model_quant_type"),
+    )
+    if quant_type is not None:
+        return _normalize_quant_type(quant_type)
+
+    quant_config = getattr(vllm_config, "quant_config", None)
+    quant_type = _extract_quant_type_from_description(getattr(quant_config, "quant_description", None))
+    if quant_type is not None:
+        return quant_type
+
+    return _normalize_quant_type(getattr(vllm_config.model_config, "quantization", None))
+
+
 def _select_a5_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    quant_type: str | None,
+    enable_fused_mc2: int,
 ) -> MoECommType:
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -293,11 +377,65 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
+    ascend_config = get_ascend_config()
+    fused_mc2_mode_1 = enable_fused_mc2 == 1
+    has_expert_parallel_world = world_size > 1
+    within_mega_moe_capacity = num_tokens <= ascend_config.mega_moe_max_tokens
+    supported_quant = _is_a5_mega_moe_supported_quant(quant_type)
+    a5_mega_moe_enable = (
+        fused_mc2_mode_1 and has_expert_parallel_world and within_mega_moe_capacity and supported_quant
+    )
+    logger.info(
+        "A5 MegaMoE condition check: enabled=%s, fused_mc2_mode_1=%s, "
+        "has_expert_parallel_world=%s, within_mega_moe_capacity=%s, supported_quant=%s, "
+        "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, enable_fused_mc2=%s, "
+        "mega_moe_max_tokens=%s, supported_quant_names=%s",
+        a5_mega_moe_enable,
+        fused_mc2_mode_1,
+        has_expert_parallel_world,
+        within_mega_moe_capacity,
+        supported_quant,
+        num_tokens,
+        world_size,
+        num_experts_per_tok,
+        quant_type,
+        enable_fused_mc2,
+        ascend_config.mega_moe_max_tokens,
+        sorted(_A5_MEGA_MOE_QUANT_NAMES),
+    )
+    if a5_mega_moe_enable:
+        logger.info(
+            "A5 MoE comm selected FUSED_MC2/MegaMoE: num_tokens=%s, world_size=%s, "
+            "top_k=%s, quant_type=%s, enable_fused_mc2=%s, mega_moe_max_tokens=%s",
+            num_tokens,
+            world_size,
+            num_experts_per_tok,
+            quant_type,
+            enable_fused_mc2,
+            ascend_config.mega_moe_max_tokens,
+        )
+        return MoECommType.FUSED_MC2
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
-        return MoECommType.MC2
-    if world_size <= num_experts_per_tok:
-        return MoECommType.ALLGATHER
-    return MoECommType.ALLTOALL
+        moe_comm_type = MoECommType.MC2
+    elif world_size <= num_experts_per_tok:
+        moe_comm_type = MoECommType.ALLGATHER
+    else:
+        moe_comm_type = MoECommType.ALLTOALL
+    logger.info(
+        "A5 MoE comm selected fallback: method=%s, num_tokens=%s, world_size=%s, top_k=%s, "
+        "quant_type=%s, enable_fused_mc2=%s, supported_mega_moe_quant=%s, "
+        "mc2_tokens_capacity=%s, mega_moe_max_tokens=%s",
+        moe_comm_type,
+        num_tokens,
+        world_size,
+        num_experts_per_tok,
+        quant_type,
+        enable_fused_mc2,
+        supported_quant,
+        mc2_tokens_capacity,
+        ascend_config.mega_moe_max_tokens,
+    )
+    return moe_comm_type
 
 
 def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
@@ -312,9 +450,10 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+    6. On A5 with expert parallel, prefer the fused MoE backend for supported
+       MXFP quantization when fused MC2 mode 1 is enabled. Otherwise use MC2
+       when tokens fit the MC2 capacity and the EP size is large enough, or
+       fall back to all-gather/all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
@@ -332,11 +471,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
-    quant_type = getattr(
-        vllm_config.model_config.hf_text_config,
-        "moe_quantize",
-        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
-    )
+    quant_type = _get_moe_quant_type(vllm_config)
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
@@ -351,7 +486,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             get_ascend_config().enable_fused_mc2,
         )
     elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        moe_comm_type = _select_a5_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+            quant_type,
+            get_ascend_config().enable_fused_mc2,
+        )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
 

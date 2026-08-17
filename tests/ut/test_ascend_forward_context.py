@@ -24,6 +24,8 @@ def _make_vllm_config(
     tensor_parallel_size: int = 1,
     num_experts: int = 128,
     quant_type: str | None = None,
+    quantization_config: dict[str, object] | None = None,
+    quant_description: dict[str, object] | None = None,
     top_k_experts: int = 1,
     num_experts_per_tok: int | None = None,
     cudagraph_capture_sizes: list[int] | None = None,
@@ -33,6 +35,8 @@ def _make_vllm_config(
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
         hf_text_config_attrs["quantize"] = quant_type
+    if quantization_config is not None:
+        hf_text_config_attrs["quantization_config"] = quantization_config
     if num_experts_per_tok is not None:
         hf_text_config_attrs["num_experts_per_tok"] = num_experts_per_tok
 
@@ -56,6 +60,7 @@ def _make_vllm_config(
         parallel_config=parallel_config,
         compilation_config=compilation_config,
         scheduler_config=scheduler_config,
+        quant_config=None if quant_description is None else SimpleNamespace(quant_description=quant_description),
     )
 
 
@@ -73,7 +78,11 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, mega_moe_max_tokens=65536),
+    )
     monkeypatch.setattr(
         afc,
         "speculative_enable_dispatch_gmm_combine_decode",
@@ -220,22 +229,69 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
 
 
 @pytest.mark.parametrize(
-    ("num_tokens", "world_size", "top_k_experts", "expected"),
+    ("num_tokens", "world_size", "top_k_experts", "enable_fused_mc2", "quant_type", "expected"),
     [
-        (128, 4, 2, MoECommType.MC2),
-        (129, 2, 4, MoECommType.ALLGATHER),
-        (129, 8, 4, MoECommType.ALLTOALL),
+        (128, 4, 2, 0, None, MoECommType.MC2),
+        (129, 2, 4, 0, None, MoECommType.ALLGATHER),
+        (129, 8, 4, 0, None, MoECommType.ALLTOALL),
+        (129, 8, 4, 1, "W4A8_MXFP", MoECommType.FUSED_MC2),
+        (129, 8, 4, 1, "W8A8_MXFP8", MoECommType.FUSED_MC2),
+        (129, 8, 4, 1, "mxfp4", MoECommType.FUSED_MC2),
+        (129, 8, 4, 2, "W4A8_MXFP", MoECommType.ALLTOALL),
+        (129, 8, 4, 1, "w8a8_dynamic", MoECommType.ALLTOALL),
+        (129, 8, 4, 1, "W4A16_MXFP4", MoECommType.ALLTOALL),
     ],
 )
-def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_experts, expected):
+def test_select_moe_comm_method_a5(
+    monkeypatch,
+    num_tokens,
+    world_size,
+    top_k_experts,
+    enable_fused_mc2,
+    quant_type,
+    expected,
+):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A5,
         capacity=128,
+        enable_fused_mc2=enable_fused_mc2,
     )
-    vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
+    vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts, quant_type=quant_type)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+def test_select_moe_comm_method_a5_reads_quantization_config(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        quantization_config={"moe_quant_type": "W8A8_MXFP8"},
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.FUSED_MC2
+
+
+def test_select_moe_comm_method_a5_reads_quant_description(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        quant_description={"model.layers.0.mlp.experts.w13_weight": "W4A8_MXFP"},
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.FUSED_MC2
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
