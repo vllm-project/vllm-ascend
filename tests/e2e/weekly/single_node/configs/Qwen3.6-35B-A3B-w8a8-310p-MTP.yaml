@@ -18,7 +18,7 @@ test_cases:
       - "--dtype"
       - "float16"
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8,32]}'
       - "--allowed-local-media-path"
       - "/"
       - "--mamba-ssm-cache-dtype"
