@@ -141,22 +141,31 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig({"load_collection_phase": "prompt"})
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_mc2_hierarchy_comm_rejects_a5(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_mc2_hierarchy_comm_rejects_a5(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(512)
 
-        with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
+        with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
             AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(513)
 
         with self.assertRaisesRegex(ValueError, "at most 512 experts"):
             AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    def test_mc2_hierarchy_comm_counts_dynamic_eplb_redundancy(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_hierarchy_comm_counts_dynamic_eplb_redundancy(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(
             480,
             dynamic_eplb=True,
@@ -172,17 +181,20 @@ class TestAscendConfig(TestBase):
         ):
             AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    def test_mc2_hierarchy_comm_ignores_redundancy_when_dynamic_eplb_is_disabled(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_hierarchy_comm_ignores_redundancy_when_dynamic_eplb_is_disabled(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(480, num_redundant_experts=33)
 
         AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type")
-    def test_mc2_hierarchy_comm_accepts_512_experts_on_a2_and_a3(self, mock_device_type):
+    @patch("vllm_ascend.device.hardware_profile.get_current_hardware_profile")
+    def test_mc2_hierarchy_comm_accepts_512_experts_on_a2_and_a3(self, mock_profile):
         for device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
             with self.subTest(device_type=device_type):
-                mock_device_type.return_value = device_type
+                mock_profile.return_value = get_hardware_profile(device_type)
                 vllm_config = self._make_mc2_hierarchy_vllm_config(512)
 
                 AscendConfig(vllm_config)
