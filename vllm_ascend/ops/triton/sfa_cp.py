@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
+from vllm.distributed.parallel_state import _groups
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -298,3 +300,53 @@ def sfa_dcp_a2a_fused_combine(
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=group)
     return fused_sfa_dcp_lse_combine(recv, sfa_output.shape[-1], scatter_dim)
+
+
+def sfa_dcp_a2a_fused(
+    sfa_output: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dcp_size: int,
+    scatter_dim: int,
+    group_name: str,
+) -> torch.Tensor:
+    """Custom-op entry point for fused SFA DCP output post-processing."""
+    group_ref = _groups.get(group_name)
+    if group_ref is None:
+        raise RuntimeError(f"SFA DCP fused A2A group {group_name!r} is not registered.")
+    group = group_ref()
+    if group is None or group.device_group is None:
+        raise RuntimeError(f"SFA DCP fused A2A group {group_name!r} is unavailable.")
+    if group.world_size != dcp_size:
+        raise RuntimeError(
+            "SFA DCP fused A2A group size does not match dcp_size: "
+            f"group={group.world_size}, dcp_size={dcp_size}."
+        )
+    return sfa_dcp_a2a_fused_combine(
+        sfa_output,
+        softmax_lse,
+        dcp_size,
+        scatter_dim,
+        group.device_group,
+    )
+
+
+def sfa_dcp_a2a_fused_fake(
+    sfa_output: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dcp_size: int,
+    scatter_dim: int,
+    group_name: str,
+) -> torch.Tensor:
+    del softmax_lse, group_name
+    output_shape = list(sfa_output.shape)
+    output_shape[scatter_dim] //= dcp_size
+    return torch.empty(output_shape, dtype=sfa_output.dtype, device=sfa_output.device)
+
+
+direct_register_custom_op(
+    op_name="sfa_dcp_a2a_fused",
+    op_func=sfa_dcp_a2a_fused,
+    fake_impl=sfa_dcp_a2a_fused_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
