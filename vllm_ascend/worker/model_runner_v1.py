@@ -4095,12 +4095,11 @@ class NPUModelRunner(GPUModelRunner):
         "DDR address out of range". The main model never hits this because its
         decode only reads already-committed rows.
 
-        For speculative decoding, zeroing both tensors is safe: active rows are
-        repopulated before the next forward, so this restores exactly the
-        cold-start state and prevents a padded commit from copying stale CPU
-        rows back to the GPU.
+        For speculative decoding, zeroing the GPU tensor is safe: every active
+        row is re-committed from the CPU source of truth before the next forward,
+        so this restores exactly the cold-start device state.
 
-        For GDN/Mamba, also zero the CPU source. Upstream #10901 added a
+        For GDN/Mamba, zero the CPU source. Upstream #10901 added a
         ``commit_block_table(num_reqs_padded)`` inside ``_dummy_run`` that copies
         the first ``num_reqs_padded`` CPU rows -> GPU right before ACL graph
         (re)capture. After restore the CPU buffer still holds the pre-snapshot
@@ -4119,8 +4118,8 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         reset_spec_gpu = self.speculative_config is not None
-        reset_cpu = reset_spec_gpu or self._has_gdn or self._has_mamba
-        if not reset_spec_gpu and not reset_cpu:
+        reset_gdn_mamba_cpu = self._has_gdn or self._has_mamba
+        if not reset_spec_gpu and not reset_gdn_mamba_cpu:
             logger.info(
                 "[restore model] block-table reset skipped: "
                 "neither speculative decoding nor GDN/Mamba is enabled"
@@ -4140,7 +4139,7 @@ class NPUModelRunner(GPUModelRunner):
                         gpu_zeroed += 1
                     except Exception as exc:  # noqa: BLE001
                         failed.append(f"gpu-group{idx}:{type(exc).__name__}:{exc}")
-            if reset_cpu:
+            if reset_gdn_mamba_cpu:
                 cpu = getattr(buf, "cpu", None)
                 if cpu is not None:
                     try:
@@ -4150,7 +4149,7 @@ class NPUModelRunner(GPUModelRunner):
                         failed.append(f"cpu-group{idx}:{type(exc).__name__}:{exc}")
         logger.info(
             "[restore model] zeroed block-table tensors: "
-            "gpu=%d (speculative decoding), cpu=%d (speculative decoding or GDN/Mamba)%s",
+            "gpu=%d (speculative decoding), cpu=%d (GDN/Mamba)%s",
             gpu_zeroed,
             cpu_zeroed,
             "" if not failed else f", failed={failed[: min(8, len(failed))]}",
