@@ -29,15 +29,18 @@ the MoE wrapper is mapped.
 
 from __future__ import annotations
 
+from functools import cache
+
 import torch
+import torch_npu  # noqa: F401 -- registers torch.npu
 from torch import nn
-from vllm import envs
 from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 
@@ -46,6 +49,12 @@ _MOE_LORA_INDEX_FIELDS = (
     "permuted_lora_indices",
     "exchanged_lora_indices",
 )
+
+
+@cache
+def _get_moe_lora_aux_stream() -> torch.npu.Stream:
+    """Return the process-local NPU stream used by MoE LoRA overlap."""
+    return torch.npu.Stream()
 
 
 def has_lora(lora_context) -> bool:
@@ -338,11 +347,8 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_size = moe_parallel_config.tp_size
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
-        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
-        # _build_lora_context is inherited from vLLM, whose GPU constructor
-        # normally initializes these fields. Ascend deliberately skips it.
-        self._lora_stream = None
-        self._events = None
+        self._enable_aux_cuda_stream = get_ascend_config().enable_moe_lora_dual_stream
+        self._init_lora_stream_context()
         self.enable_moe_shared_loras = False
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
@@ -355,9 +361,24 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         if shared_experts is not None:
             self._shared_experts = shared_experts
 
+    def _init_lora_stream_context(self) -> None:
+        """Initialize NPU synchronization objects for AllGather LoRA overlap."""
+        self._lora_stream: torch.npu.Stream | None = None
+        self._events: tuple[torch.npu.Event, ...] | None = None
+        if not self._enable_aux_cuda_stream or self.use_ep:
+            return
+        self._lora_stream = _get_moe_lora_aux_stream()
+        self._events = tuple(torch.npu.Event() for _ in range(4))
+
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
+        # Ascend currently overlaps only the TP + AllGather path. Keep EP on
+        # its existing single-stream schedule even if an auxiliary stream was
+        # initialized before the final parallel configuration was published.
+        if self.use_ep:
+            lora_context.aux_stream = None
+            lora_context.events = None
         return lora_context
 
     # ------------------------------------------------------------------

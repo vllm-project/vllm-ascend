@@ -35,6 +35,10 @@ def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
     with (
         patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
         patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+        patch(
+            "vllm_ascend.lora.fused_moe.get_ascend_config",
+            return_value=SimpleNamespace(enable_moe_lora_dual_stream=False),
+        ),
     ):
         wrapper = AscendFusedMoEWithLoRA(base_layer)
 
@@ -43,6 +47,39 @@ def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
     assert wrapper.enable_moe_shared_loras is False
     assert wrapper._shared_experts is shared_experts
     assert wrapper.n_slices == 256 * 3
+
+
+def test_ascend_fused_moe_lora_initializes_npu_aux_stream() -> None:
+    parallel_config = SimpleNamespace(tp_size=8, tp_rank=3, ep_rank=0, use_ep=False)
+    base_layer = SimpleNamespace(
+        moe_config=SimpleNamespace(
+            hidden_dim=4096,
+            num_local_experts=256,
+            num_experts=256,
+            intermediate_size_per_partition=256,
+            experts_per_token=8,
+            moe_parallel_config=parallel_config,
+            is_act_and_mul=True,
+        ),
+        _shared_experts=None,
+    )
+    aux_stream = object()
+    events = [object() for _ in range(4)]
+
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+        patch(
+            "vllm_ascend.lora.fused_moe.get_ascend_config",
+            return_value=SimpleNamespace(enable_moe_lora_dual_stream=True),
+        ),
+        patch("vllm_ascend.lora.fused_moe._get_moe_lora_aux_stream", return_value=aux_stream),
+        patch("vllm_ascend.lora.fused_moe.torch.npu.Event", side_effect=events),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(base_layer)
+
+    assert wrapper._lora_stream is aux_stream
+    assert wrapper._events == tuple(events)
 
 
 def test_moe_lora_apply_uses_adapter_enabled() -> None:

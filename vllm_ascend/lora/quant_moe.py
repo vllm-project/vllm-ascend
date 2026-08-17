@@ -39,6 +39,7 @@ from vllm_ascend.lora.fused_moe import (
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import npu_stream_switch
 
 QuantMoELoRAApply = Callable[[MoEMlpComputeInput], tuple[torch.Tensor, torch.npu.Event | None]]
 QuantMoELoRAActivationValidator = Callable[[torch.Tensor, torch.Tensor | None], None]
@@ -144,6 +145,46 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
+def _can_use_moe_lora_aux_stream(lora_context, comm_type: MoECommType) -> bool:
+    """Return whether this invocation can safely overlap base GMM and LoRA."""
+    if comm_type != MoECommType.ALLGATHER:
+        return False
+    if getattr(lora_context, "use_ep", False) or getattr(lora_context, "fully_sharded", False):
+        return False
+    aux_stream = getattr(lora_context, "aux_stream", None)
+    events = getattr(lora_context, "events", None)
+    if aux_stream is None or events is None or len(events) < 4:
+        return False
+    # Multi-stream ACLGraph capture needs dedicated graph lifecycle support.
+    # Preserve the existing graph-safe single-stream implementation for now.
+    return not torch.npu.is_current_stream_capturing()
+
+
+def _execute_moe_lora_in_parallel(
+    base_fn: Callable[[], torch.Tensor],
+    lora_fn: Callable[[], None],
+    start_event: torch.npu.Event,
+    done_event: torch.npu.Event,
+    aux_stream: torch.npu.Stream,
+) -> tuple[torch.Tensor, None]:
+    """Run a base GMM on the current stream and LoRA on an NPU aux stream."""
+    main_stream = torch.npu.current_stream()
+    start_event.record(main_stream)
+    base_result = base_fn()
+    with npu_stream_switch(aux_stream):
+        aux_stream.wait_event(start_event)
+        lora_result = lora_fn()
+        done_event.record(aux_stream)
+    main_stream.wait_event(done_event)
+    return base_result, lora_result
+
+
+def _new_lora_delta(x: torch.Tensor, lora_b_stacked: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    """Allocate a delta matching the concatenated LoRA B outputs."""
+    output_size = sum(weight.shape[-2] for weight in lora_b_stacked)
+    return x.new_empty((*x.shape[:-1], output_size))
+
+
 @register_quant_moe_lora_impl(
     QuantType.W8A8,
     validate_activation_input=_validate_dynamic_int8_activations,
@@ -192,25 +233,6 @@ def _apply_dynamic_int8_moe_lora(
     if not all(len(values) == 1 for values in (w1, w2, w1_scale, w2_scale)):
         raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists used by dynamic EPLB.")
 
-    input_dtype = hidden_states.dtype
-    quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(
-        hidden_states=hidden_states,
-        dynamic_scale=None,
-        act_quant_type=torch.int8,
-        use_mxfp_quant=False,
-    )
-    gate_up_out = torch_npu.npu_grouped_matmul(
-        x=[quantized_input],
-        weight=w1,
-        scale=[w1_scale[0].to(w2_scale[0].dtype)],
-        per_token_scale=[input_scale],
-        split_item=2,
-        group_type=0,
-        group_list=mlp_compute_input.group_list,
-        group_list_type=mlp_compute_input.group_list_type,
-        output_dtype=input_dtype,
-    )[0]
-
     if comm_type == MoECommType.ALLGATHER:
         lora_routing = _recover_moe_lora_routing_allgather(
             lora_context,
@@ -222,12 +244,60 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             group_list=mlp_compute_input.group_list,
         )
-    moe_lora_apply_w13(
-        lora_context,
-        gate_up_out=gate_up_out,
+
+    input_dtype = hidden_states.dtype
+    quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(
         hidden_states=hidden_states,
-        lora_routing=lora_routing,
+        dynamic_scale=None,
+        act_quant_type=torch.int8,
+        use_mxfp_quant=False,
     )
+
+    def base_w13_fn() -> torch.Tensor:
+        return torch_npu.npu_grouped_matmul(
+            x=[quantized_input],
+            weight=w1,
+            scale=[w1_scale[0].to(w2_scale[0].dtype)],
+            per_token_scale=[input_scale],
+            split_item=2,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+            output_dtype=input_dtype,
+        )[0]
+
+    use_aux_stream = _can_use_moe_lora_aux_stream(lora_context, comm_type)
+    if use_aux_stream:
+        lora_delta_w13 = _new_lora_delta(hidden_states, lora_context.w13_lora_b_stacked)
+
+        def lora_w13_fn() -> None:
+            # Ascend BGMV expand currently accumulates into y. Zero on the
+            # auxiliary stream so inactive rows remain zero without delaying
+            # the main-stream GMM.
+            lora_delta_w13.zero_()
+            moe_lora_apply_w13(
+                lora_context,
+                gate_up_out=lora_delta_w13,
+                hidden_states=hidden_states,
+                lora_routing=lora_routing,
+            )
+
+        gate_up_out, _ = _execute_moe_lora_in_parallel(
+            base_w13_fn,
+            lora_w13_fn,
+            lora_context.events[0],
+            lora_context.events[1],
+            lora_context.aux_stream,
+        )
+        gate_up_out.add_(lora_delta_w13)
+    else:
+        gate_up_out = base_w13_fn()
+        moe_lora_apply_w13(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=hidden_states,
+            lora_routing=lora_routing,
+        )
 
     activated = _apply_moe_activation(
         gate_up_out,
@@ -246,30 +316,55 @@ def _apply_dynamic_int8_moe_lora(
         use_mxfp_quant=False,
     )
     before_gmm2_evt = torch.npu.current_stream().record_event()
-    down_out = DeviceOperator.npu_grouped_matmul_gmm2(
-        hidden_states=quantized_activated,
-        weight=w2,
-        weight_scale=w2_scale,
-        per_token_scale=activated_scale,
-        group_list=mlp_compute_input.group_list,
-        group_list_type=mlp_compute_input.group_list_type,
-        input_dtype=input_dtype,
-        act_quant_type=torch.int8,
-        weight_quant_type=None,
-        scale_type=None,
-        per_token_scale_type=None,
-        use_bf16=input_dtype == torch.bfloat16,
-        use_mxfp_quant=False,
-        bias=None,
-        fallback_output_dtype=w2_scale[0].dtype,
-        mxfp_quant_dtype=None,
-    )
-    moe_lora_apply_w2(
-        lora_context,
-        down_out=down_out,
-        silu_out=activated,
-        lora_routing=lora_routing,
-    )
+
+    def base_w2_fn() -> torch.Tensor:
+        return DeviceOperator.npu_grouped_matmul_gmm2(
+            hidden_states=quantized_activated,
+            weight=w2,
+            weight_scale=w2_scale,
+            per_token_scale=activated_scale,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+            input_dtype=input_dtype,
+            act_quant_type=torch.int8,
+            weight_quant_type=None,
+            scale_type=None,
+            per_token_scale_type=None,
+            use_bf16=input_dtype == torch.bfloat16,
+            use_mxfp_quant=False,
+            bias=None,
+            fallback_output_dtype=w2_scale[0].dtype,
+            mxfp_quant_dtype=None,
+        )
+
+    if use_aux_stream:
+        lora_delta_w2 = _new_lora_delta(activated, lora_context.w2_lora_b_stacked)
+
+        def lora_w2_fn() -> None:
+            lora_delta_w2.zero_()
+            moe_lora_apply_w2(
+                lora_context,
+                down_out=lora_delta_w2,
+                silu_out=activated,
+                lora_routing=lora_routing,
+            )
+
+        down_out, _ = _execute_moe_lora_in_parallel(
+            base_w2_fn,
+            lora_w2_fn,
+            lora_context.events[2],
+            lora_context.events[3],
+            lora_context.aux_stream,
+        )
+        down_out.add_(lora_delta_w2)
+    else:
+        down_out = base_w2_fn()
+        moe_lora_apply_w2(
+            lora_context,
+            down_out=down_out,
+            silu_out=activated,
+            lora_routing=lora_routing,
+        )
     return down_out, before_gmm2_evt
 
 
