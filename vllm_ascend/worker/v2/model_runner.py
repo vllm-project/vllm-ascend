@@ -128,7 +128,7 @@ class NPUModelRunner(GPUModelRunner):
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.decode_context_parallel_size > 1: 
+        if parallel_config.decode_context_parallel_size > 1:
             raise NotImplementedError("Decode Context parallelism is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
