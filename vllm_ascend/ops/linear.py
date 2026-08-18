@@ -470,7 +470,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
+        # A5 quantized wo_a is reshaped to 3D in FP8 process_weights_after_loading.
+        # Non-quant A5 BF16 wo_a needs the same [G, D, R] layout as A2/A3 for
+        # npu_transpose_batchmatmul.
+        skip_wo_a_reshape = (
+            "wo_a" in self.prefix and get_ascend_device_type() == AscendDeviceType.A5 and self.quant_config is not None
+        )
+        if "wo_a" in self.prefix and not skip_wo_a_reshape:
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (

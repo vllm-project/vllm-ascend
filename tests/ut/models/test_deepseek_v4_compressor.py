@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorMetadata,
     AscendCompressorStateCache,
@@ -35,29 +34,22 @@ class TestCompressorMetadata:
             num_compressed_tokens=3,
             num_reqs_actual=2,
         )
+        compressor.attn_kv_plan = SimpleNamespace(compressor_slot_mapping_format=7)
         result_cos = torch.ones((3, 4))
         result_sin = torch.zeros((3, 4))
         slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
 
-        with (
-            patch.object(
-                DeviceOperator,
-                "get_dsa_compressor_slot_mapping_format",
-                return_value=7,
-            ) as get_slot_format,
-            patch.object(
-                torch.ops._C_ascend,
-                "compressor_metadata",
-                create=True,
-                return_value=(result_cos, result_sin, slot_mapping),
-            ) as metadata_op,
-        ):
+        with patch.object(
+            torch.ops._C_ascend,
+            "compressor_metadata",
+            create=True,
+            return_value=(result_cos, result_sin, slot_mapping),
+        ) as metadata_op:
             actual = compressor._compute_metadata(metadata)
 
         assert actual[0] is result_cos
         assert actual[1] is result_sin
         assert actual[2] is slot_mapping
-        get_slot_format.assert_called_once_with()
         args = metadata_op.call_args.args
         assert torch.equal(args[0], full_cos.view(2, 4))
         assert torch.equal(args[1], full_sin.view(2, 4))
@@ -150,7 +142,7 @@ class TestCompressorStateCache:
         cache.block_size = 8
         cache.dtype = torch.float32
         cache.sliding_window = 64
-        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
+        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"))
 
         spec = cache.get_kv_cache_spec(vllm_config)
 

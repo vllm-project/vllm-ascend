@@ -91,6 +91,13 @@ from vllm_ascend.utils import (
 )
 
 
+def _dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
+    # Lazy import: layer.py must not import deepseek_v4 at module load time.
+    from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+
+    return dsv4_resolve_attn_kv_dtype(vllm_config, non_a5_dtype)
+
+
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def __init__(
         self,
@@ -108,17 +115,20 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
+        self.dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, self.dtype)
+        use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and self.dtype == torch.bfloat16
+        cached_head_size = (
+            self.head_dim
+            if use_bf16
+            else (self.head_dim + 128 if get_ascend_device_type() == AscendDeviceType.A5 else self.head_dim)
+        )
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=self.dtype,
             sliding_window=self.window_size,
-            cache_dtype_str=self.cache_config.cache_dtype,
+            cache_dtype_str=str(self.dtype).replace("torch.", ""),
             model_version="deepseek_v4",
             alignment=None,
         )
@@ -585,8 +595,7 @@ class DeepseekV4Attention(nn.Module):
                     topk_indices_buffer=topk_indices_buffer,
                 )
 
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        k_dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, torch.bfloat16)
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,

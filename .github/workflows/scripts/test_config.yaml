@@ -118,6 +118,7 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/dsa_v1.py
+    - vllm_ascend/attention/dsa_attn_kv_plan.py
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
@@ -306,6 +307,7 @@
     - tests/ut/models/test_deepseek_v4_compressor.py
     - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
+    - tests/ut/models/test_dsv4_kv_cache_dtype.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: models_minimax_m3
@@ -373,7 +375,10 @@
     - vllm_ascend/ops/dsa.py
     - vllm_ascend/ops/mhc.py
     - vllm_ascend/ops/rope_dsv4.py
+    - vllm_ascend/ops/sparse_flash_mla.py
+    - vllm_ascend/attention/dsa_attn_kv_plan.py
   tests:
+    - tests/ut/device/test_device_op.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: ops_distributed_inference

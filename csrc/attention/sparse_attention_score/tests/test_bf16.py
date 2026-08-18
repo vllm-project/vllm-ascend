@@ -72,7 +72,7 @@ def _register_sparse_attention_score_op():
     ext_mod = importlib.util.module_from_spec(ext_spec)
     ext_spec.loader.exec_module(ext_mod)
 
-    from cann_ops_transformer.op_builder.builder import OpBuilder
+    from cann_ops_transformer.op_builder.builder import OpBuilder  # type: ignore[import-not-found]
 
     OpBuilder._loaded_ops["npu_sparse_attention_score"] = ext_mod
     print(f"[INFO] Loaded pre-compiled extension: {so_file}")
