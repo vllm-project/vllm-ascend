@@ -2251,10 +2251,19 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
+            # A newly transferred PD request can enter verification with only
+            # scheduler-inserted -1 drafts and no cached probability row.
+            fully_padded_draft_req_ids = {
+                req_id
+                for req_id, token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()
+                )
+                if token_ids and all(token_id == -1 for token_id in token_ids)
+            }
             sampler_output = self._sample(
                 logits,
                 spec_decode_metadata,
-                scheduler_output.num_invalid_spec_tokens,
+                fully_padded_draft_req_ids,
             )
 
         if self.need_accepted_tokens:
@@ -2441,9 +2450,9 @@ class NPUModelRunner(GPUModelRunner):
     def _get_spec_decode_draft_probs(
         self,
         spec_decode_metadata: SpecDecodeMetadata,
-        num_invalid_spec_tokens: dict[str, int] | None = None,
+        fully_padded_draft_req_ids: set[str] | None = None,
     ) -> torch.Tensor | None:
-        if not num_invalid_spec_tokens:
+        if not fully_padded_draft_req_ids:
             return super()._get_spec_decode_draft_probs(spec_decode_metadata)
         if self._draft_probs is None or self._draft_prob_req_ids is None:
             return None
@@ -2459,7 +2468,7 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             row_idx = row_by_req_id.get(req_id)
             if row_idx is None:
-                if num_invalid_spec_tokens.get(req_id, 0) == num_draft:
+                if req_id in fully_padded_draft_req_ids:
                     draft_probs_rows.append(
                         self._draft_probs.new_zeros(
                             (num_draft, self._draft_probs.shape[-1])
@@ -2483,7 +2492,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         logits,
         spec_decode_metadata,
-        num_invalid_spec_tokens: dict[str, int] | None = None,
+        fully_padded_draft_req_ids: set[str] | None = None,
     ):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
@@ -2506,7 +2515,7 @@ class NPUModelRunner(GPUModelRunner):
             self.rejection_sampler.prepare_sampling(max_topk)
         draft_probs = self._get_spec_decode_draft_probs(
             spec_decode_metadata,
-            num_invalid_spec_tokens,
+            fully_padded_draft_req_ids,
         )
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
