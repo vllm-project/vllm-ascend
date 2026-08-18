@@ -1784,13 +1784,14 @@ class NPUModelRunner(GPUModelRunner):
             if self.vllm_config.model_config.enable_return_routed_experts and self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
-        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
+        profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
+        if profiling_chunk_config.enabled and profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
             # This flag is set cross-process via scheduler_output because
             # modifying the config singleton in the scheduler process does
             # not affect this worker process.
             if getattr(scheduler_output, "disable_profiling_timing", False):
-                self.ascend_config.scheduler_config.profiling_chunk_config.need_timing = False
+                profiling_chunk_config.need_timing = False
             else:
                 self._sync_device()
                 self._execution_start_time = time.perf_counter()
@@ -2205,6 +2206,7 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
@@ -2365,8 +2367,10 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
-        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing and hasattr(
-            self, "_execution_start_time"
+        if (
+            profiling_chunk_config.enabled
+            and profiling_chunk_config.need_timing
+            and hasattr(self, "_execution_start_time")
         ):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
