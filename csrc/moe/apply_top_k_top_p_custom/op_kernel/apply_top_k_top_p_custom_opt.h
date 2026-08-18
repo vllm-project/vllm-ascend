@@ -45,7 +45,7 @@ private:
     __aicore__ inline void WriteSoftmaxToGm(int64_t baseGmIdx, uint32_t kthStartIdx);
     __aicore__ inline void CumsumKoggleStone(int64_t baseGmIdx);
     __aicore__ inline void FindFirstIndex(int64_t baseGmIdx, uint32_t& firstIdx);
-    __aicore__ inline void CompareSelectOnLogits(int64_t batchGmBase, inputT thresholdVal, bool useGE);
+    __aicore__ inline void CompareSelectOnLogits(int64_t batchGmBase, inputT thresholdVal, bool useGreaterEqual);
     __aicore__ inline void ScatterBoundary(int64_t batchGmBase, int64_t sortedBase, uint32_t firstIdx,
                                            inputT thresholdVal);
     __aicore__ inline void CopyOutLast(int64_t batchGmBase, int64_t sortedBase);
@@ -440,8 +440,8 @@ __aicore__ inline void ApplyTopKTopPCustomOpt<inputT, calT, outputT>::FindFirstI
 
 // --- CompareSelectOnLogits: vectorized compare + select on original logits ---
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPCustomOpt<inputT, calT, outputT>::CompareSelectOnLogits(int64_t batchGmBase,
-                                                                                      inputT thresholdVal, bool useGE)
+__aicore__ inline void ApplyTopKTopPCustomOpt<inputT, calT, outputT>::CompareSelectOnLogits(
+    int64_t batchGmBase, inputT thresholdVal, bool useGreaterEqual)
 {
     constexpr uint32_t CMP_ALIGN_ELEMS = CMP_ALIGN_BYTES / sizeof(inputT);
     uint32_t tileTimes = CeilDiv(vocabSize_, cmpSelTileLength);
@@ -459,7 +459,7 @@ __aicore__ inline void ApplyTopKTopPCustomOpt<inputT, calT, outputT>::CompareSel
         if constexpr (IsSameType<inputT, float>::value) {
             Duplicate(cmpNegInfLocal.template ReinterpretCast<int32_t>(), FLOAT32_NEG_INF, curLenAligned);
             PipeBarrier<PIPE_V>();
-            CMPMODE cmpMode = useGE ? CMPMODE::GE : CMPMODE::GT;
+            CMPMODE cmpMode = useGreaterEqual ? CMPMODE::GE : CMPMODE::GT;
             Compares(cmpMaskLocal, cmpLogitsLocal, thresholdVal, cmpMode, curLenAligned);
             PipeBarrier<PIPE_V>();
             Select(cmpLogitsLocal, cmpMaskLocal, cmpLogitsLocal, cmpNegInfLocal, SELMODE::VSEL_TENSOR_TENSOR_MODE,
@@ -467,7 +467,7 @@ __aicore__ inline void ApplyTopKTopPCustomOpt<inputT, calT, outputT>::CompareSel
         } else if constexpr (IsSameType<inputT, half>::value) {
             Duplicate(cmpNegInfLocal.template ReinterpretCast<uint16_t>(), FLOAT16_NEG_INF, curLenAligned);
             PipeBarrier<PIPE_V>();
-            CMPMODE cmpMode = useGE ? CMPMODE::GE : CMPMODE::GT;
+            CMPMODE cmpMode = useGreaterEqual ? CMPMODE::GE : CMPMODE::GT;
             Compares(cmpMaskLocal, cmpLogitsLocal, thresholdVal, cmpMode, curLenAligned);
             PipeBarrier<PIPE_V>();
             Select(cmpLogitsLocal, cmpMaskLocal, cmpLogitsLocal, cmpNegInfLocal, SELMODE::VSEL_TENSOR_TENSOR_MODE,
@@ -478,7 +478,7 @@ __aicore__ inline void ApplyTopKTopPCustomOpt<inputT, calT, outputT>::CompareSel
             Cast(cmpFp32Local, cmpLogitsLocal, RoundMode::CAST_NONE, curLenAligned);
             PipeBarrier<PIPE_V>();
             float threshFp32 = ToFloat(thresholdVal);
-            CMPMODE cmpMode = useGE ? CMPMODE::GE : CMPMODE::GT;
+            CMPMODE cmpMode = useGreaterEqual ? CMPMODE::GE : CMPMODE::GT;
             Compares(cmpMaskLocal, cmpFp32Local, threshFp32, cmpMode, curLenAligned);
             PipeBarrier<PIPE_V>();
             Select(cmpLogitsLocal.template ReinterpretCast<half>(), cmpMaskLocal,
