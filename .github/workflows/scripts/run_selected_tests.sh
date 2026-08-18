@@ -144,9 +144,10 @@ run_pytest_target() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
-      print_summary
-      exit "${status}"
+    # Keep running the remaining targets, but preserve the failure so the
+    # workflow still reports the test group as failed after the full suite.
+    if [ "${overall_status}" -eq 0 ]; then
+      overall_status="${status}"
     fi
   fi
 }
@@ -189,9 +190,8 @@ run_pytest_batch() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
-      print_summary
-      exit "${status}"
+    if [ "${overall_status}" -eq 0 ]; then
+      overall_status="${status}"
     fi
   fi
 }

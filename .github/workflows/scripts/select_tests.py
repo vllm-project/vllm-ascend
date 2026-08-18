@@ -491,6 +491,13 @@ def _dedup_groups(groups: dict[RunnerKey, list[str]]) -> None:
         groups[key] = deduped
 
 
+def _filter_groups_by_npu_types(
+    groups: dict[RunnerKey, list[str]],
+    allowed_types: set[NpuType],
+) -> dict[RunnerKey, list[str]]:
+    return {key: tests for key, tests in groups.items() if key[1] in allowed_types}
+
+
 def _find_runner(
     num_npus: int,
     npu_type: NpuType,
@@ -767,6 +774,13 @@ def main():
         default=None,
         help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
     )
+    parser.add_argument(
+        "--npu-types",
+        nargs="+",
+        choices=[npu_type.value for npu_type in NpuType],
+        default=None,
+        help="Only emit test groups for the specified NPU types (e.g. a3)",
+    )
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
@@ -896,6 +910,10 @@ def main():
             else:
                 overridden.setdefault(override_key, []).extend(tests)
         all_groups = overridden
+
+    if args.npu_types:
+        allowed_types = {NpuType(npu_type) for npu_type in args.npu_types}
+        all_groups = _filter_groups_by_npu_types(all_groups, allowed_types)
 
     if skip_tests:
         for key in list(all_groups.keys()):
