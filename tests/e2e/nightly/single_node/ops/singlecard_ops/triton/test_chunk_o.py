@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from vllm_ascend.ops.triton.fla.chunk_o import chunk_fwd_o
@@ -18,12 +19,12 @@ def _chunk_fwd_o_reference(
     batch_size, sequence_length, num_query_heads, _ = q.shape
     num_value_heads = v.shape[2]
     chunks_per_sequence = (sequence_length + chunk_size - 1) // chunk_size
-    query_heads_per_value_head = num_value_heads // num_query_heads
+    value_heads_per_query_head = num_value_heads // num_query_heads
     output = torch.empty_like(v, dtype=torch.float32)
 
     for batch_idx in range(batch_size):
         for value_head_idx in range(num_value_heads):
-            query_head_idx = value_head_idx // query_heads_per_value_head
+            query_head_idx = value_head_idx // value_heads_per_query_head
             for chunk_idx in range(chunks_per_sequence):
                 start = chunk_idx * chunk_size
                 end = min(start + chunk_size, sequence_length)
@@ -44,10 +45,17 @@ def _chunk_fwd_o_reference(
     return output
 
 
-def test_chunk_fwd_kernel_o_accuracy():
+@pytest.mark.parametrize(
+    # (1, 70) covers a tail chunk; (2, 130) additionally exercises the
+    # per-batch state offset (boh = i_n * NT) inside the kernel.
+    ("batch_size", "sequence_length"),
+    [
+        (1, 70),
+        (2, 130),
+    ],
+)
+def test_chunk_fwd_kernel_o_accuracy(batch_size: int, sequence_length: int):
     torch.manual_seed(2026)
-    batch_size = 1
-    sequence_length = 70
     num_query_heads = 1
     num_value_heads = 2
     key_dim = 128
