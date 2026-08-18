@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -11,6 +13,7 @@ from vllm_ascend.spec_decode.dynamic.cost_model import HardwareCostModel
 from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
 from vllm_ascend.spec_decode.dynamic.policy import HardwareAwarePrefixPolicy
 from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
+from vllm_ascend.worker.v2.spec_decode.metadata import align_padded_query_lengths
 
 
 def _policy(
@@ -196,3 +199,23 @@ def test_adaptive_draft_k_preserves_gate_zero_and_minimum() -> None:
     assert controller.cap(0) == 0
     # A temporary batch-level gate must not permanently disable speculation.
     assert controller.cap(5) == 1
+
+
+def test_v2_draft_metadata_aligns_full_graph_padding() -> None:
+    metadata = {
+        "layer": SimpleNamespace(actual_seq_lengths_q=[5, 10, 15, 15]),
+    }
+
+    align_padded_query_lengths(metadata, 20)
+
+    assert metadata["layer"].actual_seq_lengths_q == [5, 10, 15, 20]
+
+
+def test_v2_draft_metadata_keeps_unpadded_query_lengths() -> None:
+    metadata = {
+        "layer": SimpleNamespace(actual_seq_lengths_q=[5, 10, 15, 20]),
+    }
+
+    align_padded_query_lengths(metadata, 20)
+
+    assert metadata["layer"].actual_seq_lengths_q == [5, 10, 15, 20]

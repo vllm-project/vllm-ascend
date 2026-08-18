@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.metadata import align_padded_query_lengths
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                     num_tokens_padded=num_tokens_padded,
                     causal=self._group_causal,
                 )
+            align_padded_query_lengths(attn_metadata, num_tokens_padded)
             return [attn_metadata]
     else:
 
@@ -53,6 +55,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                     step=self.num_query_per_req,
                     causal=self._group_causal,
                 )
+            align_padded_query_lengths(attn_metadata, num_tokens_padded)
             return [attn_metadata]
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
