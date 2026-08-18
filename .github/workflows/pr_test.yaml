@@ -566,6 +566,15 @@ jobs:
             rm -f extra_recommended_tests.obs.yaml
           fi
 
+      - name: Upload extra_recommended_tests.yaml as artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: extra-recommended-tests
+          path: extra_recommended_tests.obs.yaml
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Export coverage paths output
         id: export-paths
         if: ${{ !cancelled() }}
