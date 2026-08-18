@@ -31,7 +31,7 @@ class OmniEplbUpdator(EplbUpdator):
         self.world_size = dist.get_world_size()
 
     def forward_before(self):
-        pass
+        OmniPlanner().place_experts()
 
     def forward_end(self, eplb_heat_collection_status: bool = True):
         if eplb_heat_collection_status:
