@@ -161,6 +161,12 @@ def main():
     fa3_short = _run_fa3(q, k, v, seq_short, cu_q, page_table, meta_short, causal)
     fa3_long = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_long, causal)
     fa3_long_shortmeta = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_short, causal)
+    # decode: causal and non-causal MUST agree (query attends all cached KVs;
+    # there is no future KV to mask).  A mismatch => FA3 causal position wrong.
+    fa3_long_noncausal = _run_fa3(
+        q, k, v, seq_long, cu_q, page_table,
+        _make_meta(long, seq_long, cu_q, False), False,
+    )
     torch.npu.synchronize()
 
     # ---- graph replay ----
@@ -189,6 +195,10 @@ def main():
           f"{_max_abs_diff(fa3_short, ref_short):.6f}")
     print(f"[ok ] FA3 long   vs manual long              : "
           f"{_max_abs_diff(fa3_long, ref_long):.6f}")
+    print(f"[ok ] FA3 noncausal long vs manual long      : "
+          f"{_max_abs_diff(fa3_long_noncausal, ref_long):.6f}")
+    print(f"[causal] FA3 long causal vs noncausal        : "
+          f"{_max_abs_diff(fa3_long, fa3_long_noncausal):.6f}")
     print(f"[meta] FA3(long+short meta) vs FA3(long)      : "
           f"{_max_abs_diff(fa3_long_shortmeta, fa3_long):.6f}")
     print(f"[graph] grown-seq replay vs FA3(long)         : "
@@ -203,6 +213,7 @@ def main():
     print("  [ok ]  ~1e-2..1e-1 => FA3 matches correct output (bf16 vs fp32)")
     print("         large       => FA3 output is WRONG")
     print("  [meta] ~0 => scheduler_metadata does not depend on seq values")
+    print("  [causal] ~0 => causal==noncausal (decode MUST be); large => causal pos bug")
     print("  [graph]~0 => graph replay is correct; large => graph capture/replay bug")
     print("-" * 72)
 
