@@ -8,6 +8,7 @@ import torch
 
 from vllm_ascend.spec_decode.dynamic.calibration import SequentialTemperatureScaler
 from vllm_ascend.spec_decode.dynamic.cost_model import HardwareCostModel
+from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
 from vllm_ascend.spec_decode.dynamic.policy import HardwareAwarePrefixPolicy
 from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
 
@@ -169,3 +170,29 @@ def test_proposal_gate_exits_immediately_when_queue_builds() -> None:
         num_scheduled_requests=2,
         prefill_scheduled=False,
     ) == 0
+
+
+def test_adaptive_draft_k_tracks_logical_verify_width() -> None:
+    controller = AdaptiveDraftKController(max_k=5, min_k=1, slack=1)
+
+    # The first step keeps the configured width; the result feeds the next
+    # scheduler step and removes one unused draft position.
+    assert controller.cap(5) == 5
+    controller.update([3, 2])
+    assert controller.current_k == 4
+    assert controller.cap(5) == 4
+
+    # A prefix that reaches the physical width allows gradual growth again.
+    controller.update([4, 4])
+    assert controller.current_k == 5
+    assert controller.cap(5) == 5
+
+
+def test_adaptive_draft_k_preserves_gate_zero_and_minimum() -> None:
+    controller = AdaptiveDraftKController(max_k=5, min_k=1, slack=1)
+    assert controller.cap(5) == 5
+    controller.update([0, 0])
+    assert controller.current_k == 1
+    assert controller.cap(0) == 0
+    # A temporary batch-level gate must not permanently disable speculation.
+    assert controller.cap(5) == 1

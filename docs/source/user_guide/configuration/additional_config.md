@@ -228,6 +228,9 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `profile_fingerprint` | dict | `None` | Runtime fingerprint fields that must match the profile when `strict_profile_fingerprint` is enabled. |
 | `strict_profile_fingerprint` | bool | `True` | If `True`, a profile fingerprint mismatch falls back to `confidence_budget`. |
 | `decision_interval` | int | `16` | Recompute the hardware-optimal global verification budget every N draft steps; per-request prefixes are still allocated each step. The interval also bounds NPU-to-host synchronization to one scalar per recompute. |
+| `adaptive_draft_k` | bool | `False` | Hardware-aware only. Feed the previous logical verify width back to the next scheduler step and cap the physical draft K, avoiding draft computation for unused suffix positions. Enable only with a profile validated for the target workload. |
+| `adaptive_draft_k_min` | int | `1` | Minimum physical draft K while the batch-level proposal gate is open. A gate-selected K=0 still takes precedence. |
+| `adaptive_draft_k_slack` | int | `1` | Number of extra draft positions kept beyond the previous maximum logical verify prefix to avoid overreacting to one step. |
 | `confidence_temperatures` | list[float] | `None` | Optional per-position temperature scaling values. They override values stored in the hardware profile. |
 
 **scheduler_config.short_request_first_config**

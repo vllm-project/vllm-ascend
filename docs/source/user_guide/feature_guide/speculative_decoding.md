@@ -522,6 +522,9 @@ additional_config={
         "method_params": {
             "profile_path": "/path/to/ascend_dspark_profile.json",
             "min_verify_tokens": 0,
+            "adaptive_draft_k": True,
+            "adaptive_draft_k_min": 1,
+            "adaptive_draft_k_slack": 1,
             "decision_interval": 1,
         },
     },

@@ -10,6 +10,7 @@ and the hardware-dependent allocation of verification prefixes.
 
 from vllm_ascend.spec_decode.dynamic.calibration import SequentialTemperatureScaler
 from vllm_ascend.spec_decode.dynamic.cost_model import HardwareCostModel
+from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
 from vllm_ascend.spec_decode.dynamic.policy import HardwareAwarePrefixPolicy
 from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
 
@@ -18,4 +19,5 @@ __all__ = [
     "HardwareCostModel",
     "SequentialTemperatureScaler",
     "ProposalGate",
+    "AdaptiveDraftKController",
 ]
