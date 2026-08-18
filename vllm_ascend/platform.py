@@ -1251,13 +1251,7 @@ def _disable_expandable_segments() -> None:
 
 
 def _validate_fa3_backend(key, _attn_selector_config):
-    try:
-        rl_config = get_ascend_config().rl_config
-    except RuntimeError:
-        # Backend resolution can run in unit tests or other lightweight paths
-        # before an AscendConfig is created. Without RL configuration, FA3
-        # must not be selected.
-        return False
+    rl_config = get_ascend_config().rl_config
     if not (rl_config.enabled and rl_config.enable_training_consistency):
         logger.info(
             "FA3 will not be enabled when rl_config.enable_training_consistency is false. "

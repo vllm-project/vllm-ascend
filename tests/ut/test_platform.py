@@ -1326,7 +1326,10 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
         self.assertEqual(vllm_config.compilation_config.custom_ops, [])
 
-    def test_get_attn_backend_cls_use_v1_and_mla(self):
+    @patch("vllm_ascend.platform.get_ascend_config")
+    def test_get_attn_backend_cls_use_v1_and_mla(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.rl_config.enabled = False
+        mock_get_ascend_config.return_value.rl_config.enable_training_consistency = False
         attn_selector_config = AttentionSelectorConfig(
             dtype=torch.float16,
             head_size=0,
@@ -1338,7 +1341,10 @@ class TestNPUPlatform(TestBase):
         result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
         self.assertEqual(result, "vllm_ascend.attention.mla_v1.AscendMLABackend")
 
-    def test_get_attn_backend_cls_use_v1_only(self):
+    @patch("vllm_ascend.platform.get_ascend_config")
+    def test_get_attn_backend_cls_use_v1_only(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.rl_config.enabled = False
+        mock_get_ascend_config.return_value.rl_config.enable_training_consistency = False
         attn_selector_config = AttentionSelectorConfig(
             dtype=torch.float16,
             head_size=0,
