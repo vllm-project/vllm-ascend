@@ -4,11 +4,13 @@ import pytest
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    afc._A5_MOE_QUANT_TYPES_BY_CONFIG_ID.clear()
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -31,6 +33,7 @@ def _make_vllm_config(
     cudagraph_capture_sizes: list[int] | None = None,
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
+    resolved_moe_quant_type: QuantType | None = None,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -55,12 +58,29 @@ def _make_vllm_config(
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
     scheduler_config = SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens)
-    return SimpleNamespace(
+    vllm_config = SimpleNamespace(
         model_config=model_config,
         parallel_config=parallel_config,
         compilation_config=compilation_config,
         scheduler_config=scheduler_config,
         quant_config=None if quant_description is None else SimpleNamespace(quant_description=quant_description),
+    )
+    if resolved_moe_quant_type is not None:
+        afc.cache_a5_moe_quant_type(vllm_config, resolved_moe_quant_type, "test_layer")
+    return vllm_config
+
+
+def _make_model_instance(quant_type: QuantType):
+    return SimpleNamespace(
+        model=SimpleNamespace(
+            layers=[
+                SimpleNamespace(
+                    mlp=SimpleNamespace(
+                        quant_type=quant_type,
+                    ),
+                ),
+            ],
+        ),
     )
 
 
@@ -234,12 +254,12 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
         (128, 4, 2, 0, None, MoECommType.MC2),
         (129, 2, 4, 0, None, MoECommType.ALLGATHER),
         (129, 8, 4, 0, None, MoECommType.ALLTOALL),
-        (129, 8, 4, 1, "W4A8_MXFP", MoECommType.FUSED_MC2),
-        (129, 8, 4, 1, "W8A8_MXFP8", MoECommType.FUSED_MC2),
-        (129, 8, 4, 1, "mxfp4", MoECommType.FUSED_MC2),
-        (129, 8, 4, 2, "W4A8_MXFP", MoECommType.ALLTOALL),
-        (129, 8, 4, 1, "w8a8_dynamic", MoECommType.ALLTOALL),
-        (129, 8, 4, 1, "W4A16_MXFP4", MoECommType.ALLTOALL),
+        (129, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
+        (129, 8, 4, 1, QuantType.MXFP8, MoECommType.FUSED_MC2),
+        (129, 8, 4, 1, QuantType.MXFP4, MoECommType.FUSED_MC2),
+        (129, 8, 4, 2, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
+        (129, 8, 4, 1, QuantType.W8A8, MoECommType.ALLTOALL),
+        (129, 8, 4, 1, QuantType.W4A16MXFP4, MoECommType.ALLTOALL),
     ],
 )
 def test_select_moe_comm_method_a5(
@@ -257,12 +277,16 @@ def test_select_moe_comm_method_a5(
         capacity=128,
         enable_fused_mc2=enable_fused_mc2,
     )
-    vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts, quant_type=quant_type)
+    vllm_config = _make_vllm_config(
+        world_size=world_size,
+        top_k_experts=top_k_experts,
+        resolved_moe_quant_type=quant_type,
+    )
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
-def test_select_moe_comm_method_a5_reads_quantization_config(monkeypatch):
+def test_select_moe_comm_method_a5_reads_quant_type_from_model_instance(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A5,
@@ -272,13 +296,32 @@ def test_select_moe_comm_method_a5_reads_quantization_config(monkeypatch):
     vllm_config = _make_vllm_config(
         world_size=8,
         top_k_experts=4,
-        quantization_config={"moe_quant_type": "W8A8_MXFP8"},
+    )
+
+    assert (
+        afc.select_moe_comm_method(129, vllm_config, model_instance=_make_model_instance(QuantType.W4A8MXFP))
+        == MoECommType.FUSED_MC2
+    )
+    assert not hasattr(vllm_config, "ascend_moe_quant_type")
+
+
+def test_select_moe_comm_method_a5_reads_quant_type_from_vllm_config_cache(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        resolved_moe_quant_type=QuantType.MXFP8,
     )
 
     assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.FUSED_MC2
 
 
-def test_select_moe_comm_method_a5_reads_quant_description(monkeypatch):
+def test_select_moe_comm_method_a5_does_not_parse_config_quant_string(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A5,
@@ -288,10 +331,12 @@ def test_select_moe_comm_method_a5_reads_quant_description(monkeypatch):
     vllm_config = _make_vllm_config(
         world_size=8,
         top_k_experts=4,
+        quant_type="W4A8_MXFP",
+        quantization_config={"moe_quant_type": "W8A8_MXFP8"},
         quant_description={"model.layers.0.mlp.experts.w13_weight": "W4A8_MXFP"},
     )
 
-    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
