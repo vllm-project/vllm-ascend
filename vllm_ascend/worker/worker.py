@@ -220,10 +220,10 @@ class NPUWorker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Save the buffers before level 2 sleep
-        if level == 2:
-            model = self.model_runner.model
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        # Both level-1 and level-2 sleep need this CPU snapshot to restore
+        # registered control buffers after wake-up.
+        model = self.model_runner.model
+        self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
