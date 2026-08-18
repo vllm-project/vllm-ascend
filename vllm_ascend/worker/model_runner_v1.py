@@ -2376,8 +2376,9 @@ class NPUModelRunner(GPUModelRunner):
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         # Spec acceptance DFX: run for any speculative config (MTP/Eagle/…),
-        # not only hybrid MambaSpec (``need_accepted_tokens``).
-        if self.speculative_config is not None:
+        # not only hybrid MambaSpec (``need_accepted_tokens``). Skip the extra
+        # accepted-token D2H when detection is fully gated.
+        if self.speculative_config is not None and self.dfx.should_check_after_spec():
             if self.need_accepted_tokens:
                 if self.num_accepted_tokens_event is not None:
                     self.num_accepted_tokens_event.synchronize()

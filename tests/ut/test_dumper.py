@@ -324,10 +324,11 @@ def test_dump_phase_idle_pending_active():
 
 
 def test_sync_dump_pending_or_skips_or_with_real_dfx_config(tmp_path):
-    """Regression: hot_reload_enabled is a property — must not call it as a method."""
+    """Dump off + no detector: skip TP all_reduce (hot-reload off)."""
     cfg = make_dfx_config(tmp_path)
     assert cfg.hot_reload_enabled is False
     assert cfg.dump_enabled() is False
+    assert cfg.any_detector_enabled() is False
 
     dumper = _make_dumper()
     dumper.dfx_config = cfg
@@ -371,6 +372,71 @@ def test_sync_dump_pending_or_still_ors_when_dump_on_no_reload():
 
         ar.side_effect = _or_sum
         assert dumper.sync_dump_pending_or(allow_arm=True) is True
+
+        ar.assert_called_once()
+
+
+def test_sync_dump_pending_or_skips_or_when_hot_reload_on_dump_and_detectors_off():
+    """Production idle: hot-reload ON, dump/detectors off → skip TP all_reduce."""
+    dumper = _make_dumper()
+    dumper.dfx_config = MagicMock()
+    dumper.dfx_config.dump_enabled.return_value = False
+    dumper.dfx_config.any_detector_enabled.return_value = False
+    dumper.dfx_config.hot_reload_enabled = True
+    dumper._pending_dump = False
+    dumper._pending_dump_req_id = None
+    dumper._pending_dump_skip_quota = False
+    dumper._use_pending_dump_sync = MagicMock(return_value=True)
+
+    with (
+        patch("vllm_ascend.dfx.dumper.pending.get_tp_group") as get_tp,
+        patch("torch.distributed.all_reduce") as ar,
+    ):
+        assert dumper.sync_dump_pending_or() is False
+        get_tp.assert_not_called()
+        ar.assert_not_called()
+
+
+def test_sync_dump_pending_or_fast_path_clears_stale_pending():
+    """Dump/detectors just turned off: drop leftover pending without OR."""
+    dumper = _make_dumper()
+    dumper.dfx_config = MagicMock()
+    dumper.dfx_config.dump_enabled.return_value = False
+    dumper.dfx_config.any_detector_enabled.return_value = False
+    dumper._pending_dump = True
+    dumper._pending_dump_req_id = "r1"
+    dumper._pending_dump_skip_quota = True
+    dumper._use_pending_dump_sync = MagicMock(return_value=True)
+
+    with patch("torch.distributed.all_reduce") as ar:
+        assert dumper.sync_dump_pending_or() is False
+        ar.assert_not_called()
+    assert dumper._pending_dump is False
+    assert dumper._pending_dump_req_id is None
+
+
+def test_sync_dump_pending_or_still_ors_when_dump_off_but_detector_on():
+    """Detect-only: dump off but a detector is on → still join pending-OR."""
+    dumper = _make_dumper()
+    dumper.dfx_config = MagicMock()
+    dumper.dfx_config.dump_enabled.return_value = False
+    dumper.dfx_config.any_detector_enabled.return_value = True
+    dumper._pending_dump = False
+    dumper._pending_dump_req_id = None
+    dumper._pending_dump_skip_quota = False
+    dumper._activate_msprobe_dump = MagicMock(return_value=True)
+    dumper.dump_rank_tag = MagicMock(return_value="tp0")
+    dumper._use_pending_dump_sync = MagicMock(return_value=True)
+
+    with (
+        patch("vllm_ascend.dfx.dumper.pending.get_pp_group") as get_pp,
+        patch("vllm_ascend.dfx.dumper.pending.get_tp_group") as get_tp,
+        patch("torch.distributed.all_reduce") as ar,
+    ):
+        get_pp.return_value.is_last_rank = True
+        get_tp.return_value.world_size = 2
+        get_tp.return_value.cpu_group = object()
+        assert dumper.sync_dump_pending_or(allow_arm=True) is False
 
     ar.assert_called_once()
 
