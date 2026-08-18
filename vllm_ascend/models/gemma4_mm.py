@@ -30,6 +30,30 @@ from vllm.model_executor.models.utils import init_vllm_registered_model, maybe_p
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
+def _ascend_gemma4_vision_patch_embedder_forward(
+    module,
+    pixel_values: torch.Tensor,
+    pixel_position_ids: torch.Tensor,
+    padding_positions: torch.Tensor,
+) -> torch.Tensor:
+    pixel_values = 2 * (pixel_values - 0.5)
+    pixel_values = pixel_values.to(module._ascend_activation_dtype)
+    hidden_states = module.input_proj(pixel_values)
+    position_embeddings = module._position_embeddings(pixel_position_ids, padding_positions)
+    return hidden_states + position_embeddings.to(hidden_states.dtype)
+
+
+def _patch_gemma4_vision_patch_embedder(
+    patch_embedder: torch.nn.Module,
+    activation_dtype: torch.dtype,
+) -> None:
+    patch_embedder._ascend_activation_dtype = activation_dtype
+    patch_embedder.forward = _ascend_gemma4_vision_patch_embedder_forward.__get__(
+        patch_embedder,
+        patch_embedder.__class__,
+    )
+
+
 def _get_tower_quant_config(
     vllm_config: VllmConfig,
     *,
@@ -89,6 +113,11 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
                 vision_tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
+            if vision_tower_quant and vision_tower_quant.get_name() == ASCEND_QUANTIZATION_METHOD:
+                _patch_gemma4_vision_patch_embedder(
+                    self.vision_tower.patch_embedder,
+                    self.model_dtype,
+                )
 
         if config.audio_config is not None:
             with self._mark_tower_model(vllm_config, "audio"):
