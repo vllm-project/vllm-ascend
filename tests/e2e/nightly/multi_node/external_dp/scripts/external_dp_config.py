@@ -391,8 +391,6 @@ class ExternalDPConfigLoader:
 
 
 class RankResolver:
-    """Expand node-level configs into concrete vLLM server ranks."""
-
     def __init__(self, config: ExternalDPConfig):
         self.config = config
 
@@ -473,3 +471,19 @@ class RankResolver:
                 )
             )
         return ranks
+
+#     test_content:
+#     - chat_completion  # 触发 run_chat_completion_test
+#
+#
+# prompts:
+# - "请解释什么是大语言模型"
+# - "请写一段Python冒泡排序"
+# api_keyword_args:
+# max_tokens: 128
+# temperature: 0.7
+# expected_response:
+# prompt_tokens: 15  # 断言 prompt_tokens == 15（可选）
+# completion_tokens: 100  # 断言 completion_tokens == 100（可选）
+# max_model_len: 4096  # 断言 total_tokens <= 4096（可选）
+# # 若不填 max_model_len，则自动从 server_cmd 的 --max-model-len 提取
