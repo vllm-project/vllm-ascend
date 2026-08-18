@@ -9,7 +9,7 @@ This document covers two model versions verified on Ascend NPUs:
 | Version | Description | Verified by |
 | --- | --- | --- |
 | `CohereLabs/cohere-transcribe-03-2026` | Base multilingual model (14 languages) | Colleague verification, results recorded in the internal evaluation report |
-| `CohereLabs/cohere-transcribe-arabic-07-2026` | Arabic fine-tuned model | Internal evaluation report (WER / RTFx measured on Ascend 910B) |
+| `CohereLabs/cohere-transcribe-arabic-07-2026` | Arabic fine-tuned model | Internal evaluation report (WER / RTFx measured on Atlas A2 products) |
 
 This document describes the supported features, environment preparation, single-node deployment, functional verification, and evaluation workflow for Cohere Transcribe on Ascend NPUs.
 
@@ -25,21 +25,15 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Ascend 910B 64 GB NPU. Download the model weights from any of the following sources:
+The BF16 model can be deployed with one Atlas A2 64 GB NPU. Download the model weights from any of the following sources:
 
 - GitCode mirror (03-2026): [weixin_62994174/CohereLabs_cohere-transcribe-03-2026](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)
 - Hugging Face: [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) or [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026)
-- ModelScope: `CohereLabs/cohere-transcribe-03-2026`
+- ModelScope: [CohereLabs/cohere-transcribe-03-2026](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026)
 
 Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
-
-The model requires the `librosa` package for audio preprocessing. Install it inside the serving environment:
-
-```bash
-pip install librosa
-```
 
 ## 4 Installation
 
@@ -100,11 +94,11 @@ pip show vllm-ascend
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Both model versions can be deployed on one Ascend 910B (Atlas A2) NPU with the same parameters; only the model weight path changes.
+Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Both model versions can be deployed on one Atlas A2 NPU with the same parameters; only the model weight path changes.
 
 === "Atlas A2 inference products"
 
-    The following examples are for Atlas A2 inference products (Ascend 910B).
+    The following examples are for Atlas A2 inference products.
 
     === "cohere-transcribe-03-2026"
 
@@ -147,7 +141,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
         - `--trust-remote-code` is required because the model repository ships custom modeling code.
         - `--block-size 128` is required: the model must be served with a block size of at least 128.
         - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
-        - `--dtype bfloat16` matches the BF16 deployment validated on Ascend 910B.
+        - `--dtype bfloat16` matches the BF16 deployment validated on Atlas A2 products.
         - `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` are recommended when the model weights are downloaded to a local directory in advance.
 
 When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
@@ -196,7 +190,7 @@ Verified by a colleague on the same benchmark as 07-2026 (see Section 7.2). Resu
 
 ### 7.2 cohere-transcribe-arabic-07-2026 (Arabic fine-tuned model)
 
-Measured in the internal evaluation report on Ascend 910B.
+Measured in the internal evaluation report on Atlas A2 products.
 
 On the Common Voice 18 (CV18) Arabic test set (10,471 samples), the model achieves a WER of 5.69%, close to the official result (5.82%). The WER distribution is as follows:
 
