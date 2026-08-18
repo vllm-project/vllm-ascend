@@ -393,7 +393,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 if not isinstance(attn_meta, (AscendMetadata, AscendMLAMetadata)):
                     continue
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
-                attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
+                # AscendMLAMetadata receives seq_len_list dynamically in the
+                # existing draft path, while AscendMetadata declares it as a
+                # dataclass field. Keep that behavior without pretending the
+                # MLA type statically owns the field.
+                cast(Any, attn_meta).seq_len_list = attn_meta.seq_lens.tolist()
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize per-step decode attention metadata for graph mode."""
