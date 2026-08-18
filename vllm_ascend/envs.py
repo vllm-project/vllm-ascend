@@ -104,59 +104,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Compressor SP (sequence parallelism) for DeepSeek-V4 DSA-CP. When enabled,
-    # each TP rank only computes the compressed rows it owns, then an
-    # all_gather_into_tensor + fixed selector rebuilds the global compressed_kv.
-    # Unsafe shapes fall back to the original full-hidden compressor. (plan2 Stage 1)
-    "VLLM_ASCEND_ENABLE_COMPRESSOR_SP": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_COMPRESSOR_SP", "0"))),
-    # Print aggregated DSA-CP compressor SP hit/fallback counters every N
-    # compressor/indexer update events. 0 disables diagnostics.
-    "VLLM_ASCEND_COMPRESSOR_SP_DEBUG_INTERVAL": lambda: int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_DEBUG_INTERVAL", "0")),
-    # Synchronize around compressor SP debug timing sections. Expensive; only
-    # for short profiling/debug runs.
-    "VLLM_ASCEND_COMPRESSOR_SP_DEBUG_SYNC": lambda: bool(int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_DEBUG_SYNC", "0"))),
-    # Debug-only layout metadata assertions for Compressor SP. When enabled the
-    # runtime rebuilds the same layouts from selectors/index mappings and checks
-    # they are bit-identical. Must stay disabled in performance runs.
-    "VLLM_ASCEND_COMPRESSOR_SP_LAYOUT_ASSERT": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_LAYOUT_ASSERT", "0"))
-    ),
-    # Allow C4 compressor SP for nonzero request start_pos after NPU
-    # row/state-cache equivalence validation. Explicit opt-in kill switch.
-    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONZERO_START": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONZERO_START", "0"))
-    ),
-    # Allow C4 compressor SP when seq_len is not aligned to 4. The local planner
-    # replicates the real tail state; explicit opt-in on validated deployments.
-    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONALIGNED": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONALIGNED", "0"))
-    ),
-    # Allow C128 compressor SP when seq_len is not aligned to 128 after
-    # validating row and tail-state equivalence. Explicit opt-in only.
-    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C128_NONALIGNED": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C128_NONALIGNED", "0"))
-    ),
-    # Allow chunked-prefill calls to use the same history-aware local plan.
-    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_CHUNKED_PREFILL": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_CHUNKED_PREFILL", "0"))
-    ),
-    # Replicate each active request's chunk-end Compressor state block across
-    # TP ranks. Chunked local Compressor is unsafe unless enabled.
-    "VLLM_ASCEND_COMPRESSOR_SP_SYNC_CHUNKED_BOUNDARY_STATE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_SYNC_CHUNKED_BOUNDARY_STATE", "0"))
-    ),
-    # Recompute C4 chunk-end state from a bounded hidden-state tail on every rank.
-    "VLLM_ASCEND_COMPRESSOR_SP_REPLAY_C4_BOUNDARY_STATE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_REPLAY_C4_BOUNDARY_STATE", "0"))
-    ),
-    # Debug-only full/local dual-run comparison switch. Expensive; must stay
-    # disabled in release/performance runs.
-    "VLLM_ASCEND_COMPRESSOR_SP_DUAL_RUN": lambda: bool(int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_DUAL_RUN", "0"))),
-    # Step B: feed the padded rank-major Compressor AllGather buffer directly
-    # into the existing scatter op through a padded destination slot mapping.
-    "VLLM_ASCEND_COMPRESSOR_SP_SCATTER_FUSION": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_SCATTER_FUSION", "0"))
-    ),
 }
 
 # end-env-vars-definition
