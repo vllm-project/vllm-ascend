@@ -616,6 +616,36 @@ class TestGetCacheScaleMapper(TestBase):
             "model.layers.1.mla_attn.mla_attn.indexer.k_rot",
         )
 
+    def test_mla_quant_mappings_are_idempotent(self):
+        config = AscendModelSlimConfig(
+            {
+                "fa_quant_type": "C8",
+                "layers.1.fa_k.scale": "C8",
+                "indexer_quant_type": "INT8",
+                "layers.1.indexer.quant_type": "INT8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        suffixes = (
+            ".fa_q.scale",
+            ".fa_k.scale",
+            ".fa_v.scale",
+            ".fa_q.offset",
+            ".fa_k.offset",
+            ".fa_v.offset",
+            ".indexer.q_rot",
+            ".indexer.k_rot",
+        )
+
+        for suffix in suffixes:
+            with self.subTest(suffix=suffix):
+                original_name = f"model.layers.1.self_attn{suffix}"
+                expected_name = f"model.layers.1.self_attn.mla_attn.mla_attn{suffix}"
+                mapped_name = mapper._map_name(original_name)
+
+                self.assertEqual(mapped_name, expected_name)
+                self.assertEqual(mapper._map_name(mapped_name), expected_name)
+
 
 class TestApplyVllmMapper(TestBase):
     def test_apply_mapper_with_populated_quant_description(self):
