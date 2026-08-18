@@ -257,6 +257,21 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+#   2. vllm.v1.core.kv_cache_utils.get_kv_cache_groups
+#    Why:
+#       The v0.26 branch cannot unify the different page sizes used by a sparse
+#       MLA target (GLM-5.2) and its regular sliding-window DSpark draft, so
+#       service startup fails while building KV cache groups.
+#    How:
+#       If page-size unification fails for this supported combination, promote
+#       the draft's allocation spec to full attention with the target block
+#       size. Its sliding-window attention compute remains unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/48776
+#    Future Plan:
+#       Remove this part of the patch when the supported vLLM release includes
+#       PR #48776.
+#
 # ** 11. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
@@ -559,6 +574,22 @@
 #       Remove this patch once upstream vLLM supports loading these MTP draft
 #       models without a custom `hf_config_override`, or exposes a plugin hook
 #       for MTP model_type/architecture remapping.
+#
+#   2. `vllm.transformers_utils.configs.speculators.algos.update_dspark`
+#    Why:
+#       vLLM v0.26 discards a Speculators DSpark checkpoint's
+#       `sample_from_anchor` setting and omits `dflash_config.target_layer_ids`.
+#       This selects the wrong anchor layout and sizes the GLM-5.2 draft FC from
+#       three draft layers instead of five target auxiliary layers.
+#    How:
+#       Preserve `sample_from_anchor` while translating the checkpoint config
+#       and populate `dflash_config` with the mask token and zero-based target
+#       layer IDs consumed by v0.26's DFlash model constructor.
+#    Related PRs:
+#       https://github.com/vllm-project/vllm/pull/48524
+#       https://github.com/vllm-project/vllm/pull/48639
+#    Future Plan:
+#       Remove this patch when the supported vLLM release includes both fixes.
 #
 # ** 21. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

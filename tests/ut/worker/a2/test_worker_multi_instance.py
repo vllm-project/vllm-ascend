@@ -27,6 +27,12 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
     """Tests for determine_available_memory() focusing on the multi-instance
     OOM regression (PR #7427)."""
 
+    def setUp(self):
+        self.ascend_config_patcher = patch("vllm_ascend.worker.worker.get_ascend_config")
+        mock_ascend_config = self.ascend_config_patcher.start()
+        mock_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        self.addCleanup(self.ascend_config_patcher.stop)
+
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
@@ -47,6 +53,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
 
+        worker.vllm_config = SimpleNamespace(kv_transfer_config=None)
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
 

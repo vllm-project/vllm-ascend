@@ -1510,7 +1510,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
-        record_attention_compute_start()
         return DeviceOperator.indexer_select_post_process(
             self,
             q_li,
@@ -1979,9 +1978,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_li is not None
                 k_li = self._get_full_kv(k_li, attn_metadata)
 
-        if kv_cache is not None and self.is_kv_producer:
-            attn_metadata.reshape_cache_event = torch.npu.Event()
-
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
             use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
@@ -2021,12 +2017,22 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
+        # Notify for every layer that wrote the cache, not just indexer layers:
+        # by this point all of the layer's KV (main + indexer) has been
+        # scattered, so the connector can dispatch the PD pull immediately.
+        if kv_cache is not None:
             notify_kv_cache_written(self.layer_name or "")
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
         else:
             topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+
+        # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
+        # reuse cached top-k indices and have no indexer, so recording this
+        # inside indexer_select_post_process would leave their gate closed.
+        record_attention_compute_start()
+
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:

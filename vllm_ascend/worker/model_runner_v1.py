@@ -131,6 +131,9 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     allocate_kv_offload_topk_profile_buffers,
@@ -3729,6 +3732,7 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
+        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
@@ -3842,6 +3846,11 @@ class NPUModelRunner(GPUModelRunner):
         return kv_caches
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+        compilation_config = getattr(self, "compilation_config", None)
+        if compilation_config is None:
+            compilation_config = getattr(self.vllm_config, "compilation_config", None)
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
             group_spec = group_kv_cache_spec.kv_cache_spec
@@ -3850,6 +3859,12 @@ class NPUModelRunner(GPUModelRunner):
                     layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
                 else:
                     layer_kv_cache_spec[layer_name] = group_spec
+                if static_forward_context is not None:
+                    attn_layer = static_forward_context.get(layer_name)
+                    if isinstance(attn_layer, AttentionLayerBase):
+                        spec = attn_layer.get_kv_cache_spec(self.vllm_config)
+                        if isinstance(spec, AscendSFAIndexerCacheSpec):
+                            layer_kv_cache_spec[layer_name] = spec
         return layer_kv_cache_spec
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:

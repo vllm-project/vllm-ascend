@@ -85,3 +85,9 @@ def register_connector():
         "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
         "RecomputeCPUOffloadConnectorV1",
     )
+
+    KVConnectorFactory.register_connector(
+        "SfaRemoteD2HConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
+        "SfaRemoteD2HConnector",
+    )

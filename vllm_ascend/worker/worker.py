@@ -61,6 +61,12 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
+    get_gva_layerwise_config,
+    get_layerwise_physical_layer_index,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_host_device_memory_usage_ratio,
 )
@@ -588,6 +594,26 @@ class NPUWorker(WorkerBase):
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
 
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            memory_info = getattr(self, "_gva_layerwise_memory_info", None)
+            if memory_info is None:
+                num_layers = self.model_config.get_num_layers(self.parallel_config)
+                layout = build_layerwise_cache_layout(num_layers, extra_config)
+                num_buffer_assignments = len(layout.storage_indices)
+                factor = num_layers / num_buffer_assignments if layout.has_layer_reuse else 1.0
+            else:
+                num_layers, num_buffer_assignments, factor = memory_info
+            if factor != 1.0:
+                self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
+                logger.info(
+                    "Layerwise KV cache reuse maps %d layers onto %d buffer assignments; "
+                    "scale logical KV budget by %.3f.",
+                    num_layers,
+                    num_buffer_assignments,
+                    factor,
+                )
+
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
@@ -927,8 +953,46 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
+    def _get_layerwise_kv_cache_memory_info(
+        self,
+        kv_cache_spec: dict[str, KVCacheSpec],
+        extra_config: dict[str, Any],
+    ) -> tuple[int, int, float]:
+        if not kv_cache_spec:
+            return 0, 0, 1.0
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+        num_layers = len(physical_layers)
+        if num_layers < base_layers:
+            return num_layers, num_layers, 1.0
+        reuse_layout = build_layerwise_reuse_layout(
+            kv_cache_spec,
+            base_layers,
+            extra_config,
+        )
+        if not reuse_layout.has_layer_reuse:
+            return num_layers, num_layers, 1.0
+        num_buffer_assignments = len(reuse_layout.buffer_slots)
+
+        logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
+        physical_page_bytes = 0
+        for slot in reuse_layout.buffer_slots:
+            physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
+            for layer in slot:
+                indexer = reuse_layout.layer_cache_specs[layer].indexer
+                if indexer is not None:
+                    physical_page_bytes += indexer.spec.page_size_bytes
+                    break
+        return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
+                kv_cache_spec,
+                extra_config,
+            )
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
             self.kv_cache_spec = kv_cache_spec
