@@ -71,6 +71,8 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
                 rank=moe_config.ep_rank,
                 world_size=moe_config.ep_size,
                 num_experts=moe_config.num_experts,
+                max_redundant_per_rank=eplb_config.num_redundant_experts//moe_config.ep_size  if eplb_config.expert_map_path is None else None,
+                max_redundant_per_expert=100  if eplb_config.expert_map_path is None else None,
             )
             planner.config.dump_dir = eplb_config.expert_map_record_path
             planner.config.enable_dump = os.getenv("EXPERT_MAP_RECORD", "false") == "true"

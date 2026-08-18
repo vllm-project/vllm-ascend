@@ -30,6 +30,11 @@ class OmniEplbUpdator(EplbUpdator):
         self.num_moe_layers = self.adaptor.num_moe_layers
         self.world_size = dist.get_world_size()
 
+    def reset_log2phy(self):
+        for local_idx, layer in enumerate(self.adaptor.moe_layers):
+            layer.log2phy = OmniPlanner().get_log2phy(local_idx)
+        logger.info("[eplb/omni] OmniEplbUpdator re-register log2phy completed, rank=%s", self.rank_id)
+
     def forward_before(self):
         OmniPlanner().place_experts()
 

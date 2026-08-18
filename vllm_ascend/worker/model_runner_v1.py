@@ -3752,21 +3752,22 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
 
-        # Trigger OmniPlanner stage 2 when num_moe_layers is now known
-        eplb_config = self.ascend_config.eplb_config
-        if eplb_config.enable_omni_eplb:
-            try:
-                from omni_placement.omni_planner import OmniPlanner
-                from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor as _VllmEplbAdaptor
-                num_moe_layers = len(_VllmEplbAdaptor._registered_moe_layers)
-                omni_planner = OmniPlanner()  # get singleton
-                omni_planner.init_dynamic_components(num_moe_layers)
-                omni_planner.init_dram_weights(self.eplb_adaptor.param_dict, 0, param_dict_type="vllm_ascend")
-                omni_planner.start_dynamic_optimize_expert_load_balance()
-                logger.info("[eplb/omni] OmniPlanner stage 2 initialized, num_moe_layers=%s", num_moe_layers)
-            except Exception as e:
-                logger.error("[eplb/omni] OmniPlanner stage 2 failed: %s", e)
-                raise
+            # Trigger OmniPlanner stage 2 when num_moe_layers is now known
+            eplb_config = self.ascend_config.eplb_config
+            if eplb_config.enable_omni_eplb:
+                try:
+                    from omni_placement.omni_planner import OmniPlanner
+                    from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor as _VllmEplbAdaptor
+                    num_moe_layers = len(_VllmEplbAdaptor._registered_moe_layers)
+                    omni_planner = OmniPlanner()  # get singleton
+                    omni_planner.init_dynamic_components(num_moe_layers)
+                    omni_planner.init_dram_weights(self.eplb_adaptor.param_dict, 0, param_dict_type="vllm_ascend")
+                    omni_planner.start_dynamic_optimize_expert_load_balance()
+                    logger.info("[eplb/omni] OmniPlanner stage 2 initialized, num_moe_layers=%s", num_moe_layers)
+                except Exception as e:
+                    logger.error("[eplb/omni] OmniPlanner stage 2 failed: %s", e)
+                    raise
+            self.eplb_updator.reset_log2phy()
 
     def update_eplb_heat_collection_status(self, num_tokens_padded: int):
         if self.eplb_heat_collection_stage == "prefill":
