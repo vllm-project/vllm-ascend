@@ -82,6 +82,16 @@ def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
     if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
         return False
 
+    # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
+    # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
+    # range [1024, 3072] and a multiple of 512. This constraint may be removed
+    # in CANN 9.2.0
+    moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+    if moe_intermediate_size is None:
+        return False
+    if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+        return False
+
     quant_type = getattr(
         vllm_config.model_config.hf_text_config,
         "moe_quantize",
