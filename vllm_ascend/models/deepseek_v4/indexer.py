@@ -356,6 +356,7 @@ class DeepseekV4Indexer(nn.Module):
         overlap_plan: IndexerOverlapPlan,
         *,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
         cache_metadata, _ = self._get_indexer_cache_metadata(metadata)
@@ -396,9 +397,10 @@ class DeepseekV4Indexer(nn.Module):
                 cos,
                 sin,
                 qr_pertoken_scale,
+                write_cache=write_cache,
             )
 
-        if self.skip_topk or aux_stream is None:
+        if write_cache and (self.skip_topk or aux_stream is None):
             compressed_kv, compress_slot_mapping = overlap_plan.compute_attention_compressed_kv()
             overlap_plan.scatter_attention_compressed_kv(compressed_kv, compress_slot_mapping)
 
@@ -571,6 +573,7 @@ class DeepseekV4Indexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ):
         (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
             self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
@@ -605,15 +608,18 @@ class DeepseekV4Indexer(nn.Module):
         )
 
         q = rotate_activation(q, hadamard)
-        kv, indexer_slot_mapping = compressor(
-            hidden_states=x,
-            state_cache=indexer_state_cache,
-            metadata=metadata.compressor,
-        )
-        if kv.numel() == 0:
-            kv = None
-        elif compressor.rotate:
-            kv = rotate_activation(kv, hadamard)
+        kv = None
+        indexer_slot_mapping = None
+        if write_cache:
+            kv, indexer_slot_mapping = compressor(
+                hidden_states=x,
+                state_cache=indexer_state_cache,
+                metadata=metadata.compressor,
+            )
+            if kv.numel() == 0:
+                kv = None
+            elif compressor.rotate:
+                kv = rotate_activation(kv, hadamard)
 
         return (
             q,
@@ -634,6 +640,7 @@ class DeepseekV4Indexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ):
         q, kv, ik, isc, ifc, cache_metadata, indexer_slot_mapping = self._indexer_qkv_prepare(
             x,
@@ -643,17 +650,29 @@ class DeepseekV4Indexer(nn.Module):
             cos,
             sin,
             qr_pertoken_scale,
+            write_cache=write_cache,
         )
 
         weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
 
-        return self.ops.quantize_update_cache_and_select_topk(
+        if write_cache:
+            return self.ops.quantize_update_cache_and_select_topk(
+                q,
+                kv,
+                weights,
+                ik,
+                isc,
+                ifc,
+                indexer_slot_mapping,
+                cache_metadata,
+            )
+
+        q, q_scale = self.ops.quantize_query(q)
+        return self.ops.select_topk(
             q,
-            kv,
             weights,
+            q_scale,
             ik,
             isc,
-            ifc,
-            indexer_slot_mapping,
             cache_metadata,
         )

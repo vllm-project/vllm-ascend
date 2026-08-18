@@ -844,7 +844,7 @@ class TestAscendDSACompressedCacheRouting:
         state_cache = torch.empty(0)
 
         with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
-            actual = impl._update_compressed_caches_and_select_topk(
+            actual = impl._maybe_update_compressed_caches_and_select_topk(
                 layer_name="model.layers.0.self_attn.attn",
                 hidden_states=hidden_states,
                 qr=qr,
@@ -865,6 +865,7 @@ class TestAscendDSACompressedCacheRouting:
         assert indexer_call.kwargs["qr"] is qr
         assert indexer_call.kwargs["kv_cache"] is kv_cache
         assert indexer_call.kwargs["metadata"] is indexer_metadata
+        assert indexer_call.kwargs["write_cache"] is True
         assert isinstance(overlap_plan, IndexerOverlapPlan)
         assert overlap_plan.aux_stream is None
         impl.compressor.assert_called_once_with(
@@ -878,7 +879,8 @@ class TestAscendDSACompressedCacheRouting:
             compress_slot_mapping,
         )
 
-    def test_c128_delegates_directly_to_compressor(self):
+    @pytest.mark.parametrize("write_cache", [True, False], ids=["normal", "prepared"])
+    def test_c128_delegates_directly_to_compressor(self, write_cache: bool):
         impl = _make_impl()
         impl.compress_ratio = 128
         compressed_kv = torch.ones((1, 1, 4))
@@ -898,7 +900,7 @@ class TestAscendDSACompressedCacheRouting:
         compress_kv_cache = torch.empty(0)
 
         with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
-            actual = impl._update_compressed_caches_and_select_topk(
+            actual = impl._maybe_update_compressed_caches_and_select_topk(
                 layer_name="layer",
                 hidden_states=hidden_states,
                 qr=torch.ones((1, 4)),
@@ -907,23 +909,35 @@ class TestAscendDSACompressedCacheRouting:
                 qr_pertoken_scale=None,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
+                write_cache=write_cache,
             )
 
         assert actual is None
-        impl.compressor.assert_called_once_with(
-            hidden_states=hidden_states,
-            state_cache=state_cache,
-            metadata=compressor_metadata,
-        )
-        scatter.assert_called_once_with(
-            compress_kv_cache,
-            compressed_kv,
-            compress_slot_mapping,
-        )
+        if write_cache:
+            impl.compressor.assert_called_once_with(
+                hidden_states=hidden_states,
+                state_cache=state_cache,
+                metadata=compressor_metadata,
+            )
+            scatter.assert_called_once_with(
+                compress_kv_cache,
+                compressed_kv,
+                compress_slot_mapping,
+            )
+        else:
+            impl.compressor.assert_not_called()
+            scatter.assert_not_called()
 
 
-@pytest.mark.parametrize("compress_ratio", [4, 128])
-def test_forward_attention_sets_compressed_kv_args(compress_ratio: int):
+@pytest.mark.parametrize(
+    ("compress_ratio", "cache_is_prepared"),
+    [(4, False), (128, False), (4, True)],
+    ids=["c4_normal", "c128_normal", "c4_prepared"],
+)
+def test_forward_attention_sets_compressed_kv_args(
+    compress_ratio: int,
+    cache_is_prepared: bool,
+):
     impl = _make_impl()
     impl.compress_ratio = compress_ratio
     impl.multistream_dsv4_dsa_overlap = False
@@ -989,10 +1003,10 @@ def test_forward_attention_sets_compressed_kv_args(compress_ratio: int):
             impl,
             "_mla_prolog_single_stream",
             return_value=(q, qr, None),
-        ),
+        ) as single_stream_prolog,
         patch.object(
             impl,
-            "_update_compressed_caches_and_select_topk",
+            "_maybe_update_compressed_caches_and_select_topk",
             return_value=topk_indices,
         ) as update_compressed_caches,
         patch.object(
@@ -1018,15 +1032,18 @@ def test_forward_attention_sets_compressed_kv_args(compress_ratio: int):
             hidden_states,
             (torch.empty(0),),
             layer_metadata,
+            cache_is_prepared,
         )
 
     assert actual is attention_output
+    assert single_stream_prolog.call_args.kwargs["write_swa_cache"] is not cache_is_prepared
     update_call = update_compressed_caches.call_args
     assert update_call.kwargs["layer_name"] == "layer"
     assert update_call.kwargs["hidden_states"] is hidden_states
     assert update_call.kwargs["layer_metadata"] is layer_metadata
     assert update_call.kwargs["compress_kv_cache"] is compress_kv_cache
     assert update_call.kwargs["state_cache"] is state_cache
+    assert update_call.kwargs["write_cache"] is not cache_is_prepared
     sparse_kwargs = sparse_attn_op.call_args.kwargs
     assert sparse_kwargs["cmp_kv"] is compress_kv_cache
     assert sparse_kwargs["cmp_block_table"] is common_req.block_table
@@ -1037,3 +1054,25 @@ def test_forward_attention_sets_compressed_kv_args(compress_ratio: int):
         assert sparse_kwargs["cmp_sparse_indices"] is topk_indices
     else:
         assert "cmp_sparse_indices" not in sparse_kwargs
+
+
+def test_prepared_cache_rejects_multistream_before_cache_access():
+    impl = _make_impl()
+    impl.multistream_dsv4_dsa_overlap = True
+
+    with (
+        patch.object(DeviceOperator, "unpack_dsa_forward_kv_cache") as unpack_cache,
+        pytest.raises(
+            RuntimeError,
+            match="Prepared DSA caches require single-stream attention",
+        ),
+    ):
+        impl._forward_attention(
+            "layer",
+            torch.empty((1, 4)),
+            (torch.empty(0),),
+            cast(Any, None),
+            True,
+        )
+
+    unpack_cache.assert_not_called()
