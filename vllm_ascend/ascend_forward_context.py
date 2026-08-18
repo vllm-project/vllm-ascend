@@ -398,7 +398,7 @@ _A5_MEGA_MOE_QUANT_TYPES = {
     QuantType.MXFP8,
     QuantType.W4A8MXFP,
 }
-_A5_MEGA_MOE_MAX_TOKENS_PER_RANK = 512
+_A5_MEGA_MOE_GROUP_SIZE = 32
 _A5_MOE_QUANT_TYPES_BY_CONFIG_ID: dict[int, QuantType] = {}
 
 
@@ -420,6 +420,40 @@ def _get_moe_quant_type_from_model_instance(model_instance: torch.nn.Module | No
         if isinstance(quant_type, QuantType):
             return quant_type
     return None
+
+
+def _get_a5_moe_activation(
+    vllm_config: VllmConfig,
+    model_instance: torch.nn.Module | None,
+) -> str | None:
+    model = getattr(model_instance, "model", None)
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(model_instance, "layers", None)
+    if layers is not None:
+        for layer in layers:
+            activation = getattr(getattr(layer, "mlp", None), "activation", None)
+            if isinstance(activation, str):
+                return activation
+            if isinstance(activation, Enum):
+                return activation.name
+
+    hf_text_config = vllm_config.model_config.hf_text_config
+    return _get_first_config_value(hf_text_config, ("hidden_act", "hidden_activation"))
+
+
+def _is_a5_mega_moe_supported_activation(activation: str | None) -> bool:
+    if activation is None:
+        return True
+    normalized = activation.lower().removeprefix("moeactivation.")
+    return normalized in {"silu", "swiglu"}
+
+
+def _get_a5_moe_group_size(vllm_config: VllmConfig) -> int | None:
+    quant_description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None)
+    if isinstance(quant_description, dict):
+        return quant_description.get("group_size")
+    return getattr(quant_description, "group_size", None)
 
 
 def cache_a5_moe_quant_type(
@@ -466,6 +500,8 @@ def _select_a5_moe_comm_method(
     mc2_tokens_capacity: int,
     quant_type: QuantType | None,
     enable_fused_mc2: int,
+    activation: str | None,
+    group_size: int | None,
 ) -> MoECommType:
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -474,45 +510,66 @@ def _select_a5_moe_comm_method(
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
     ascend_config = get_ascend_config()
+    eplb_config = getattr(ascend_config, "eplb_config", None)
+    dynamic_eplb = bool(getattr(eplb_config, "dynamic_eplb", False))
+    num_redundant_experts = int(getattr(eplb_config, "num_redundant_experts", 0))
     fused_mc2_mode_1 = enable_fused_mc2 == 1
     has_expert_parallel_world = world_size > 1
-    mega_moe_max_tokens = min(ascend_config.mega_moe_max_tokens, _A5_MEGA_MOE_MAX_TOKENS_PER_RANK)
+    mega_moe_max_tokens = ascend_config.mega_moe_max_tokens
     within_mega_moe_capacity = num_tokens <= mega_moe_max_tokens
     supported_quant = _is_a5_mega_moe_supported_quant(quant_type)
+    supported_activation = _is_a5_mega_moe_supported_activation(activation)
+    supported_group_size = group_size in (None, _A5_MEGA_MOE_GROUP_SIZE)
+    supported_eplb = not dynamic_eplb and num_redundant_experts == 0
     a5_mega_moe_enable = (
-        fused_mc2_mode_1 and has_expert_parallel_world and within_mega_moe_capacity and supported_quant
+        fused_mc2_mode_1
+        and has_expert_parallel_world
+        and within_mega_moe_capacity
+        and supported_quant
+        and supported_activation
+        and supported_group_size
+        and supported_eplb
     )
-    logger.info(
+    logger.debug(
         "A5 MegaMoE condition check: enabled=%s, fused_mc2_mode_1=%s, "
         "has_expert_parallel_world=%s, within_mega_moe_capacity=%s, supported_quant=%s, "
-        "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, enable_fused_mc2=%s, "
-        "mega_moe_max_tokens=%s, configured_mega_moe_max_tokens=%s, supported_quant_types=%s",
+        "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, "
+        "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, activation=%s, "
+        "group_size=%s, enable_fused_mc2=%s, "
+        "mega_moe_max_tokens=%s, dynamic_eplb=%s, num_redundant_experts=%s, supported_quant_types=%s",
         a5_mega_moe_enable,
         fused_mc2_mode_1,
         has_expert_parallel_world,
         within_mega_moe_capacity,
         supported_quant,
+        supported_activation,
+        supported_group_size,
+        supported_eplb,
         num_tokens,
         world_size,
         num_experts_per_tok,
         quant_type,
+        activation,
+        group_size,
         enable_fused_mc2,
         mega_moe_max_tokens,
-        ascend_config.mega_moe_max_tokens,
+        dynamic_eplb,
+        num_redundant_experts,
         sorted(quant_type.name for quant_type in _A5_MEGA_MOE_QUANT_TYPES),
     )
     if a5_mega_moe_enable:
-        logger.info(
+        logger.debug(
             "A5 MoE comm selected FUSED_MC2/MegaMoE: num_tokens=%s, world_size=%s, "
-            "top_k=%s, quant_type=%s, enable_fused_mc2=%s, mega_moe_max_tokens=%s, "
-            "configured_mega_moe_max_tokens=%s",
+            "top_k=%s, quant_type=%s, activation=%s, group_size=%s, enable_fused_mc2=%s, "
+            "mega_moe_max_tokens=%s",
             num_tokens,
             world_size,
             num_experts_per_tok,
             quant_type,
+            activation,
+            group_size,
             enable_fused_mc2,
             mega_moe_max_tokens,
-            ascend_config.mega_moe_max_tokens,
         )
         return MoECommType.FUSED_MC2
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
@@ -521,20 +578,24 @@ def _select_a5_moe_comm_method(
         moe_comm_type = MoECommType.ALLGATHER
     else:
         moe_comm_type = MoECommType.ALLTOALL
-    logger.info(
+    logger.debug(
         "A5 MoE comm selected fallback: method=%s, num_tokens=%s, world_size=%s, top_k=%s, "
-        "quant_type=%s, enable_fused_mc2=%s, supported_mega_moe_quant=%s, "
-        "mc2_tokens_capacity=%s, mega_moe_max_tokens=%s, configured_mega_moe_max_tokens=%s",
+        "quant_type=%s, activation=%s, enable_fused_mc2=%s, supported_mega_moe_quant=%s, "
+        "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, mc2_tokens_capacity=%s, "
+        "mega_moe_max_tokens=%s",
         moe_comm_type,
         num_tokens,
         world_size,
         num_experts_per_tok,
         quant_type,
+        activation,
         enable_fused_mc2,
         supported_quant,
+        supported_activation,
+        supported_group_size,
+        supported_eplb,
         mc2_tokens_capacity,
         mega_moe_max_tokens,
-        ascend_config.mega_moe_max_tokens,
     )
     return moe_comm_type
 
@@ -557,7 +618,8 @@ def select_moe_comm_method(
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
     6. On A5 with expert parallel, prefer the fused MoE backend for supported
-       MXFP quantization when fused MC2 mode 1 is enabled. Otherwise use MC2
+       MXFP quantization and SwiGLU semantics when fused MC2 mode 1 is enabled
+       and EPLB does not use dynamic or redundant experts. Otherwise use MC2
        when tokens fit the MC2 capacity and the EP size is large enough, or
        fall back to all-gather/all-to-all.
 
@@ -599,6 +661,8 @@ def select_moe_comm_method(
             mc2_tokens_capacity,
             _get_a5_moe_quant_type(vllm_config, model_instance),
             get_ascend_config().enable_fused_mc2,
+            _get_a5_moe_activation(vllm_config, model_instance),
+            _get_a5_moe_group_size(vllm_config),
         )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER

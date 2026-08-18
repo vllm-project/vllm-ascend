@@ -2,9 +2,11 @@ from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
@@ -23,23 +25,33 @@ def _make_moe_config():
     return moe_config
 
 
-def _make_fused_input(*, swiglu_limit=0.0, log2phy=None, scale_dtype=torch.uint8):
+def _make_fused_input(
+    *,
+    swiglu_limit=0.0,
+    log2phy=None,
+    scale_dtype=torch.uint8,
+    activation="silu",
+    dynamic_eplb=False,
+    global_redundant_expert_num=0,
+    w1=None,
+):
     return build_fused_experts_input(
         hidden_states=torch.randn(4, 8),
         topk_weights=torch.randn(4, 2),
         topk_ids=torch.tensor([[0, 1], [1, 0], [0, 1], [1, 0]]),
-        w1=torch.randn(2, 16, 8),
+        w1=torch.randn(2, 16, 8) if w1 is None else w1,
         w2=torch.randn(2, 8, 8),
         quant_type=QuantType.MXFP8,
-        dynamic_eplb=False,
+        dynamic_eplb=dynamic_eplb,
         log2phy=log2phy,
-        activation="silu",
+        global_redundant_expert_num=global_redundant_expert_num,
+        activation=activation,
         mxfp_act_quant_type=torch.float8_e4m3fn,
         mxfp_weight_quant_type=torch.float8_e4m3fn,
         mxfp_scale_dtype=torch.uint8,
         mxfp_per_token_scale_dtype=torch.uint8,
-        w1_scale=torch.ones(2, 16, 1, dtype=scale_dtype),
-        w2_scale=torch.ones(2, 8, 1, dtype=scale_dtype),
+        w1_scale=torch.ones(2, 16, 1, 2, dtype=scale_dtype),
+        w2_scale=torch.ones(2, 8, 1, 2, dtype=scale_dtype),
         swiglu_limit=swiglu_limit,
     )
 
@@ -51,7 +63,6 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
 
     with (
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.FLOAT8_E8M0FNU_DTYPE", torch.uint8),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
             return_value=SimpleNamespace(mega_moe_max_tokens=65536),
@@ -62,8 +73,8 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
         backend.fused_experts(fused_input)
 
     get_symm_buffer.assert_called_once()
-    assert get_symm_buffer.call_args.kwargs["intermediate_hidden"] == 8
-    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 512
+    assert get_symm_buffer.call_args.kwargs["intermediate_hidden"] == 16
+    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 65536
     assert get_symm_buffer.call_args.kwargs["dispatch_quant_mode"] == 4
 
     mega_moe.assert_called_once()
@@ -74,6 +85,8 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     assert "activation_params" not in mega_moe_kwargs
     assert mega_moe_kwargs["weight1_type"] == torch.float8_e4m3fn
     assert mega_moe_kwargs["weight2_type"] == torch.float8_e4m3fn
+    assert mega_moe_kwargs["l1_weights_sf"][0].dtype == FLOAT8_E8M0FNU_DTYPE
+    assert mega_moe_kwargs["l2_weights_sf"][0].dtype == FLOAT8_E8M0FNU_DTYPE
 
 
 def test_mega_moe_backend_passes_positive_swiglu_limit_as_clamp():
@@ -83,7 +96,6 @@ def test_mega_moe_backend_passes_positive_swiglu_limit_as_clamp():
 
     with (
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.FLOAT8_E8M0FNU_DTYPE", torch.uint8),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
             return_value=SimpleNamespace(mega_moe_max_tokens=512),
@@ -98,18 +110,81 @@ def test_mega_moe_backend_passes_positive_swiglu_limit_as_clamp():
 
 def test_mega_moe_backend_accepts_enum_activation():
     assert MegaMoEBackend._normalize_activation(_TestMoEActivation.SILU) == "swiglu"
-    assert MegaMoEBackend._normalize_activation(_TestMoEActivation.SWIGLUOAI) == "swiglu"
-    assert MegaMoEBackend._normalize_activation(_TestMoEActivation.SWIGLUSTEP) == "swiglu"
+
+
+@pytest.mark.parametrize("activation", [_TestMoEActivation.SWIGLUOAI, _TestMoEActivation.SWIGLUSTEP, "situglu"])
+def test_mega_moe_backend_rejects_activation_with_different_semantics(activation):
+    with pytest.raises(ValueError, match="without changing its semantics"):
+        MegaMoEBackend._normalize_activation(activation)
+
+
+@pytest.mark.parametrize(
+    ("input_kwargs", "message"),
+    [
+        ({"dynamic_eplb": True}, "dynamic EPLB"),
+        ({"global_redundant_expert_num": 1}, "redundant physical experts"),
+    ],
+)
+def test_mega_moe_backend_rejects_unsupported_eplb_layouts(input_kwargs, message):
+    backend = MegaMoEBackend(_make_moe_config())
+    with pytest.raises(RuntimeError, match=message):
+        backend.fused_experts(_make_fused_input(**input_kwargs))
+
+
+def test_mega_moe_backend_rejects_transposed_grouped_matmul_layout():
+    w1 = torch.randn(2, 8, 16).transpose(1, 2)
+    fused_input = _make_fused_input(w1=w1)
+
+    backend = MegaMoEBackend(_make_moe_config())
+    with pytest.raises(ValueError, match="requires contiguous w1"):
+        backend.fused_experts(fused_input)
+
+
+def test_mega_moe_backend_validates_fp4_packed_dimensions():
+    fused_input = build_fused_experts_input(
+        hidden_states=torch.randn(4, 128),
+        topk_weights=torch.randn(4, 2),
+        topk_ids=torch.tensor([[0, 1], [1, 0], [0, 1], [1, 0]]),
+        w1=torch.randint(0, 255, (2, 128, 64), dtype=torch.uint8),
+        w2=torch.randint(0, 255, (2, 128, 32), dtype=torch.uint8),
+        quant_type=QuantType.W4A8MXFP,
+        dynamic_eplb=False,
+        mxfp_act_quant_type=torch.float8_e4m3fn,
+        mxfp_weight_quant_type=torch.uint8,
+        mxfp_scale_dtype=torch.uint8,
+        mxfp_per_token_scale_dtype=torch.uint8,
+        w1_scale=torch.ones(2, 128, 2, 2, dtype=torch.uint8),
+        w2_scale=torch.ones(2, 128, 1, 2, dtype=torch.uint8),
+    )
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
+        return_value=SimpleNamespace(mega_moe_max_tokens=512),
+    ):
+        key = MegaMoEBackend(_make_moe_config())._make_buffer_key(fused_input)
+
+    assert key.hidden_size == 128
+    assert key.intermediate_hidden == 128
+
+
+def test_mega_moe_backend_rejects_input_over_configured_capacity():
+    fused_input = _make_fused_input()
+    with patch(
+        "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
+        return_value=SimpleNamespace(mega_moe_max_tokens=3),
+    ):
+        backend = MegaMoEBackend(_make_moe_config())
+        with pytest.raises(ValueError, match="exceeds the configured capacity"):
+            backend._make_buffer_key(fused_input)
 
 
 def test_mega_moe_backend_rejects_packed_uint64_scales():
     fused_input = _make_fused_input(scale_dtype=torch.uint64)
 
-    with patch("vllm_ascend.ops.fused_moe.mega_moe.FLOAT8_E8M0FNU_DTYPE", torch.uint8):
-        backend = MegaMoEBackend(_make_moe_config())
-        try:
-            backend.fused_experts(fused_input)
-        except RuntimeError as exc:
-            assert "Do not pass packed INT/Fused-MC2 UINT64 scales into MegaMoE" in str(exc)
-        else:
-            raise AssertionError("Expected uint64 scales to be rejected.")
+    backend = MegaMoEBackend(_make_moe_config())
+    try:
+        backend.fused_experts(fused_input)
+    except RuntimeError as exc:
+        assert "Do not pass packed INT/Fused-MC2 UINT64 scales into MegaMoE" in str(exc)
+    else:
+        raise AssertionError("Expected uint64 scales to be rejected.")
