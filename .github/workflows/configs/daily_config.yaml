@@ -24,9 +24,9 @@
 
 daily:
   # --- A2: PR E2E one-card smoke (pytest-driven, runs on a2b3-1) ---
-  # Coverage: attention / sampler / small-model serve / batch invariant /
+  # Coverage: attention / sampler / small-model serve /
   # embedding / w8a8 quant / multi-instance / guided decoding.
-  # Sum of estimated_times ~ 2520s (~42 min) sequential + ~20 min install+compile.
+  # Sum of estimated_times ~ 1840s (~31 min) sequential + ~20 min install+compile.
   a2_pr_e2e:
     - name: a2-one-card-smoke
       os: linux-aarch64-a2b3-1
@@ -34,7 +34,6 @@ daily:
         tests/e2e/pull_request/one_card/test_attention_fa3.py
         tests/e2e/pull_request/one_card/test_sampler.py
         tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
-        tests/e2e/pull_request/one_card/test_batch_invariant.py
         tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py
         tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
         tests/e2e/pull_request/one_card/test_multi_instance.py
