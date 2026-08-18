@@ -363,8 +363,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             actual_seq_lengths_key = self.actual_seq_lengths_key
 
         runtime_cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
-        self.actual_seq_lengths_query.zero_()
-        self.actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)
+        actual_seq_lengths_query.zero_()
+        actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)
         if common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly and num_input_tokens > num_reqs:
             num_dummy_reqs = num_input_tokens - num_reqs
             dummy_query_lens = runtime_cum_query_lens[-1] + torch.arange(
@@ -373,14 +373,16 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 device=runtime_cum_query_lens.device,
                 dtype=runtime_cum_query_lens.dtype,
             )
-            self.actual_seq_lengths_query[num_reqs:num_input_tokens].copy_(dummy_query_lens)
-        cum_query_lens = self.actual_seq_lengths_query[:num_reqs]
+            actual_seq_lengths_query[num_reqs:num_input_tokens].copy_(
+                dummy_query_lens
+            )
+        cum_query_lens = actual_seq_lengths_query[:num_reqs]
         runtime_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        self.actual_seq_lengths_key.zero_()
-        self.actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
+        actual_seq_lengths_key.zero_()
+        actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
         if common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly and num_input_tokens > num_reqs:
-            self.actual_seq_lengths_key[num_reqs:num_input_tokens].fill_(1)
-        seq_lens = self.actual_seq_lengths_key[:num_reqs]
+            actual_seq_lengths_key[num_reqs:num_input_tokens].fill_(1)
+        seq_lens = actual_seq_lengths_key[:num_reqs]
 
         # Prefer _seq_lens_cpu (always available, updated during draft
         # iterations) over seq_lens_cpu (None in async spec decode mode).
