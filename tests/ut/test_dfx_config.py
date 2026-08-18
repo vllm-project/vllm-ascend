@@ -98,6 +98,48 @@ def test_msprobe_config_path_seeded_and_reload_flag(tmp_path: Path):
     assert cfg.dump_reload_msprobe() is False
 
 
+def test_reload_omitted_msprobe_config_path_keeps_seed(tmp_path: Path):
+    """JSON omitting dump.msprobe_config_path must not wipe a bootstrap seed."""
+    cfg_path = tmp_path / "dfx_config.json"
+    msprobe = str(tmp_path / "msprobe.json")
+    cfg = DfxRuntimeConfig(
+        cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        sync_mode="file",
+        reload_interval_seconds=5,
+        msprobe_config_path=msprobe,
+    )
+    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    payload["dump"].pop("msprobe_config_path", None)
+    payload["ascend_log"]["level"] = "DEBUG"
+    cfg_path.write_text(json.dumps(payload), encoding="utf-8")
+    cfg._last_reload_ts = 0.0
+    assert cfg.sync_dfx_config() is True
+    assert cfg.dump_msprobe_config_path() == msprobe
+    assert cfg.ascend_log_level() == "DEBUG"
+
+
+def test_reload_explicit_null_msprobe_config_path_clears(tmp_path: Path):
+    """Explicit JSON null clears dump.msprobe_config_path (omit does not)."""
+    cfg_path = tmp_path / "dfx_config.json"
+    msprobe = str(tmp_path / "msprobe.json")
+    cfg = DfxRuntimeConfig(
+        cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        sync_mode="file",
+        reload_interval_seconds=5,
+        msprobe_config_path=msprobe,
+    )
+    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    payload["dump"]["msprobe_config_path"] = None
+    cfg_path.write_text(json.dumps(payload), encoding="utf-8")
+    cfg._last_reload_ts = 0.0
+    assert cfg.sync_dfx_config() is True
+    assert cfg.dump_msprobe_config_path() is None
+
+
 @pytest.mark.parametrize(
     "payload, getter, default, expected, err_match",
     [
@@ -261,6 +303,7 @@ def _valid_dfx_data(**dump_overrides):
             "max_prompt_token_ids": 1000,
             "max_output_token_ids": 1000,
             "include_block_ids": True,
+            "include_slot_mapping": False,
             "block_last_write_wave": False,
             "block_last_writer": False,
         },
@@ -544,6 +587,33 @@ def test_ensure_persisted_skips_rewrite_when_file_exists(tmp_path: Path, monkeyp
     assert cfg.ensure_persisted() is True
     assert cfg_path.stat().st_mtime == mtime_before
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["max_times"] == 7
+
+
+def test_ensure_persisted_backfills_omitted_msprobe_config_path(tmp_path: Path, monkeypatch):
+    """Explicit existing JSON that omits the key gets that key only, not a full rewrite."""
+    monkeypatch.setenv("RANK", "0")
+    cfg_path = tmp_path / "dfx_config.json"
+    cfg_path.write_text(
+        json.dumps({"dump": {"max_times": 7, "enabled": True}, "ascend_log": {"level": "WARNING"}}),
+        encoding="utf-8",
+    )
+    msprobe = str(tmp_path / "msprobe.json")
+    cfg = DfxRuntimeConfig(
+        cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=False,
+        sync_mode="file",
+        reload_interval_seconds=0,
+        msprobe_config_path=msprobe,
+    )
+    assert cfg.dump_msprobe_config_path() == msprobe
+    assert cfg.ensure_persisted() is True
+    saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert saved["dump"]["msprobe_config_path"] == msprobe
+    assert saved["dump"]["max_times"] == 7
+    assert saved["dump"]["enabled"] is True
+    assert saved["ascend_log"]["level"] == "WARNING"
+    assert "debug" not in saved["ascend_log"]
 
 
 def test_save_prefers_disk_over_stale_memory(tmp_path: Path, monkeypatch):

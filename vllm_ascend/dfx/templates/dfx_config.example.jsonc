@@ -26,11 +26,11 @@
     "max_times": 0,
     // Cooldown seconds between auto dumps.
     "cooldown_seconds": 300,
-    // Manual dump arm. false/0 = off; true = dump every nonempty real
-    // execute_model wave until set false; positive int N = next N waves
-    // then off. Needs dump.enabled=true + reload_interval > 0; skips quota /
-    // cooldown / input filters. Each arm writes one report for that wave's
-    // batch (counts; ids if save_sensitive_info).
+    // Manual dump arm. false/0 = off; true = dump every wave with
+    // scheduled_tokens>0 until set false; positive int N = next N such waves
+    // then off. Idle / dummy / 0-token cleanup does not consume (even if
+    // residual req_ids remain). Needs dump.enabled=true + reload_interval > 0;
+    // skips quota / cooldown / input filters. Each arm writes one report.
     "manual_trigger": false,
     // Effective msprobe JSON path. Bootstrap seeds from additional_config
     // dump_config_path / dump_config when null. Change path (or set
@@ -73,6 +73,10 @@
     "max_output_token_ids": 1000,
     // Include each request's current GPU block_ids in report detail.
     "include_block_ids": true,
+    // D2H this wave's real paged-attention slot_mapping for the request
+    // (packed-batch slice). Default off: extra device sync; prefill can be long.
+    // Writes detail.slot_mapping + slot_mapping_span [start, end].
+    "include_slot_mapping": false,
     // Per physical block: last KV-write wave (DFX real-step index). Off by default.
     "block_last_write_wave": false,
     // Per physical block: last writer request_id. Off by default.
