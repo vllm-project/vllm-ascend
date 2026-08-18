@@ -272,6 +272,9 @@ a3:
       - name: engine-func-tests
         os: linux-aarch64-a3-4
         tests: tests/e2e/weekly/single_node/engine_func_test_robot
+      - name: structured_output_qwen3
+        os: linux-aarch64-a3-2
+        tests: tests/e2e/weekly/single_node/features/structured_output
       - name: deepseek-v3-2-w8a8
         os: linux-aarch64-a3-16
         config_file_path: DeepSeek-V3.2-W8A8_A3_weekly.yaml
