@@ -626,6 +626,21 @@
     - tests/e2e/pull_request/eight_card/model_runner_v2
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
+# Qwen3-32B W8A8 V1/V2 migration guards (LC/LL perf + AIME/GPQA acc).
+# TEMP gating: dependency-triggered proxy for the [MRV2] PR-title gate that the
+# CI engineering team will implement. Until then these run only when the
+# model-runner-V2 stack changes, not on every PR.
+- name: qwen3_32b_w8a8_v2_migration
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/worker/worker.py
+    - vllm_ascend/worker/v2
+  tests:
+    - tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py
+    - tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_ll_performance.py
+    - tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_aime2024_accuracy.py
+    - tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_gpqa_accuracy.py
+
 # XLite
 - name: xlite
   optional: false
@@ -851,6 +866,10 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1540
   tests/e2e/pull_request/four_card/test_graph_mode.py: 510
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 420
+  tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_aime2024_accuracy.py: 3000
+  tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_gpqa_accuracy.py: 7200
+  tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py: 1800
+  tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_ll_performance.py: 1200
   tests/e2e/pull_request/two_card/test_gemma4.py: 310
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 670
   tests/ut/attention/a2/test_attention_cp.py: 30
