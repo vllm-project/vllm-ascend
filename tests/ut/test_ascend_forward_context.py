@@ -31,7 +31,10 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 0,
     hidden_size: int = 2048,
 ):
-    hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
+    hf_text_config_attrs: dict[str, object] = {
+        "top_k_experts": top_k_experts,
+        "moe_intermediate_size": 2048,
+    }
     if quant_type is not None:
         hf_text_config_attrs["quantize"] = quant_type
     if num_experts_per_tok is not None:
