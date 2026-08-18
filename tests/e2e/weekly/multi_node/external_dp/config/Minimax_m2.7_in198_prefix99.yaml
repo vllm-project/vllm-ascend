@@ -81,8 +81,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "204800"
       - --max-num-batched-tokens
@@ -134,8 +132,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "204800"
       - --max-num-batched-tokens
