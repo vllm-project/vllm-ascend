@@ -1,0 +1,367 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (The "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Daily Regression pipeline -- high-frequency "broken window" detection on main.
+#
+# Runs 4x/day during daytime (Beijing 09:00/12:00/15:00/18:00) to cover the
+# PR-merge peak window (09:00-20:00 Beijing). Each slot executes the SAME
+# curated fast subset defined in .github/workflows/configs/daily_config.yaml
+# so any breakage on main is surfaced within ~3h. Per-slot runtime < 90 min.
+#
+# The 09:00 Beijing (01:00 UTC) morning slot verifies the overnight nightly-ci
+# image (built at 20:00 Beijing / 12:00 UTC the night before) and surfaces any
+# regression introduced by the nightly build. The 18:00 Beijing (10:00 UTC)
+# slot ends by ~19:30 Beijing, leaving the 20:00 Beijing nightly image build
+# slot clear.
+#
+# Coverage per slot (all jobs test main HEAD via _e2e_daily_tests.yaml):
+#   - Build/compile gate: verify-image pulls the nightly-ci image and smoke-
+#     imports vllm_ascend + vllm + custom ops. The image itself is rebuilt daily
+#     by the scheduled nightly_image_build.yaml (compile gate).
+#   - PR E2E: A2 one_card + A3 two_card/four_card curated smoke subsets.
+#   - Nightly high-freq subset: curated high-frequency failure cases from
+#     tests/e2e/nightly/single_node/ops/ (A2 + A3, as pytest paths).
+#
+# All test jobs use the SAME lightweight executor (_e2e_daily_tests.yaml):
+# checkout main HEAD -> reinstall -> pytest. No nightly executor, no aisbench,
+# no AOP hooks, no config_file_path -- daily is self-contained.
+#
+# On failure a tracking GitHub issue is opened (one per day, deduplicated) and
+# the Actions run status is red -- combining the two for fast triage.
+
+name: Daily
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
+  schedule:
+    # 01:00, 04:00, 07:00, 10:00 UTC = 09:00, 12:00, 15:00, 18:00 Beijing.
+    # 4 runs/day during the PR-merge peak window (09:00-20:00 Beijing), every 3h.
+    # The 09:00 Beijing (01:00 UTC) slot uses the overnight nightly-ci image
+    # (built at 12:00 UTC = 20:00 Beijing the night before). The 18:00 Beijing
+    # (10:00 UTC) slot ends by ~19:10 Beijing, clear of the 20:00 nightly build.
+    #
+    # Timing note: the 10:00 UTC slot's worst-case timeout is 85min (ends 11:25
+    # UTC), leaving a 35min gap before the 12:00 UTC nightly image build. In
+    # practice the slot runs ~72min (ends 11:12 UTC, 48min gap). Even if they
+    # overlap, daily tests use NPU runners while nightly_image_build uses ARM
+    # CPU runners -- no resource contention.
+    - cron: '0 1,4,7,10 * * *'
+  workflow_dispatch:
+    inputs:
+      skip_notify:
+        description: 'Skip opening a tracking issue on failure (useful for manual dry-runs)'
+        required: false
+        default: 'false'
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be
+# explicitly declared as "shell: bash -el {0}" to activate ascend-toolkit env.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# Cancel a still-running previous slot -- slots are 3h apart and each is <90min,
+# so overlap only happens on a stuck run; cancelling it keeps feedback fast.
+concurrency:
+  group: daily-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Prebuilt images produced by nightly_image_build.yaml (scheduled at 12:00 UTC).
+  A2_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a2'
+  A3_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a3'
+  DAILY_CONFIG: '.github/workflows/configs/daily_config.yaml'
+
+jobs:
+  setup-vars:
+    name: Resolve daily test matrix
+    runs-on: linux-aarch64-a2b3-0
+    outputs:
+      a2_image: ${{ steps.export.outputs.a2_image }}
+      a3_image: ${{ steps.export.outputs.a3_image }}
+      a2_pr_e2e: ${{ steps.set-matrix.outputs.a2_pr_e2e }}
+      a3_pr_e2e_two_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_two_card }}
+      a3_pr_e2e_four_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_four_card }}
+      a2_nightly_hf: ${{ steps.set-matrix.outputs.a2_nightly_hf }}
+      a3_nightly_hf: ${{ steps.set-matrix.outputs.a3_nightly_hf }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Export image refs
+        id: export
+        run: |
+          {
+            echo "a2_image=${{ env.A2_IMAGE }}"
+            echo "a3_image=${{ env.A3_IMAGE }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read daily test matrix config
+        id: set-matrix
+        env:
+          MATRIX_FILE: ${{ env.DAILY_CONFIG }}
+          MATRIX_OUTPUTS: '{"a2_pr_e2e":"daily.a2_pr_e2e","a3_pr_e2e_two_card":"daily.a3_pr_e2e_two_card","a3_pr_e2e_four_card":"daily.a3_pr_e2e_four_card","a2_nightly_hf":"daily.a2_nightly_hf","a3_nightly_hf":"daily.a3_nightly_hf"}'
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+
+  verify-image:
+    name: Verify nightly-ci image (build gate)
+    needs: [setup-vars]
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 10
+    container:
+      image: ${{ needs.setup-vars.outputs.a2_image }}
+    steps:
+      - name: Smoke import vllm-ascend and vllm
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend, vllm; print('import OK ->', vllm_ascend.__file__)"
+      - name: Verify custom ops loadable
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend.vllm_ascend_C; print('custom ops OK -> vllm_ascend_C loaded')"
+      - name: Report image build provenance
+        run: |
+          echo "Image: ${{ needs.setup-vars.outputs.a2_image }}"
+          echo "=== vllm-ascend ==="
+          (cd /vllm-workspace/vllm-ascend && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
+          echo "=== vllm ==="
+          (cd /vllm-workspace/vllm && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
+
+  a2-pr-e2e:
+    name: A2 one-card PR E2E
+    needs: [setup-vars, verify-image]
+    if: always() && needs.verify-image.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJson(needs.setup-vars.outputs.a2_pr_e2e) }}
+    uses: ./.github/workflows/_e2e_daily_tests.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: ${{ needs.setup-vars.outputs.a2_image }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: main
+      timeout_minutes: '75'
+
+  a3-pr-e2e-two-card:
+    name: A3 two-card PR E2E
+    needs: [setup-vars, verify-image]
+    if: always() && needs.verify-image.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        test_config: ${{ fromJson(needs.setup-vars.outputs.a3_pr_e2e_two_card) }}
+    uses: ./.github/workflows/_e2e_daily_tests.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: ${{ needs.setup-vars.outputs.a3_image }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: main
+      timeout_minutes: '60'
+
+  a3-pr-e2e-four-card:
+    name: A3 four-card PR E2E
+    needs: [setup-vars, verify-image]
+    if: always() && needs.verify-image.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        test_config: ${{ fromJson(needs.setup-vars.outputs.a3_pr_e2e_four_card) }}
+    uses: ./.github/workflows/_e2e_daily_tests.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: ${{ needs.setup-vars.outputs.a3_image }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: main
+      timeout_minutes: '60'
+
+  a2-nightly-hf:
+    name: A2 nightly high-freq
+    needs: [setup-vars, verify-image]
+    if: always() && needs.verify-image.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJson(needs.setup-vars.outputs.a2_nightly_hf) }}
+    uses: ./.github/workflows/_e2e_daily_tests.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: ${{ needs.setup-vars.outputs.a2_image }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: main
+      timeout_minutes: '45'
+
+  a3-nightly-hf:
+    name: A3 nightly high-freq
+    needs: [setup-vars, verify-image]
+    if: always() && needs.verify-image.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        test_config: ${{ fromJson(needs.setup-vars.outputs.a3_nightly_hf) }}
+    uses: ./.github/workflows/_e2e_daily_tests.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: ${{ needs.setup-vars.outputs.a3_image }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: main
+      timeout_minutes: '45'
+
+  daily-gate:
+    name: Daily gate
+    needs:
+      - verify-image
+      - a2-pr-e2e
+      - a3-pr-e2e-two-card
+      - a3-pr-e2e-four-card
+      - a2-nightly-hf
+      - a3-nightly-hf
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate job results
+        env:
+          VERIFY: ${{ needs.verify-image.result }}
+          A2_PR: ${{ needs.a2-pr-e2e.result }}
+          A3_TWO: ${{ needs.a3-pr-e2e-two-card.result }}
+          A3_FOUR: ${{ needs.a3-pr-e2e-four-card.result }}
+          A2_HF: ${{ needs.a2-nightly-hf.result }}
+          A3_HF: ${{ needs.a3-nightly-hf.result }}
+        run: |
+          echo "=== Daily Gate Summary ==="
+          printf 'verify-image:          %s\n' "$VERIFY"
+          printf 'a2-pr-e2e:             %s\n' "$A2_PR"
+          printf 'a3-pr-e2e-two-card:    %s\n' "$A3_TWO"
+          printf 'a3-pr-e2e-four-card:   %s\n' "$A3_FOUR"
+          printf 'a2-nightly-hf:         %s\n' "$A2_HF"
+          printf 'a3-nightly-hf:         %s\n' "$A3_HF"
+          echo "========================="
+
+          # Build gate is mandatory -- a broken/missing image is a hard fail.
+          if [ "$VERIFY" != "success" ]; then
+            echo "::error::verify-image (build gate) did not succeed (result: $VERIFY)"
+            exit 1
+          fi
+
+          # Any non-skipped test job that did not succeed is a regression.
+          for r in "$A2_PR" "$A3_TWO" "$A3_FOUR" "$A2_HF" "$A3_HF"; do
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
+              echo "::error::test job failed (result: $r)"
+              exit 1
+            fi
+          done
+
+          echo "=== Daily Gate: PASSED ==="
+
+  notify-failure:
+    name: Open tracking issue on failure
+    needs: [daily-gate]
+    if: >-
+      always() &&
+      needs.daily-gate.result == 'failure' &&
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'workflow_dispatch' && inputs.skip_notify == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gh CLI needs explicit repo context -- this job has no checkout step
+      # (runs on ubuntu-latest without actions/checkout), so gh cannot infer
+      # the repo from a local git remote. GH_REPO makes all gh commands in
+      # this step target the correct repository.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Open or update daily tracking issue
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          DATE=$(date -u +%Y-%m-%d)
+          TITLE="Daily Regression Failure ($DATE)"
+          LABEL="daily-regression-failure"
+
+          # Ensure the label exists (idempotent). Keep stderr visible for
+          # diagnostics (e.g. permission errors) but don't fail the step if the
+          # label already exists.
+          gh label create "$LABEL" --color B60205 --description "Daily regression pipeline failure" || true
+
+          # Find an open tracking issue for today (dedup -- one issue per day).
+          ISSUE_NUMBER=$(gh issue list \
+            --label "$LABEL" \
+            --state open \
+            --search "in:title $TITLE" \
+            --json number,title \
+            --jq ".[] | select(.title==\"$TITLE\") | .number" | head -n1 || true)
+
+          BODY="## Daily Regression Failure
+
+          - **Date (UTC):** $DATE
+          - **Run:** [$RUN_URL]($RUN_URL)
+          - **Trigger:** ${{ github.event_name }}
+
+          ### What to do
+
+          1. Open the run link above and locate the first failing job.
+          2. If \`verify-image\` failed -> the nightly-ci image build is broken; check [Nightly Image Build Schedule](../actions/workflows/nightly_image_build.yaml).
+          3. If a test job failed -> fetch its \`daily-logs-*\` artifact and triage the pytest log.
+          4. Comment with the root cause and link the fixing PR; close this issue once main is green again on the next daily slot.
+
+          _This issue is auto-generated by the Daily-Regression workflow. It will not be recreated for the same day._
+          "
+
+          if [ -n "$ISSUE_NUMBER" ]; then
+            echo "Appending comment to existing issue #$ISSUE_NUMBER"
+            gh issue comment "$ISSUE_NUMBER" --body "### Slot $(date -u +%H:%M) UTC also failed
+
+          - Run: $RUN_URL
+
+          $BODY"
+          else
+            echo "Creating new tracking issue: $TITLE"
+            gh issue create --title "$TITLE" --body "$BODY" --label "$LABEL"
+          fi
