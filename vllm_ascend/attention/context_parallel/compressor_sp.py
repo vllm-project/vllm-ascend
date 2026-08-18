@@ -60,7 +60,7 @@ def build_compressor_sp_plan(
     local_end: int,
     tp_rank: int = 0,
 ) -> CompressorSPPlan:
-    """Plan the minimal aligned first-prefill Compressor SP path.
+    """Plan Compressor sequence-parallel execution for aligned full prefills.
 
     Unsupported layouts return a disabled plan before the local Compressor can
     mutate its state cache. Each enabled rank computes only the expanded token

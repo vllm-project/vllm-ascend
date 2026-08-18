@@ -53,13 +53,13 @@ def test_reused_buffer_resets_stale_padding_rows():
     assert second.tolist() == [[4, 0], [-1, 127], [5, 0], [-1, 127]]
 
 
-def test_slot_mapping_format_detection():
+def test_a5_flat_and_non_a5_block_offset_mapping_detection():
     assert is_block_offset_slot_mapping(torch.zeros((4, 2), dtype=torch.int32))
     assert not is_block_offset_slot_mapping(torch.zeros(4, dtype=torch.int32))
     assert not is_block_offset_slot_mapping(torch.zeros((4, 1), dtype=torch.int32))
 
 
-def test_flat_slot_mapping_is_rejected_by_padded_helper():
+def test_a5_flat_slot_mapping_is_rejected_by_block_offset_helper():
     with pytest.raises(ValueError, match="block-offset"):
         build_padded_destination_for_scatter(
             torch.tensor([1, 2]),

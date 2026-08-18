@@ -1684,6 +1684,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 )
                 DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, padded_slot_mapping)
         else:
+            # A5 compressor metadata returns flat slot IDs for kv_compress_epilog.
+            # The block-offset invalid destination used above is not part of
+            # that contract, so remove rank padding before scattering.
             compact_rows = self._select_compressor_sp_rows(gathered, plan, "gather_compact")
             if compact_rows.shape[0] != expected_global:
                 raise RuntimeError("compacted Compressor SP gather has an unexpected row count")
