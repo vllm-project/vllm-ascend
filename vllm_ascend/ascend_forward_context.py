@@ -398,6 +398,7 @@ _A5_MEGA_MOE_QUANT_TYPES = {
     QuantType.MXFP8,
     QuantType.W4A8MXFP,
 }
+_A5_MEGA_MOE_MAX_TOKENS_PER_RANK = 512
 _A5_MOE_QUANT_TYPES_BY_CONFIG_ID: dict[int, QuantType] = {}
 
 
@@ -475,7 +476,8 @@ def _select_a5_moe_comm_method(
     ascend_config = get_ascend_config()
     fused_mc2_mode_1 = enable_fused_mc2 == 1
     has_expert_parallel_world = world_size > 1
-    within_mega_moe_capacity = num_tokens <= ascend_config.mega_moe_max_tokens
+    mega_moe_max_tokens = min(ascend_config.mega_moe_max_tokens, _A5_MEGA_MOE_MAX_TOKENS_PER_RANK)
+    within_mega_moe_capacity = num_tokens <= mega_moe_max_tokens
     supported_quant = _is_a5_mega_moe_supported_quant(quant_type)
     a5_mega_moe_enable = (
         fused_mc2_mode_1 and has_expert_parallel_world and within_mega_moe_capacity and supported_quant
@@ -484,7 +486,7 @@ def _select_a5_moe_comm_method(
         "A5 MegaMoE condition check: enabled=%s, fused_mc2_mode_1=%s, "
         "has_expert_parallel_world=%s, within_mega_moe_capacity=%s, supported_quant=%s, "
         "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, enable_fused_mc2=%s, "
-        "mega_moe_max_tokens=%s, supported_quant_types=%s",
+        "mega_moe_max_tokens=%s, configured_mega_moe_max_tokens=%s, supported_quant_types=%s",
         a5_mega_moe_enable,
         fused_mc2_mode_1,
         has_expert_parallel_world,
@@ -495,18 +497,21 @@ def _select_a5_moe_comm_method(
         num_experts_per_tok,
         quant_type,
         enable_fused_mc2,
+        mega_moe_max_tokens,
         ascend_config.mega_moe_max_tokens,
         sorted(quant_type.name for quant_type in _A5_MEGA_MOE_QUANT_TYPES),
     )
     if a5_mega_moe_enable:
         logger.info(
             "A5 MoE comm selected FUSED_MC2/MegaMoE: num_tokens=%s, world_size=%s, "
-            "top_k=%s, quant_type=%s, enable_fused_mc2=%s, mega_moe_max_tokens=%s",
+            "top_k=%s, quant_type=%s, enable_fused_mc2=%s, mega_moe_max_tokens=%s, "
+            "configured_mega_moe_max_tokens=%s",
             num_tokens,
             world_size,
             num_experts_per_tok,
             quant_type,
             enable_fused_mc2,
+            mega_moe_max_tokens,
             ascend_config.mega_moe_max_tokens,
         )
         return MoECommType.FUSED_MC2
@@ -519,7 +524,7 @@ def _select_a5_moe_comm_method(
     logger.info(
         "A5 MoE comm selected fallback: method=%s, num_tokens=%s, world_size=%s, top_k=%s, "
         "quant_type=%s, enable_fused_mc2=%s, supported_mega_moe_quant=%s, "
-        "mc2_tokens_capacity=%s, mega_moe_max_tokens=%s",
+        "mc2_tokens_capacity=%s, mega_moe_max_tokens=%s, configured_mega_moe_max_tokens=%s",
         moe_comm_type,
         num_tokens,
         world_size,
@@ -528,6 +533,7 @@ def _select_a5_moe_comm_method(
         enable_fused_mc2,
         supported_quant,
         mc2_tokens_capacity,
+        mega_moe_max_tokens,
         ascend_config.mega_moe_max_tokens,
     )
     return moe_comm_type
