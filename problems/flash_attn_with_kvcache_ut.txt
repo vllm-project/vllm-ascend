@@ -1,18 +1,46 @@
 KV_SHORT=16 KV_LONG=4096 CAUSAL=1 python tests/standalone/fa3/test_fa3_schedmeta_depends_on_seqlens.py 
-[W818 23:00:38.134907940 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[W818 23:23:55.930292819 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-short=16  long=4096  causal=True
+short=16  long=4096  causal=True  window_size=(-1,-1)
 ========================================================================
-[W818 23:00:44.379736453 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[1] eager short+shortmeta vs [2] eager long+longmeta : max_abs_diff=0.000000
-[3] eager long+shortmeta  vs [2] eager long+longmeta : max_abs_diff=0.000000
-[4] graph grown-seq replay  vs [2] eager long+longmeta : max_abs_diff=0.000000
-[5] graph short-seq replay  vs [1] eager short+shortmeta: max_abs_diff=0.000000
+[W818 23:24:01.223496136 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[ref] manual short vs manual long            : 1.587359
+[fa3] FA3 short  vs FA3 long                 : 0.000000
+[ok ] FA3 short  vs manual short             : 0.003969
+[ok ] FA3 long   vs manual long              : 1.583923
+[meta] FA3(long+short meta) vs FA3(long)      : 0.000000
+[graph] grown-seq replay vs FA3(long)         : 1.583984
+[graph] short-seq replay vs FA3(short)        : 0.000000
 ------------------------------------------------------------------------
-VERDICT: scheduler_metadata does NOT depend on cache_seqlens
-         values at these lengths (only on max_seqlen_k).
-  -> graph replay matches in BOTH cases: decode bug is elsewhere
-     (block_table/cu_seqlens_q refresh, or the flash_attn_npu.patch
-     GetCachedOutputTensor aliasing).
+Read:
+  [ref]  >0  => seq genuinely changes the correct output (expected)
+  [fa3]  should mirror [ref]; ~0 while [ref]>0 => FA3 ignores cache_seqlens
+  [ok ]  ~1e-2..1e-1 => FA3 matches correct output (bf16 vs fp32)
+         large       => FA3 output is WRONG
+  [meta] ~0 => scheduler_metadata does not depend on seq values
+  [graph]~0 => graph replay is correct; large => graph capture/replay bug
+------------------------------------------------------------------------
+KV_SHORT=16 KV_LONG=4096 CAUSAL=0 python tests/standalone/fa3/test_fa3_schedmeta_depends_on_seqlens.py 
+[W818 23:26:02.118948125 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[import] FA3 loaded from flash_attn_npu_3
+========================================================================
+short=16  long=4096  causal=False  window_size=(-1,-1)
+========================================================================
+[W818 23:26:08.360275776 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[ref] manual short vs manual long            : 1.522781
+[fa3] FA3 short  vs FA3 long                 : 0.000000
+[ok ] FA3 short  vs manual short             : 0.005188
+[ok ] FA3 long   vs manual long              : 1.519083
+[meta] FA3(long+short meta) vs FA3(long)      : 0.000000
+[graph] grown-seq replay vs FA3(long)         : 1.519165
+[graph] short-seq replay vs FA3(short)        : 0.000000
+------------------------------------------------------------------------
+Read:
+  [ref]  >0  => seq genuinely changes the correct output (expected)
+  [fa3]  should mirror [ref]; ~0 while [ref]>0 => FA3 ignores cache_seqlens
+  [ok ]  ~1e-2..1e-1 => FA3 matches correct output (bf16 vs fp32)
+         large       => FA3 output is WRONG
+  [meta] ~0 => scheduler_metadata does not depend on seq values
+  [graph]~0 => graph replay is correct; large => graph capture/replay bug
 ------------------------------------------------------------------------
