@@ -3818,9 +3818,13 @@ class NPUModelRunner(GPUModelRunner):
                 raise NotImplementedError(
                     "create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it"
                 )
+            # decode = every request has exactly 1 query token.  Do NOT key on
+            # `uniform_decode` here: patch_cudagraph forces it to False in FULL
+            # mode, which would route decode to CANN V1 instead of FA3.
+            is_decode = all(q == 1 for q in num_scheduled_tokens_list)
             self.attn_state = (
                 AscendAttentionState.DecodeOnly
-                if uniform_decode
+                if is_decode
                 else AscendAttentionState.ChunkedPrefill
             )
             if self.speculative_config and self.speculative_config.method == "mtp":
