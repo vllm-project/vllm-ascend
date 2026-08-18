@@ -14,12 +14,17 @@ expected by the migrated kernels.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from functools import lru_cache
+from typing import Any
 
 import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+
+get_aicore_num: Callable[[], Any] | None
+init_device_properties_triton: Callable[[], Any] | None
 
 try:
     from vllm_ascend.ops.triton.triton_utils import (
@@ -767,7 +772,7 @@ def minimax_m3_index_decode(
     local_blocks: int,
     num_kv_heads: int,
     decode_query_len: int,
-    max_decode_query_len: int = None,
+    max_decode_query_len: int | None = None,
     out: torch.Tensor | None = None,
     sm_scale=None,
 ) -> torch.Tensor:

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import torch
 
-import vllm_ascend.vllm_ascend_C  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_custom_op,
