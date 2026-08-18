@@ -2,6 +2,7 @@ from typing import Any
 
 import torch
 from vllm.config import VllmConfig
+from vllm.distributed.utils import get_pp_indices
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -89,7 +90,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
         return None
 
 
-def validate_indexer_pp_partition(
+def validate_indexer_pp_stage(
     config: Any,
     start_layer: int,
     end_layer: int,
@@ -108,7 +109,7 @@ def validate_indexer_pp_partition(
     Models without either ``indexer_types`` or ``use_index_cache`` are left
     unchanged.
     """
-    if pp_size <= 1:
+    if pp_size <= 1 or start_layer >= end_layer:
         return
 
     indexer_types = getattr(config, "indexer_types", None)
@@ -116,8 +117,7 @@ def validate_indexer_pp_partition(
     if indexer_types is None and not use_index_cache:
         return
 
-    index_cache_skip_topk = _get_index_cache_skip_topk(config, start_layer)
-    if index_cache_skip_topk:
+    if use_index_cache and _get_index_cache_skip_topk(config, start_layer):
         raise ValueError(
             "Index cache dependency crosses a pipeline-parallel stage boundary: "
             f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
@@ -144,6 +144,140 @@ def validate_indexer_pp_partition(
                 "Cross-PP Top-K index propagation is not supported. "
                 "Please choose a pipeline-parallel partition aligned to an IndexShare group."
             )
+
+
+def validate_indexer_pp_partition(
+    config: Any,
+    num_hidden_layers: int,
+    pp_size: int,
+) -> None:
+    """Validate all PP stages locally without cross-rank communication."""
+    if pp_size <= 1:
+        return
+
+    for pp_rank in range(pp_size):
+        start_layer, end_layer = get_pp_indices(
+            num_hidden_layers,
+            pp_rank,
+            pp_size,
+        )
+        try:
+            validate_indexer_pp_stage(
+                config,
+                start_layer,
+                end_layer,
+                pp_rank,
+                pp_size,
+            )
+        except ValueError as error:
+            nearest_partitions = _get_nearest_valid_indexer_pp_partitions(
+                config,
+                num_hidden_layers,
+                pp_size,
+                invalid_pp_rank=pp_rank,
+            )
+            if not nearest_partitions:
+                raise
+
+            suggestions = [
+                f'VLLM_PP_LAYER_PARTITION="{",".join(map(str, partition))}"'
+                for partition in nearest_partitions
+            ]
+            partition_label = (
+                "partition is" if len(suggestions) == 1 else "partitions are"
+            )
+            raise ValueError(
+                f"{error} The nearest valid layer {partition_label} "
+                f'{" or ".join(suggestions)}.'
+            ) from None
+
+
+def _get_nearest_valid_indexer_pp_partitions(
+    config: Any,
+    num_hidden_layers: int,
+    pp_size: int,
+    invalid_pp_rank: int,
+) -> list[list[int]]:
+    if invalid_pp_rank <= 0 or invalid_pp_rank >= pp_size:
+        return []
+
+    try:
+        validate_indexer_pp_stage(
+            config,
+            start_layer=0,
+            end_layer=num_hidden_layers,
+            pp_rank=0,
+            pp_size=pp_size,
+        )
+    except ValueError:
+        return []
+
+    current_boundaries = [
+        get_pp_indices(num_hidden_layers, pp_rank, pp_size)[0]
+        for pp_rank in range(1, pp_size)
+    ]
+    valid_boundaries = []
+    for boundary in range(1, num_hidden_layers):
+        try:
+            validate_indexer_pp_stage(
+                config,
+                boundary,
+                num_hidden_layers,
+                pp_rank=1,
+                pp_size=pp_size,
+            )
+        except ValueError:
+            continue
+        valid_boundaries.append(boundary)
+
+    if len(valid_boundaries) < pp_size - 1:
+        return []
+
+    invalid_boundary_index = invalid_pp_rank - 1
+
+    def find_nearest_partition(move_boundary_higher: bool) -> list[int] | None:
+        states: dict[int, tuple[int, tuple[int, ...]]] = {
+            0: (0, ()),
+        }
+        for boundary_index, current_boundary in enumerate(current_boundaries):
+            next_states: dict[int, tuple[int, tuple[int, ...]]] = {}
+            for boundary in valid_boundaries:
+                if boundary_index == invalid_boundary_index:
+                    if move_boundary_higher and boundary <= current_boundary:
+                        continue
+                    if not move_boundary_higher and boundary >= current_boundary:
+                        continue
+
+                candidates = [
+                    (
+                        cost + abs(boundary - current_boundary),
+                        path + (boundary,),
+                    )
+                    for previous_boundary, (cost, path) in states.items()
+                    if previous_boundary < boundary
+                ]
+                if candidates:
+                    next_states[boundary] = min(candidates)
+            states = next_states
+
+        if not states:
+            return None
+
+        _, nearest_boundaries = min(states.values())
+        boundaries = (0, *nearest_boundaries, num_hidden_layers)
+        return [
+            boundaries[index + 1] - boundaries[index]
+            for index in range(pp_size)
+        ]
+
+    return [
+        partition
+        for partition in (
+            find_nearest_partition(move_boundary_higher=False),
+            find_nearest_partition(move_boundary_higher=True),
+        )
+        if partition is not None
+    ]
 
 
 def _get_index_cache_skip_topk(config: Any, layer_id: int) -> bool:

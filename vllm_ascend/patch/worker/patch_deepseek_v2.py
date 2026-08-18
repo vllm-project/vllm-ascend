@@ -301,12 +301,14 @@ def _deepseek_v2_model_init_with_indexer_pp_validation(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
 
     config = getattr(self, "config", None)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        return
+
     pp_group = get_pp_group()
     validate_indexer_pp_partition(
         config,
-        self.start_layer,
-        self.end_layer,
-        pp_group.rank_in_group,
+        num_hidden_layers,
         pp_group.world_size,
     )
 
