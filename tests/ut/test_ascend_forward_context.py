@@ -255,6 +255,8 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
         (129, 2, 4, 0, None, MoECommType.ALLGATHER),
         (129, 8, 4, 0, None, MoECommType.ALLTOALL),
         (129, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
+        (512, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
+        (513, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
         (129, 8, 4, 1, QuantType.MXFP8, MoECommType.FUSED_MC2),
         (129, 8, 4, 1, QuantType.MXFP4, MoECommType.FUSED_MC2),
         (129, 8, 4, 2, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
