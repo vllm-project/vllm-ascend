@@ -2,7 +2,6 @@ from typing import Any
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed.utils import get_pp_indices
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -121,7 +120,8 @@ def validate_indexer_pp_stage(
         raise ValueError(
             "Index cache dependency crosses a pipeline-parallel stage boundary: "
             f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-            f"but layer {start_layer} skips Top-K computation. "
+            f"but layer {start_layer} skips Top-K computation without a preceding "
+            "Top-K recomputation in the same PP stage. "
             "Cross-PP Top-K index propagation is not supported. "
             "Please choose a pipeline-parallel partition whose first layer "
             "recomputes the Top-K index."
@@ -140,7 +140,8 @@ def validate_indexer_pp_stage(
             raise ValueError(
                 "IndexShare group crosses a pipeline-parallel stage boundary: "
                 f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                f"but layer {layer_id} is shared before a full Indexer exists in this stage. "
+                f"but layer {layer_id} uses a shared Indexer without a preceding "
+                "full Indexer in the same PP stage. "
                 "Cross-PP Top-K index propagation is not supported. "
                 "Please choose a pipeline-parallel partition aligned to an IndexShare group."
             )
@@ -154,6 +155,8 @@ def validate_indexer_pp_partition(
     """Validate all PP stages locally without cross-rank communication."""
     if pp_size <= 1:
         return
+
+    from vllm.distributed.utils import get_pp_indices
 
     for pp_rank in range(pp_size):
         start_layer, end_layer = get_pp_indices(
@@ -200,6 +203,8 @@ def _get_nearest_valid_indexer_pp_partitions(
 ) -> list[list[int]]:
     if invalid_pp_rank <= 0 or invalid_pp_rank >= pp_size:
         return []
+
+    from vllm.distributed.utils import get_pp_indices
 
     try:
         validate_indexer_pp_stage(

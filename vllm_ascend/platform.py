@@ -340,6 +340,60 @@ class NPUPlatform(Platform):
                 )
 
     @classmethod
+    def _validate_indexer_pp_config(cls, vllm_config: VllmConfig) -> None:
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        if pp_size <= 1:
+            return
+
+        config = getattr(vllm_config.model_config, "hf_text_config", None)
+        if config is None:
+            return
+
+        indexer_types = getattr(config, "indexer_types", None)
+        use_index_cache = getattr(config, "use_index_cache", False)
+        if indexer_types is None and not use_index_cache:
+            return
+
+        num_hidden_layers = getattr(config, "num_hidden_layers", None)
+        if not isinstance(num_hidden_layers, int):
+            return
+
+        from vllm_ascend.attention.indexer import validate_indexer_pp_partition
+
+        validate_indexer_pp_partition(
+            config,
+            num_hidden_layers,
+            pp_size,
+        )
+
+    @classmethod
+    def _validate_indexer_pp_config(cls, vllm_config: VllmConfig) -> None:
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        if pp_size <= 1:
+            return
+
+        config = getattr(vllm_config.model_config, "hf_text_config", None)
+        if config is None:
+            return
+
+        indexer_types = getattr(config, "indexer_types", None)
+        use_index_cache = getattr(config, "use_index_cache", False)
+        if indexer_types is None and not use_index_cache:
+            return
+
+        num_hidden_layers = getattr(config, "num_hidden_layers", None)
+        if not isinstance(num_hidden_layers, int):
+            return
+
+        from vllm_ascend.attention.indexer import validate_indexer_pp_partition
+
+        validate_indexer_pp_partition(
+            config,
+            num_hidden_layers,
+            pp_size,
+        )
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
@@ -358,6 +412,8 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        cls._validate_indexer_pp_config(vllm_config)
 
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)

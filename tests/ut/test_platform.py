@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -294,6 +295,35 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
+
+    def test_validate_indexer_pp_config_rejects_invalid_partition(self):
+        indexer_types = ["full", "full", "full", "shared", "shared", "shared"]
+        indexer_types.extend(["full", "shared", "shared", "shared"] * 18)
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.model_config.hf_text_config = SimpleNamespace(
+            num_hidden_layers=78,
+            indexer_types=indexer_types,
+        )
+
+        with pytest.raises(ValueError, match='VLLM_PP_LAYER_PARTITION="38,40"'):
+            self.platform._validate_indexer_pp_config(vllm_config)
+
+    @patch.object(
+        NPUPlatform,
+        "_validate_indexer_pp_config",
+        side_effect=ValueError("invalid Indexer PP partition"),
+    )
+    def test_check_and_update_config_validates_indexer_before_worker_start(
+        self,
+        mock_validate_indexer,
+    ):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+
+        with pytest.raises(ValueError, match="invalid Indexer PP partition"):
+            self.platform.check_and_update_config(vllm_config)
+
+        mock_validate_indexer.assert_called_once_with(vllm_config)
 
     def test_apply_config_platform_defaults_skips_when_scheduler_max_num_seqs_is_missing(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

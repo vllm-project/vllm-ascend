@@ -1,4 +1,3 @@
-from functools import wraps
 from itertools import islice
 
 import torch
@@ -32,8 +31,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
-
-from vllm_ascend.attention.indexer import validate_indexer_pp_partition
 
 
 def _should_skip_indexer_init(
@@ -291,29 +288,6 @@ def _deepseek_v2_mla_attention_init(
 
 
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
-
-
-_original_deepseek_v2_model_init = DeepseekV2Model.__init__
-
-
-@wraps(_original_deepseek_v2_model_init)
-def _deepseek_v2_model_init_with_indexer_pp_validation(self, *args, **kwargs):
-    _original_deepseek_v2_model_init(self, *args, **kwargs)
-
-    config = getattr(self, "config", None)
-    num_hidden_layers = getattr(config, "num_hidden_layers", None)
-    if num_hidden_layers is None:
-        return
-
-    pp_group = get_pp_group()
-    validate_indexer_pp_partition(
-        config,
-        num_hidden_layers,
-        pp_group.world_size,
-    )
-
-
-DeepseekV2Model.__init__ = _deepseek_v2_model_init_with_indexer_pp_validation
 
 
 def _patched_forward(
