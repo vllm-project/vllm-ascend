@@ -1,3 +1,4 @@
+from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +8,12 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
+
+
+class _TestMoEActivation(Enum):
+    SILU = 1
+    SWIGLUOAI = 2
+    SWIGLUSTEP = 3
 
 
 def _make_moe_config():
@@ -85,3 +92,9 @@ def test_mega_moe_backend_passes_positive_swiglu_limit_as_clamp():
         backend.fused_experts(fused_input)
 
     assert mega_moe.call_args.kwargs["activation_clamp"] == 7.0
+
+
+def test_mega_moe_backend_accepts_enum_activation():
+    assert MegaMoEBackend._normalize_activation(_TestMoEActivation.SILU) == "swiglu"
+    assert MegaMoEBackend._normalize_activation(_TestMoEActivation.SWIGLUOAI) == "swiglu"
+    assert MegaMoEBackend._normalize_activation(_TestMoEActivation.SWIGLUSTEP) == "swiglu"

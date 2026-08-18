@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from vllm.distributed import get_ep_group
@@ -106,7 +107,7 @@ class MegaMoEBackend:
     def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput):
         key = self._make_buffer_key(fused_experts_input)
         if self._sym_buffer is not None and self._sym_buffer_key == key:
-            logger.info("A5 MegaMoE reuses sym buffer: %s", key)
+            logger.debug("A5 MegaMoE reuses sym buffer: %s", key)
             return self._sym_buffer
 
         get_symm_buffer_for_mega_moe, _ = _get_mega_moe_ops()
@@ -125,9 +126,10 @@ class MegaMoEBackend:
         return self._sym_buffer
 
     @staticmethod
-    def _normalize_activation(activation: str) -> str:
-        activation_lower = activation.lower()
-        if activation_lower in ("silu", "swiglu"):
+    def _normalize_activation(activation: Any) -> str:
+        activation_name = activation if isinstance(activation, str) else getattr(activation, "name", str(activation))
+        activation_lower = activation_name.lower().removeprefix("moeactivation.")
+        if activation_lower in ("silu", "swiglu", "swigluoai", "swiglustep"):
             return "swiglu"
         if activation_lower in ("situ", "situglu"):
             return "situglu"
@@ -156,12 +158,15 @@ class MegaMoEBackend:
         w2_scale = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
         activation = self._normalize_activation(fused_experts_input.activation)
         activation_clamp = self._get_activation_clamp(fused_experts_input.swiglu_limit)
+        mxfp = fused_experts_input.quant.mxfp
 
         _, mega_moe = _get_mega_moe_ops()
-        logger.info(
+        logger.debug(
             "A5 MegaMoE call: hidden_states_shape=%s, topk_ids_shape=%s, topk_weights_shape=%s, "
             "w1_shapes=%s, w2_shapes=%s, w1_scale_shapes=%s, w2_scale_shapes=%s, quant_type=%s, "
-            "activation=%s, activation_clamp=%s, has_log2phy=%s, dynamic_eplb=%s",
+            "is_mxfp=%s, mxfp_act_quant_type=%s, mxfp_weight_quant_type=%s, mxfp_scale_dtype=%s, "
+            "mxfp_per_token_scale_dtype=%s, mxfp_use_bf16=%s, comm_quant_mode=%s, activation=%s, "
+            "activation_clamp=%s, has_log2phy=%s, dynamic_eplb=%s",
             tuple(fused_experts_input.hidden_states.shape),
             tuple(topk_ids.shape),
             tuple(fused_experts_input.topk_weights.shape),
@@ -170,6 +175,13 @@ class MegaMoEBackend:
             [tuple(scale.shape) for scale in w1_scale],
             [tuple(scale.shape) for scale in w2_scale],
             fused_experts_input.quant.quant_type,
+            fused_experts_input.quant.is_mxfp,
+            None if mxfp is None else mxfp.act_quant_type,
+            None if mxfp is None else mxfp.weight_quant_type,
+            None if mxfp is None else mxfp.scale_dtype,
+            None if mxfp is None else mxfp.per_token_scale_dtype,
+            None if mxfp is None else mxfp.use_bf16,
+            fused_experts_input.quant.comm_quant_mode,
             activation,
             activation_clamp,
             fused_experts_input.routing.log2phy is not None,
@@ -187,7 +199,7 @@ class MegaMoEBackend:
             activation=activation,
             activation_clamp=activation_clamp,
         )
-        logger.info(
+        logger.debug(
             "A5 MegaMoE output: output_shape=%s, expert_tokens_shape=%s",
             tuple(output.shape),
             None if expert_tokens is None else tuple(expert_tokens.shape),
