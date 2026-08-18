@@ -30,6 +30,9 @@ def get_or_register_attention_buffer(
     factory: Callable[[], torch.Tensor],
 ) -> torch.Tensor:
     """Return a shared non-persistent buffer owned by attention modules."""
+    # TODO: Revisit this after torch_npu supports traversing mem-pool
+    # allocations during sleep/wake. The buffer could then be allocated from
+    # the appropriate mem-pool for CaMem to manage its device-memory lifetime.
     static_forward_context = vllm_config.compilation_config.static_forward_context
     modules = []
     for layer_name in layer_names:
