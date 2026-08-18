@@ -147,16 +147,18 @@ class PendingDumpMixin:
         ``allow_arm``: False on dummy/capture — last-PP TPs still join the
         all_reduce (avoid deadlock) but do not activate or clear pending.
         """
-        # Fast path — fully-off default service. With hot-reload disabled AND
-        # the dump sink off, nothing can ever arm (auto dump, anomaly arm, and
-        # manual_trigger all require ``dump.enabled``), so the pending-OR is always 0.
-        # Skip the collective entirely: a default run with no DFX params gets
-        # zero distributed overhead per step. Safe because with hot-reload off
-        # ``dump.enabled`` is a static startup value, identical across last-PP
-        # TPs (assumes a consistent startup config per EngineCore). Returns
-        # exactly what the OR would (False) — no behavioral change.
+        # Fast path — dump sink off AND no detector. Then nothing can arm
+        # (auto dump, anomaly arm, and manual_trigger all require
+        # ``dump.enabled``; anomaly arm also needs a detector). The pending-OR
+        # is always 0, so skip the TP all_reduce. Called after
+        # ``refresh_config`` in the same wave, so last-PP TPs share the same
+        # live flags (broadcast / file poll). Hot-reload ON is fine: the next
+        # wave that enables dump or a detector leaves this path.
+        # Drop leftover local pending if dump/detectors were just turned off,
+        # so a later re-enable cannot activate without a new trigger.
         dfx_cfg = getattr(self, "dfx_config", None)
-        if dfx_cfg is not None and not dfx_cfg.hot_reload_enabled and not dfx_cfg.dump_enabled():
+        if dfx_cfg is not None and not dfx_cfg.dump_enabled() and not dfx_cfg.any_detector_enabled():
+            self._clear_pending_dump()
             return False
 
         tag = self.dump_rank_tag()

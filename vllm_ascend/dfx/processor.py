@@ -396,6 +396,19 @@ class DfxProcessor:
                 text,
             )
 
+    def should_check_after_spec(self) -> bool:
+        """True when spec IO + SpecAcceptance may run this step.
+
+        When fully gated (no detector / wrong rank / dump already armed),
+        runners must skip extra accepted-token D2H before calling
+        :meth:`check_after_spec`.
+        """
+        dumper = getattr(self, "dumper", None)
+        if dumper is None:
+            return False
+        can = getattr(dumper, "can_run_anomaly_detection", None)
+        return bool(can()) if callable(can) else False
+
     def check_after_spec(
         self,
         sampled_tokens: Any,
@@ -405,6 +418,8 @@ class DfxProcessor:
 
         Detection gating (rank / dump / detector-on) lives in ``DetectorManager``.
         """
+        if not self.should_check_after_spec():
+            return
         for alert in self.detectors.check_after_spec(sampled_tokens, accepted_token_nums):
             self._handle_alert(alert, detector=self.detectors.get(alert.anomaly_type))
 

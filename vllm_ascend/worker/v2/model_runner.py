@@ -539,10 +539,11 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
             query_start_loc,
         )
-        self.dfx.check_after_spec(
-            sampled_tokens=sampled_tokens,
-            accepted_token_nums=num_sampled,
-        )
+        if self.dfx.should_check_after_spec():
+            self.dfx.check_after_spec(
+                sampled_tokens=sampled_tokens,
+                accepted_token_nums=num_sampled,
+            )
         self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):

@@ -89,7 +89,7 @@ start → forward → finalize → disable（需 _dump_forward_seen）
 - **Sync + TP>1 / async**：check 仅 TP0 → `pending_dump`；下步入口 last-PP TP `all_reduce(OR)` 后全体 activate。
 - **Sync + TP=1**：可当场 activate。
 - pending / dump_active 期间跳过后续 anomaly check，避免重复 arm。
-- **默认全关 fast-path**：`dfx_config_reload_interval=0`（热更关）且 `dump.enabled=false` 时，`sync_dump_pending_or` **跳过** TP `all_reduce`（pending 恒为 0）。前提是**同一 EngineCore 内各 TP 启动时读到的 `dump.enabled` 一致**（共享同一份 JSON / 同路径默认文件）。若运维给不同 TP 配了不同的 `dump.enabled`，可能出现一侧走 fast-path、一侧进 OR → **集体通信挂死**；正常同路径启动不会。见 [dfx_ops.md](./dfx_ops.md) 排障表。
+- **默认全关 fast-path**：`dump.enabled=false` 且无 detector 时，`sync_dump_pending_or` **跳过** TP `all_reduce`（pending 恒为 0；热更开着也走这条，因同 wave 已先 `refresh_config`）。顺带清掉本 rank 残留 pending，避免下次再开 dump 时无 trigger 却 activate。前提是**同一 EngineCore 内各 TP 本 wave 看到的 dump/detector 开关一致**。若运维给不同 TP 配了不同 JSON，可能一侧 skip、一侧进 OR → **集体通信挂死**；正常同路径启动不会。见 [dfx_ops.md](./dfx_ops.md) 排障表。
 
 ## 6. DP / PP / TP
 
@@ -122,7 +122,7 @@ start → forward → finalize → disable（需 _dump_forward_seen）
 1. `forward_seen` 只表示「activate 后调用过 start」，不保证 msprobe 一定写出文件。
 2. ACLGraph：必须在构图前安装 hook 且保持采集开启；DFX 只闸 `step()` 落盘。若仅在 dump 窗口才 `start`，replay 采空（「无 DFX 常开有数、DFX manual_trigger 无数」）。
 3. v1 EC producer 短路径可能在 activate 后用 encoder-only `start→finalize` 消费窗口；普通文本 serving 无此路径。
-4. async / sync+TP>1 下，若未走 fast-path，last PP 每步 CPU `all_reduce`（全员参与）；不能「仅 pending 的 rank 进 collective」。**Fast-path**：热更关且 `dump.enabled=false` 时跳过该 OR（见 §5）。
+4. async / sync+TP>1 下，若未走 fast-path，last PP 每步 CPU `all_reduce`（全员参与）；不能「仅 pending 的 rank 进 collective」。**Fast-path**：`dump.enabled=false` 且无 detector 时跳过该 OR（热更开着也适用；见 §5）。
 5. Sync + TP>1 也走 pending-OR（与 async 相同齐步模型）；仅 Sync + TP=1 可当场 activate。
 6. Config sync 与 dump OR 使用不同 process group（per-DP/file vs tp）；二者都要求**各自组内**全员同拍进入。
 

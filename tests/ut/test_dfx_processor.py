@@ -49,6 +49,17 @@ def test_dfx_processor_check_after_spec_writes_report_on_arm():
     assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
 
 
+def test_dfx_processor_check_after_spec_skips_when_gated():
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.dumper = MagicMock()
+    proc.dumper.can_run_anomaly_detection.return_value = False
+    proc.detectors = MagicMock()
+
+    proc.check_after_spec(sampled_tokens=None, accepted_token_nums=None)
+
+    proc.detectors.check_after_spec.assert_not_called()
+
+
 def test_dfx_processor_refresh_runs_manual_dump_with_batch_report():
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.runner = MagicMock(tp_rank=0)
