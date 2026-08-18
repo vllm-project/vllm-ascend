@@ -919,6 +919,12 @@ class RecomputeScheduler(Scheduler):
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and num_scheduled_tokens:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
+        num_spec_tokens_to_schedule = self._apply_ascend_proposal_gate(
+            num_spec_tokens_to_schedule,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            num_scheduled_requests=len(num_scheduled_tokens),
+            prefill_scheduled=prefill_scheduled,
+        )
 
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,

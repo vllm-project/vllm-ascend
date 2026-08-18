@@ -475,16 +475,65 @@ When `dynamic_spec_config.method` is set to `"dspark"` or `"dflash"`, the corres
 2. Estimates per-position acceptance likelihood for each request:
    - **DSpark**: sigmoid output of the DSpark confidence head.
    - **DFlash (head-free)**: `max(softmax(logits))` of the argmax draft token (no extra neural head).
-3. Periodically recomputes a shared per-request verify budget from those confidence scores.
-4. Allocates that budget across requests (each request keeps at least `min_verify_tokens`), so each request verifies only a prefix of draft tokens.
+3. Calibrates the conditional confidence values when per-position temperatures are supplied.
+4. Periodically recomputes a shared verify budget. With `policy: "confidence_budget"`, this is the existing threshold policy. With `policy: "hardware_aware"`, it maximizes expected accepted tokens multiplied by the profiled Ascend steps-per-second curve.
+5. Allocates that budget across requests (each request keeps at least `min_verify_tokens`), so each request verifies only a prefix of draft tokens.
 
 The resulting per-request verify lengths are consumed by the model runner when collecting draft tokens for the target-model verify step.
+
+For hardware-aware deployments, the optional proposal gate adds a batch-level
+decision before the drafter launch. Set `proposal_gate_enabled: true` to enter
+the latency profile after consecutive low-load decode steps. Prefill or queued
+requests immediately select `K=0`, preserving target-model throughput; the
+next low-load streak re-enables the configured hardware-aware policy. The gate
+is scheduler-side and does not synchronize NPU tensors.
 
 #### Configuration
 
 Enable this approach through `additional_config.dynamic_spec_config`. See [Additional Configuration](../configuration/additional_config.md) for the full parameter reference.
 
 You still need a matching `speculative_config` (`method: "dspark"` or `"dflash"`, draft model path, and `num_speculative_tokens`). Dynamic decoding only decides how many of those drafted tokens are verified per request. Set `dynamic_spec_config.method` to the same method name as in `speculative_config`.
+
+For the hardware-aware policy, create a profile for the exact target/draft,
+dtype, parallelism and graph mode. A minimal profile is:
+
+```json
+{
+  "fingerprint": {"device": "Ascend", "graph_mode": "FULL"},
+  "latency_ms": {"1": 0.8, "8": 1.1, "16": 1.6, "32": 2.5},
+  "confidence_temperatures": [1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3]
+}
+```
+
+Then enable it with:
+
+```python
+additional_config={
+    "dynamic_spec_config": {
+        "method": "dspark",
+        "policy": "hardware_aware",
+        "proposal_gate_enabled": True,
+        "proposal_gate_params": {
+            "enter_ratio": 0.5,
+            "exit_ratio": 0.8,
+            "enter_steps": 2,
+            "exit_steps": 1,
+        },
+        "method_params": {
+            "profile_path": "/path/to/ascend_dspark_profile.json",
+            "min_verify_tokens": 0,
+            "adaptive_draft_k": True,
+            "adaptive_draft_k_min": 1,
+            "adaptive_draft_k_slack": 1,
+            "decision_interval": 1,
+        },
+    },
+}
+```
+
+If the profile is missing or its fingerprint does not match, vLLM Ascend logs
+a warning and falls back to `confidence_budget` so the existing dynamic path
+continues to work.
 
 #### Offline inference example
 

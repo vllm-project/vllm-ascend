@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 import math
 from contextlib import contextmanager
 from dataclasses import replace
@@ -10,6 +11,14 @@ import torch
 import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode
 from vllm.forward_context import get_forward_context
+from vllm_ascend.spec_decode.dynamic import (
+    HardwareAwarePrefixPolicy,
+    HardwareCostModel,
+    SequentialTemperatureScaler,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 def update_num_computed_tokens_for_batch_change(
@@ -248,6 +257,7 @@ class DynamicSpecScheduler:
         self,
         *,
         method: str,
+        policy: str = "confidence_budget",
         method_params: dict[str, Any],
         max_batch_size: int,
         num_speculative_tokens: int,
@@ -257,6 +267,9 @@ class DynamicSpecScheduler:
             raise ValueError(f"Unsupported dynamic speculative method: {method}")
 
         self.method = method
+        self.policy_name = policy or method_params.get("policy", "confidence_budget")
+        if self.policy_name not in ("confidence_budget", "hardware_aware"):
+            raise ValueError(f"Unsupported dynamic speculative policy: {self.policy_name}")
 
         self.max_batch_size = max_batch_size
         self.num_speculative_tokens = num_speculative_tokens
@@ -285,11 +298,70 @@ class DynamicSpecScheduler:
             )
         )
 
+        configured_min_k = method_params.get("min_verify_tokens")
         self.min_k = int(
-            method_params.get(
-                "min_verify_tokens",
-                1,
+            configured_min_k
+            if configured_min_k is not None
+            else (0 if self.policy_name == "hardware_aware" else 1)
+        )
+        if self.min_k < 0 or self.min_k > self.num_speculative_tokens:
+            raise ValueError(
+                "min_verify_tokens must be between 0 and num_speculative_tokens"
             )
+
+        # Confidence calibration is a no-op unless temperatures are supplied
+        # explicitly or in the hardware profile.
+        self.cost_model: HardwareCostModel | None = None
+        self.hardware_policy: HardwareAwarePrefixPolicy | None = None
+        profile_temperatures: tuple[float, ...] = ()
+        if self.policy_name == "hardware_aware":
+            try:
+                profile = method_params.get("profile")
+                profile_path = method_params.get("profile_path")
+                if profile is not None:
+                    self.cost_model = HardwareCostModel.from_dict(
+                        profile,
+                        expected_fingerprint=method_params.get("profile_fingerprint"),
+                        strict_fingerprint=bool(method_params.get("strict_profile_fingerprint", True)),
+                    )
+                elif profile_path:
+                    self.cost_model = HardwareCostModel.from_json(
+                        profile_path,
+                        expected_fingerprint=method_params.get("profile_fingerprint"),
+                        strict_fingerprint=bool(method_params.get("strict_profile_fingerprint", True)),
+                    )
+                else:
+                    raise ValueError("profile_path or inline profile is required")
+                self.hardware_policy = HardwareAwarePrefixPolicy(
+                    cost_model=self.cost_model,
+                    min_k=self.min_k,
+                    max_batch_size=self.max_batch_size,
+                    max_draft_tokens=self.num_speculative_tokens,
+                    device=device,
+                    decision_interval=self._hardware_decision_interval(method_params),
+                )
+                profile_temperatures = self.cost_model.confidence_temperatures
+            except (OSError, TypeError, ValueError) as exc:
+                # A stale or missing profile must not make an otherwise valid
+                # dynamic SD deployment unusable.  Fall back to the policy
+                # already shipped by PR #13216/#13819.
+                logger.warning(
+                    "Unable to enable hardware-aware dynamic speculative "
+                    "scheduling; falling back to confidence_budget: %s",
+                    exc,
+                )
+                self.policy_name = "confidence_budget"
+                self.cost_model = None
+                self.hardware_policy = None
+                if configured_min_k is None:
+                    self.min_k = 1
+
+        configured_temperatures = method_params.get("confidence_temperatures")
+        if configured_temperatures is None and profile_temperatures:
+            configured_temperatures = profile_temperatures
+        self.calibrator = SequentialTemperatureScaler.from_config(
+            configured_temperatures,
+            self.num_speculative_tokens,
         )
 
         self.budget_k = max(
@@ -299,6 +371,17 @@ class DynamicSpecScheduler:
                 self.num_speculative_tokens,
             ),
         )
+
+        # A stale hardware profile must not reduce the proposal budget far
+        # below the confidence-budget policy that is already known to work.
+        # The floor is expressed as a ratio so it follows the confidence
+        # scheduler when its budget is updated. Set to 0 to disable it after
+        # a workload-specific profile has been validated.
+        self.hardware_min_budget_ratio = float(
+            method_params.get("hardware_min_budget_ratio", 0.8)
+        )
+        if not 0.0 <= self.hardware_min_budget_ratio <= 1.0:
+            raise ValueError("hardware_min_budget_ratio must be in [0, 1]")
 
         self._steps_since_budget_update = 0
 
@@ -346,6 +429,34 @@ class DynamicSpecScheduler:
         # Latest result consumed by the model runner.
         self.num_verify_tokens: torch.Tensor | None = None
 
+    @staticmethod
+    def _hardware_decision_interval(method_params: dict[str, Any]) -> int:
+        """Return a safe recomputation interval for hardware-aware policy.
+
+        Recomputing the hardware allocation performs a device-side sort and
+        transfers the winning candidate index back to Python.  Doing that on
+        every decode step (``decision_interval=1``) makes the scheduler
+        host-bound for small batches.  Keep the interval configurable, but
+        protect the hot path with a conservative minimum.  Users that have a
+        workload-specific calibration can explicitly lower
+        ``min_decision_interval``.
+        """
+        configured = int(method_params.get("decision_interval", 16))
+        minimum = int(method_params.get("min_decision_interval", 8))
+        if configured <= 0 or minimum <= 0:
+            raise ValueError(
+                "decision_interval and min_decision_interval must be > 0"
+            )
+        interval = max(configured, minimum)
+        if interval != configured:
+            logger.info(
+                "Clamping hardware-aware decision_interval from %d to %d "
+                "to avoid per-step scheduler synchronization",
+                configured,
+                interval,
+            )
+        return interval
+
     def update(
         self,
         *,
@@ -361,6 +472,7 @@ class DynamicSpecScheduler:
 
             token_probs = self._compute_dflash_token_probs(
                 logits,
+                num_reqs=num_reqs,
             )
         elif self.method == "dspark":
             if num_reqs is None:
@@ -380,6 +492,7 @@ class DynamicSpecScheduler:
     def _compute_dflash_token_probs(
         self,
         logits: torch.Tensor,
+        num_reqs: int | None = None,
     ) -> torch.Tensor:
         """Estimate DFlash token acceptance probabilities.
 
@@ -393,12 +506,22 @@ class DynamicSpecScheduler:
             token_probs: [B, D]
         """
         num_rows = logits.shape[0]
-        num_draft_tokens = self.num_speculative_tokens
-        num_reqs = num_rows // num_draft_tokens
+        if num_reqs is None:
+            num_draft_tokens = self.num_speculative_tokens
+            num_reqs = num_rows // max(num_draft_tokens, 1)
+        else:
+            num_reqs = int(num_reqs)
+            num_draft_tokens = num_rows // max(num_reqs, 1)
+        if num_reqs <= 0 or num_draft_tokens <= 0:
+            return self._token_probs_buffer[:0, :0]
 
-        token_probs = self._token_probs_buffer[:num_reqs]
+        token_probs = self._token_probs_buffer[:num_reqs, :num_draft_tokens]
         # max(softmax(logits)) per row; PyTorch keeps this ACLGraph-safe.
-        token_probs.copy_(torch.softmax(logits.float(), dim=-1).max(dim=-1).values.view(num_reqs, num_draft_tokens))
+        raw_probs = torch.softmax(logits.float(), dim=-1).max(dim=-1).values.view(
+            num_reqs,
+            num_draft_tokens,
+        )
+        token_probs.copy_(self.calibrator.calibrate_probabilities(raw_probs))
         token_probs.clamp_(
             min=1e-6,
             max=1.0,
@@ -422,8 +545,10 @@ class DynamicSpecScheduler:
         Output:
             token_probs: [B, D]
         """
-        num_draft_tokens = self.num_speculative_tokens
+        num_draft_tokens = max(int(draft_token_ids.shape[1]) - 1, 0)
         num_tokens = num_reqs * num_draft_tokens
+        if num_reqs <= 0 or num_draft_tokens <= 0:
+            return self._token_probs_buffer[:0, :0]
 
         flat_hidden = last_hidden_states.reshape(
             num_tokens,
@@ -451,16 +576,13 @@ class DynamicSpecScheduler:
             flat_markov,
         )
 
-        token_probs = self._token_probs_buffer[:num_reqs]
+        token_probs = self._token_probs_buffer[:num_reqs, :num_draft_tokens]
 
-        token_probs.copy_(
-            confidence_logits.reshape(
-                num_reqs,
-                num_draft_tokens,
-            )
+        confidence_logits = confidence_logits.reshape(
+            num_reqs,
+            num_draft_tokens,
         )
-
-        token_probs.sigmoid_()
+        token_probs.copy_(torch.sigmoid(self.calibrator.calibrate_logits(confidence_logits)))
         token_probs.clamp_(
             min=1e-6,
             max=1.0,
@@ -475,7 +597,7 @@ class DynamicSpecScheduler:
         """Run the shared dynamic speculative scheduling pipeline."""
         num_reqs, num_draft_tokens = token_probs.shape
 
-        survival = self._survival_buffer[:num_reqs]
+        survival = self._survival_buffer[:num_reqs, : token_probs.shape[1]]
 
         # survival[b, i] estimates the probability that request b reaches
         # and accepts the draft prefix through position i.
@@ -485,9 +607,24 @@ class DynamicSpecScheduler:
             out=survival,
         )
 
-        self.compute_verify_budget(survival)
-
-        self.num_verify_tokens = self.allocate_verify_budget(survival)
+        if self.hardware_policy is not None:
+            # Keep the confidence budget alive as a cheap safety signal. The
+            # update itself is amortized by budget_update_interval and avoids
+            # the profile selecting a much smaller K solely because a sparse
+            # latency table rounded a candidate to the wrong graph shape.
+            self.compute_verify_budget(survival)
+            min_total_tokens = math.ceil(
+                num_reqs
+                * self.budget_k
+                * self.hardware_min_budget_ratio
+            )
+            self.num_verify_tokens = self.hardware_policy.allocate(
+                survival,
+                min_total_tokens=min_total_tokens,
+            )
+        else:
+            self.compute_verify_budget(survival)
+            self.num_verify_tokens = self.allocate_verify_budget(survival)
 
         return self.num_verify_tokens
 
@@ -554,17 +691,18 @@ class DynamicSpecScheduler:
 
         keep_lens = self._num_verify_tokens_buffer[:num_reqs]
 
-        keep_lens.fill_(self.min_k)
+        mandatory = min(self.min_k, num_draft_tokens)
+        keep_lens.fill_(mandatory)
 
         extra_budget_per_req = max(
-            self.budget_k - self.min_k,
+            self.budget_k - mandatory,
             0,
         )
 
-        # Positions [0:min_k] have already been guaranteed.
+        # Positions [0:mandatory] have already been guaranteed.
         candidate_window = survival[
             :,
-            self.min_k :,
+            mandatory:,
         ]
 
         num_candidates = candidate_window.numel()
@@ -575,7 +713,7 @@ class DynamicSpecScheduler:
         )
 
         if num_budget_tokens > 0:
-            candidate_cols = num_draft_tokens - self.min_k
+            candidate_cols = num_draft_tokens - mandatory
 
             flat_survival = candidate_window.reshape(-1)
 
@@ -599,7 +737,7 @@ class DynamicSpecScheduler:
             )
 
         keep_lens.clamp_(
-            min=self.min_k,
+            min=mandatory,
             max=num_draft_tokens,
         )
 
