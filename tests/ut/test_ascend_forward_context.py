@@ -30,6 +30,7 @@ def _make_vllm_config(
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
     hidden_size: int = 2048,
+    routed_expert_hidden_size: int | None = None,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -38,6 +39,8 @@ def _make_vllm_config(
         hf_text_config_attrs["num_experts_per_tok"] = num_experts_per_tok
     hf_text_config_attrs["hidden_size"] = hidden_size
 
+    if routed_expert_hidden_size is not None:
+        hf_text_config_attrs["routed_expert_hidden_size"] = routed_expert_hidden_size
     model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
         get_num_experts=lambda: num_experts,
@@ -285,6 +288,11 @@ def test_select_moe_comm_method_a3_quant_w4a8(
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
+        (128, 16, MoECommType.FUSED_MC2),
+        (128, 32, MoECommType.FUSED_MC2),
+        (128, 64, MoECommType.FUSED_MC2),
+        (128, 128, MoECommType.FUSED_MC2),
+        (128, 129, MoECommType.MC2),
     ],
 )
 def test_select_moe_comm_method_a3_quant_w8a8(
@@ -293,6 +301,7 @@ def test_select_moe_comm_method_a3_quant_w8a8(
     ep_world_size,
     expected,
 ):
+    monkeypatch.setattr(afc, "_MEGA_MOE_SUPPORTED", True)
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A3,
@@ -320,6 +329,27 @@ def test_cann_megamoe_supported_by_config_quant_type(
     expected,
 ):
     vllm_config = _make_vllm_config(quant_type=quant_type)
+
+    assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("hidden_size", "routed_expert_hidden_size", "expected"),
+    [
+        (7168, 2048, True),
+        (7168, 768, False),
+        (768, None, False),
+    ],
+)
+def test_cann_megamoe_supported_by_config_uses_routed_hidden_size(
+    hidden_size,
+    routed_expert_hidden_size,
+    expected,
+):
+    vllm_config = _make_vllm_config(
+        hidden_size=hidden_size,
+        routed_expert_hidden_size=routed_expert_hidden_size,
+    )
 
     assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
 
