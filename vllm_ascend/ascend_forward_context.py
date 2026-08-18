@@ -12,6 +12,7 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -95,7 +96,12 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+        moe_comm_type = select_moe_comm_method(
+            max_num_tokens,
+            vllm_config,
+            is_draft_model,
+            model_instance=model_instance,
+        )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -282,22 +288,6 @@ def _select_a3_moe_comm_method(
     return MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
 
-_A5_MEGA_MOE_QUANT_NAMES = {
-    "mxfp4",
-    "mxfp8",
-    "w8a8_mxfp8",
-    "w4a4_mxfp4",
-    "w4a8_mxfp",
-    "w4a8_mxfp4",
-}
-
-
-def _is_a5_mega_moe_supported_quant(quant_type: str | None) -> bool:
-    if quant_type is None:
-        return False
-    return quant_type.lower() in _A5_MEGA_MOE_QUANT_NAMES
-
-
 def _get_config_value(config: Any, name: str) -> Any:
     if config is None:
         return None
@@ -317,6 +307,12 @@ def _get_first_config_value(config: Any, names: tuple[str, ...]) -> Any:
 def _normalize_quant_type(quant_type: Any) -> str | None:
     if quant_type is None:
         return None
+    if isinstance(quant_type, dict):
+        nested_quant_type = _get_first_config_value(
+            quant_type,
+            ("moe_quantize", "quantize", "moe_quant_type", "quant_type", "model_quant_type"),
+        )
+        return _normalize_quant_type(nested_quant_type)
     if isinstance(quant_type, str):
         return quant_type
     name = getattr(quant_type, "name", None)
@@ -325,10 +321,20 @@ def _normalize_quant_type(quant_type: Any) -> str | None:
     return str(quant_type)
 
 
+def _canonicalize_quant_type_name(quant_type: str) -> str:
+    return quant_type.removeprefix("QuantType.").lower().replace("-", "_")
+
+
+def _is_global_fp8_quantization(quant_type: str | None) -> bool:
+    if quant_type is None:
+        return False
+    return _canonicalize_quant_type_name(quant_type) in {"fp8", "deepseek_v4_fp8"}
+
+
 def _extract_quant_type_from_description(quant_description: Any) -> str | None:
     if not isinstance(quant_description, dict):
         return None
-    quant_type = _get_first_config_value(quant_description, ("moe_quantize", "quantize", "model_quant_type"))
+    quant_type = _get_first_config_value(quant_description, ("moe_quantize", "quantize"))
     if quant_type is not None:
         return _normalize_quant_type(quant_type)
 
@@ -339,14 +345,28 @@ def _extract_quant_type_from_description(quant_description: Any) -> str | None:
         quant_type = _normalize_quant_type(value)
         if quant_type is not None:
             return quant_type
+
+    quant_type = _get_config_value(quant_description, "model_quant_type")
+    if quant_type is not None:
+        return _normalize_quant_type(quant_type)
     return None
 
 
 def _get_moe_quant_type(vllm_config: VllmConfig) -> str | None:
     hf_text_config = vllm_config.model_config.hf_text_config
+    quant_config = getattr(vllm_config, "quant_config", None)
+    quant_description = getattr(quant_config, "quant_description", None)
+    logger.debug(
+        "MoE quant type detection input: quant_config_type=%s, quant_description=%s",
+        type(quant_config).__name__ if quant_config is not None else None,
+        quant_description,
+    )
+
     quant_type = _get_first_config_value(hf_text_config, ("moe_quantize", "quantize"))
     if quant_type is not None:
-        return _normalize_quant_type(quant_type)
+        quant_type = _normalize_quant_type(quant_type)
+        logger.info_once("MoE quant type detected: quant_type=%s, source=hf_text_config", quant_type)
+        return quant_type
 
     quantization_config = _get_config_value(hf_text_config, "quantization_config")
     quant_type = _get_first_config_value(
@@ -354,21 +374,96 @@ def _get_moe_quant_type(vllm_config: VllmConfig) -> str | None:
         ("moe_quantize", "quantize", "moe_quant_type", "quant_type", "model_quant_type"),
     )
     if quant_type is not None:
-        return _normalize_quant_type(quant_type)
-
-    quant_config = getattr(vllm_config, "quant_config", None)
-    quant_type = _extract_quant_type_from_description(getattr(quant_config, "quant_description", None))
-    if quant_type is not None:
+        quant_type = _normalize_quant_type(quant_type)
+        logger.info_once("MoE quant type detected: quant_type=%s, source=hf_quantization_config", quant_type)
         return quant_type
 
-    return _normalize_quant_type(getattr(vllm_config.model_config, "quantization", None))
+    quant_type = _extract_quant_type_from_description(quant_description)
+    if quant_type is not None:
+        logger.info_once("MoE quant type detected: quant_type=%s, source=quant_description", quant_type)
+        return quant_type
+
+    quant_type = _normalize_quant_type(getattr(vllm_config.model_config, "quantization", None))
+    if _is_global_fp8_quantization(quant_type):
+        # Ascend fp8 maps FusedMoE layers to the DS W4A8 MXFP implementation.
+        quant_type = "W4A8_MXFP"
+        logger.info_once("MoE quant type detected: quant_type=%s, source=ascend_fp8_moe", quant_type)
+        return quant_type
+    logger.info_once("MoE quant type detected: quant_type=%s, source=model_config.quantization", quant_type)
+    return quant_type
+
+
+_A5_MEGA_MOE_QUANT_TYPES = {
+    QuantType.MXFP4,
+    QuantType.MXFP8,
+    QuantType.W4A8MXFP,
+}
+_A5_MOE_QUANT_TYPES_BY_CONFIG_ID: dict[int, QuantType] = {}
+
+
+def _is_a5_mega_moe_supported_quant(quant_type: QuantType | None) -> bool:
+    return quant_type in _A5_MEGA_MOE_QUANT_TYPES
+
+
+def _get_moe_quant_type_from_model_instance(model_instance: torch.nn.Module | None) -> QuantType | None:
+    model = getattr(model_instance, "model", None)
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(model_instance, "layers", None)
+    if layers is None:
+        return None
+
+    for layer in layers:
+        mlp = getattr(layer, "mlp", None)
+        quant_type = getattr(mlp, "quant_type", None)
+        if isinstance(quant_type, QuantType):
+            return quant_type
+    return None
+
+
+def cache_a5_moe_quant_type(
+    vllm_config: VllmConfig | None,
+    quant_type: QuantType,
+    layer_name: str,
+) -> None:
+    if vllm_config is None:
+        logger.info_once(
+            "A5 MoE quant type cache skipped: layer_name=%s, quant_type=%s, reason=missing_vllm_config",
+            layer_name,
+            quant_type,
+        )
+        return
+    _A5_MOE_QUANT_TYPES_BY_CONFIG_ID[id(vllm_config)] = quant_type
+    logger.info_once(
+        "A5 MoE quant type cached: layer_name=%s, quant_type=%s, source=fused_moe_get_quant_type",
+        layer_name,
+        quant_type,
+    )
+
+
+def _get_a5_moe_quant_type(
+    vllm_config: VllmConfig,
+    model_instance: torch.nn.Module | None = None,
+) -> QuantType | None:
+    quant_type = _get_moe_quant_type_from_model_instance(model_instance)
+    if quant_type is not None:
+        logger.info_once("A5 MoE quant type detected: quant_type=%s, source=model_instance", quant_type)
+        return quant_type
+
+    quant_type = _A5_MOE_QUANT_TYPES_BY_CONFIG_ID.get(id(vllm_config))
+    if quant_type is not None:
+        logger.info_once("A5 MoE quant type detected: quant_type=%s, source=vllm_config_cache", quant_type)
+        return quant_type
+
+    logger.info_once("A5 MoE quant type detected: quant_type=%s, source=unavailable", None)
+    return None
 
 
 def _select_a5_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
-    quant_type: str | None,
+    quant_type: QuantType | None,
     enable_fused_mc2: int,
 ) -> MoECommType:
     num_experts_per_tok = getattr(
@@ -389,7 +484,7 @@ def _select_a5_moe_comm_method(
         "A5 MegaMoE condition check: enabled=%s, fused_mc2_mode_1=%s, "
         "has_expert_parallel_world=%s, within_mega_moe_capacity=%s, supported_quant=%s, "
         "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, enable_fused_mc2=%s, "
-        "mega_moe_max_tokens=%s, supported_quant_names=%s",
+        "mega_moe_max_tokens=%s, supported_quant_types=%s",
         a5_mega_moe_enable,
         fused_mc2_mode_1,
         has_expert_parallel_world,
@@ -401,7 +496,7 @@ def _select_a5_moe_comm_method(
         quant_type,
         enable_fused_mc2,
         ascend_config.mega_moe_max_tokens,
-        sorted(_A5_MEGA_MOE_QUANT_NAMES),
+        sorted(quant_type.name for quant_type in _A5_MEGA_MOE_QUANT_TYPES),
     )
     if a5_mega_moe_enable:
         logger.info(
@@ -438,7 +533,12 @@ def _select_a5_moe_comm_method(
     return moe_comm_type
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model=False,
+    model_instance: torch.nn.Module | None = None,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -459,6 +559,8 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
         is_draft_model (bool): Whether the model runs in MTP mode.
+        model_instance (torch.nn.Module | None): Model instance used by A5 to
+            read the already resolved MoE QuantType.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -471,7 +573,6 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
-    quant_type = _get_moe_quant_type(vllm_config)
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
@@ -481,7 +582,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         moe_comm_type = _select_a3_moe_comm_method(
             num_tokens,
             vllm_config,
-            quant_type,
+            _get_moe_quant_type(vllm_config),
             mc2_tokens_capacity,
             get_ascend_config().enable_fused_mc2,
         )
@@ -490,7 +591,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             num_tokens,
             vllm_config,
             mc2_tokens_capacity,
-            quant_type,
+            _get_a5_moe_quant_type(vllm_config, model_instance),
             get_ascend_config().enable_fused_mc2,
         )
     elif soc_version == AscendDeviceType._310P:
