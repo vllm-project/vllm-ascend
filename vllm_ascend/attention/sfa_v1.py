@@ -1180,13 +1180,31 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _v_up_proj(self, x):
         if hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # Transpose explicitly to (N, B, L) so the aclnn TransposeBatchMatMul
-            # can use perm_x1=(0,1,2) (no inner transpose). This downgrades the
-            # constraint from N*L<65536 (fails when TP=1: 128*512=65536) to
-            # L<65536 (always satisfied since kv_lora_rank=512).
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
-            # Multiply (N, B, L) x (N, L, V) -> (N, B, V), perm_y=(1,0,2) -> (B, N, V)
-            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # With perm_x1=(1,0,2), x1 is (B, N, L) and the aclnn TransposeBatchMatMul
+            # constraint on older CANN binaries is N*L < 65536. TP=1 gives
+            # N=128, L=512 -> N*L=65536 which fails. When the constraint is
+            # satisfied, use the internal-transpose path (perm_x1=(1,0,2)) to
+            # save a contiguous copy; otherwise fall back to explicit transpose
+            # + perm_x1=(0,1,2), which downgrades the check to L<65536.
+            # TODO: CANN 9.2 removes the N*L<65536 check in both GE InferShape
+            # (transpose_batch_mat_mul_infershape.cpp) and aclnn host API
+            # (conditional on scale==nullptr && batch_split_factor==1). Once
+            # the deployment baseline reaches CANN 9.2, this if/else branch
+            # can be collapsed to perm_x1=(1,0,2) for all TP configs.
+            if self.local_num_heads * self.kv_lora_rank < 65536:
+                # x stays (B, N, L); operator transposes internally.
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV,
+                                                        perm_x1=(1, 0, 2),
+                                                        perm_y=(1, 0, 2))
+            else:
+                # Explicit transpose to (N, B, L) so the operator uses
+                # perm_x1=(0,1,2) (no inner transpose).
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank) \
+                     .transpose(0, 1).contiguous()
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV,
+                                                        perm_x1=(0, 1, 2),
+                                                        perm_y=(1, 0, 2))
             # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
