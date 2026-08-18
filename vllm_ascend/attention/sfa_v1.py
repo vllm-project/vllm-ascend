@@ -353,6 +353,17 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         block_size = self.kernel_block_size
 
+        # TODO: Revisit this logic after ModelRunner V1 is fully removed,
+        # and remove it if ModelRunner V2 no longer depends on these per-step buffers.
+        if draft_index is not None:
+            assert self.spec_actual_seq_lengths_query is not None
+            assert self.spec_actual_seq_lengths_key is not None
+            actual_seq_lengths_query = self.spec_actual_seq_lengths_query[draft_index - 1]
+            actual_seq_lengths_key = self.spec_actual_seq_lengths_key[draft_index - 1]
+        else:
+            actual_seq_lengths_query = self.actual_seq_lengths_query
+            actual_seq_lengths_key = self.actual_seq_lengths_key
+
         runtime_cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         self.actual_seq_lengths_query.zero_()
         self.actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)

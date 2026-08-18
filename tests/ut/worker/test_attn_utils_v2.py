@@ -18,7 +18,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.models import deepseek_v4
+from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -63,7 +63,9 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         quant_config=None,
     )
 
-    cache_layer = deepseek_v4.AscendDeepseekV4IndexerCache.__new__(deepseek_v4.AscendDeepseekV4IndexerCache)
+    cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
+        deepseek_v4_indexer.AscendDeepseekV4IndexerCache
+    )
     torch.nn.Module.__init__(cache_layer)
     cache_layer.head_dim = 128
     cache_layer.dtype = torch.int8
@@ -72,7 +74,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     cache_layer.kv_cache = torch.tensor([])
 
     monkeypatch.setattr(
-        deepseek_v4,
+        deepseek_v4_indexer,
         "get_ascend_device_type",
         lambda: device_type,
     )

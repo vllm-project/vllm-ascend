@@ -303,6 +303,8 @@
   source_file_dependencies:
     - vllm_ascend/models
   tests:
+    - tests/ut/models/test_deepseek_v4_compressor.py
+    - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
@@ -499,7 +501,7 @@
   base: spec_decode_base
   source_file_dependencies:
     - vllm_ascend/spec_decode/dspark_proposer.py
-    - vllm_ascend/models/deepseek_v4_dspark.py
+    - vllm_ascend/models/deepseek_v4/dspark.py
   tests:
     - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
     - tests/e2e/pull_request/eight_card/test_glm5_2.py
@@ -623,6 +625,7 @@
     - tests/e2e/pull_request/one_card/model_runner_v2
     - tests/e2e/pull_request/two_card/model_runner_v2
     - tests/e2e/pull_request/four_card/model_runner_v2
+    - tests/e2e/pull_request/eight_card/model_runner_v2
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
 # XLite
@@ -734,7 +737,7 @@
     - tests/ut/tools/bisect
 
 - name: _tools
-  optional: false
+  optional: true
   source_file_dependencies:
     - tools/
   tests:
@@ -840,6 +843,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 40
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1890
+  tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 1890
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 450
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 1020
