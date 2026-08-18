@@ -6,8 +6,7 @@ import pytest
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
-from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
+from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend, _view_mxfp_scales_as_e8m0
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -85,8 +84,30 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     assert "activation_params" not in mega_moe_kwargs
     assert mega_moe_kwargs["weight1_type"] == torch.float8_e4m3fn
     assert mega_moe_kwargs["weight2_type"] == torch.float8_e4m3fn
-    assert mega_moe_kwargs["l1_weights_sf"][0].dtype == FLOAT8_E8M0FNU_DTYPE
-    assert mega_moe_kwargs["l2_weights_sf"][0].dtype == FLOAT8_E8M0FNU_DTYPE
+    assert mega_moe_kwargs["l1_weights_sf"][0].dtype == torch.float8_e8m0fnu
+    assert mega_moe_kwargs["l2_weights_sf"][0].dtype == torch.float8_e8m0fnu
+
+
+def test_view_mxfp_scales_as_e8m0_reinterprets_uint8_storage():
+    scale = torch.arange(64, dtype=torch.uint8).reshape(2, 16, 1, 2)
+
+    normalized_scale = _view_mxfp_scales_as_e8m0([scale], "w1_scale")[0]
+
+    assert normalized_scale.dtype == torch.float8_e8m0fnu
+    assert normalized_scale.shape == scale.shape
+    assert normalized_scale.stride() == scale.stride()
+    assert normalized_scale.numel() == scale.numel()
+    assert normalized_scale.data_ptr() == scale.data_ptr()
+
+
+def test_view_mxfp_scales_as_e8m0_requires_native_torch_dtype():
+    scale = torch.ones(2, 16, 1, 2, dtype=torch.uint8)
+
+    with (
+        patch("vllm_ascend.ops.fused_moe.mega_moe._TORCH_FLOAT8_E8M0FNU_DTYPE", None),
+        pytest.raises(RuntimeError, match=r"torch\.float8_e8m0fnu"),
+    ):
+        _view_mxfp_scales_as_e8m0([scale], "w1_scale")
 
 
 def test_mega_moe_backend_passes_positive_swiglu_limit_as_clamp():
