@@ -24,8 +24,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
 
 The following model weights are available:
 
-- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
-- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
+- `Qwen3.8-27B` (BF16 version): requires 1 Ascend 950DT(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
+- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
 - `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -39,6 +39,39 @@ If you want to deploy the model in a multi-node environment, verify the communic
 ### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
+=== "A2 series"
+
+    Start the docker image on each node.
+
+    ```bash
+    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.23.0rc1
+    export NAME=vllm-ascend
+
+    docker run --rm \
+        --name $NAME \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -140,9 +173,9 @@ Before starting the service:
 
 - Replace the model path, parallel sizes and service port with values from the target environment.
 
-=== "A3 series"
+=== "Atlas 800 A3 / Atlas 800 A2"
 
-    The following example is for Atlas 800 A3. Quantized versions need `--quantization ascend`.
+    The following example is for Atlas 800 A3 / Atlas 800 A2. Quantized versions need `--quantization ascend`.
 
     ```shell
     #!/bin/sh
