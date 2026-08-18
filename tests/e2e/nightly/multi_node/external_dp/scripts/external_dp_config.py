@@ -71,10 +71,37 @@ class NodeTemplate:
 
 @dataclass(frozen=True)
 class KVPoolConfig:
-    """KV pool backend and backend-specific configuration."""
+    """Base configuration shared by managed KV pool backends."""
 
-    type: str
     config: dict[str, Any]
+
+    @property
+    def type(self) -> str:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class MooncakeKVPoolConfig(KVPoolConfig):
+    """Mooncake master configuration."""
+
+    master_port: int
+    metrics_port: int
+
+    @property
+    def type(self) -> str:
+        return "mooncake"
+
+
+@dataclass(frozen=True)
+class MemcacheKVPoolConfig(KVPoolConfig):
+    """Memcache MetaService configuration."""
+
+    meta_service_port: int
+    config_store_port: int
+
+    @property
+    def type(self) -> str:
+        return "memcache"
 
 
 @dataclass(frozen=True)
@@ -351,7 +378,17 @@ class ExternalDPConfigLoader:
         pool_config = raw_kv_pool.get("config")
         if not isinstance(pool_config, dict):
             raise TypeError("kv_pool.config must be a mapping")
-        return KVPoolConfig(type=pool_type, config=dict(pool_config))
+        if pool_type == "mooncake":
+            return MooncakeKVPoolConfig(
+                config=dict(pool_config),
+                master_port=int(raw_kv_pool["master_port"]),
+                metrics_port=int(raw_kv_pool["metrics_port"]),
+            )
+        return MemcacheKVPoolConfig(
+            config=dict(pool_config),
+            meta_service_port=int(raw_kv_pool["meta_service_port"]),
+            config_store_port=int(raw_kv_pool["config_store_port"]),
+        )
 
     @classmethod
     def _validate_config(cls, config: ExternalDPConfig) -> None:
@@ -420,7 +457,27 @@ class ExternalDPConfigLoader:
         kv_pool = config.kv_pool
         if kv_pool is None:
             return
-        if kv_pool.type == "memcache":
+        if isinstance(kv_pool, MooncakeKVPoolConfig):
+            ports = (
+                ("master_port", kv_pool.master_port),
+                ("metrics_port", kv_pool.metrics_port),
+            )
+        elif isinstance(kv_pool, MemcacheKVPoolConfig):
+            ports = (
+                ("meta_service_port", kv_pool.meta_service_port),
+                ("config_store_port", kv_pool.config_store_port),
+            )
+        else:
+            raise TypeError(f"Unsupported KV pool config: {type(kv_pool).__name__}")
+
+        for field_name, port in ports:
+            if port < 1 or port > 65535:
+                raise ValueError(f"kv_pool.{field_name} must be between 1 and 65535")
+        if ports[0][1] == ports[1][1]:
+            raise ValueError(
+                f"kv_pool.{ports[0][0]} and kv_pool.{ports[1][0]} must be different"
+            )
+        if isinstance(kv_pool, MemcacheKVPoolConfig):
             for section in ("meta", "local"):
                 if not isinstance(kv_pool.config.get(section), dict):
                     raise TypeError(f"kv_pool.config.{section} must be a mapping for memcache")

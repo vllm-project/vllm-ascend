@@ -10,11 +10,13 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import 
     ExternalDPConfig,
     ExternalDPConfigLoader,
     KVPoolConfig,
+    MemcacheKVPoolConfig,
+    MooncakeKVPoolConfig,
     RoutingConfig,
 )
 
 
-def _make_config(pool_type: str, pool_config: dict[str, Any]) -> ExternalDPConfig:
+def _make_config(kv_pool: KVPoolConfig) -> ExternalDPConfig:
     return ExternalDPConfig(
         test_name="kv-pool-test",
         model="test/model",
@@ -32,7 +34,7 @@ def _make_config(pool_type: str, pool_config: dict[str, Any]) -> ExternalDPConfi
         ),
         nodes=[],
         launch_templates=[],
-        kv_pool=KVPoolConfig(type=pool_type, config=pool_config),
+        kv_pool=kv_pool,
     )
 
 
@@ -59,6 +61,31 @@ def _memcache_config() -> dict[str, Any]:
     }
 
 
+def _make_mooncake_pool(
+    *,
+    master_port: int = 41001,
+    metrics_port: int = 41002,
+) -> MooncakeKVPoolConfig:
+    return MooncakeKVPoolConfig(
+        config=_mooncake_config(),
+        master_port=master_port,
+        metrics_port=metrics_port,
+    )
+
+
+def _make_memcache_pool(
+    *,
+    config: dict[str, Any] | None = None,
+    meta_service_port: int = 42001,
+    config_store_port: int = 42002,
+) -> MemcacheKVPoolConfig:
+    return MemcacheKVPoolConfig(
+        config=_memcache_config() if config is None else config,
+        meta_service_port=meta_service_port,
+        config_store_port=config_store_port,
+    )
+
+
 def _mock_process_start(monkeypatch, launched: dict[str, object]):
     class FakeProcess:
         pid = 123
@@ -79,10 +106,31 @@ def _mock_process_start(monkeypatch, launched: dict[str, object]):
 def test_parse_kv_pool_types(pool_type: str) -> None:
     pool_config = _mooncake_config() if pool_type == "mooncake" else _memcache_config()
     kv_pool = ExternalDPConfigLoader._parse_kv_pool(
-        {"kv_pool": {"type": pool_type, "config": pool_config}}
+        {
+            "kv_pool": {
+                "type": pool_type,
+                **(
+                    {"master_port": 50088, "metrics_port": 50089}
+                    if pool_type == "mooncake"
+                    else {"meta_service_port": 50088, "config_store_port": 50089}
+                ),
+                "config": pool_config,
+            }
+        }
     )
 
-    assert kv_pool == KVPoolConfig(type=pool_type, config=pool_config)
+    if pool_type == "mooncake":
+        assert kv_pool == MooncakeKVPoolConfig(
+            config=pool_config,
+            master_port=50088,
+            metrics_port=50089,
+        )
+    else:
+        assert kv_pool == MemcacheKVPoolConfig(
+            config=pool_config,
+            meta_service_port=50088,
+            config_store_port=50089,
+        )
 
 
 def test_parse_kv_pool_rejects_unknown_type() -> None:
@@ -92,22 +140,28 @@ def test_parse_kv_pool_rejects_unknown_type() -> None:
         )
 
 
+def test_validate_kv_pool_rejects_invalid_ports() -> None:
+    config = _make_config(
+        _make_mooncake_pool(master_port=50088, metrics_port=50088)
+    )
+
+    with pytest.raises(ValueError, match="must be different"):
+        ExternalDPConfigLoader._validate_kv_pool(config)
+
+
 def test_validate_memcache_requires_meta_and_local_sections() -> None:
-    config = _make_config("memcache", {"meta": {}})
+    config = _make_config(_make_memcache_pool(config={"meta": {}}))
 
     with pytest.raises(TypeError, match="kv_pool.config.local"):
         ExternalDPConfigLoader._validate_kv_pool(config)
 
 
-def test_mooncake_manager_allocates_ports_and_starts_master(
+def test_mooncake_manager_uses_configured_ports_and_starts_master(
     tmp_path: Path, monkeypatch
 ) -> None:
-    config = _make_config("mooncake", _mooncake_config())
+    config = _make_config(_make_mooncake_pool())
     launched: dict[str, object] = {}
     terminated: list[int] = []
-    ports = iter([41001, 41002])
-    monkeypatch.setenv("LOG_PREFIX", str(tmp_path / "shared"))
-    monkeypatch.setattr(runtime, "get_open_port", lambda: next(ports))
     monkeypatch.setattr(runtime.socket, "create_connection", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr(runtime, "terminate_process_tree", terminated.append)
     _mock_process_start(monkeypatch, launched)
@@ -137,14 +191,11 @@ def test_mooncake_manager_allocates_ports_and_starts_master(
     assert terminated == [123]
 
 
-def test_memcache_manager_allocates_ports_and_starts_meta_service(
+def test_memcache_manager_uses_configured_ports_and_starts_meta_service(
     tmp_path: Path, monkeypatch
 ) -> None:
-    config = _make_config("memcache", _memcache_config())
+    config = _make_config(_make_memcache_pool())
     launched: dict[str, object] = {}
-    ports = iter([42001, 42002])
-    monkeypatch.setenv("LOG_PREFIX", str(tmp_path / "shared"))
-    monkeypatch.setattr(runtime, "get_open_port", lambda: next(ports))
     monkeypatch.setattr(runtime.socket, "create_connection", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr(runtime, "terminate_process_tree", lambda _pid: None)
     _mock_process_start(monkeypatch, launched)
@@ -170,17 +221,9 @@ def test_memcache_manager_allocates_ports_and_starts_meta_service(
         assert launched["env"] == {"MMC_META_CONFIG_PATH": str(manager.meta_config_path)}
 
 
-def test_non_primary_node_uses_shared_ports_without_starting_service(
+def test_non_primary_node_uses_configured_ports_without_starting_service(
     tmp_path: Path, monkeypatch
 ) -> None:
-    shared_dir = tmp_path / "shared"
-    coordination_file = shared_dir / "kv_pool_coord" / "kv-pool-test.json"
-    coordination_file.parent.mkdir(parents=True)
-    coordination_file.write_text(
-        json.dumps({"type": "mooncake", "service": 43001, "auxiliary": 43002}),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("LOG_PREFIX", str(shared_dir))
     monkeypatch.setattr(runtime.socket, "create_connection", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr(
         runtime,
@@ -189,7 +232,9 @@ def test_non_primary_node_uses_shared_ports_without_starting_service(
     )
 
     manager = runtime.create_kv_pool_manager(
-        config=_make_config("mooncake", _mooncake_config()),
+        config=_make_config(
+            _make_mooncake_pool(master_port=43001, metrics_port=43002)
+        ),
         current_node_index=1,
         log_root=tmp_path,
     )

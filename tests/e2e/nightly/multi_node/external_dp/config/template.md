@@ -34,11 +34,13 @@ routing:
     prefiller: [0]
     decoder: [1]
 
-# Optional. Select one managed KV pool backend. The framework allocates its
-# ports dynamically, starts the backend service on node 0, and writes the
-# backend config used by every vLLM rank.
+# Optional. Select one managed KV pool backend and configure its ports. The
+# framework starts the backend service on node 0 and writes the backend config
+# used by every vLLM rank.
 kv_pool:
   type: mooncake
+  master_port: 50088
+  metrics_port: 50089
   config:
     metadata_server: "P2PHANDSHAKE"
     protocol: "ascend"
@@ -205,9 +207,10 @@ benchmarks:
 - `templates`: One template per config entry. The framework expands one command
   per local DP rank.
 - `kv_pool`: Optional managed KV pool. `type` is either `mooncake` or
-  `memcache`. The framework allocates conflict-free ports on node 0, shares
-  them through `LOG_PREFIX`, and starts the selected service on node 0 before
-  any vLLM rank starts.
+  `memcache`. Mooncake requires `master_port` and `metrics_port`; Memcache
+  requires `meta_service_port` and `config_store_port`. All configured ports
+  must be available on node 0. The framework starts the selected service on
+  node 0 before any vLLM rank starts.
 - `kv_pool.config`: Backend-specific config. For Mooncake, it is written to
   each node's generated `mooncake.json`; the framework derives and overwrites
   `master_server_address`. For Memcache, it contains `meta` and `local`
@@ -258,6 +261,8 @@ To use Memcache instead, replace the `kv_pool` block with:
 ```yaml
 kv_pool:
   type: memcache
+  meta_service_port: 5000
+  config_store_port: 6000
   config:
     meta:
       ock.mmc.log_level: error

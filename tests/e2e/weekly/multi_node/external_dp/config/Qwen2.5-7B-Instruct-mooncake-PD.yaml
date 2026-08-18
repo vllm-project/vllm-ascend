@@ -11,6 +11,8 @@ routing:
 
 kv_pool:
   type: mooncake
+  master_port: 50088
+  metrics_port: 50089
   config:
     metadata_server: "P2PHANDSHAKE"
     protocol: "ascend"

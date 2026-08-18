@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any
 
 import regex as re
-from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ROUTING_DISAGGREGATED_PREFILL,
     ExternalDPConfig,
+    MemcacheKVPoolConfig,
+    MooncakeKVPoolConfig,
     NodeTemplate,
     RankInfo,
     replace_cluster_placeholders,
@@ -58,14 +59,6 @@ class ServerCommand:
 RankProcess = tuple[subprocess.Popen, RankInfo, Path]
 
 
-@dataclass(frozen=True)
-class KVPoolPorts:
-    """Dynamically allocated ports shared by all external DP nodes."""
-
-    service: int
-    auxiliary: int
-
-
 class ExternalDPKVPoolManager:
     """Common lifecycle for a KV pool service running on node 0."""
 
@@ -80,7 +73,6 @@ class ExternalDPKVPoolManager:
         self.current_node_index = current_node_index
         self.log_root = log_root
         self.process: subprocess.Popen | None = None
-        self.ports: KVPoolPorts | None = None
         self.server_envs: dict[str, str] = {}
 
     @property
@@ -100,63 +92,10 @@ class ExternalDPKVPoolManager:
         return self.config.cluster_ips[PRIMARY_NODE_INDEX]
 
     def start(self) -> None:
-        self.ports = self._resolve_ports()
         self._write_config()
         if self.current_node_index == PRIMARY_NODE_INDEX:
             self._start_service()
         self._wait_ready()
-
-    def _coordination_file(self) -> Path:
-        log_prefix = os.environ.get("LOG_PREFIX")
-        if not log_prefix:
-            if self.config.num_nodes > 1:
-                raise RuntimeError(
-                    "LOG_PREFIX must point to a shared directory for "
-                    "multi-node KV pool startup"
-                )
-            coordination_root = self.log_root
-        else:
-            coordination_root = Path(log_prefix)
-        safe_test_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.config.test_name)
-        return coordination_root / "kv_pool_coord" / f"{safe_test_name}.json"
-
-    def _resolve_ports(self) -> KVPoolPorts:
-        coordination_file = self._coordination_file()
-        if self.current_node_index == PRIMARY_NODE_INDEX:
-            service_port = get_open_port()
-            auxiliary_port = get_open_port()
-            while auxiliary_port == service_port:
-                auxiliary_port = get_open_port()
-            ports = KVPoolPorts(service=service_port, auxiliary=auxiliary_port)
-            coordination_file.parent.mkdir(parents=True, exist_ok=True)
-            temporary_file = coordination_file.with_suffix(".tmp")
-            temporary_file.write_text(
-                json.dumps(
-                    {
-                        "type": self.pool_type,
-                        "service": ports.service,
-                        "auxiliary": ports.auxiliary,
-                    }
-                ),
-                encoding="utf-8",
-            )
-            temporary_file.replace(coordination_file)
-            logger.info("Allocated %s KV pool ports: %s", self.pool_type, ports)
-            return ports
-
-        deadline = time.monotonic() + KV_POOL_READY_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            try:
-                values = json.loads(coordination_file.read_text(encoding="utf-8"))
-                if values.get("type") == self.pool_type:
-                    return KVPoolPorts(
-                        service=int(values["service"]),
-                        auxiliary=int(values["auxiliary"]),
-                    )
-            except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-                pass
-            time.sleep(1)
-        raise TimeoutError(f"Timed out waiting for KV pool ports: {coordination_file}")
 
     def _write_config(self) -> None:
         raise NotImplementedError
@@ -165,9 +104,7 @@ class ExternalDPKVPoolManager:
         raise NotImplementedError
 
     def _ready_ports(self) -> tuple[int, ...]:
-        if self.ports is None:
-            raise RuntimeError("KV pool ports are not initialized")
-        return (self.ports.service,)
+        raise NotImplementedError
 
     def _wait_ready(self, timeout: int = KV_POOL_READY_TIMEOUT_SECONDS) -> None:
         pending_ports = set(self._ready_ports())
@@ -227,10 +164,15 @@ class ExternalDPMooncakeManager(ExternalDPKVPoolManager):
         ).resolve()
 
     @property
+    def mooncake_config(self) -> MooncakeKVPoolConfig:
+        kv_pool = self.config.kv_pool
+        if not isinstance(kv_pool, MooncakeKVPoolConfig):
+            raise TypeError("Mooncake manager requires MooncakeKVPoolConfig")
+        return kv_pool
+
+    @property
     def master_address(self) -> str:
-        if self.ports is None:
-            raise RuntimeError("Mooncake ports are not initialized")
-        return f"{self.service_host}:{self.ports.service}"
+        return f"{self.service_host}:{self.mooncake_config.master_port}"
 
     def _write_config(self) -> None:
         local_ip = self.config.cluster_ips[self.current_node_index]
@@ -256,14 +198,12 @@ class ExternalDPMooncakeManager(ExternalDPKVPoolManager):
         )
 
     def _start_service(self) -> None:
-        if self.ports is None:
-            raise RuntimeError("Mooncake ports are not initialized")
         cmd = [
             "mooncake_master",
             "--port",
-            str(self.ports.service),
+            str(self.mooncake_config.master_port),
             "--metrics_port",
-            str(self.ports.auxiliary),
+            str(self.mooncake_config.metrics_port),
             "--eviction_high_watermark_ratio",
             str(MOONCAKE_EVICTION_HIGH_WATERMARK_RATIO),
             "--eviction_ratio",
@@ -280,6 +220,9 @@ class ExternalDPMooncakeManager(ExternalDPKVPoolManager):
         self.process = start_logged_process(cmd, env, log_file)
         logger.info("Mooncake master launched at %s", self.master_address)
 
+    def _ready_ports(self) -> tuple[int, ...]:
+        return (self.mooncake_config.master_port,)
+
 
 class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
     """Materialize Memcache configs and manage one cluster-wide MetaService."""
@@ -289,6 +232,13 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         runtime_dir = self.log_root / f"node-{self.current_node_index}" / "runtime"
         self.meta_config_path = (runtime_dir / "mmc-meta.conf").resolve()
         self.local_config_path = (runtime_dir / "mmc-local.conf").resolve()
+
+    @property
+    def memcache_config(self) -> MemcacheKVPoolConfig:
+        kv_pool = self.config.kv_pool
+        if not isinstance(kv_pool, MemcacheKVPoolConfig):
+            raise TypeError("Memcache manager requires MemcacheKVPoolConfig")
+        return kv_pool
 
     @staticmethod
     def _format_config(config: dict[str, Any]) -> str:
@@ -300,8 +250,6 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         return "".join(f"{key} = {format_value(value)}\n" for key, value in config.items())
 
     def _write_config(self) -> None:
-        if self.ports is None:
-            raise RuntimeError("Memcache ports are not initialized")
         local_ip = self.config.cluster_ips[self.current_node_index]
         rendered_config = replace_cluster_placeholders(
             self.pool_config,
@@ -311,8 +259,12 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         )
         meta_config = dict(rendered_config["meta"])
         local_config = dict(rendered_config["local"])
-        meta_service_url = f"tcp://{self.service_host}:{self.ports.service}"
-        config_store_url = f"tcp://{self.service_host}:{self.ports.auxiliary}"
+        meta_service_url = (
+            f"tcp://{self.service_host}:{self.memcache_config.meta_service_port}"
+        )
+        config_store_url = (
+            f"tcp://{self.service_host}:{self.memcache_config.config_store_port}"
+        )
         meta_config["ock.mmc.meta_service_url"] = meta_service_url
         meta_config["ock.mmc.meta_service.config_store_url"] = config_store_url
         local_config["ock.mmc.meta_service_url"] = meta_service_url
@@ -334,9 +286,10 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         logger.info("Memcache MetaService launched on node 0")
 
     def _ready_ports(self) -> tuple[int, ...]:
-        if self.ports is None:
-            raise RuntimeError("Memcache ports are not initialized")
-        return (self.ports.service, self.ports.auxiliary)
+        return (
+            self.memcache_config.meta_service_port,
+            self.memcache_config.config_store_port,
+        )
 
 
 class NullKVPoolManager:
@@ -365,11 +318,11 @@ def create_kv_pool_manager(
     }
     if config.kv_pool is None:
         return NullKVPoolManager()
-    if config.kv_pool.type == "mooncake":
+    if isinstance(config.kv_pool, MooncakeKVPoolConfig):
         return ExternalDPMooncakeManager(**kwargs)
-    if config.kv_pool.type == "memcache":
+    if isinstance(config.kv_pool, MemcacheKVPoolConfig):
         return ExternalDPMemcacheManager(**kwargs)
-    raise ValueError(f"Unsupported kv_pool.type: {config.kv_pool.type}")
+    raise TypeError(f"Unsupported KV pool config: {type(config.kv_pool).__name__}")
 
 
 class ServerCommandBuilder:
