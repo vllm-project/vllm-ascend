@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import torch
@@ -68,7 +68,9 @@ class AscendInputBatch(InputBatch):
 
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
-    seq_lens_np: np.ndarray
+    # Defaulted so it stays orderable after InputBatch.max_query_len, which is
+    # a defaulted base field; real batches always pass it explicitly.
+    seq_lens_np: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
 
@@ -78,12 +80,14 @@ class AscendInputBatch(InputBatch):
         num_reqs: int,
         num_tokens: int,
         input_buffers: AscendInputBuffers,
+        max_query_len: int | None = None,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
         input_batch = InputBatch.make_dummy(
             num_reqs,
             num_tokens,
             input_buffers,
+            max_query_len=max_query_len,
         )
         # Evenly distribute num_tokens across requests instead of dumping the
         # whole remainder on the last request.

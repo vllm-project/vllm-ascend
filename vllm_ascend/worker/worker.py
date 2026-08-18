@@ -458,9 +458,14 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
-        # Initialize workspace manager
+        # Initialize workspace manager. The V2 runner reserves a second
+        # workspace lane for the DSpark drafter (upstream `_num_workspace_lanes`).
         num_ubatches = 1
-        init_workspace_manager(self.device, num_ubatches)
+        speculative_config = self.vllm_config.speculative_config
+        num_workspace_lanes = (
+            2 if self.use_v2_model_runner and speculative_config is not None and speculative_config.use_dspark() else 1
+        )
+        init_workspace_manager(self.device, num_ubatches, num_workspace_lanes)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")

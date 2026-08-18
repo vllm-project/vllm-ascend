@@ -861,7 +861,7 @@ class NPUModelRunner(GPUModelRunner):
         :return: tuple[
             logits_indices,
             spec_decode_metadata,
-            total_num_scheduled_tokens,
+            max_num_sampled_tokens,
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1282,7 +1282,7 @@ class NPUModelRunner(GPUModelRunner):
         return (
             logits_indices,
             spec_decode_metadata,
-            total_num_scheduled_tokens,
+            int(num_sampled_tokens.max()),
         )
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
@@ -1916,7 +1916,7 @@ class NPUModelRunner(GPUModelRunner):
                 (
                     logits_indices,
                     spec_decode_metadata,
-                    total_num_scheduled_tokens,
+                    max_num_sampled_tokens,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
@@ -2022,10 +2022,10 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn = None
                     num_reqs = self.input_batch.num_reqs
                     req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
-                    dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
+                    dsa_positions_np = self._dsa_positions_np_buf[:scheduler_output.total_num_scheduled_tokens]
                     np.add(
                         self.input_batch.num_computed_tokens_cpu[req_indices],
-                        self.query_pos.np[:total_num_scheduled_tokens],
+                        self.query_pos.np[:scheduler_output.total_num_scheduled_tokens],
                         out=dsa_positions_np,
                     )
 
@@ -2057,6 +2057,7 @@ class NPUModelRunner(GPUModelRunner):
                     max_query_len=max_num_scheduled_tokens,
                     ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
+                    max_num_sampled_tokens=max_num_sampled_tokens,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
@@ -2858,6 +2859,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded: int | None = None,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
+        max_num_sampled_tokens: int | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
@@ -3016,6 +3018,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
+            cm_base.max_logits_per_req = max_num_sampled_tokens
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(logits_indices)
 
         def _build_attn_group_metadata(
@@ -3362,6 +3365,7 @@ class NPUModelRunner(GPUModelRunner):
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                     for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
+                    max_num_sampled_tokens=int(num_sampled_tokens.max()),
                 )
                 if not is_graph_capturing:
                     for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):

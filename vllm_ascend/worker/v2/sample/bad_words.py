@@ -113,7 +113,9 @@ def _bad_words_kernel(
                             actual_pos = effective_len - prefix_len + j
                             if actual_pos >= output_len:
                                 spec_offset = actual_pos - output_len
-                                actual = tl.load(input_ids_ptr + cur_req_first_pos + spec_offset)
+                                # input_ids at local position 0 is the last
+                                # committed token; draft tokens start at 1.
+                                actual = tl.load(input_ids_ptr + cur_req_first_pos + spec_offset + 1)
                             else:
                                 actual = tl.load(output_base + actual_pos)
 

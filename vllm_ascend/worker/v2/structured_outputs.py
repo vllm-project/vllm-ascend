@@ -36,15 +36,26 @@ def _apply_grammar_bitmask_kernel(
     logits_ptr,
     logits_stride,
     logits_indices_ptr,
+    cu_num_logits_ptr,
     bitmask_ptr,
     bitmask_stride,
     vocab_size,
+    MASK_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     BLOCK_SIZE_SUB: tl.constexpr = 1024
     bitmask_idx = tl.program_id(0)
     block_id = tl.program_id(1)
-    logits_idx = tl.load(logits_indices_ptr + bitmask_idx)
+    # The mapping is keyed by (request, position) rather than absolute logit
+    # index: adaptive verification finalizes per-request logit offsets on
+    # device, so resolve them from the GPU cu_num_logits here.
+    mapping_idx = tl.load(logits_indices_ptr + bitmask_idx)
+    req_idx = mapping_idx // MASK_STRIDE
+    position_idx = mapping_idx % MASK_STRIDE
+    logits_idx = tl.load(cu_num_logits_ptr + req_idx)
+    num_req_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - logits_idx
+    logits_idx += position_idx
+    position_is_active = position_idx < num_req_logits
 
     # Sub-block tiling loop: process BLOCK_SIZE_SUB tokens per iteration
     for sub_offset in tl.range(0, BLOCK_SIZE, BLOCK_SIZE_SUB):
@@ -64,5 +75,5 @@ def _apply_grammar_bitmask_kernel(
         tl.store(
             logits_ptr + logits_idx * logits_stride + block_offset,
             -float("inf"),
-            mask=bitmask & (block_offset < vocab_size),
+            mask=position_is_active & bitmask & (block_offset < vocab_size),
         )
