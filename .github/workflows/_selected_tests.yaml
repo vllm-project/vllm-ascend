@@ -536,6 +536,16 @@ jobs:
             fi
             exit 0
 
+        - name: Upload pruned extra_recommended_tests.yaml as artifact
+          if: ${{ steps.prune-extra.outputs.pruned == 'true' }}
+          continue-on-error: true
+          uses: actions/upload-artifact@v4
+          with:
+            name: pruned-extra-recommended-tests-${{ env.TASK_NAME }}
+            path: extra_recommended_tests.yaml
+            if-no-files-found: ignore
+            retention-days: 7
+
         - name: Upload pruned extra_recommended_tests.yaml to OBS
           if: ${{ steps.prune-extra.outputs.pruned == 'true' }}
           continue-on-error: true
