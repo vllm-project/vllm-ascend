@@ -805,6 +805,7 @@ class EplbConfig:
         "eplb_heat_collection_stage": "all",
         "enable_omni_eplb": False,
         "omni_config_file": None,
+        "convert_weight_to_list": False
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -858,8 +859,11 @@ class EplbConfig:
         if self.enable_omni_eplb:
             if self.omni_config_file is not None and not os.path.exists(self.omni_config_file):
                 raise ValueError(f"omni_config_file does not exist: {self.omni_config_file}")
+
+        if self.config["dynamic_eplb"] and not self.enable_omni_eplb:
+            self.config["convert_weight_to_list"] = True
         
-        logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
+        logger.info("Dynamic EPLB is %s and convert moe's weights to list is %s", self.config["dynamic_eplb"], self.config["convert_weight_to_list"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
         logger.info("Omni EPLB is %s, config_file=%s", self.config["enable_omni_eplb"], self.config["omni_config_file"])
 

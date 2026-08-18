@@ -129,12 +129,6 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         else None
     )
         
-    # if moe_config.ep_rank == 0  and layer_id==7:
-    #     torch.save(global_placement, f"/data/kww/eplb-dump/omni_global_placement_{moe_config.num_experts}.pt")
-    #     torch.save(log2phy, f"/data/kww/eplb-dump/omni_log2phy_{moe_config.num_experts}.pt")
-    #     torch.save(n_redundant, f"/data/kww/eplb-dump/omni_n_redundant_{moe_config.num_experts}.pt")
-        # torch.save(global_expert_map, f"/data/kww/eplb-dump/omni_global_expert_map_{moe_config.num_experts}.pt")
-
     return torch.stack(global_expert_map), local_expert_map, log2phy, n_redundant
 
 
