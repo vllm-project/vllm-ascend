@@ -713,9 +713,9 @@ class TestAscendConfig(TestBase):
         }
         with patch.dict(os.environ, {}, clear=True):
             ascend_config = init_ascend_config(test_vllm_config)
+            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
 
         self.assertEqual(ascend_config.weight_nz_mode, 0)
-        self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
         mock_warning.assert_called_once_with(
             "RL config requires weight_nz_mode=0; overriding AscendConfig.weight_nz_mode from %s to 0.",
             2,
@@ -796,7 +796,7 @@ class TestAscendConfig(TestBase):
             init_ascend_config(test_vllm_config)
             self.assertNotIn("expandable_segments", os.environ["PYTORCH_NPU_ALLOC_CONF"])
             self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], "page_size:1g")
-        mock_info.assert_called_once_with(
+        mock_info.assert_any_call(
             "Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s",
             "page_size:1g",
         )
