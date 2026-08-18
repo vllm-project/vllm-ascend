@@ -1,4 +1,4 @@
-# DeepSeek-V3/3.1
+# DeepSeek-V3 & 3.1
 
 ## 1 Introduction
 

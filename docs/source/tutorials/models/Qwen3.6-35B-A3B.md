@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B Deployment Tutorial
+# Qwen3.6-35B-A3B
 
 ## 1 Introduction
 

@@ -1,4 +1,4 @@
-# Gemma4 Deployment Tutorial
+# Gemma4
 
 ## 1 Introduction
 

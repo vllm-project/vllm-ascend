@@ -23,11 +23,17 @@ import torch
 from vllm_ascend.attention.dsa_v1 import (
     DSA_METADATA_BUFFER_SIZE,
     AscendDSAImpl,
+    AscendDSALayerMetadata,
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
+from vllm_ascend.models.deepseek_v4.indexer import (
+    AscendIndexerMetadata,
+    IndexerOverlapPlan,
+)
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
@@ -555,12 +561,6 @@ def _make_impl() -> AscendDSAImpl:
             "vllm_ascend.attention.dsa_v1.get_ascend_config",
             return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
         ),
-        patch(
-            "vllm_ascend.attention.dsa_v1.get_current_vllm_config",
-            return_value=SimpleNamespace(
-                model_config=SimpleNamespace(hf_config=SimpleNamespace(use_index_cache=False))
-            ),
-        ),
     ):
         return AscendDSAImpl(
             n_heads=1,
@@ -587,6 +587,7 @@ def _make_impl() -> AscendDSAImpl:
             wo_b=linear,
             eps=1e-6,
             attn_sink=None,
+            swa_cache_layer=SimpleNamespace(prefix="swa_cache"),
         )
 
 
@@ -641,7 +642,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
             layer_name="layer",
             hidden_states=hidden_states,
             kv_cache=(torch.empty(0),),
-            attn_metadata=[metadata],
+            attn_metadata={"swa_cache": metadata},
             output=output,
         )
 
@@ -651,7 +652,8 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     forward_attention.assert_called_once()
     call = forward_attention.call_args
     assert torch.equal(call.args[1], hidden_states)
-    assert call.args[3] == [metadata]
+    assert call.args[3].attention is None
+    assert call.args[3].swa is metadata
     assert not call.kwargs
 
 
@@ -739,11 +741,15 @@ def test_forward_attention_routes_unified_req_metadata(
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):
+        layer_metadata = impl._get_layer_metadata(
+            "layer",
+            {"swa_cache": metadata},
+        )
         actual = impl._forward_attention(
             layer_name="layer",
             hidden_states=hidden_states,
             kv_cache=(torch.empty(0),),
-            attn_metadata=[metadata],
+            layer_metadata=layer_metadata,
         )
 
     assert actual is attention_output
@@ -765,3 +771,262 @@ def test_forward_attention_routes_unified_req_metadata(
         assert sparse_call.kwargs["cu_seqlens_ori_kv"] is req_metadata.query_start_loc
     else:
         assert "cu_seqlens_ori_kv" not in sparse_call.kwargs
+
+
+class TestAscendDSAComponentMetadata:
+    def test_routes_c4_metadata_by_cache_prefix(self):
+        impl = _make_impl()
+        impl.compress_ratio = 4
+        impl.compressor = SimpleNamespace(state_cache=SimpleNamespace(prefix="compressor.state_cache"))
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="indexer.k_cache"),
+            compressor=SimpleNamespace(state_cache=SimpleNamespace(prefix="indexer.compressor.state_cache")),
+        )
+        attention_metadata = cast(Any, object())
+        compressor_state_metadata = cast(Any, object())
+        indexer_cache_metadata = cast(Any, object())
+        indexer_state_metadata = cast(Any, object())
+        swa_metadata = cast(Any, object())
+
+        actual = impl._get_layer_metadata(
+            "layer",
+            {
+                "layer": attention_metadata,
+                "compressor.state_cache": compressor_state_metadata,
+                "indexer.k_cache": indexer_cache_metadata,
+                "indexer.compressor.state_cache": indexer_state_metadata,
+                "swa_cache": swa_metadata,
+            },
+        )
+
+        assert actual.attention is attention_metadata
+        assert actual.swa is swa_metadata
+        assert actual.compressor is not None
+        assert actual.compressor.cache is attention_metadata
+        assert actual.compressor.state is compressor_state_metadata
+        assert actual.indexer is not None
+        assert actual.indexer.compressor.cache is indexer_cache_metadata
+        assert actual.indexer.compressor.state is indexer_state_metadata
+
+
+class TestAscendDSACompressedCacheRouting:
+    def test_c4_delegates_through_indexer_overlap_plan(self):
+        impl = _make_impl()
+        impl.compress_ratio = 4
+        impl.multistream_dsv4_dsa_overlap = False
+        compressed_kv = torch.ones((1, 1, 4))
+        compress_slot_mapping = torch.zeros((1, 2), dtype=torch.int32)
+        impl.compressor = MagicMock(return_value=(compressed_kv, compress_slot_mapping))
+        topk_indices = torch.tensor([[[1, 2, 3]]], dtype=torch.int32)
+        impl.indexer = MagicMock(return_value=topk_indices)
+        compressor_metadata = AscendCompressorMetadata(
+            cache=cast(Any, object()),
+            state=cast(Any, object()),
+        )
+        indexer_metadata = AscendIndexerMetadata(compressor=compressor_metadata)
+        layer_metadata = AscendDSALayerMetadata(
+            attention=cast(Any, object()),
+            swa=cast(Any, object()),
+            compressor=compressor_metadata,
+            indexer=indexer_metadata,
+        )
+        hidden_states = torch.ones((1, 4))
+        qr = torch.ones((1, 4))
+        kv_cache = (torch.empty(0),)
+        compress_kv_cache = torch.empty(0)
+        state_cache = torch.empty(0)
+
+        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+            actual = impl._update_compressed_caches_and_select_topk(
+                layer_name="model.layers.0.self_attn.attn",
+                hidden_states=hidden_states,
+                qr=qr,
+                kv_cache=kv_cache,
+                layer_metadata=layer_metadata,
+                qr_pertoken_scale=None,
+                compress_kv_cache=compress_kv_cache,
+                state_cache=state_cache,
+            )
+            indexer_call = impl.indexer.call_args
+            overlap_plan = indexer_call.kwargs["overlap_plan"]
+            actual_kv, actual_mapping = overlap_plan.compute_attention_compressed_kv()
+            overlap_plan.scatter_attention_compressed_kv(actual_kv, actual_mapping)
+
+        assert actual is topk_indices
+        assert indexer_call.kwargs["layer_name"] == "model.layers.0.self_attn.attn"
+        assert indexer_call.kwargs["hidden_states"] is hidden_states
+        assert indexer_call.kwargs["qr"] is qr
+        assert indexer_call.kwargs["kv_cache"] is kv_cache
+        assert indexer_call.kwargs["metadata"] is indexer_metadata
+        assert isinstance(overlap_plan, IndexerOverlapPlan)
+        assert overlap_plan.aux_stream is None
+        impl.compressor.assert_called_once_with(
+            hidden_states=hidden_states,
+            state_cache=state_cache,
+            metadata=compressor_metadata,
+        )
+        scatter.assert_called_once_with(
+            compress_kv_cache,
+            compressed_kv,
+            compress_slot_mapping,
+        )
+
+    def test_c128_delegates_directly_to_compressor(self):
+        impl = _make_impl()
+        impl.compress_ratio = 128
+        compressed_kv = torch.ones((1, 1, 4))
+        compress_slot_mapping = torch.zeros((1, 2), dtype=torch.int32)
+        impl.compressor = MagicMock(return_value=(compressed_kv, compress_slot_mapping))
+        compressor_metadata = AscendCompressorMetadata(
+            cache=cast(Any, object()),
+            state=cast(Any, object()),
+        )
+        layer_metadata = AscendDSALayerMetadata(
+            attention=cast(Any, object()),
+            swa=cast(Any, object()),
+            compressor=compressor_metadata,
+        )
+        hidden_states = torch.ones((1, 4))
+        state_cache = torch.empty(0)
+        compress_kv_cache = torch.empty(0)
+
+        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+            actual = impl._update_compressed_caches_and_select_topk(
+                layer_name="layer",
+                hidden_states=hidden_states,
+                qr=torch.ones((1, 4)),
+                kv_cache=(torch.empty(0),),
+                layer_metadata=layer_metadata,
+                qr_pertoken_scale=None,
+                compress_kv_cache=compress_kv_cache,
+                state_cache=state_cache,
+            )
+
+        assert actual is None
+        impl.compressor.assert_called_once_with(
+            hidden_states=hidden_states,
+            state_cache=state_cache,
+            metadata=compressor_metadata,
+        )
+        scatter.assert_called_once_with(
+            compress_kv_cache,
+            compressed_kv,
+            compress_slot_mapping,
+        )
+
+
+@pytest.mark.parametrize("compress_ratio", [4, 128])
+def test_forward_attention_sets_compressed_kv_args(compress_ratio: int):
+    impl = _make_impl()
+    impl.compress_ratio = compress_ratio
+    impl.multistream_dsv4_dsa_overlap = False
+    hidden_states = torch.ones((2, 4))
+    q = torch.ones((2, 1, 2))
+    qr = torch.ones((2, 2))
+    attention_output = torch.full((2, 1, 2), 9.0)
+    cos = torch.ones((2, 1, 1, 2))
+    sin = torch.zeros((2, 1, 1, 2))
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    seq_lens = torch.tensor([4], dtype=torch.int32)
+    common_req = AscendDSAReqMetadata(
+        block_table=torch.tensor([[1]], dtype=torch.int32),
+        seq_lens=seq_lens,
+        slot_mapping=None,
+        block_size=128,
+        query_start_loc=query_start_loc,
+        sin=cast(Any, {"layer": sin}),
+        cos=cast(Any, {"layer": cos}),
+        sas_metadata=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32),
+        cu_cmp_seqlen_list=torch.tensor([0, 1], dtype=torch.int32),
+    )
+    swa_req = AscendDSAReqMetadata(
+        block_table=torch.tensor([[5]], dtype=torch.int32),
+        seq_lens=seq_lens,
+        slot_mapping=torch.tensor([[0, 0], [0, 1]], dtype=torch.int32),
+        block_size=128,
+        query_start_loc=query_start_loc,
+    )
+    attention_metadata = AscendDSAMetadata(2, 0, 0, 1, req_metadata=common_req)
+    compressor_metadata = AscendCompressorMetadata(
+        cache=attention_metadata,
+        state=cast(Any, object()),
+    )
+    layer_metadata = AscendDSALayerMetadata(
+        attention=attention_metadata,
+        swa=AscendDSAMetadata(2, 0, 0, 1, req_metadata=swa_req),
+        compressor=compressor_metadata,
+    )
+    compress_kv_cache = torch.empty(0)
+    swa_kv_cache = torch.empty(0)
+    state_cache = torch.empty(0)
+    topk_indices = torch.tensor([[[1, 2, 3]]], dtype=torch.int32) if compress_ratio == 4 else None
+    sparse_attn_op = MagicMock(return_value=(attention_output,))
+
+    def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
+        extra_kwargs.update(kwargs)
+
+    with (
+        patch.object(
+            DeviceOperator,
+            "unpack_dsa_forward_kv_cache",
+            return_value=(
+                compress_kv_cache,
+                swa_kv_cache,
+                state_cache,
+                None,
+                None,
+                None,
+            ),
+        ),
+        patch.object(
+            impl,
+            "_mla_prolog_single_stream",
+            return_value=(q, qr, None),
+        ),
+        patch.object(
+            impl,
+            "_update_compressed_caches_and_select_topk",
+            return_value=topk_indices,
+        ) as update_compressed_caches,
+        patch.object(
+            DeviceOperator,
+            "get_dsa_sparse_attn_op",
+            return_value=sparse_attn_op,
+        ),
+        patch.object(
+            DeviceOperator,
+            "get_dsa_sparse_attn_base_kwargs",
+            return_value={},
+        ),
+        patch.object(
+            DeviceOperator,
+            "add_dsa_sparse_attn_extra_kwargs",
+            side_effect=add_extra_kwargs,
+        ),
+        patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
+        patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
+    ):
+        actual = impl._forward_attention(
+            "layer",
+            hidden_states,
+            (torch.empty(0),),
+            layer_metadata,
+        )
+
+    assert actual is attention_output
+    update_call = update_compressed_caches.call_args
+    assert update_call.kwargs["layer_name"] == "layer"
+    assert update_call.kwargs["hidden_states"] is hidden_states
+    assert update_call.kwargs["layer_metadata"] is layer_metadata
+    assert update_call.kwargs["compress_kv_cache"] is compress_kv_cache
+    assert update_call.kwargs["state_cache"] is state_cache
+    sparse_kwargs = sparse_attn_op.call_args.kwargs
+    assert sparse_kwargs["cmp_kv"] is compress_kv_cache
+    assert sparse_kwargs["cmp_block_table"] is common_req.block_table
+    assert sparse_kwargs["cmp_mask_mode"] == 3
+    assert sparse_kwargs["cmp_ratio"] == compress_ratio
+    assert sparse_kwargs["cu_seqlens_cmp_kv"] is common_req.cu_cmp_seqlen_list
+    if compress_ratio == 4:
+        assert sparse_kwargs["cmp_sparse_indices"] is topk_indices
+    else:
+        assert "cmp_sparse_indices" not in sparse_kwargs
