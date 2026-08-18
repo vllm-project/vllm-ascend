@@ -325,6 +325,42 @@ class DeepseekV4Indexer(nn.Module):
         assert hadamard is not None
         return cache_req_metadata, hadamard
 
+    def update_cache(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        metadata: AscendIndexerMetadata,
+    ) -> None:
+        """Update Indexer caches without projecting queries or selecting TopK."""
+        if hidden_states.shape[0] == 0:
+            return
+
+        state_cache, key_cache, scale_cache, full_cache = self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
+        _, hadamard = self._get_indexer_cache_metadata(metadata)
+        compressor = self.compressor
+        assert compressor is not None
+        key, slot_mapping = compressor(
+            hidden_states=hidden_states,
+            state_cache=state_cache,
+            metadata=metadata.compressor,
+        )
+        if key.shape[0] == 0:
+            return
+        if compressor.rotate:
+            key = rotate_activation(key, hadamard)
+        _, key_scale = self.ops.quantize_key_and_update_cache(
+            key,
+            key_cache,
+            full_cache,
+            slot_mapping,
+        )
+        if key_scale is not None:
+            self.ops.update_scale_cache(
+                key_scale,
+                scale_cache,
+                slot_mapping,
+            )
+
     def _get_cached_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
         if self.topk_indices_buffer is None:
             raise RuntimeError("topk_indices_buffer is required to read cached TopK indices")
