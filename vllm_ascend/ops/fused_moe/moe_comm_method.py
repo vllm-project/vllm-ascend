@@ -49,6 +49,29 @@ _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 _LOCAL_MEGA_MOE_MAX_TOKENS_PER_CALL = 2048
 
 
+def _as_local_mega_moe_tensor_list(
+    value,
+    item_dim: int,
+    name: str,
+    num_experts: int | None = None,
+) -> list[torch.Tensor]:
+    """Normalize stacked per-expert tensors for the local MegaMoe op."""
+    values = value if isinstance(value, list) else [value]
+    if len(values) == 1 and values[0].dim() == item_dim + 1:
+        values = list(values[0].unbind(dim=0))
+    elif len(values) == 1 and item_dim == 1 and num_experts is not None and num_experts > 1:
+        flat_scale = values[0]
+        if flat_scale.dim() == 1 and flat_scale.numel() % num_experts == 0:
+            values = list(flat_scale.view(num_experts, -1).unbind(dim=0))
+
+    invalid_dims = [tensor.dim() for tensor in values if tensor.dim() != item_dim]
+    if invalid_dims:
+        raise ValueError(
+            f"Local MegaMoe expects {name} entries to be {item_dim}-D, but got entry dimensions {invalid_dims}."
+        )
+    return values
+
+
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
     return _MoECommMethods.get(moe_comm_type)
 
@@ -291,13 +314,21 @@ class FusedMC2CommImpl(MoECommMethod):
         assert fused_experts_input.weights.w2_scale is not None
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
 
-        def to_list(value):
-            return value if isinstance(value, list) else [value]
-
-        weight1 = to_list(fused_experts_input.weights.w1)
-        weight2 = to_list(fused_experts_input.weights.w2)
-        weight_scales1 = to_list(fused_experts_input.weights.w1_scale)
-        weight_scales2 = to_list(fused_experts_input.weights.w2_scale)
+        weight1 = _as_local_mega_moe_tensor_list(fused_experts_input.weights.w1, 2, "weight1")
+        weight2 = _as_local_mega_moe_tensor_list(fused_experts_input.weights.w2, 2, "weight2")
+        weight_scales1 = _as_local_mega_moe_tensor_list(
+            fused_experts_input.weights.w1_scale, 1, "weight_scales1", num_experts=len(weight1)
+        )
+        weight_scales2 = _as_local_mega_moe_tensor_list(
+            fused_experts_input.weights.w2_scale, 1, "weight_scales2", num_experts=len(weight2)
+        )
+        expert_counts = {len(weight1), len(weight2), len(weight_scales1), len(weight_scales2)}
+        if len(expert_counts) != 1:
+            raise ValueError(
+                "Local MegaMoe requires equal per-expert weight and scale list lengths, "
+                f"got w1={len(weight1)}, w2={len(weight2)}, "
+                f"w1_scale={len(weight_scales1)}, w2_scale={len(weight_scales2)}."
+            )
         weight_scales1 = [scale.view(torch.uint64) if scale.dtype == torch.int64 else scale for scale in weight_scales1]
         weight_scales2 = [scale.view(torch.uint64) if scale.dtype == torch.int64 else scale for scale in weight_scales2]
 
