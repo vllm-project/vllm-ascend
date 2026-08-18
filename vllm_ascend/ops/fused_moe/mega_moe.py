@@ -25,7 +25,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEFusedExpertsInput
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -38,6 +37,8 @@ _MEGA_MOE_SUPPORTED_QUANTS = {
 _FP4_PACK_FACTOR = 2
 _MXFP_SCALE_BLOCK_SIZE = 64
 _MXFP_SCALE_MULTIPLIER = 2
+# Tensor.view requires a torch.dtype; torch_npu's operator dtype enum is interpreted as a shape.
+_TORCH_FLOAT8_E8M0FNU_DTYPE = getattr(torch, "float8_e8m0fnu", None)
 
 
 def _as_tensor_list(tensor_or_list: torch.Tensor | list[torch.Tensor] | None, name: str) -> list[torch.Tensor]:
@@ -51,16 +52,16 @@ def _as_tensor_list(tensor_or_list: torch.Tensor | list[torch.Tensor] | None, na
 
 
 def _view_mxfp_scales_as_e8m0(scales: list[torch.Tensor], name: str) -> list[torch.Tensor]:
-    if FLOAT8_E8M0FNU_DTYPE is None:
-        raise RuntimeError("A5 MegaMoE requires torch_npu.float8_e8m0fnu for weight scales.")
+    if _TORCH_FLOAT8_E8M0FNU_DTYPE is None:
+        raise RuntimeError("A5 MegaMoE requires torch.float8_e8m0fnu to reinterpret MXFP weight scales.")
 
     normalized_scales: list[torch.Tensor] = []
     for idx, scale in enumerate(scales):
-        if scale.dtype == FLOAT8_E8M0FNU_DTYPE:
+        if scale.dtype == _TORCH_FLOAT8_E8M0FNU_DTYPE:
             normalized_scales.append(scale)
             continue
         if scale.dtype == torch.uint8:
-            normalized_scales.append(scale.view(FLOAT8_E8M0FNU_DTYPE))
+            normalized_scales.append(scale.view(_TORCH_FLOAT8_E8M0FNU_DTYPE))
             continue
         raise RuntimeError(
             f"A5 MegaMoE requires {name}[{idx}] to be FLOAT8_E8M0 weight scale, "
