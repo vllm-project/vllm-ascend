@@ -241,7 +241,7 @@ test_cases:
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
-  - name: "deepseek_R1_W8A8_Perfermance_0006"
+  - name: "deepseek_R1_W8A8_Performance_0006"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/vllm-ascend/DeepSeek-V3.1-w8a8c8-mxfp8"
     envs:
       <<: *envs
@@ -332,7 +332,7 @@ test_cases:
       - "--enforce-eager"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--reasoning-parser"
       - "deepseek_r1"
       - "--additional-config"
@@ -366,7 +366,7 @@ test_cases:
       - "--enforce-eager"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--reasoning-parser"
       - "deepseek_r1'+'"
       - "--additional-config"
@@ -398,7 +398,7 @@ test_cases:
       - "--enforce-eager"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--reasoning-parser"
       - "deepseek_r1'+'"
       - "--additional-config"
@@ -424,7 +424,7 @@ test_cases:
       - "40000"
       - "--max-num-batched-tokens"
       - "2048"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--gpu-memory-utilization"
       - "0.9"
       - "--enable-auto-tool-choice"
@@ -458,7 +458,7 @@ test_cases:
       - "40000"
       - "--max-num-batched-tokens"
       - "2048"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--gpu-memory-utilization"
       - "0.9"
       - "--enable-auto-tool-choice"
