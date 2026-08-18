@@ -3,6 +3,7 @@
 
 from collections.abc import Callable
 from functools import lru_cache
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -12,8 +13,7 @@ import torch
 def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
     """Load the SparseFlashMla torch operators shipped by ops-transformer."""
     try:
-        import cann_ops_transformer  # noqa: F401  # type: ignore[import-not-found]
-
+        import_module("cann_ops_transformer")
         namespace = torch.ops.cann_ops_transformer
         attention_op = namespace.sparse_flash_mla
         metadata_op = namespace.sparse_flash_mla_metadata
