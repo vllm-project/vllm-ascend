@@ -21,6 +21,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner
 from tests.e2e.weekly.single_node.features.structured_output.cases import (
@@ -28,7 +29,6 @@ from tests.e2e.weekly.single_node.features.structured_output.cases import (
     SERVED_MODEL_NAME,
 )
 
-SERVER_PORT = 8004
 SERVER_ENV = {
     "VLLM_USE_V1": "1",
     "TASK_QUEUE_ENABLE": "1",
@@ -61,10 +61,11 @@ def offline_runner() -> Generator[VllmRunner, None, None]:
 
 @pytest.fixture(scope="module")
 def openai_server() -> Generator[RemoteOpenAIServer, None, None]:
+    server_port = get_open_port()
     server_args = [
         "--trust-remote-code",
         "--port",
-        str(SERVER_PORT),
+        str(server_port),
         "--data-parallel-size",
         "1",
         "--tensor-parallel-size",
@@ -92,7 +93,7 @@ def openai_server() -> Generator[RemoteOpenAIServer, None, None]:
         MODEL_NAME,
         server_args,
         server_host="127.0.0.1",
-        server_port=SERVER_PORT,
+        server_port=server_port,
         env_dict=SERVER_ENV,
         auto_port=False,
     ) as server:
