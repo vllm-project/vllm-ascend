@@ -34,6 +34,7 @@ def _make_vllm_config(
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
     resolved_moe_quant_type: QuantType | None = None,
+    hidden_act: str | None = None,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -42,6 +43,8 @@ def _make_vllm_config(
         hf_text_config_attrs["quantization_config"] = quantization_config
     if num_experts_per_tok is not None:
         hf_text_config_attrs["num_experts_per_tok"] = num_experts_per_tok
+    if hidden_act is not None:
+        hf_text_config_attrs["hidden_act"] = hidden_act
 
     model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
@@ -70,13 +73,14 @@ def _make_vllm_config(
     return vllm_config
 
 
-def _make_model_instance(quant_type: QuantType):
+def _make_model_instance(quant_type: QuantType, activation=None):
     return SimpleNamespace(
         model=SimpleNamespace(
             layers=[
                 SimpleNamespace(
                     mlp=SimpleNamespace(
                         quant_type=quant_type,
+                        activation=activation,
                     ),
                 ),
             ],
@@ -93,6 +97,9 @@ def _patch_select_moe_comm_method_deps(
     enable_fused_mc2: int = 0,
     is_moe: bool = True,
     spec_decode_enabled: bool = False,
+    mega_moe_max_tokens: int = 65536,
+    dynamic_eplb: bool = False,
+    num_redundant_experts: int = 0,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
@@ -101,7 +108,14 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, mega_moe_max_tokens=65536),
+        lambda: SimpleNamespace(
+            enable_fused_mc2=enable_fused_mc2,
+            mega_moe_max_tokens=mega_moe_max_tokens,
+            eplb_config=SimpleNamespace(
+                dynamic_eplb=dynamic_eplb,
+                num_redundant_experts=num_redundant_experts,
+            ),
+        ),
     )
     monkeypatch.setattr(
         afc,
@@ -256,7 +270,7 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
         (129, 8, 4, 0, None, MoECommType.ALLTOALL),
         (129, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
         (512, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
-        (513, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
+        (513, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
         (129, 8, 4, 1, QuantType.MXFP8, MoECommType.FUSED_MC2),
         (129, 8, 4, 1, QuantType.MXFP4, MoECommType.FUSED_MC2),
         (129, 8, 4, 2, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
@@ -305,6 +319,98 @@ def test_select_moe_comm_method_a5_reads_quant_type_from_model_instance(monkeypa
         == MoECommType.FUSED_MC2
     )
     assert not hasattr(vllm_config, "ascend_moe_quant_type")
+
+
+def test_select_moe_comm_method_a5_honors_configured_mega_moe_capacity(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=512,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        resolved_moe_quant_type=QuantType.W4A8MXFP,
+    )
+
+    assert afc.select_moe_comm_method(512, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(513, vllm_config) == MoECommType.ALLTOALL
+
+
+@pytest.mark.parametrize(
+    ("dynamic_eplb", "num_redundant_experts"),
+    [(True, 0), (False, 1)],
+)
+def test_select_moe_comm_method_a5_falls_back_for_unsupported_eplb(
+    monkeypatch,
+    dynamic_eplb,
+    num_redundant_experts,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+        dynamic_eplb=dynamic_eplb,
+        num_redundant_experts=num_redundant_experts,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        resolved_moe_quant_type=QuantType.MXFP8,
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
+
+
+@pytest.mark.parametrize("hidden_act", ["swigluoai", "swiglustep", "situglu"])
+def test_select_moe_comm_method_a5_falls_back_for_unsupported_activation(monkeypatch, hidden_act):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        resolved_moe_quant_type=QuantType.MXFP8,
+        hidden_act=hidden_act,
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
+
+
+def test_select_moe_comm_method_a5_reads_activation_from_model_instance(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    model_instance = _make_model_instance(QuantType.W4A8MXFP, activation="swiglustep")
+
+    assert afc.select_moe_comm_method(129, vllm_config, model_instance=model_instance) == MoECommType.ALLTOALL
+
+
+def test_select_moe_comm_method_a5_falls_back_for_unsupported_mxfp_group_size(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        resolved_moe_quant_type=QuantType.MXFP8,
+        quant_description={"group_size": 64},
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
 
 
 def test_select_moe_comm_method_a5_reads_quant_type_from_vllm_config_cache(monkeypatch):

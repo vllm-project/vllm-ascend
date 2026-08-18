@@ -35,7 +35,9 @@ _MEGA_MOE_SUPPORTED_QUANTS = {
     QuantType.MXFP4,
     QuantType.W4A8MXFP,
 }
-_MEGA_MOE_MAX_TOKENS_PER_RANK = 512
+_FP4_PACK_FACTOR = 2
+_MXFP_SCALE_BLOCK_SIZE = 64
+_MXFP_SCALE_MULTIPLIER = 2
 
 
 def _as_tensor_list(tensor_or_list: torch.Tensor | list[torch.Tensor] | None, name: str) -> list[torch.Tensor]:
@@ -98,21 +100,117 @@ class MegaMoEBackend:
         self._sym_buffer = None
         self._sym_buffer_key: _MegaMoEBufferKey | None = None
 
-    def _make_buffer_key(self, fused_experts_input: MoEFusedExpertsInput) -> _MegaMoEBufferKey:
-        hidden_size = fused_experts_input.hidden_states.shape[-1]
-        w1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")[0]
-        if w1.ndim != 3:
-            raise ValueError(f"A5 MegaMoE expects expert weight w1 to be 3D, got shape {tuple(w1.shape)}.")
-        if w1.shape[-1] != hidden_size:
+    @staticmethod
+    def _validate_stacked_mxfp_layout(
+        fused_experts_input: MoEFusedExpertsInput,
+        w1: list[torch.Tensor],
+        w2: list[torch.Tensor],
+        w1_scale: list[torch.Tensor],
+        w2_scale: list[torch.Tensor],
+    ) -> int:
+        tensors = {
+            "w1": w1,
+            "w2": w2,
+            "w1_scale": w1_scale,
+            "w2_scale": w2_scale,
+        }
+        for name, values in tensors.items():
+            if len(values) != 1:
+                raise ValueError(
+                    f"A5 MegaMoE requires {name} to contain one stacked tensor, got {len(values)} tensors."
+                )
+            if not values[0].is_contiguous():
+                raise ValueError(
+                    f"A5 MegaMoE requires contiguous {name}, got shape={tuple(values[0].shape)} "
+                    f"and stride={values[0].stride()}."
+                )
+
+        weight1 = w1[0]
+        weight2 = w2[0]
+        scale1 = w1_scale[0]
+        scale2 = w2_scale[0]
+        if weight1.ndim != 3 or weight2.ndim != 3:
             raise ValueError(
-                f"A5 MegaMoE expects w1 shape (num_experts_per_rank, 2 * intermediate_hidden, hidden), "
-                f"got w1 shape {tuple(w1.shape)} and hidden size {hidden_size}."
+                "A5 MegaMoE expects stacked 3D expert weights, "
+                f"got w1={tuple(weight1.shape)} and w2={tuple(weight2.shape)}."
             )
-        projected_hidden = int(w1.shape[-2])
+        if scale1.ndim != 4 or scale2.ndim != 4:
+            raise ValueError(
+                "A5 MegaMoE expects stacked 4D MXFP scales, "
+                f"got w1_scale={tuple(scale1.shape)} and w2_scale={tuple(scale2.shape)}."
+            )
+
+        hidden_size = int(fused_experts_input.hidden_states.shape[-1])
+        fp4_packed = fused_experts_input.quant.quant_type in {QuantType.MXFP4, QuantType.W4A8MXFP}
+        pack_factor = _FP4_PACK_FACTOR if fp4_packed else 1
+        projected_hidden = int(weight1.shape[1])
         if projected_hidden % 2 != 0:
-            raise ValueError(f"A5 MegaMoE expects w1.shape[-2] to be even, got {projected_hidden}.")
+            raise ValueError(f"A5 MegaMoE expects w1.shape[1] to be even, got {projected_hidden}.")
         intermediate_hidden = projected_hidden // 2
-        max_tokens_per_rank = min(get_ascend_config().mega_moe_max_tokens, _MEGA_MOE_MAX_TOKENS_PER_RANK)
+        if hidden_size % pack_factor != 0 or intermediate_hidden % pack_factor != 0:
+            raise ValueError(
+                "A5 MegaMoE FP4 dimensions must be divisible by the packing factor: "
+                f"hidden_size={hidden_size}, intermediate_hidden={intermediate_hidden}, "
+                f"pack_factor={pack_factor}."
+            )
+        expected_weight1_shape = (weight1.shape[0], projected_hidden, hidden_size // pack_factor)
+        expected_weight2_shape = (weight1.shape[0], hidden_size, intermediate_hidden // pack_factor)
+        expected_scale1_shape = (
+            weight1.shape[0],
+            projected_hidden,
+            (hidden_size + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
+            _MXFP_SCALE_MULTIPLIER,
+        )
+        expected_scale2_shape = (
+            weight1.shape[0],
+            hidden_size,
+            (intermediate_hidden + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
+            _MXFP_SCALE_MULTIPLIER,
+        )
+        actual_shapes = {
+            "w1": tuple(weight1.shape),
+            "w2": tuple(weight2.shape),
+            "w1_scale": tuple(scale1.shape),
+            "w2_scale": tuple(scale2.shape),
+        }
+        expected_shapes = {
+            "w1": expected_weight1_shape,
+            "w2": expected_weight2_shape,
+            "w1_scale": expected_scale1_shape,
+            "w2_scale": expected_scale2_shape,
+        }
+        if actual_shapes != expected_shapes:
+            raise ValueError(
+                "A5 MegaMoE received an incompatible stacked MXFP layout: "
+                f"actual={actual_shapes}, expected={expected_shapes}."
+            )
+        return projected_hidden
+
+    def _make_buffer_key(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+        projected_hidden: int | None = None,
+    ) -> _MegaMoEBufferKey:
+        hidden_size = int(fused_experts_input.hidden_states.shape[-1])
+        if projected_hidden is None:
+            w1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
+            w2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
+            w1_scale = _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale")
+            w2_scale = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
+            projected_hidden = self._validate_stacked_mxfp_layout(
+                fused_experts_input,
+                w1,
+                w2,
+                w1_scale,
+                w2_scale,
+            )
+        max_tokens_per_rank = get_ascend_config().mega_moe_max_tokens
+        if fused_experts_input.hidden_states.shape[0] > max_tokens_per_rank:
+            raise ValueError(
+                "A5 MegaMoE input exceeds the configured capacity: "
+                f"num_tokens={fused_experts_input.hidden_states.shape[0]}, "
+                f"mega_moe_max_tokens={max_tokens_per_rank}."
+            )
         act_dtype = torch.float8_e4m3fn
         if fused_experts_input.quant.mxfp is not None and fused_experts_input.quant.mxfp.act_quant_type is not None:
             act_dtype = fused_experts_input.quant.mxfp.act_quant_type
@@ -121,13 +219,13 @@ class MegaMoEBackend:
             max_tokens_per_rank=max_tokens_per_rank,
             top_k=self.moe_config.experts_per_token,
             hidden_size=hidden_size,
-            intermediate_hidden=intermediate_hidden,
+            intermediate_hidden=projected_hidden,
             dispatch_quant_mode=4,
             dispatch_quant_out_dtype=act_dtype,
         )
 
-    def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput):
-        key = self._make_buffer_key(fused_experts_input)
+    def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput, projected_hidden: int):
+        key = self._make_buffer_key(fused_experts_input, projected_hidden)
         if self._sym_buffer is not None and self._sym_buffer_key == key:
             logger.debug("A5 MegaMoE reuses sym buffer: %s", key)
             return self._sym_buffer
@@ -151,11 +249,12 @@ class MegaMoEBackend:
     def _normalize_activation(activation: Any) -> str:
         activation_name = activation if isinstance(activation, str) else getattr(activation, "name", str(activation))
         activation_lower = activation_name.lower().removeprefix("moeactivation.")
-        if activation_lower in ("silu", "swiglu", "swigluoai", "swiglustep"):
+        if activation_lower in ("silu", "swiglu"):
             return "swiglu"
-        if activation_lower in ("situ", "situglu"):
-            return "situglu"
-        raise ValueError(f"A5 MegaMoE does not support activation={activation!r}.")
+        raise ValueError(
+            f"A5 MegaMoE does not support activation={activation!r} without changing its semantics. "
+            "Only SILU/SwiGLU is currently supported."
+        )
 
     @staticmethod
     def _get_activation_clamp(swiglu_limit: float) -> float | None:
@@ -169,6 +268,10 @@ class MegaMoEBackend:
             )
         if not fused_experts_input.quant.is_mxfp:
             raise RuntimeError("A5 MegaMoE requires MXFP quant parameters.")
+        if fused_experts_input.dynamic_eplb:
+            raise RuntimeError("A5 MegaMoE does not support dynamic EPLB expert weight lists.")
+        if fused_experts_input.routing.global_redundant_expert_num:
+            raise RuntimeError("A5 MegaMoE does not support redundant physical experts.")
 
         topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
@@ -183,6 +286,13 @@ class MegaMoEBackend:
         w2_scale = _view_mxfp_scales_as_e8m0(
             _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale"),
             "w2_scale",
+        )
+        projected_hidden = self._validate_stacked_mxfp_layout(
+            fused_experts_input,
+            w1,
+            w2,
+            w1_scale,
+            w2_scale,
         )
         activation = self._normalize_activation(fused_experts_input.activation)
         activation_clamp = self._get_activation_clamp(fused_experts_input.swiglu_limit)
@@ -227,7 +337,7 @@ class MegaMoEBackend:
             "l1_weights_sf": w1_scale,
             "l2_weights": w2,
             "l2_weights_sf": w2_scale,
-            "sym_buffer": self._get_sym_buffer(fused_experts_input),
+            "sym_buffer": self._get_sym_buffer(fused_experts_input, projected_hidden),
             "activation": activation,
             "activation_clamp": activation_clamp,
         }
