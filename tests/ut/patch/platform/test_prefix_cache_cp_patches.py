@@ -21,12 +21,14 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+import vllm_ascend.patch.platform.patch_kv_cache_utils as patch_kv_cache_utils
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _ascend_free_blocks,
     _ascend_resolve_kv_cache_block_sizes,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
@@ -153,6 +155,30 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     expected_scheduler_block_size = math.lcm(16, 32) * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+def test_ascend_free_blocks_uses_vllm_v026_signature(monkeypatch) -> None:
+    freed_blocks = []
+
+    def _fake_free_blocks(_block_pool, blocks) -> None:
+        freed_blocks.extend(blocks)
+
+    monkeypatch.setattr(
+        patch_kv_cache_utils,
+        "_orig_block_pool_free_blocks",
+        _fake_free_blocks,
+    )
+    block = SimpleNamespace(
+        block_id=1,
+        ref_cnt=1,
+        is_null=False,
+        prev_free_block=None,
+        next_free_block=None,
+    )
+
+    _ascend_free_blocks(object(), [block, block])
+
+    assert freed_blocks == [block]
 
 
 @pytest.mark.parametrize(

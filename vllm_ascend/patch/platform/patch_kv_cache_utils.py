@@ -84,7 +84,6 @@ _orig_block_pool_free_blocks = BlockPool.free_blocks
 def _ascend_free_blocks(
     self: BlockPool,
     ordered_blocks: Iterable[KVCacheBlock],
-    prepend: bool = False,
 ) -> None:
     filtered_blocks: list[KVCacheBlock] = []
     for block in _dedupe_free_blocks(ordered_blocks, "BlockPool.free_blocks"):
@@ -92,7 +91,7 @@ def _ascend_free_blocks(
             _swa_block_diag("ref_cnt_underflow_free_blocks", block, "BlockPool.free_blocks")
             continue
         filtered_blocks.append(block)
-    _orig_block_pool_free_blocks(self, filtered_blocks, prepend)
+    _orig_block_pool_free_blocks(self, filtered_blocks)
 
 
 _orig_free_queue_prepend_n = FreeKVCacheBlockQueue.prepend_n
