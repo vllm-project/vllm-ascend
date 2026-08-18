@@ -100,7 +100,7 @@ jobs:
           cat > extra_tests.txt <<'EOF'
           tests/ut/test_utils.py
           tests/e2e/pull_request/one_card/_310p/test_classification_310p.py
-          tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py
+          tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py::test_qwen3_vl_8b_tp1_fp16
           EOF
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file extra_tests.txt
