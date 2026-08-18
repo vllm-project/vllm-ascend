@@ -68,8 +68,12 @@ DEEPSEEK_V4_PROMPTS = [
     "What is the meaning of life?",
 ]
 
-# The routed-expert SwiGLU clamp changes the second continuation (#14397).
-DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", "What is the meaning of life?', 'What is the"]
+# The routed-expert SwiGLU clamp introduces the second continuation (#14397),
+# while the original continuation can still occur with the previous stack.
+DEEPSEEK_V4_GOLDENS = (
+    ["Hello, my name is {name} and I", 'What is the meaning of life?",\n    "What is'],
+    ["Hello, my name is {name} and I", "What is the meaning of life?', 'What is the"],
+)
 
 
 @dataclass(frozen=True)
@@ -155,7 +159,7 @@ FULL_FEATURE_MODEL_CASES = [
         name="deepseek_v4_w4a8_dsa_cp_full_features",
         model="gdydems/DeepSeek-V4-Flash-w4a8-mtp",
         prompts=DEEPSEEK_V4_PROMPTS,
-        expected_outputs=DEEPSEEK_V4_GOLDEN,
+        expected_outputs=DEEPSEEK_V4_GOLDENS,
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 8192,
