@@ -18,6 +18,7 @@ config:
     dp_rank_start: 0
     tp_size: 2
     dp_address: "${NODE_0_IP}"
+
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 13321
@@ -61,7 +62,7 @@ templates:
       - --max-num-seqs
       - "24"
       - --max-model-len
-      - "1010000"
+      - "262144"
       - --max-num-batched-tokens
       - "8192"
       - --gpu-memory-utilization
@@ -120,7 +121,7 @@ templates:
       - --max-num-seqs
       - "24"
       - --max-model-len
-      - "1010000"
+      - "262144"
       - --max-num-batched-tokens
       - "8192"
       - --gpu-memory-utilization
