@@ -79,7 +79,7 @@ build_package() {
 }
 
 verify_cpu_only() {
-    if [[ -e /dev/davinci0 || -e /dev/davinci_manager ]]; then
+    if ls /dev/davinci* >/dev/null 2>&1 || [[ -e /dev/davinci_manager ]]; then
         echo "An Ascend NPU device is visible in the CPU-only environment." >&2
         return 1
     fi
