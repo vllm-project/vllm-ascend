@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import regex as re
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ROUTING_DISAGGREGATED_PREFILL,
@@ -30,6 +33,15 @@ from tests.e2e.nightly.multi_node.scripts.utils import get_net_interface
 logger = logging.getLogger(__name__)
 
 SERVER_READY_TIMEOUT_SECONDS = 3600
+KV_POOL_READY_TIMEOUT_SECONDS = 300
+MOONCAKE_EVICTION_HIGH_WATERMARK_RATIO = 0.9
+MOONCAKE_EVICTION_RATIO = 0.1
+MOONCAKE_DEFAULT_KV_LEASE_TTL = 11000
+MOONCAKE_LIBRARY_PATHS = (
+    "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake",
+    "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages",
+)
+PRIMARY_NODE_INDEX = 0
 TEMPLATE_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 ENV_VAR_RE = re.compile(r"(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -44,6 +56,320 @@ class ServerCommand:
 
 
 RankProcess = tuple[subprocess.Popen, RankInfo, Path]
+
+
+@dataclass(frozen=True)
+class KVPoolPorts:
+    """Dynamically allocated ports shared by all external DP nodes."""
+
+    service: int
+    auxiliary: int
+
+
+class ExternalDPKVPoolManager:
+    """Common lifecycle for a KV pool service running on node 0."""
+
+    def __init__(
+        self,
+        *,
+        config: ExternalDPConfig,
+        current_node_index: int,
+        log_root: Path,
+    ):
+        self.config = config
+        self.current_node_index = current_node_index
+        self.log_root = log_root
+        self.process: subprocess.Popen | None = None
+        self.ports: KVPoolPorts | None = None
+        self.server_envs: dict[str, str] = {}
+
+    @property
+    def pool_type(self) -> str:
+        if self.config.kv_pool is None:
+            raise RuntimeError("KV pool is not configured")
+        return self.config.kv_pool.type
+
+    @property
+    def pool_config(self) -> dict[str, Any]:
+        if self.config.kv_pool is None:
+            raise RuntimeError("KV pool is not configured")
+        return self.config.kv_pool.config
+
+    @property
+    def service_host(self) -> str:
+        return self.config.cluster_ips[PRIMARY_NODE_INDEX]
+
+    def start(self) -> None:
+        self.ports = self._resolve_ports()
+        self._write_config()
+        if self.current_node_index == PRIMARY_NODE_INDEX:
+            self._start_service()
+        self._wait_ready()
+
+    def _coordination_file(self) -> Path:
+        log_prefix = os.environ.get("LOG_PREFIX")
+        if not log_prefix:
+            if self.config.num_nodes > 1:
+                raise RuntimeError(
+                    "LOG_PREFIX must point to a shared directory for "
+                    "multi-node KV pool startup"
+                )
+            coordination_root = self.log_root
+        else:
+            coordination_root = Path(log_prefix)
+        safe_test_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.config.test_name)
+        return coordination_root / "kv_pool_coord" / f"{safe_test_name}.json"
+
+    def _resolve_ports(self) -> KVPoolPorts:
+        coordination_file = self._coordination_file()
+        if self.current_node_index == PRIMARY_NODE_INDEX:
+            service_port = get_open_port()
+            auxiliary_port = get_open_port()
+            while auxiliary_port == service_port:
+                auxiliary_port = get_open_port()
+            ports = KVPoolPorts(service=service_port, auxiliary=auxiliary_port)
+            coordination_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary_file = coordination_file.with_suffix(".tmp")
+            temporary_file.write_text(
+                json.dumps(
+                    {
+                        "type": self.pool_type,
+                        "service": ports.service,
+                        "auxiliary": ports.auxiliary,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            temporary_file.replace(coordination_file)
+            logger.info("Allocated %s KV pool ports: %s", self.pool_type, ports)
+            return ports
+
+        deadline = time.monotonic() + KV_POOL_READY_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                values = json.loads(coordination_file.read_text(encoding="utf-8"))
+                if values.get("type") == self.pool_type:
+                    return KVPoolPorts(
+                        service=int(values["service"]),
+                        auxiliary=int(values["auxiliary"]),
+                    )
+            except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                pass
+            time.sleep(1)
+        raise TimeoutError(f"Timed out waiting for KV pool ports: {coordination_file}")
+
+    def _write_config(self) -> None:
+        raise NotImplementedError
+
+    def _start_service(self) -> None:
+        raise NotImplementedError
+
+    def _ready_ports(self) -> tuple[int, ...]:
+        if self.ports is None:
+            raise RuntimeError("KV pool ports are not initialized")
+        return (self.ports.service,)
+
+    def _wait_ready(self, timeout: int = KV_POOL_READY_TIMEOUT_SECONDS) -> None:
+        pending_ports = set(self._ready_ports())
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.process is not None and self.process.poll() is not None:
+                raise RuntimeError(
+                    f"{self.pool_type} service exited before becoming ready with code {self.process.returncode}"
+                )
+            for port in tuple(pending_ports):
+                try:
+                    with socket.create_connection((self.service_host, port), timeout=2):
+                        pending_ports.remove(port)
+                except OSError:
+                    pass
+            if not pending_ports:
+                logger.info("%s KV pool ready on node 0", self.pool_type)
+                return
+            time.sleep(1)
+        raise TimeoutError(
+            f"Timed out waiting for {self.pool_type} KV pool at {self.service_host}; ports={sorted(pending_ports)}"
+        )
+
+    @staticmethod
+    def _write_text_atomic(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+        temporary_path.write_text(content, encoding="utf-8")
+        temporary_path.replace(path)
+
+    def cleanup(self) -> None:
+        if self.process is None:
+            return
+        logger.info("Stopping %s KV pool service pid=%d", self.pool_type, self.process.pid)
+        terminate_process_tree(self.process.pid)
+        self.process = None
+
+    def __enter__(self):
+        try:
+            self.start()
+        except Exception:
+            self.cleanup()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.cleanup()
+
+
+class ExternalDPMooncakeManager(ExternalDPKVPoolManager):
+    """Materialize Mooncake config and manage one cluster-wide master."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.config_path = (
+            self.log_root / f"node-{self.current_node_index}" / "runtime" / "mooncake.json"
+        ).resolve()
+
+    @property
+    def master_address(self) -> str:
+        if self.ports is None:
+            raise RuntimeError("Mooncake ports are not initialized")
+        return f"{self.service_host}:{self.ports.service}"
+
+    def _write_config(self) -> None:
+        local_ip = self.config.cluster_ips[self.current_node_index]
+        store_config = replace_cluster_placeholders(
+            self.pool_config,
+            cluster_ips=self.config.cluster_ips,
+            local_ip=local_ip,
+            current_node_index=self.current_node_index,
+        )
+        store_config["master_server_address"] = self.master_address
+        self._write_text_atomic(
+            self.config_path,
+            json.dumps(store_config, indent=2, ensure_ascii=False),
+        )
+        self.server_envs = {
+            "MOONCAKE_CONFIG_PATH": str(self.config_path),
+            "MOONCAKE_MASTER": self.master_address,
+        }
+        logger.info(
+            "Generated Mooncake config for node %d: %s",
+            self.current_node_index,
+            self.config_path,
+        )
+
+    def _start_service(self) -> None:
+        if self.ports is None:
+            raise RuntimeError("Mooncake ports are not initialized")
+        cmd = [
+            "mooncake_master",
+            "--port",
+            str(self.ports.service),
+            "--metrics_port",
+            str(self.ports.auxiliary),
+            "--eviction_high_watermark_ratio",
+            str(MOONCAKE_EVICTION_HIGH_WATERMARK_RATIO),
+            "--eviction_ratio",
+            str(MOONCAKE_EVICTION_RATIO),
+            "--default_kv_lease_ttl",
+            str(MOONCAKE_DEFAULT_KV_LEASE_TTL),
+        ]
+        inherited_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+        library_path_parts = [*MOONCAKE_LIBRARY_PATHS]
+        if inherited_library_path:
+            library_path_parts.append(inherited_library_path)
+        env = {"LD_LIBRARY_PATH": os.pathsep.join(library_path_parts)}
+        log_file = self.log_root / f"node-{self.current_node_index}" / "mooncake-master.log"
+        self.process = start_logged_process(cmd, env, log_file)
+        logger.info("Mooncake master launched at %s", self.master_address)
+
+
+class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
+    """Materialize Memcache configs and manage one cluster-wide MetaService."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        runtime_dir = self.log_root / f"node-{self.current_node_index}" / "runtime"
+        self.meta_config_path = (runtime_dir / "mmc-meta.conf").resolve()
+        self.local_config_path = (runtime_dir / "mmc-local.conf").resolve()
+
+    @staticmethod
+    def _format_config(config: dict[str, Any]) -> str:
+        def format_value(value: Any) -> str:
+            if isinstance(value, bool):
+                return str(value).lower()
+            return str(value)
+
+        return "".join(f"{key} = {format_value(value)}\n" for key, value in config.items())
+
+    def _write_config(self) -> None:
+        if self.ports is None:
+            raise RuntimeError("Memcache ports are not initialized")
+        local_ip = self.config.cluster_ips[self.current_node_index]
+        rendered_config = replace_cluster_placeholders(
+            self.pool_config,
+            cluster_ips=self.config.cluster_ips,
+            local_ip=local_ip,
+            current_node_index=self.current_node_index,
+        )
+        meta_config = dict(rendered_config["meta"])
+        local_config = dict(rendered_config["local"])
+        meta_service_url = f"tcp://{self.service_host}:{self.ports.service}"
+        config_store_url = f"tcp://{self.service_host}:{self.ports.auxiliary}"
+        meta_config["ock.mmc.meta_service_url"] = meta_service_url
+        meta_config["ock.mmc.meta_service.config_store_url"] = config_store_url
+        local_config["ock.mmc.meta_service_url"] = meta_service_url
+        local_config["ock.mmc.local_service.config_store_url"] = config_store_url
+        self._write_text_atomic(self.meta_config_path, self._format_config(meta_config))
+        self._write_text_atomic(self.local_config_path, self._format_config(local_config))
+        self.server_envs = {"MMC_LOCAL_CONFIG_PATH": str(self.local_config_path)}
+        logger.info("Generated Memcache configs for node %d", self.current_node_index)
+
+    def _start_service(self) -> None:
+        cmd = [
+            sys.executable,
+            "-c",
+            "from memcache_hybrid import MetaService; MetaService.main()",
+        ]
+        env = {"MMC_META_CONFIG_PATH": str(self.meta_config_path)}
+        log_file = self.log_root / f"node-{self.current_node_index}" / "memcache-meta-service.log"
+        self.process = start_logged_process(cmd, env, log_file)
+        logger.info("Memcache MetaService launched on node 0")
+
+    def _ready_ports(self) -> tuple[int, ...]:
+        if self.ports is None:
+            raise RuntimeError("Memcache ports are not initialized")
+        return (self.ports.service, self.ports.auxiliary)
+
+
+class NullKVPoolManager:
+    """No-op context manager used when kv_pool is not configured."""
+
+    def __init__(self):
+        self.server_envs: dict[str, str] = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return None
+
+
+def create_kv_pool_manager(
+    *,
+    config: ExternalDPConfig,
+    current_node_index: int,
+    log_root: Path,
+) -> ExternalDPKVPoolManager | NullKVPoolManager:
+    kwargs = {
+        "config": config,
+        "current_node_index": current_node_index,
+        "log_root": log_root,
+    }
+    if config.kv_pool is None:
+        return NullKVPoolManager()
+    if config.kv_pool.type == "mooncake":
+        return ExternalDPMooncakeManager(**kwargs)
+    if config.kv_pool.type == "memcache":
+        return ExternalDPMemcacheManager(**kwargs)
+    raise ValueError(f"Unsupported kv_pool.type: {config.kv_pool.type}")
 
 
 class ServerCommandBuilder:
@@ -177,11 +503,13 @@ class ExternalDPServerManager:
         ranks: list[RankInfo],
         current_node_index: int,
         log_root: Path,
+        extra_envs: dict[str, str] | None = None,
     ):
         self.config = config
         self.ranks = ranks
         self.current_node_index = current_node_index
         self.log_root = log_root
+        self.extra_envs = dict(extra_envs or {})
         self.command_builder = ServerCommandBuilder(config)
         self.dist_envs = build_dist_envs(
             config.cluster_ips[current_node_index],
@@ -196,7 +524,7 @@ class ExternalDPServerManager:
             for rank in local_ranks:
                 template = self.config.launch_templates[rank.node_index]
                 template = type(template)(
-                    envs={**template.envs, **self.dist_envs},
+                    envs={**template.envs, **self.dist_envs, **self.extra_envs},
                     server_cmd_template=template.server_cmd_template,
                 )
                 server_cmd = self.command_builder.build(rank, template)

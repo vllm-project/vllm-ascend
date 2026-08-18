@@ -16,6 +16,7 @@ from tests.e2e.nightly.multi_node.scripts.utils import (
 logger = logging.getLogger(__name__)
 
 ROUTING_DISAGGREGATED_PREFILL = "disaggregated_prefill"
+SUPPORTED_KV_POOL_TYPES = {"memcache", "mooncake"}
 PROXY_SCRIPT_BY_ROUTING_TYPE = {
     ROUTING_DISAGGREGATED_PREFILL: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
 }
@@ -69,6 +70,14 @@ class NodeTemplate:
 
 
 @dataclass(frozen=True)
+class KVPoolConfig:
+    """KV pool backend and backend-specific configuration."""
+
+    type: str
+    config: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RankInfo:
     """One concrete vLLM server rank expanded from a node config."""
 
@@ -105,6 +114,7 @@ class ExternalDPConfig:
     launch_templates: list[NodeTemplate]
     benchmark_cases: list[dict[str, Any]] = field(default_factory=list)
     special_dependencies: dict[str, str] = field(default_factory=dict)
+    kv_pool: KVPoolConfig | None = None
 
     @property
     def is_disaggregated_prefill(self) -> bool:
@@ -189,6 +199,7 @@ class ExternalDPConfigLoader:
         nodes = cls._parse_nodes(raw_config, resolved_cluster_ips)
         launch_templates = cls._parse_templates(raw_config)
         benchmark_cases = cls._parse_benchmarks(raw_config)
+        kv_pool = cls._parse_kv_pool(raw_config)
 
         config = ExternalDPConfig(
             test_name=str(raw_config.get("test_name", "external_dp_test")),
@@ -202,6 +213,7 @@ class ExternalDPConfigLoader:
             launch_templates=launch_templates,
             benchmark_cases=benchmark_cases,
             special_dependencies=dict(raw_config.get("special_dependencies", {})),
+            kv_pool=kv_pool,
         )
         cls._validate_config(config)
         return config
@@ -324,11 +336,29 @@ class ExternalDPConfigLoader:
             benchmark_cases.append(case_with_name)
         return benchmark_cases
 
+    @staticmethod
+    def _parse_kv_pool(raw_config: dict[str, Any]) -> KVPoolConfig | None:
+        raw_kv_pool = raw_config.get("kv_pool")
+        if raw_kv_pool is None:
+            return None
+        if not isinstance(raw_kv_pool, dict):
+            raise TypeError("kv_pool must be a mapping")
+
+        pool_type = str(raw_kv_pool.get("type", "")).lower()
+        if pool_type not in SUPPORTED_KV_POOL_TYPES:
+            raise ValueError(f"Unsupported kv_pool.type: {pool_type!r}")
+
+        pool_config = raw_kv_pool.get("config")
+        if not isinstance(pool_config, dict):
+            raise TypeError("kv_pool.config must be a mapping")
+        return KVPoolConfig(type=pool_type, config=dict(pool_config))
+
     @classmethod
     def _validate_config(cls, config: ExternalDPConfig) -> None:
         cls._validate_config_sizes(config)
         cls._validate_routing(config)
         cls._validate_node_parallel_config(config)
+        cls._validate_kv_pool(config)
 
     @staticmethod
     def _validate_config_sizes(config: ExternalDPConfig) -> None:
@@ -384,6 +414,16 @@ class ExternalDPConfigLoader:
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
+
+    @staticmethod
+    def _validate_kv_pool(config: ExternalDPConfig) -> None:
+        kv_pool = config.kv_pool
+        if kv_pool is None:
+            return
+        if kv_pool.type == "memcache":
+            for section in ("meta", "local"):
+                if not isinstance(kv_pool.config.get(section), dict):
+                    raise TypeError(f"kv_pool.config.{section} must be a mapping for memcache")
 
 
 class RankResolver:
