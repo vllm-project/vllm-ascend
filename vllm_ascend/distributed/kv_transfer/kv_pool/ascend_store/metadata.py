@@ -226,7 +226,12 @@ def get_effective_group_block_size(
     group_cache_families: Sequence[str],
     group_id: int,
 ) -> int:
-    return group_block_sizes[group_id] * max(
+    # Keep the fallback used by the scheduler and worker implementations
+    # before this helper was extracted.  Some callers may provide a group id
+    # that is not present in the grouped block-size metadata; those callers
+    # must continue to use the first group's block size.
+    block_size = group_block_sizes[0] if group_id >= len(group_block_sizes) else group_block_sizes[group_id]
+    return block_size * max(
         infer_cache_family_ratio(get_group_cache_family(group_cache_families, group_id)),
         1,
     )

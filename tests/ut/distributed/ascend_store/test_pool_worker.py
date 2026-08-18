@@ -778,6 +778,24 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 0)
 
+    def test_lookup_all_cached(self):
+        worker = self._make_worker()
+        worker.m_store.exists.return_value = [1, 1]
+        result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
+        self.assertEqual(result, 32)
+
+    def test_lookup_partial(self):
+        worker = self._make_worker()
+        worker.m_store.exists.return_value = [1, 0]
+        result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
+        self.assertEqual(result, 16)
+
+    def test_lookup_exception(self):
+        worker = self._make_worker()
+        worker.m_store.exists.side_effect = Exception("fail")
+        result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
+        self.assertEqual(result, 0)
+
     def test_lookup_layerwise(self):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 1, 1, 1]
@@ -1086,6 +1104,20 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     def test_process_save_for_layer_batch_skip_no_save(self):
         worker = self._make_worker()
         req = ReqMeta(req_id="r1", token_len_chunk=32, block_ids=[0, 1], block_hashes=["h0", "h1"], can_save=False)
+        worker._process_save_for_layer_batch([req], 0)
+        self.assertEqual(len(worker.layer_save_tasks[0]), 0)
+
+    def test_process_save_for_layer_batch_skip_zero_range(self):
+        worker = self._make_worker()
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            save_start_token=16,
+            save_end_token=16,
+        )
         worker._process_save_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_save_tasks[0]), 0)
 
