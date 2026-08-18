@@ -15,7 +15,11 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -72,6 +76,128 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
+
+    def test_dsv4_packed_cache_uses_one_backing_with_per_layer_offsets(self):
+        runner = self._build_runner()
+        runner.use_compress = True
+        layer_specs = {
+            "model.layers.0.c4_attn": AscendMLAAttentionSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=4,
+                dtype=torch.float16,
+                compress_ratio=4,
+                model_version="deepseek_v4",
+                indexes_kv_by_block_stride=True,
+            ),
+            "model.layers.1.c128_attn": AscendMLAAttentionSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=2,
+                dtype=torch.float16,
+                compress_ratio=128,
+                model_version="deepseek_v4",
+                indexes_kv_by_block_stride=True,
+            ),
+            "model.mtp.layers.0.c128_attn": AscendMLAAttentionSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=2,
+                dtype=torch.float16,
+                compress_ratio=128,
+                model_version="deepseek_v4",
+                indexes_kv_by_block_stride=True,
+            ),
+            "model.layers.2.swa_attn": AscendSlidingWindowMLASpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=2,
+                dtype=torch.float16,
+                sliding_window=128,
+                model_version="deepseek_v4",
+                indexes_kv_by_block_stride=True,
+            ),
+        }
+        layer_names = list(layer_specs)
+        c4_name, c128_name, mtp_name, swa_name = layer_names
+        block_stride = sum(layer_specs[name].page_size_bytes for name in (c4_name, c128_name, mtp_name))
+        num_blocks = 2
+        packed_size = block_stride * num_blocks
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=packed_size,
+                    shared_by=[c4_name, swa_name],
+                    offset=0,
+                    block_stride=block_stride,
+                ),
+                KVCacheTensor(
+                    size=packed_size,
+                    shared_by=[c128_name],
+                    offset=layer_specs[c4_name].page_size_bytes,
+                    block_stride=block_stride,
+                ),
+                KVCacheTensor(
+                    size=packed_size,
+                    shared_by=[mtp_name],
+                    offset=layer_specs[c4_name].page_size_bytes + layer_specs[c128_name].page_size_bytes,
+                    block_stride=block_stride,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[c4_name, c128_name, mtp_name],
+                    kv_cache_spec=UniformTypeKVCacheSpecs(
+                        block_size=4,
+                        kv_cache_specs={name: layer_specs[name] for name in (c4_name, c128_name, mtp_name)},
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    layer_names=[swa_name],
+                    kv_cache_spec=UniformTypeKVCacheSpecs(
+                        block_size=4,
+                        kv_cache_specs={swa_name: layer_specs[swa_name]},
+                    ),
+                ),
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        self.assertEqual(
+            raw_caches[c4_name].untyped_storage().data_ptr(),
+            raw_caches[mtp_name].untyped_storage().data_ptr(),
+        )
+
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = lambda blocks, block_size, num_heads, head_size: (
+            blocks,
+            block_size,
+            num_heads,
+            head_size,
+        )
+        runner.attn_backend = backend
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=backend,
+                layer_names=[layer_name],
+            )
+            for layer_name, spec in layer_specs.items()
+        ]
+        caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)
+
+        first_cache = caches[c4_name][0]
+        self.assertTrue(all(cache[0].stride(0) * cache[0].element_size() == block_stride for cache in caches.values()))
+        self.assertEqual(caches[swa_name][0].data_ptr(), first_cache.data_ptr())
+        self.assertEqual(
+            caches[c128_name][0].data_ptr() - first_cache.data_ptr(),
+            layer_specs[c4_name].page_size_bytes,
+        )
+        self.assertEqual(
+            caches[mtp_name][0].data_ptr() - first_cache.data_ptr(),
+            layer_specs[c4_name].page_size_bytes + layer_specs[c128_name].page_size_bytes,
+        )
 
     def test_sparse_c8_indexer_reuses_raw_cache_from_shared_descriptor(self):
         runner = self._build_runner()

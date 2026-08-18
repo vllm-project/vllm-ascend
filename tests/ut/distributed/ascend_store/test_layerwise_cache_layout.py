@@ -539,7 +539,7 @@ def test_non_attention_cache_spec_is_rejected():
         )
 
 
-def test_packed_cache_tensor_descriptors_are_rejected():
+def test_packed_cache_tensor_descriptors_are_converted_to_layerwise_buffers():
     layer_names = [
         "model.layers.0.self_attn",
         "model.layers.1.self_attn",
@@ -547,6 +547,7 @@ def test_packed_cache_tensor_descriptors_are_rejected():
     ]
     spec = _make_full_attention_spec()
     kv_cache_config = SimpleNamespace(
+        num_blocks=2,
         kv_cache_tensors=[
             KVCacheTensor(
                 size=16,
@@ -567,8 +568,16 @@ def test_packed_cache_tensor_descriptors_are_rejected():
         ],
     )
 
-    with pytest.raises(NotImplementedError, match="pre-shared or packed"):
-        apply_layerwise_kv_cache_plan(
-            kv_cache_config,
-            _make_vllm_config(3, 1),
-        )
+    apply_layerwise_kv_cache_plan(
+        kv_cache_config,
+        _make_vllm_config(3, 1),
+    )
+
+    assert len(kv_cache_config.kv_cache_tensors) == 2
+    assert all(tensor.offset == 0 for tensor in kv_cache_config.kv_cache_tensors)
+    assert all(tensor.block_stride == 0 for tensor in kv_cache_config.kv_cache_tensors)
+    assert all(tensor.size == spec.page_size_bytes * 2 for tensor in kv_cache_config.kv_cache_tensors)
+    assert (
+        sorted(layer_name for tensor in kv_cache_config.kv_cache_tensors for layer_name in tensor.shared_by)
+        == layer_names
+    )

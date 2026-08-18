@@ -299,9 +299,12 @@ def apply_layerwise_kv_cache_plan(
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
-    if any(len(tensor.shared_by) != 1 or tensor.offset != 0 or tensor.block_stride != 0 for tensor in old_tensors):
+    uses_packed_layout = any(tensor.block_stride > 0 for tensor in old_tensors)
+    if uses_packed_layout and any(tensor.block_stride <= 0 for tensor in old_tensors):
+        raise NotImplementedError("Layerwise KV cache reuse does not support mixed packed and unpacked descriptors.")
+    if not uses_packed_layout and any(len(tensor.shared_by) != 1 or tensor.offset != 0 for tensor in old_tensors):
         raise NotImplementedError(
-            "Layerwise KV cache reuse does not support pre-shared or packed KV cache tensor descriptors."
+            "Layerwise KV cache reuse does not support pre-shared unpacked KV cache tensor descriptors."
         )
 
     if actual_layers < base_layers:
@@ -318,23 +321,29 @@ def apply_layerwise_kv_cache_plan(
             actual_layers - base_layers,
         )
 
-    tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
+    tensors_by_name = {} if uses_packed_layout else {tensor.shared_by[0]: tensor for tensor in old_tensors}
 
     def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
-        cache_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
-        tensor_sizes = {tensor.size for tensor in cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("Layers sharing layerwise KV buffers must have equal tensor sizes for every cache spec.")
         reference_spec = layer_specs[shared_by[0]]
         if any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
             raise ValueError(
                 "Layers sharing layerwise KV buffers must have identical cache specs for every named cache spec."
             )
+        if uses_packed_layout:
+            tensor_size = reference_spec.page_size_bytes * kv_cache_config.num_blocks
+        else:
+            cache_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
+            tensor_sizes = {tensor.size for tensor in cache_tensors}
+            if len(tensor_sizes) != 1:
+                raise ValueError(
+                    "Layers sharing layerwise KV buffers must have equal tensor sizes for every cache spec."
+                )
+            tensor_size = cache_tensors[0].size
         new_tensors.append(
             KVCacheTensor(
                 shared_by=shared_by,
-                size=cache_tensors[0].size,
+                size=tensor_size,
             )
         )
 

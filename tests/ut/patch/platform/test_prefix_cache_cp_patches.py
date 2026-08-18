@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
@@ -25,9 +26,6 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
-)
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_resolve_kv_cache_block_sizes,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
@@ -105,10 +103,12 @@ def _make_vllm_config(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
+            prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
         ),
+        kv_transfer_config=None,
     )
 
 
@@ -126,8 +126,8 @@ def _make_coordinator_for_effective_block_size(
 @pytest.mark.parametrize(
     ("enable_prefix_caching", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2, id="dcp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="dcp-with-prefix-caching"),
+        pytest.param(False, 32, id="dcp-without-prefix-caching"),
+        pytest.param(True, 32, id="dcp-with-prefix-caching"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
@@ -140,12 +140,15 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
         dcp=2,
     )
 
-    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
         kv_cache_config,
         vllm_config,
     )
 
-    expected_scheduler_block_size = math.lcm(16, 32) * 2
+    # Upstream scales attention blocks by DCP, while Mamba blocks retain
+    # their physical size: LCM(16 * 2, 32) == 32. Mamba mode "none" does
+    # not support finer block hashing, so both outputs use that granularity.
+    expected_scheduler_block_size = math.lcm(16 * 2, 32)
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
 

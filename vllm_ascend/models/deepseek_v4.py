@@ -132,6 +132,8 @@ class AscendCompressorStateCache(CompressorStateCache):
             sliding_window=self.sliding_window,
             alignment=None,
             page_size_padded=page_size_padded,
+            indexes_kv_by_block_stride=True,
+            model_version="deepseek_v4",
         )
 
     def forward(self): ...
@@ -169,6 +171,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
+            indexes_kv_by_block_stride=True,
         )
 
     def forward(self): ...
@@ -205,6 +208,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             cache_dtype_str=self.cache_config.cache_dtype,
             model_version="deepseek_v4",
             alignment=None,
+            indexes_kv_by_block_stride=True,
         )
 
     def forward(self): ...

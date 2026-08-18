@@ -6,6 +6,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 from vllm.v1.outputs import KVConnectorOutput
 
 # Clean up stale mock modules installed by other kv offload tests that replace
@@ -63,6 +64,37 @@ def test_recompute_cpu_offload_metadata_defaults_are_empty():
     assert metadata.preempt_load_gpu_blocks == []
     assert metadata.preempt_load_cpu_blocks == []
     assert metadata.preempt_load_event_to_reqs == {}
+
+
+def test_recompute_cpu_offload_preserves_packed_layout_without_double_counting():
+    gpu_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=400,
+                shared_by=["c4", "swa"],
+                offset=0,
+                block_stride=100,
+            ),
+            KVCacheTensor(
+                size=400,
+                shared_by=["c128"],
+                offset=40,
+                block_stride=100,
+            ),
+        ],
+        kv_cache_groups=[],
+    )
+
+    cpu_config = RecomputeCPUOffloadScheduler._derive_cpu_config(
+        gpu_config,
+        cpu_capacity_bytes=1_000,
+    )
+
+    assert cpu_config.num_blocks == 10
+    assert [tensor.size for tensor in cpu_config.kv_cache_tensors] == [1_000, 1_000]
+    assert [tensor.offset for tensor in cpu_config.kv_cache_tensors] == [0, 40]
+    assert [tensor.block_stride for tensor in cpu_config.kv_cache_tensors] == [100, 100]
 
 
 def test_recompute_cpu_offload_connector_scheduler_methods_forward():

@@ -155,16 +155,26 @@ class RecomputeCPUOffloadScheduler:
         for t in gpu_config.kv_cache_tensors:
             if t.shared_by:
                 gpu_kv_cache_tensors.append(t)
-        gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
+        packed_tensors = [t for t in gpu_kv_cache_tensors if t.block_stride > 0]
+        unpacked_tensors = [t for t in gpu_kv_cache_tensors if t.block_stride == 0]
+        packed_total_bytes = max((t.size for t in packed_tensors), default=0)
+        gpu_total_bytes = packed_total_bytes + sum(t.size for t in unpacked_tensors)
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
-        cpu_tensors = [
-            KVCacheTensor(
-                size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
+        cpu_tensors = []
+        for tensor in gpu_kv_cache_tensors:
+            if tensor.block_stride > 0:
+                size = tensor.block_stride * num_cpu_blocks
+            else:
+                size = tensor.size // num_gpu_blocks * num_cpu_blocks
+            cpu_tensors.append(
+                KVCacheTensor(
+                    size=size,
+                    shared_by=list(tensor.shared_by),
+                    offset=tensor.offset,
+                    block_stride=tensor.block_stride,
+                )
             )
-            for t in gpu_kv_cache_tensors
-        ]
         return KVCacheConfigCls(
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,

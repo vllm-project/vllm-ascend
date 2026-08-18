@@ -3924,7 +3924,34 @@ class NPUModelRunner(GPUModelRunner):
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
+        packed_backing: torch.Tensor | None = None
+        packed_size: int | None = None
+        packed_block_stride: int | None = None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            if kv_cache_tensor.block_stride > 0:
+                if kv_cache_tensor.size % kv_cache_tensor.block_stride:
+                    raise ValueError("Packed KV cache size must be divisible by block_stride.")
+                if packed_backing is None:
+                    packed_backing = self._allocate_int8_cache_tensor(
+                        kv_cache_tensor.size,
+                        alignment,
+                    )
+                    packed_size = kv_cache_tensor.size
+                    packed_block_stride = kv_cache_tensor.block_stride
+                elif (
+                    kv_cache_tensor.size != packed_size
+                    or kv_cache_tensor.block_stride != packed_block_stride
+                ):
+                    raise ValueError("All packed KV cache descriptors must share one backing layout.")
+                for layer_name in kv_cache_tensor.shared_by:
+                    layer_spec = layer_kv_cache_spec[layer_name]
+                    if kv_cache_tensor.offset < 0 or (
+                        kv_cache_tensor.offset + layer_spec.page_size_bytes > kv_cache_tensor.block_stride
+                    ):
+                        raise ValueError(f"Packed KV cache page for {layer_name} exceeds its block stride.")
+                    kv_cache_raw_tensors[layer_name] = packed_backing
+                continue
+
             use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
@@ -4114,17 +4141,22 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_dtype_list: list[int],
         page_size_bytes: int,
         overlap_full_kv_cache: bool = False,
+        page_offset_bytes: int = 0,
+        block_stride_bytes: int | None = None,
     ):
         reshaped_kv_tensors = []
-        base_storage_offset_bytes = raw_tensor.storage_offset()
+        base_storage_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size() + page_offset_bytes
         storage_offset_bytes = base_storage_offset_bytes
+        physical_page_stride_bytes = block_stride_bytes or page_size_bytes
         for idx, (shape, dtype) in enumerate(zip(kv_cache_shape_list, kv_cache_dtype_list)):
             if overlap_full_kv_cache and idx == 2:
                 storage_offset_bytes = base_storage_offset_bytes
             dtype_size = get_dtype_size(dtype)
-            num_element_per_page = (
-                page_size_bytes // dtype_size
-            )
+            if physical_page_stride_bytes % dtype_size:
+                raise ValueError(
+                    f"KV cache block stride {physical_page_stride_bytes} is not aligned to {dtype}."
+                )
+            num_element_per_page = physical_page_stride_bytes // dtype_size
 
             stride = torch.empty(shape).stride()
             target_stride = (num_element_per_page, *stride[1:])
@@ -4158,6 +4190,12 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        layer_packing = {
+            layer_name: (kv_cache_tensor.offset, kv_cache_tensor.block_stride)
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors
+            if kv_cache_tensor.block_stride > 0
+            for layer_name in kv_cache_tensor.shared_by
+        }
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -4172,8 +4210,19 @@ class NPUModelRunner(GPUModelRunner):
                 if self.use_compress and isinstance(current_kv_cache_spec,
                                                     (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
-                    sum_page_size_bytes = kv_tensor.numel()
-                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
+                    packing = layer_packing.get(layer_name)
+                    if packing is None:
+                        page_offset_bytes = 0
+                        block_stride_bytes = current_kv_cache_spec.page_size_bytes
+                    else:
+                        page_offset_bytes, block_stride_bytes = packing
+                        if page_offset_bytes < 0 or (
+                            page_offset_bytes + current_kv_cache_spec.page_size_bytes > block_stride_bytes
+                        ):
+                            raise ValueError("Packed DSA cache page exceeds its block stride.")
+                    if kv_tensor.numel() % block_stride_bytes:
+                        raise ValueError("DSA cache allocation is not a whole number of physical blocks.")
+                    num_blocks = kv_tensor.numel() // block_stride_bytes
                     assert num_blocks == kv_cache_config.num_blocks, \
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
@@ -4220,6 +4269,8 @@ class NPUModelRunner(GPUModelRunner):
                                            kv_cache_dtype_list,
                                            current_kv_cache_spec.page_size_bytes,
                                            overlap_full_kv_cache=overlap_full_kv_cache,
+                                           page_offset_bytes=page_offset_bytes,
+                                           block_stride_bytes=block_stride_bytes,
                                            )
 
                     kv_caches[layer_name] = kv_cache
@@ -4718,6 +4769,8 @@ class NPUModelRunner(GPUModelRunner):
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    if isinstance(spec, AttentionSpec):
+                        spec = replace(spec, indexes_kv_by_block_stride=True)
                     kv_cache_spec[layer_name] = spec
             elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):

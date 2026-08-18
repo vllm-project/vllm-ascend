@@ -44,7 +44,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return self.block_size
 
     @property
-    def page_size_bytes(self) -> int:
+    def real_page_size_bytes(self) -> int:
         return (
             self.block_size
             * self.num_kv_heads
@@ -53,8 +53,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
+        assert all(isinstance(spec, AscendMLAAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be AscendMLAAttentionSpec."
         )
         layout_set = {
             (
@@ -71,8 +71,19 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             "All attention layers in the same KV cache group must use the same KV cache layout."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        compress_ratio_set = set(spec.compress_ratio for spec in specs)
+        model_version_set = set(spec.model_version for spec in specs)
+        alignment_set = set(spec.alignment for spec in specs)
+        page_size_padded_set = set(spec.page_size_padded for spec in specs)
+        block_stride_indexing_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert len(cache_dtype_str_set) == 1, (
             "All attention layers in the same KV cache group must use the same quantization method."
+        )
+        assert len(compress_ratio_set) == 1 and len(model_version_set) == 1 and len(alignment_set) == 1, (
+            "All attention layers in the same KV cache group must use the same compression metadata."
+        )
+        assert len(page_size_padded_set) == 1 and len(block_stride_indexing_set) == 1, (
+            "All attention layers in the same KV cache group must use the same page layout."
         )
         cache_sparse_sfa_c8_set = set(spec.cache_sparse_sfa_c8 for spec in specs)
         assert len(cache_sparse_sfa_c8_set) == 1, (
@@ -89,7 +100,14 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             scale_dim=specs[0].scale_dim,
             scale_dtype=specs[0].scale_dtype,
             dtype=specs[0].dtype,
+            kv_quant_mode=specs[0].kv_quant_mode,
+            page_size_padded=page_size_padded_set.pop(),
+            indexes_kv_by_block_stride=block_stride_indexing_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
+            alignment=alignment_set.pop(),
+            compress_ratio=compress_ratio_set.pop(),
+            model_version=model_version_set.pop(),
+            non_causal_multi_token_decode=any(spec.non_causal_multi_token_decode for spec in specs),
             cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
             store_on_host=store_on_host_set.pop(),
         )
@@ -179,7 +197,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     model_version: str | None = None
 
     def __post_init__(self):
-        pass
+        super().__post_init__()
 
     @property
     def storage_block_size(self) -> int:
@@ -197,12 +215,18 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
+        alignment_set = set(spec.alignment for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
+        page_size_padded_set = set(spec.page_size_padded for spec in specs)
+        block_stride_indexing_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
+            and len(alignment_set) == 1
             and len(sliding_window_set) == 1
+            and len(page_size_padded_set) == 1
+            and len(block_stride_indexing_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, compress ratio, model version and sliding "
@@ -214,8 +238,10 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
+            indexes_kv_by_block_stride=block_stride_indexing_set.pop(),
             sliding_window=sliding_window_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
+            alignment=alignment_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
         )

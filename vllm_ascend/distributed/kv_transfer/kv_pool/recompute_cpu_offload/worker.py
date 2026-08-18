@@ -69,7 +69,11 @@ class RecomputeCPUOffloadWorker:
         for t in self.kv_cache_config.kv_cache_tensors:
             if t.shared_by:
                 scheduler_gpu_kv_cache_tensors.append(t)
-        scheduler_gpu_total_bytes = sum(t.size for t in scheduler_gpu_kv_cache_tensors)
+        packed_tensors = [t for t in scheduler_gpu_kv_cache_tensors if t.block_stride > 0]
+        unpacked_tensors = [t for t in scheduler_gpu_kv_cache_tensors if t.block_stride == 0]
+        scheduler_gpu_total_bytes = max((t.size for t in packed_tensors), default=0) + sum(
+            t.size for t in unpacked_tensors
+        )
         scheduler_num_cpu_blocks = max(1, self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes)
 
         unique_gpu_caches: dict[str, torch.Tensor] = {}

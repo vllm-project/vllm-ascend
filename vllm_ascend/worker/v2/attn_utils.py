@@ -108,7 +108,14 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 num_kv_heads=spec.num_kv_heads,
                 head_size=head_size,
                 dtype=dtype,
+                kv_quant_mode=spec.kv_quant_mode,
+                page_size_padded=spec.page_size_padded,
+                indexes_kv_by_block_stride=True,
                 cache_dtype_str=cache_dtype_str,
+                alignment=spec.alignment,
+                compress_ratio=spec.compress_ratio,
+                model_version=spec.model_version,
+                non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
@@ -354,15 +361,20 @@ def _adjust_dsv4_kv_layout(
     cache_dtypes: list[torch.dtype],
     page_size_bytes: int,
     overlap_full_kv_cache: bool = False,
+    page_offset_bytes: int = 0,
+    block_stride_bytes: int | None = None,
 ) -> list[torch.Tensor]:
     caches = []
-    base_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size()
+    base_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size() + page_offset_bytes
     offset_bytes = base_offset_bytes
+    physical_page_stride_bytes = block_stride_bytes or page_size_bytes
     for index, (shape, dtype) in enumerate(zip(cache_shapes, cache_dtypes)):
         if overlap_full_kv_cache and index == 2:
             offset_bytes = base_offset_bytes
         dtype_size = get_dtype_size(dtype)
-        page_stride = page_size_bytes // dtype_size
+        if physical_page_stride_bytes % dtype_size:
+            raise ValueError(f"DSA block stride {physical_page_stride_bytes} is not aligned to {dtype}.")
+        page_stride = physical_page_stride_bytes // dtype_size
         stride = torch.empty(shape).stride()
         if offset_bytes % dtype_size:
             raise ValueError(f"DSA cache offset {offset_bytes} is not aligned to {dtype}.")
@@ -383,11 +395,19 @@ def _view_dsv4_cache(
     kv_cache_spec: AttentionSpec,
     attn_backend: AttentionBackend,
     kv_cache_config: KVCacheConfig,
+    packing: tuple[int, int] | None = None,
 ) -> list[torch.Tensor]:
     """Create DSA cache views without applying normal MLA K/V splitting."""
-    if raw_tensor.numel() % kv_cache_spec.page_size_bytes:
-        raise ValueError("DSA cache allocation is not a whole number of physical pages.")
-    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+    if packing is None:
+        page_offset_bytes = 0
+        block_stride_bytes = kv_cache_spec.page_size_bytes
+    else:
+        page_offset_bytes, block_stride_bytes = packing
+        if page_offset_bytes < 0 or page_offset_bytes + kv_cache_spec.page_size_bytes > block_stride_bytes:
+            raise ValueError("DSA packed cache page exceeds its block stride.")
+    if raw_tensor.numel() % block_stride_bytes:
+        raise ValueError("DSA cache allocation is not a whole number of physical blocks.")
+    num_blocks = raw_tensor.numel() // block_stride_bytes
     if num_blocks != kv_cache_config.num_blocks:
         raise ValueError(f"DSA cache has {num_blocks} blocks, expected {kv_cache_config.num_blocks}.")
 
@@ -429,6 +449,8 @@ def _view_dsv4_cache(
         cache_dtypes,
         kv_cache_spec.page_size_bytes,
         overlap_full_kv_cache,
+        page_offset_bytes=page_offset_bytes,
+        block_stride_bytes=block_stride_bytes,
     )
 
 
@@ -548,9 +570,34 @@ def _allocate_kv_cache(
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
+    packed_backing: torch.Tensor | None = None
+    packed_size: int | None = None
+    packed_block_stride: int | None = None
 
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if not kv_cache_tensor.shared_by:
+            continue
+
+        if kv_cache_tensor.block_stride > 0:
+            if kv_cache_tensor.size % kv_cache_tensor.block_stride:
+                raise ValueError("Packed KV cache size must be divisible by block_stride.")
+            if packed_backing is None:
+                packed_backing = _allocate_int8_cache_tensor(
+                    kv_cache_tensor.size,
+                    alignment,
+                    device,
+                )
+                packed_size = kv_cache_tensor.size
+                packed_block_stride = kv_cache_tensor.block_stride
+            elif kv_cache_tensor.size != packed_size or kv_cache_tensor.block_stride != packed_block_stride:
+                raise ValueError("All packed KV cache descriptors must share one backing layout.")
+            for layer_name in kv_cache_tensor.shared_by:
+                layer_spec = layer_kv_cache_spec[layer_name]
+                if kv_cache_tensor.offset < 0 or (
+                    kv_cache_tensor.offset + layer_spec.page_size_bytes > kv_cache_tensor.block_stride
+                ):
+                    raise ValueError(f"Packed KV cache page for {layer_name} exceeds its block stride.")
+                kv_cache_raw_tensors[layer_name] = packed_backing
             continue
 
         if is_dsv4_model:
@@ -708,6 +755,12 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
+    layer_packing = {
+        layer_name: (kv_cache_tensor.offset, kv_cache_tensor.block_stride)
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors
+        if kv_cache_tensor.block_stride > 0
+        for layer_name in kv_cache_tensor.shared_by
+    }
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -777,6 +830,7 @@ def _reshape_kv_cache_v2(
                     kv_cache_spec,
                     group.backend,
                     kv_cache_config,
+                    layer_packing.get(layer_name),
                 )
                 continue
 
