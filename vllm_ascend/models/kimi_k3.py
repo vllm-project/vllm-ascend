@@ -1223,11 +1223,15 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
                     continue
                 if ".experts." in name and name not in params_dict:
                     continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
+                packed_name = name.replace(weight_name, param_name)
+                if packed_name.endswith(".bias") and packed_name not in params_dict:
                     continue
-                if is_pp_missing_parameter(name, self):
+                if is_pp_missing_parameter(packed_name, self):
+                    name = packed_name
                     break
+                if packed_name not in params_dict:
+                    continue
+                name = packed_name
                 param = params_dict[name]
                 param.weight_loader(param, loaded_weight, shard_id)
                 break

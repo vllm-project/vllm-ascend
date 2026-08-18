@@ -94,6 +94,36 @@ def test_kimi_k3_loads_bfg_checkpoint_shards_into_fused_linear():
     assert loaded == {"layers.0.self_attn.fused_bfg_proj.weight"}
 
 
+def test_kimi_k3_keeps_full_attention_g_proj_outside_bfg_fusion():
+    model = KimiK3TextModel.__new__(KimiK3TextModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(num_experts=0)
+    model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    model.layers[0].self_attn = nn.Module()
+    model.layers[0].self_attn.fused_bfg_proj = nn.Module()
+    fused_weight = nn.Parameter(torch.empty(1))
+    fused_weight.weight_loader = MagicMock()
+    model.layers[0].self_attn.fused_bfg_proj.register_parameter("weight", fused_weight)
+
+    model.layers[1].self_attn = nn.Module()
+    model.layers[1].self_attn.g_proj = nn.Module()
+    full_attention_weight = nn.Parameter(torch.empty(1))
+    full_attention_weight.weight_loader = MagicMock()
+    model.layers[1].self_attn.g_proj.register_parameter("weight", full_attention_weight)
+    loaded_weight = torch.empty(1)
+
+    with (
+        patch("vllm_ascend.models.kimi_k3.get_spec_layer_idx_from_weight_name", return_value=None),
+        patch("vllm_ascend.models.kimi_k3.fused_moe_make_expert_params_mapping", return_value=[]),
+        patch("vllm_ascend.models.kimi_k3.is_pp_missing_parameter", return_value=False),
+    ):
+        loaded = model.load_weights([("layers.1.self_attn.g_proj.weight", loaded_weight)])
+
+    fused_weight.weight_loader.assert_not_called()
+    full_attention_weight.weight_loader.assert_called_once_with(full_attention_weight, loaded_weight)
+    assert loaded == {"layers.1.self_attn.g_proj.weight"}
+
+
 @pytest.mark.parametrize(
     ("quant_name", "uses_quantized_latent_projections"),
     [
