@@ -1194,17 +1194,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.local_num_heads * self.kv_lora_rank < 65536:
                 # x stays (B, N, L); operator transposes internally.
                 x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV,
-                                                        perm_x1=(1, 0, 2),
-                                                        perm_y=(1, 0, 2))
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
             else:
                 # Explicit transpose to (N, B, L) so the operator uses
                 # perm_x1=(0,1,2) (no inner transpose).
-                x = x.view(-1, self.local_num_heads, self.kv_lora_rank) \
-                     .transpose(0, 1).contiguous()
-                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV,
-                                                        perm_x1=(0, 1, 2),
-                                                        perm_y=(1, 0, 2))
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
             # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
