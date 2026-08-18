@@ -219,7 +219,15 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Returns:
             The output tensor after flash attention.
         """
-        real_tokens = int(attn_metadata.seq_lens.sum().item())
+        # seq_lens.sum().item() is a synchronous D2H copy, which ACL
+        # forbids inside a graph capture (the drafter is captured whole under FULL).
+        # num_actual_tokens is the same quantity already available on the host -- the
+        # sibling splitfuse path below reads it the same way.
+        _nat = getattr(attn_metadata, "num_actual_tokens", None)
+        if _nat is not None:
+            real_tokens = int(_nat)
+        else:
+            real_tokens = int(attn_metadata.seq_lens.sum().item())
         seq_len = attn_metadata.seq_lens
         aligned_tokens = int(query.shape[0])
         delta = aligned_tokens - real_tokens
