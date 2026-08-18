@@ -28,7 +28,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
@@ -79,37 +78,39 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         self.attn_backends = attn_backends
 
-    # The signature is split on vllm_version_is: v0.26.0's
-    # _build_draft_attn_metadata does not accept seq_lens_cpu_upper_bound /
-    # step; d02df748bf+ does.
-    if vllm_version_is("0.26.0"):
+    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        assert self.input_batch is not None
+        with build_attn_metadata_wrapper():
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=self.input_batch.num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
+            )
+        return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
-        def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-            num_tokens_padded = num_reqs_padded * self.num_query_per_req
-            assert self.input_batch is not None
-            with build_attn_metadata_wrapper():
-                attn_metadata = self._build_draft_attn_metadata(
-                    num_reqs=self.input_batch.num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_tokens_padded,
-                    causal=self._group_causal,
-                )
-            return [attn_metadata]
-    else:
+    def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
+        """Rebuild ``actual_seq_lengths_q`` from the padded request count,
+        mirroring Eagle's ``_update_decode_attn_metadata``.
 
-        def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-            num_tokens_padded = num_reqs_padded * self.num_query_per_req
-            assert self.input_batch is not None
-            with build_attn_metadata_wrapper():
-                attn_metadata = self._build_draft_attn_metadata(
-                    num_reqs=self.input_batch.num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_tokens_padded,
-                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                    step=self.num_query_per_req,
-                    causal=self._group_causal,
-                )
-            return [attn_metadata]
+        DSpark inherits DFlash's full-graph path, and upstream
+        ``Speculator._build_draft_attn_metadata`` clamps ``query_start_loc`` at
+        the real ``num_reqs`` to keep the cumulative series non-decreasing, so
+        when a batch is padded to a capture size (``num_reqs_padded >
+        num_reqs``) the cumulative query lengths stop at
+        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
+        Ascend FIA operator requires, in TND layout, that the last element of
+        ``actual_seq_lengths_q`` equals the query token count of the graph
+        being replayed; otherwise tiling fails with
+        ``queryT != last element of actualSequenceLengthQ``.
+        """
+        query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
+        for metadata in attn_metadata.values():
+            metadata.actual_seq_lengths_q = query_lens_list
+        return attn_metadata
 
     def propose(
         self,

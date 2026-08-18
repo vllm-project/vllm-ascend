@@ -18,7 +18,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.models import deepseek_v4
+from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -63,7 +63,9 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         quant_config=None,
     )
 
-    cache_layer = deepseek_v4.AscendDeepseekV4IndexerCache.__new__(deepseek_v4.AscendDeepseekV4IndexerCache)
+    cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
+        deepseek_v4_indexer.AscendDeepseekV4IndexerCache
+    )
     torch.nn.Module.__init__(cache_layer)
     cache_layer.head_dim = 128
     cache_layer.dtype = torch.int8
@@ -72,7 +74,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     cache_layer.kv_cache = torch.tensor([])
 
     monkeypatch.setattr(
-        deepseek_v4,
+        deepseek_v4_indexer,
         "get_ascend_device_type",
         lambda: device_type,
     )
@@ -166,23 +168,14 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         **kwargs,
     ):
         del common_prefix_len, fast_build
-        self.prefill_ratio_to_sas_metadata = kwargs["prefill_ratio_to_sas_metadata"]
-        self.decode_ratio_to_sas_metadata = kwargs["decode_ratio_to_sas_metadata"]
         self.common_ratio_to_sas_metadata = kwargs["common_ratio_to_sas_metadata"]
         call = {
             "common_attn_metadata": common_attn_metadata,
             "block_size": kwargs["block_size"],
-            "prefill_ratio_to_sas_metadata": self.prefill_ratio_to_sas_metadata,
-            "decode_ratio_to_sas_metadata": self.decode_ratio_to_sas_metadata,
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
         }
         self.calls.append(call)
-        for cache_name in (
-            "prefill_ratio_to_sas_metadata",
-            "decode_ratio_to_sas_metadata",
-            "common_ratio_to_sas_metadata",
-        ):
-            call[cache_name].setdefault("first_group", len(self.calls) == 1)
+        call["common_ratio_to_sas_metadata"].setdefault("first_group", len(self.calls) == 1)
         return SimpleNamespace(common_attn_metadata=common_attn_metadata)
 
 
@@ -277,6 +270,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             num_scheduled_tokens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
+            is_prefilling_np=np.array([True, True, False, False]),
             dcp_local_seq_lens=None,
             positions=torch.arange(8, dtype=torch.int32),
             attn_state=None,
@@ -297,10 +291,11 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         common_metadata = call["common_attn_metadata"]
         assert common_metadata.num_actual_tokens == 5
         assert common_metadata.num_input_tokens == expected_input_tokens
-    for cache_name in (
-        "prefill_ratio_to_sas_metadata",
-        "decode_ratio_to_sas_metadata",
-        "common_ratio_to_sas_metadata",
-    ):
-        assert calls[0][cache_name] is calls[1][cache_name]
-        assert calls[1][cache_name]["first_group"] is True
+        if caller != "default":
+            assert torch.equal(
+                common_metadata.is_prefilling,
+                torch.tensor([True, True, False, False]),
+            )
+    cache_name = "common_ratio_to_sas_metadata"
+    assert calls[0][cache_name] is calls[1][cache_name]
+    assert calls[1][cache_name]["first_group"] is True

@@ -69,7 +69,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer, vllm_version_is
+from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
 
 # isort: off
 if TYPE_CHECKING:
@@ -466,6 +466,12 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
+        # Reformat metadata keyed by request_id then CP shard index. Populated by the
+        # last TP-offset pull task for each shard; applied once all pull tasks finish.
+        self.pending_reformat: defaultdict[str, dict[int, list[tuple[int, list[list[int]], int, list[int]]]]] = (
+            defaultdict(dict)
+        )
+        self.pending_reformat_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         first_kv_cache = next(iter(self.kv_caches.values()))
@@ -559,6 +565,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         num_computed_tokens: int = 0,
         all_task_done: bool = False,
+        shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
     ):
@@ -579,6 +586,7 @@ class KVCacheRecvingThread(threading.Thread):
             "num_computed_tokens": num_computed_tokens,
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
+            "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
@@ -718,7 +726,24 @@ class KVCacheRecvingThread(threading.Thread):
                     self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
-            if self._mark_request_task_done(request_id, all_task_done):
+            all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
+            if all_tasks_done:
+                if transfer_failed or self._is_failed_recv_request(request_id):
+                    with self.pending_reformat_lock:
+                        self.pending_reformat.pop(request_id, None)
+                else:
+                    try:
+                        self._reformat_pending_kv_caches(request_id)
+                    except Exception as e:
+                        transfer_failed = True
+                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                        with self.pending_reformat_lock:
+                            self.pending_reformat.pop(request_id, None)
+                        logger.exception(
+                            "Failed to reformat KV cache after all pulls for request %s: %s",
+                            remote_request_id,
+                            e,
+                        )
                 self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
@@ -798,16 +823,15 @@ class KVCacheRecvingThread(threading.Thread):
                 local_block_ids_replicate_k[0],
             )
 
-        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
+        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int, group_spec: dict[str, Any]) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
             if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index += self.num_draft_layers
+            is_index_cache_plane = any(".index_cache" in name for name in group_spec.get("layer_names", []))
 
             def in_partition(metadata_layer_idx: int) -> bool:
                 transformer_layer = (
-                    metadata_layer_idx - self.index_cache_plane_base
-                    if metadata_layer_idx >= self.index_cache_plane_base
-                    else metadata_layer_idx
+                    metadata_layer_idx - self.index_cache_plane_base if is_index_cache_plane else metadata_layer_idx
                 )
                 return first_layer_index <= transformer_layer < end_layer_index
 
@@ -839,7 +863,7 @@ class KVCacheRecvingThread(threading.Thread):
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
             kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
             raw_layer_indices = layer_indices
-            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
+            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank, group_spec)
 
             if not layer_indices:
                 continue
@@ -1007,6 +1031,38 @@ class KVCacheRecvingThread(threading.Thread):
         for reformat_group, is_group_transfer_end in attention_group_reformat_block_ids:
             if is_group_transfer_end:
                 ready_attention_group_reformat_block_ids.append(reformat_group)
+        if ready_attention_group_reformat_block_ids:
+            shard_idx = int(req_meta.get("shard_idx", 0))
+            self._stash_pending_reformat(
+                req_meta["request_id"],
+                shard_idx,
+                ready_attention_group_reformat_block_ids,
+            )
+
+    def _stash_pending_reformat(
+        self,
+        request_id: str,
+        shard_idx: int,
+        ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
+    ) -> None:
+        with self.pending_reformat_lock:
+            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
+
+    def _reformat_pending_kv_caches(self, request_id: str) -> None:
+        with self.pending_reformat_lock:
+            shard_reformats = self.pending_reformat.pop(request_id, {})
+        for shard_idx in sorted(shard_reformats):
+            logger.debug(
+                "Reformatting KV cache after all pulls completed. request_id=%s shard_idx=%s",
+                request_id,
+                shard_idx,
+            )
+            self._apply_kv_cache_reformat(shard_reformats[shard_idx])
+
+    def _apply_kv_cache_reformat(
+        self,
+        ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
+    ) -> None:
         if not ready_attention_group_reformat_block_ids:
             return
 
@@ -1509,45 +1565,22 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
-    # main2main compat: upstream KVConnectorBase_V1.__init__() now sets
-    # _kv_transfer_config (required by requires_kv_delivery property in
-    # Scheduler.__init__() post-0.26.0).
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
+    def __init__(  # type: ignore[misc]
+        self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
+    ):
+        assert vllm_config.kv_transfer_config is not None
+        self._kv_transfer_config = vllm_config.kv_transfer_config
+        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        self._connector_metadata = MooncakeConnectorMetadata()
 
-        def __init__(
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self._kv_transfer_config = vllm_config.kv_transfer_config
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(  # type: ignore[no-redef]
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None  # type: ignore[no-redef]
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
+                vllm_config, str(self.engine_id), kv_cache_config
+            )
+            self.connector_worker: MooncakeConnectorWorker | None = None
+        elif role == KVConnectorRole.WORKER:
+            self.connector_scheduler = None
+            self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
     ############################################################
     # Scheduler Side Methods
@@ -3574,6 +3607,7 @@ class MooncakeConnectorWorker:
                             pcp_dcp_rank == len(remote_handshake_port_list) - 1
                             and remote_tp_offset == len(remote_ports) - 1
                         ),
+                        shard_idx=pcp_dcp_rank,
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,

@@ -54,6 +54,7 @@ class AscendModelState(DefaultModelState):
 
         num_actual_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
@@ -63,6 +64,7 @@ class AscendModelState(DefaultModelState):
             num_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
