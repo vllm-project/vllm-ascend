@@ -196,6 +196,7 @@ def test_npu_model_runner_uses_ascend_pcp_manager() -> None:
 def test_initialize_kv_cache_skips_pcp_binding_when_disabled() -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.pcp_manager = None
+    runner.model_config = MagicMock(enable_return_routed_experts=False)
     kv_cache_config = MagicMock()
 
     with (
