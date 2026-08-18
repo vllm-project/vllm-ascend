@@ -14,20 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# MiniMax-M2 linear attention: MiniMaxText01RMSNormTP weight sharding and NPU q/k norm path.
+# MiniMax-M2 linear attention: NPU q/k norm path for MiniMaxText01RMSNormTP.
 #
 
 import logging
-from functools import partial
 
 import torch
-import torch.nn as nn
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
-from vllm.model_executor.custom_op import CustomOp
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.minimax_rms_norm import (  # type: ignore[import-not-found]
     MiniMaxText01RMSNormTP,
 )
@@ -100,54 +93,6 @@ def _patched_qk(
     # convention for the original as well.
     return _original_qk_method(q_norm, k_norm, q, k)
 
-
-def _patched_weight_loader(
-    param: nn.Parameter,
-    loaded_weight: torch.Tensor,
-    shard_world_size: int | None = None,
-    shard_rank: int | None = None,
-) -> None:
-    if shard_world_size is None:
-        shard_world_size = get_tensor_model_parallel_world_size()
-    if shard_rank is None:
-        shard_rank = get_tensor_model_parallel_rank()
-    shard_size = loaded_weight.shape[0] // shard_world_size
-    shard = slice(shard_rank * shard_size, (shard_rank + 1) * shard_size)
-    param.data.copy_(loaded_weight[shard])
-
-
-def _patched_init(
-    self: "MiniMaxText01RMSNormTP",
-    hidden_size: int,
-    eps: float = 1e-6,
-    *,
-    weight_shard_world_size: int | None = None,
-    weight_shard_rank: int | None = None,
-) -> None:
-    CustomOp.__init__(self)
-    self.tp_world = get_tensor_model_parallel_world_size()
-    self.tp_rank = get_tensor_model_parallel_rank()
-    self.weight_shard_world = weight_shard_world_size or self.tp_world
-    self.weight_shard_rank = self.tp_rank if weight_shard_rank is None else weight_shard_rank
-
-    if hidden_size % self.weight_shard_world != 0:
-        raise ValueError(
-            "MiniMaxText01RMSNormTP hidden_size must be divisible by "
-            f"weight_shard_world_size, got hidden_size={hidden_size}, "
-            f"weight_shard_world_size={self.weight_shard_world}"
-        )
-
-    self.weight = nn.Parameter(torch.ones(int(hidden_size / self.weight_shard_world)))
-    self.weight.weight_loader = partial(
-        _patched_weight_loader,
-        shard_world_size=self.weight_shard_world,
-        shard_rank=self.weight_shard_rank,
-    )
-    self.variance_epsilon = eps
-
-
-MiniMaxText01RMSNormTP.__init__ = _patched_init
-MiniMaxText01RMSNormTP.weight_loader = staticmethod(_patched_weight_loader)
 
 if _ORIG_QK_METHOD_NAME is not None:
     # Force staticmethod style, as requested.

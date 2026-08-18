@@ -48,7 +48,7 @@
 # /vllm_ascend/model_loader
 /vllm_ascend/ops @zzzzwwjj @realliujiaxu
 # /vllm_ascend/patch
-# /vllm_ascend/quantization
+/vllm_ascend/quantization @kunpengW-code
 /vllm_ascend/sample @realliujiaxu
 # /vllm_ascend/spec_decode
 # /vllm_ascend/worker
