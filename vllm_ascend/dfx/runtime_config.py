@@ -109,7 +109,8 @@ _DEFAULTS: dict[str, Any] = {
         "print_sampling_meta": False,
         # When a request finishes: log output_token_ids + decoded text (TP0 only).
         # Applies to every finished request. Independent of dump_finish sidecars
-        # (those are dump-activated reqs only, under report/).
+        # (those are dump-activated reqs only, under report/). Accumulate only
+        # while true (no backfill); mid-request enable may be partial or empty.
         "print_output_on_finish": False,
     },
     "report": {
@@ -1088,6 +1089,12 @@ class DfxRuntimeConfig:
         Default False. When True, TP0 logs on reap (after ``mark_finished``) for every
         finished request (independent of dump_finish sidecars and of
         ``save_sensitive_info``). Can be large / sensitive — leave off in prod.
+
+        Accumulation starts only while this flag is true on each sample step
+        (no backfill of tokens produced before enable). Hot-enabling mid-request
+        may yield a partial finish log, or an empty one if the request finishes
+        with no further appends after enable. Enable before traffic for full
+        output.
         """
         log_sec = self._data.get("log") or {}
         return bool(log_sec.get("print_output_on_finish", False))

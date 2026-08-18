@@ -354,7 +354,14 @@ class DfxProcessor:
             )
 
     def _maybe_print_output_on_finish(self, finished_req_ids: Any, io_mgr: RequestIoSnapshotManager) -> None:
-        """Log output_token_ids + text for finished reqs (TP0 only)."""
+        """Log output_token_ids + text for finished reqs (TP0 only).
+
+        Content comes from DFX cumulative IO accumulated while
+        ``log.print_output_on_finish`` was true on sample steps (no historical
+        backfill). Mid-request hot-enable may print a partial sequence or
+        ``output_token_count=0`` / empty text if nothing was appended after
+        enable. See ``DfxRuntimeConfig.log_print_output_on_finish``.
+        """
         runner = self.runner
         try:
             if int(getattr(runner, "tp_rank", 0)) != 0:

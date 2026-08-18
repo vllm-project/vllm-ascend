@@ -44,6 +44,7 @@ Worker: runner.dfx = DfxProcessor(runner)
 - `DfxProcessor` 在异常检测命中或 `manual_trigger` 命中后，都会尝试调用 dumper；**无论 dump 是否成功 arm，都会写 report**，避免 dump 配额耗尽、冷却中或相关性校验失败时丢失异常证据。
 - report JSON 含 `dump_armed` / `dump_attempted` / `dump_arm_wave` / `dump_count` / `dump_max_times`；成功 arm 时文件名带 `_dump`。`dump_arm_wave` 为 arm 时的 real-step wave；与请求结束时的 `dump_finish_*.log`（含 `dump_activate_wave` / `dump_waves_after_report`）对齐。
 - `log.print_sampling_meta` / `log.print_output_on_finish` 只控制日志，不写入 report 文件内容。
+- `print_output_on_finish`：**开启后才**在 sample 步向 DFX 累积 output（不回填历史）。热开时对 in-flight 请求可能不全或全空；完整日志需在发请求前打开。详见 [dfx_ops.md](./dfx_ops.md) §2.2.2。
 
 ## 2. Runtime Config
 
@@ -164,7 +165,7 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
 |----|------|
 | `dump` | `enabled`（默认 `false`，dump sink）/ `max_times`（仅 auto-arm）/ `cooldown_seconds`；`manual_trigger` 见运维页。与 detector 正交 |
 | `ascend_log` | `level`：`vllm_ascend` 包根 logger 级别。`debug`：模块白名单（相对路径，如 `["dfx"]` → `vllm_ascend.dfx`）强制 DEBUG。走 Ascend 专用 handler（不受 `VLLM_LOGGING_LEVEL` 的 `vllm` handler 过滤）。无 `enabled` |
-| `log` | `print_sampling_meta`：默认 `false`，写 anomaly report 时打 `[SamplingMeta]` 日志。`print_output_on_finish`：默认 `false`，**每个**请求结束时 TP0 打 output 日志（与 `dump_finish` 文件无关） |
+| `log` | `print_sampling_meta`：默认 `false`，写 anomaly report 时打 `[SamplingMeta]` 日志。`print_output_on_finish`：默认 `false`，**每个**请求结束时 TP0 打 output 日志（与 `dump_finish` 文件无关）；仅在开关为 true 期间累积，不回填，热开 in-flight 可能不全或空 |
 | `report` | `save_sensitive_info`：默认 `false` 只存 `*_token_count`（不写 token ids）；`true` 时落盘 id（受 `max_*` 截断）并可 decode（anomaly 与 dump_finish 共用）。`decode_token_ids`：默认 `true`，`save_sensitive_info=true` 时把 `*_token_ids` decode 成 `*_text` / 逐步 `*_texts`。`max_prompt_token_ids` / `max_output_token_ids` 默认 1000，`0`=不截断 |
 | `detector` | 共享 `stop_after_alert`（默认 `true`：某请求一旦检出异常即停止检测该请求，防止同一异常反复写 report）+ 各检测器嵌套段（`spec_acceptance` / `token_logprob` / `output_substring`），每段含 `enabled` 与阈值 |
 | `input_filter` | `filters` 见 §2.6；`print_input_token_ids_once` 见运维 §2.3 |
@@ -322,7 +323,7 @@ Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `
 - Detector / dump 日志只打长度，不打印 token ids；完整 I/O 仅走 report / dump_finish
 - `log` 段（与 `report` 正交）：
   - `log.print_sampling_meta`：可选 `[SamplingMeta]` 日志（TP0+last-PP）
-  - `log.print_output_on_finish`：每个请求结束时的 output 日志；`dump_finish_*.log` 对已 arm 的请求落盘（pending 未 activate 时 `dump_activate_wave=null`）
+  - `log.print_output_on_finish`：每个请求结束时的 output 日志（开启后才累积、不回填；热开 in-flight 可能不全或空）。`dump_finish_*.log` 对已 arm 的请求落盘（pending 未 activate 时 `dump_activate_wave=null`）
 - wave：真实 `execute_model` 拍自增；用 `req_id` 对齐 anomaly 的 `dump_arm_wave` 与 dump_finish 的 activate / 差值（详见 [dfx_ops.md](./dfx_ops.md) §2.2.2）
 - DFX **不再** arm 上游 `debug_log_full`（vLLM 字段可空转）
 

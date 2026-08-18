@@ -217,7 +217,10 @@ class DetectorManager:
         When anomaly detection is gated off, TP0 still appends when
         ``log.print_output_on_finish=true`` (finish log for every req) or when
         a dump finish sidecar may still need cumulative output (pending /
-        active dump / already-activated finish meta). Detection then skips
+        active dump / already-activated finish meta). Appends happen only on
+        steps where those gates are already true — there is no backfill of
+        tokens produced while the flag was off; mid-request enable may leave
+        finish logs partial or empty. Detection then skips
         ``stop_after_alert`` reqs by id — never by row-subsetting — so
         ``req_idx`` stays aligned with ``input_batch`` (filters / dump related).
 
