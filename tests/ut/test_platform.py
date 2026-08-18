@@ -1476,7 +1476,7 @@ class TestNPUPlatform(TestBase):
         )
         vllm_config.model_config.supports_mamba_prefix_caching = True
 
-        with pytest.raises(AssertionError, match="AscendStore"):
+        with pytest.raises(ValueError, match="AscendStore"):
             self.run_mamba_config_lifecycle(vllm_config)
 
     def test_mamba_config_preserves_explicit_large_block_size(self):
