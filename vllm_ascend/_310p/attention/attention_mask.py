@@ -17,7 +17,10 @@
 
 import torch
 import torch_npu
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context
 
+from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
 
@@ -70,6 +73,89 @@ class AttentionMaskBuilder310:
         mask.masked_fill_(upper, float("-inf"))
         return mask
 
+    @staticmethod
+    def _requires_graph_safe_query_positions() -> bool:
+        try:
+            forward_context = get_forward_context()
+        except (AssertionError, RuntimeError):
+            return False
+        vllm_config = getattr(forward_context, "vllm_config", None)
+        return (
+            vllm_config is not None
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+            and is_310p_dflash_piecewise(vllm_config)
+        )
+
+    @staticmethod
+    def _get_graph_safe_query_positions(
+        attn_metadata: AscendMetadata,
+        device: torch.device,
+        causal: bool,
+    ) -> torch.Tensor:
+        """Build SplitFuse rows entirely on-device for capture and replay."""
+        num_query_tokens = int(attn_metadata.num_actual_tokens)
+        query_start_loc = attn_metadata.query_start_loc.to(
+            device=device,
+            dtype=torch.int32,
+        )
+        seq_lens = attn_metadata.seq_lens.to(device=device, dtype=torch.int32)
+        num_reqs = seq_lens.shape[0]
+
+        token_indices = torch.arange(
+            num_query_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
+        row_starts = query_start_loc[:num_reqs]
+        row_ends = query_start_loc[1 : num_reqs + 1]
+        request_mask = (token_indices.unsqueeze(0) >= row_starts.unsqueeze(1)) & (
+            token_indices.unsqueeze(0) < row_ends.unsqueeze(1)
+        )
+        request_indices = request_mask.to(torch.int32).argmax(dim=0)
+        request_indices = torch.where(
+            request_mask.any(dim=0),
+            request_indices,
+            torch.full_like(request_indices, num_reqs - 1),
+        )
+
+        token_row_starts = row_starts.index_select(0, request_indices)
+        query_lens = (row_ends - row_starts).index_select(0, request_indices)
+        context_lens = seq_lens.index_select(0, request_indices)
+        if causal:
+            positions = context_lens - query_lens + token_indices - token_row_starts
+        else:
+            positions = context_lens - 1
+        return positions.clamp_min_(0)
+
+    @classmethod
+    def _get_query_positions(
+        cls,
+        attn_metadata: AscendMetadata,
+        device: torch.device,
+        causal: bool,
+    ) -> torch.Tensor:
+        if cls._requires_graph_safe_query_positions():
+            return cls._get_graph_safe_query_positions(
+                attn_metadata,
+                device,
+                causal=causal,
+            )
+
+        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
+        query_lens = (qsl[1:] - qsl[:-1]).tolist()
+        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32).tolist()
+        if causal:
+            rows = [
+                row
+                for query_len, context_len in zip(query_lens, context_lens)
+                for row in range(context_len - query_len, context_len)
+            ]
+        else:
+            rows = [
+                context_len - 1 for query_len, context_len in zip(query_lens, context_lens) for _ in range(query_len)
+            ]
+        return torch.tensor(rows, dtype=torch.int32, device=device)
+
     @classmethod
     def get_splitfuse_mask(cls, attn_metadata: AscendMetadata, device: torch.device):
         """
@@ -88,13 +174,7 @@ class AttentionMaskBuilder310:
         """
         if cls.chunked_prefill_attn_mask is None:
             cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
-        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
-        qlens = qsl[1:] - qsl[:-1]
-        q_list = qlens.tolist()
-        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
-        c_list = context_lens.tolist()
-        pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
-        position = torch.tensor(pos_list, dtype=torch.int32, device=device)
+        position = cls._get_query_positions(attn_metadata, device, causal=True)
         splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
         return splitfuse_mask_nz
@@ -117,14 +197,7 @@ class AttentionMaskBuilder310:
         """
         if cls.chunked_prefill_attn_mask is None:
             cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
-        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
-        qlens = qsl[1:] - qsl[:-1]
-        q_list = qlens.tolist()
-        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
-        c_list = context_lens.tolist()
-        # Non-causal: all query tokens of a request share the last valid row (cl-1).
-        pos_list = [cl - 1 for ql, cl in zip(q_list, c_list) for _ in range(ql)]
-        position = torch.tensor(pos_list, dtype=torch.int32, device=device)
+        position = cls._get_query_positions(attn_metadata, device, causal=False)
         splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
         return splitfuse_mask_nz

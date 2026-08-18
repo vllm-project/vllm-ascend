@@ -53,6 +53,64 @@ class TestAttentionMaskBuilder310(TestBase):
         attn_mask = AttentionMaskBuilder310.get_non_causal_splitfuse_mask(attn_metadata, torch.device("cpu"))
         self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, 16, 16))
 
+    def test_graph_safe_query_positions_support_mixed_request_lengths(self):
+        attn_metadata = MagicMock()
+        attn_metadata.num_actual_tokens = 5
+        attn_metadata.query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+        attn_metadata.seq_lens = torch.tensor([7, 10], dtype=torch.int32)
+
+        causal = AttentionMaskBuilder310._get_graph_safe_query_positions(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=True,
+        )
+        non_causal = AttentionMaskBuilder310._get_graph_safe_query_positions(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=False,
+        )
+
+        torch.testing.assert_close(
+            causal,
+            torch.tensor([5, 6, 7, 8, 9], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            non_causal,
+            torch.tensor([6, 6, 9, 9, 9], dtype=torch.int32),
+        )
+
+    @patch("torch_npu.npu_format_cast", side_effect=lambda tensor, _: tensor)
+    @patch.object(
+        AttentionMaskBuilder310,
+        "_requires_graph_safe_query_positions",
+        return_value=True,
+    )
+    def test_exact_piecewise_routes_splitfuse_positions_to_device_math(
+        self,
+        _,
+        __,
+    ):
+        attn_metadata = MagicMock()
+        attn_metadata.num_actual_tokens = 5
+        attn_metadata.query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+        attn_metadata.seq_lens = torch.tensor([7, 10], dtype=torch.int32)
+
+        with patch.object(
+            AttentionMaskBuilder310,
+            "_get_graph_safe_query_positions",
+            wraps=AttentionMaskBuilder310._get_graph_safe_query_positions,
+        ) as graph_safe_positions:
+            AttentionMaskBuilder310.get_splitfuse_mask(
+                attn_metadata,
+                torch.device("cpu"),
+            )
+
+        graph_safe_positions.assert_called_once_with(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=True,
+        )
+
     def test_get_compressed_non_causal_splitfuse_mask_310(self):
         from vllm_ascend._310p.attention.attention_mask import COMPRESSED_MASK_SEQ_LEN
 

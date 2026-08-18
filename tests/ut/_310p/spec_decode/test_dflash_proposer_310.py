@@ -53,6 +53,8 @@ class TestCopyAndExpandInputsAscendC(TestBase):
     def _make_self(self, num_query_total, num_context):
         return SimpleNamespace(
             device=torch.device("cpu"),
+            vllm_config=SimpleNamespace(speculative_config=None),
+            runner=SimpleNamespace(max_num_reqs=16),
             parallel_drafting_token_id=999,
             kernel_block_size=128,
             num_speculative_tokens=3,
@@ -75,6 +77,7 @@ class TestCopyAndExpandInputsAscendC(TestBase):
 
         def fake_op(next_token_ids, tpos, *args, **kwargs):
             captured["tpos"] = tpos
+            captured.setdefault("num_rejected", []).append(args[4])
             n = tpos.shape[0]
             return (
                 torch.zeros(num_query_total, dtype=torch.int32),
@@ -135,3 +138,36 @@ class TestCopyAndExpandInputsAscendC(TestBase):
 
         self.assertEqual(captured["tpos"].dim(), 1)
         self.assertEqual(captured["tpos"].shape[0], num_context)
+
+    def test_exact_piecewise_zero_rejection_buffer_is_persistent_and_bounded(self):
+        num_context = 12
+        target_positions = torch.arange(num_context, dtype=torch.int32)
+        fake_self = self._make_self(num_query_total=4, num_context=num_context)
+        captured = {}
+
+        with patch(
+            "vllm_ascend._310p.spec_decode.dflash_proposer_310.is_310p_dflash_piecewise",
+            return_value=True,
+        ):
+            self._run(
+                fake_self,
+                target_positions,
+                num_context,
+                batch_size=1,
+                num_query_per_req=4,
+                captured=captured,
+            )
+            self._run(
+                fake_self,
+                target_positions,
+                num_context,
+                batch_size=1,
+                num_query_per_req=4,
+                captured=captured,
+            )
+
+        first, second = captured["num_rejected"]
+        self.assertEqual(fake_self._zero_num_rejected_buffer_310.shape, (16,))
+        self.assertEqual(first.shape, (1,))
+        self.assertEqual(first.data_ptr(), second.data_ptr())
+        torch.testing.assert_close(first, torch.zeros(1, dtype=torch.int32))

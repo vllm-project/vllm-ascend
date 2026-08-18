@@ -47,9 +47,14 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
+from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
+from vllm_ascend._310p.piecewise_size_nodes import install_piecewise_size_node_compat
+from vllm_ascend._310p.quantization.methods.w8a8_dynamic import (
+    enable_dflash_piecewise_graph_safe_w8a8,
+)
 from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -80,14 +85,11 @@ def _resize_dflash_draft_kv_cache_specs(
             continue
 
         if layer_spec.real_page_size_bytes % layer_spec.block_size != 0:
-            raise ValueError(
-                f"DFlash draft KV page for {layer_name} is not token aligned."
-            )
+            raise ValueError(f"DFlash draft KV page for {layer_name} is not token aligned.")
         bytes_per_token = layer_spec.real_page_size_bytes // layer_spec.block_size
         if unified_page_size % bytes_per_token != 0:
             raise ValueError(
-                f"DFlash draft KV page for {layer_name} cannot fit the "
-                f"{unified_page_size}-byte unified page."
+                f"DFlash draft KV page for {layer_name} cannot fit the {unified_page_size}-byte unified page."
             )
         draft_block_size = unified_page_size // bytes_per_token
         if draft_block_size % _DFLASH_DRAFT_BLOCK_ALIGNMENT != 0:
@@ -133,6 +135,9 @@ class NPUModelRunner310(NPUModelRunner):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if is_310p_dflash_piecewise(self.vllm_config):
+            install_piecewise_size_node_compat()
+            enable_dflash_piecewise_graph_safe_w8a8()
         self.input_batch = NPUInputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
@@ -176,11 +181,7 @@ class NPUModelRunner310(NPUModelRunner):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_specs = super().get_kv_cache_spec()
-        if (
-            self.speculative_config is None
-            or self.speculative_config.method != "dflash"
-            or self.drafter is None
-        ):
+        if self.speculative_config is None or self.speculative_config.method != "dflash" or self.drafter is None:
             return kv_cache_specs
 
         draft_layer_names = getattr(
@@ -188,17 +189,12 @@ class NPUModelRunner310(NPUModelRunner):
             "_draft_attn_layer_names",
             set(),
         )
-        mamba_page_sizes = {
-            spec.page_size_bytes
-            for spec in kv_cache_specs.values()
-            if isinstance(spec, MambaSpec)
-        }
+        mamba_page_sizes = {spec.page_size_bytes for spec in kv_cache_specs.values() if isinstance(spec, MambaSpec)}
         if not draft_layer_names or not mamba_page_sizes:
             return kv_cache_specs
         if len(mamba_page_sizes) != 1:
             raise ValueError(
-                "310P DFlash requires one unified Mamba KV page size, but got "
-                f"{sorted(mamba_page_sizes)}."
+                f"310P DFlash requires one unified Mamba KV page size, but got {sorted(mamba_page_sizes)}."
             )
 
         unified_page_size = next(iter(mamba_page_sizes))
@@ -240,15 +236,37 @@ class NPUModelRunner310(NPUModelRunner):
         num_encoder_reqs: int = 0,
     ):
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        dflash_piecewise_active = is_310p_dflash_piecewise(self.vllm_config)
+
+        if dflash_piecewise_active and force_uniform_decode is not None:
+            logger.debug(
+                "[310p-dflash-piecewise/dispatch] scope=%s attn_state=%s "
+                "num_tokens=%d num_reqs=%d max_num_scheduled_tokens=%d "
+                "uniform_decode_query_len=%d all_decode=%s force_eager_in=%s "
+                "forced_uniform_decode=%s",
+                dflash_piecewise_active,
+                getattr(self.attn_state, "name", None),
+                num_tokens,
+                num_reqs,
+                max_num_scheduled_tokens,
+                self.uniform_decode_query_len,
+                bool(is_all_decode),
+                force_eager,
+                force_uniform_decode,
+            )
 
         if self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit):
             force_eager = True
 
         # Spec decoding graph replay is only valid for uniform spec-decode batches (q_len = 1 + K).
-        if self.speculative_config is not None and (
-            self.attn_state != AscendAttentionState.SpecDecoding
-            or max_num_scheduled_tokens != self.uniform_decode_query_len
-            or num_tokens != max_num_scheduled_tokens * num_reqs
+        if (
+            self.speculative_config is not None
+            and not dflash_piecewise_active
+            and (
+                self.attn_state != AscendAttentionState.SpecDecoding
+                or max_num_scheduled_tokens != self.uniform_decode_query_len
+                or num_tokens != max_num_scheduled_tokens * num_reqs
+            )
         ):
             force_eager = True
 
@@ -397,9 +415,7 @@ class NPUModelRunner310(NPUModelRunner):
                     self.num_accepted_tokens.gpu.fill_(1)
 
             need_async_num_computed_update = (
-                self.use_async_spec_decode
-                and self.valid_sampled_token_count_gpu is not None
-                and prev_req_id_to_index
+                self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
             )
 
             if need_async_num_computed_update:
@@ -689,19 +705,10 @@ class NPUModelRunner310(NPUModelRunner):
         if not is_rc_device():
             self.seq_lens[num_reqs:].fill_(0)
 
-        if use_async_device_metadata and (
-            self.uses_mrope or self.uses_xdrope_dim > 0
-        ):
+        if use_async_device_metadata and (self.uses_mrope or self.uses_xdrope_dim > 0):
             req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
-            drift = (
-                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-                - cpu_values[req_indices_gpu]
-            )
-            target = (
-                self.mrope_positions
-                if self.uses_mrope
-                else self.xdrope_positions
-            )
+            drift = self.num_computed_tokens[req_indices_gpu].to(torch.int64) - cpu_values[req_indices_gpu]
+            target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
 
         if (

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import os
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -20,6 +21,13 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
+from vllm_ascend._310p.graph_input_contract import (
+    GraphInputContractError,
+    GraphInputTensorContract,
+    capture_graph_input_contracts,
+    validate_graph_input_contracts,
+)
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
@@ -55,6 +63,11 @@ class ACLGraphEntry:
     # for aclgraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
+    input_contracts: tuple[GraphInputTensorContract, ...] | None = None
+    component: str | None = None
+    rank: int | None = None
+    capture_count: int = 0
+    replay_count: int = 0
 
 
 class ACLGraphWrapper:
@@ -99,6 +112,11 @@ class ACLGraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.is_exact_310p_dflash_piecewise = self.is_debugging_mode and is_310p_dflash_piecewise(vllm_config)
+        self.validate_input_contracts = self.is_exact_310p_dflash_piecewise
+        self._debug_piecewise_component = os.getenv("VLLM_ASCEND_310P_DFLASH_PIECEWISE_DEBUG_COMPONENT")
+        if self._debug_piecewise_component not in (None, "both", "target", "draft"):
+            raise ValueError("VLLM_ASCEND_310P_DFLASH_PIECEWISE_DEBUG_COMPONENT must be one of: both, target, draft")
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
@@ -130,6 +148,56 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def _debug_component_is_enabled(self, component: str) -> bool:
+        selector = self._debug_piecewise_component
+        if (
+            selector is None
+            or selector == "both"
+            or not self.is_debugging_mode
+            or not self.is_exact_310p_dflash_piecewise
+            or self.runtime_mode != CUDAGraphMode.PIECEWISE
+        ):
+            return True
+        return selector == component
+
+    def _capture_input_contracts(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[GraphInputTensorContract, ...] | None:
+        if not self.validate_input_contracts:
+            return None
+        return capture_graph_input_contracts(args, kwargs)
+
+    def _validate_replay_input_contracts(
+        self,
+        entry: ACLGraphEntry,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        if entry.input_contracts is None:
+            return
+        actual_contracts = self._capture_input_contracts(args, kwargs)
+        assert actual_contracts is not None
+        try:
+            validate_graph_input_contracts(
+                entry.input_contracts,
+                actual_contracts,
+            )
+        except GraphInputContractError as exc:
+            raise GraphInputContractError(
+                "310P DFlash Piecewise graph input contract failed: "
+                f"component={entry.component}, rank={entry.rank}, "
+                f"mode={self.runtime_mode.name}, "
+                f"descriptor={entry.batch_descriptor}: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _debug_rank() -> int:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank()
+        return 0
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
@@ -142,6 +210,14 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
+            return self.runnable(*args, **kwargs)
+
+        component = "draft" if getattr(_EXTRA_CTX, "is_draft_model", False) else "target"
+        if not self._debug_component_is_enabled(component):
+            logger.debug_once(
+                "[310p-dflash-piecewise/graph] event=debug-bypass component=%s ",
+                component,
+            )
             return self.runnable(*args, **kwargs)
 
         if batch_descriptor not in self.concrete_aclgraph_entries:
@@ -162,6 +238,19 @@ class ACLGraphWrapper:
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
+            entry.input_contracts = self._capture_input_contracts(args, kwargs)
+            if entry.input_contracts is not None:
+                entry.component = "draft" if getattr(_EXTRA_CTX, "is_draft_model", False) else "target"
+                entry.rank = self._debug_rank()
+                logger.debug(
+                    "[310p-dflash-piecewise/graph] event=capture component=%s "
+                    "rank=%d mode=%s descriptor=%s tensor_count=%d",
+                    entry.component,
+                    entry.rank,
+                    self.runtime_mode.name,
+                    entry.batch_descriptor,
+                    len(entry.input_contracts),
+                )
             aclgraph = torch.npu.NPUGraph()
 
             with ExitStack() as stack:
@@ -232,6 +321,7 @@ class ACLGraphWrapper:
             # to save memory
             entry.output = weak_ref_tensors(output)
             entry.aclgraph = aclgraph
+            entry.capture_count += 1
 
             compilation_counter.num_cudagraph_captured += 1
 
@@ -240,6 +330,9 @@ class ACLGraphWrapper:
             # manage the memory during acl graph capture
             return output
 
+        # The exact-scope recursive contract carries tensor paths and storage
+        # metadata, so run it before the legacy flat positional-address check.
+        self._validate_replay_input_contracts(entry, args, kwargs)
         if self.is_debugging_mode:
             # check if the input addresses are the same
             new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
@@ -248,7 +341,6 @@ class ACLGraphWrapper:
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}"
             )
-
         logger.info_once("Replaying aclgraph")
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
@@ -264,6 +356,20 @@ class ACLGraphWrapper:
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
+        entry.replay_count += 1
+        if entry.input_contracts is not None and entry.replay_count == 1:
+            logger.debug(
+                "[310p-dflash-piecewise/graph] event=replay component=%s "
+                "rank=%d mode=%s descriptor=%s capture_count=%d "
+                "replay_count=%d tensor_count=%d contract=stable",
+                entry.component,
+                entry.rank,
+                self.runtime_mode.name,
+                entry.batch_descriptor,
+                entry.capture_count,
+                entry.replay_count,
+                len(entry.input_contracts),
+            )
         return entry.output
 
 

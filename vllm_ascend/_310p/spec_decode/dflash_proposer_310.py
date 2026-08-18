@@ -33,7 +33,11 @@ import torch
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
+from vllm_ascend._310p.ops.rotary_embedding import (
+    AscendRotaryEmbedding310,
+    configure_draft_rope_capacity_310,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
@@ -47,10 +51,7 @@ MAX_SUPPORTED_NUM_SPEC_TOKENS_310P = 15
 
 def _validate_num_spec_tokens_310(num_speculative_tokens: int | None) -> None:
     """Reject only query lengths that exceed the compiled recurrent buffers."""
-    if (
-        num_speculative_tokens is not None
-        and num_speculative_tokens > MAX_SUPPORTED_NUM_SPEC_TOKENS_310P
-    ):
+    if num_speculative_tokens is not None and num_speculative_tokens > MAX_SUPPORTED_NUM_SPEC_TOKENS_310P:
         raise ValueError(
             "dflash/dspark on 310P supports at most "
             f"{MAX_SUPPORTED_NUM_SPEC_TOKENS_310P} speculative tokens, but got "
@@ -188,6 +189,7 @@ def _prepare_per_layer_slot_mappings_310(
         layer_name: query_slots_by_size[block_sizes_by_layer[layer_name]] for layer_name in proposer.attn_layer_names
     }
 
+
 def _ensure_kernel_block_size_matches_cache_310(proposer: Any) -> None:
     """Align the draft ``kernel_block_size`` with the allocated KV cache.
 
@@ -233,6 +235,12 @@ def wrap_dummy_run_with_draft_flag(original):
 
     @functools.wraps(original)
     def dummy_run(self, *args, **kwargs):
+        vllm_config = getattr(self, "vllm_config", None)
+        if vllm_config is not None and is_310p_dflash_piecewise(vllm_config):
+            runner = getattr(self, "runner", None)
+            capacity_tokens = getattr(runner, "max_num_tokens", None)
+            if isinstance(capacity_tokens, int) and capacity_tokens > 0:
+                configure_draft_rope_capacity_310(capacity_tokens)
         prev_flag = AscendRotaryEmbedding310._is_drafting_update_enabled
         AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
         try:
@@ -281,6 +289,19 @@ def _copy_and_expand_inputs_ascendc(
 
     if num_rejected_tokens_gpu is not None:
         num_rejected = num_rejected_tokens_gpu.to(torch.int32)
+    elif is_310p_dflash_piecewise(self.vllm_config):
+        max_num_reqs = int(self.runner.max_num_reqs)
+        zero_buffer = getattr(self, "_zero_num_rejected_buffer_310", None)
+        if zero_buffer is None or zero_buffer.shape[0] < max_num_reqs:
+            zero_buffer = torch.zeros(
+                max_num_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._zero_num_rejected_buffer_310 = zero_buffer
+        else:
+            zero_buffer.zero_()
+        num_rejected = zero_buffer[:batch_size]
     else:
         # The op always consumes a real [batch_size] tensor; when the caller
         # has no rejection info we feed an all-zero one.

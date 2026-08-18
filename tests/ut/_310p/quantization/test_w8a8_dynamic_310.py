@@ -19,9 +19,9 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.quantization.methods.w8a8_dynamic import (
+    _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE,
     AscendW8A8DynamicFusedMoEMethod310,
     AscendW8A8DynamicLinearMethod310,
-    _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE,
 )
 
 
@@ -157,6 +157,37 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
                 pertoken_scale[_W8A8_DYNAMIC_MATMUL_CHUNK_SIZE:],
             )
         )
+        self.assertEqual(output.shape, (num_tokens, 256))
+
+    @patch("torch_npu.npu_dynamic_quant", create=True)
+    @patch("torch_npu.npu_quant_matmul")
+    def test_apply_piecewise_uses_shape_dynamic_two_way_chunks(
+        self,
+        mock_npu_quant_matmul,
+        mock_npu_dynamic_quantize,
+    ):
+        self.method._dflash_piecewise_graph_safe = True
+        layer = MagicMock()
+        layer.weight = torch.randint(-127, 128, (128, 256), dtype=torch.int8)
+        layer.weight_scale = torch.randn(256, dtype=torch.float32)
+
+        num_tokens = 1280
+        x = torch.randn(num_tokens, 128, dtype=torch.float16)
+        quantized_x = torch.randint(-128, 127, x.shape, dtype=torch.int8)
+        pertoken_scale = torch.randn(num_tokens, dtype=torch.float32)
+        mock_npu_dynamic_quantize.return_value = quantized_x, pertoken_scale
+        mock_npu_quant_matmul.side_effect = lambda input_, *_args, **_kwargs: torch.zeros(
+            input_.shape[0], 256, dtype=x.dtype
+        )
+
+        output = self.method.apply(layer, x)
+
+        self.assertEqual(mock_npu_quant_matmul.call_count, 2)
+        first_call, second_call = mock_npu_quant_matmul.call_args_list
+        self.assertEqual(first_call.args[0].shape[0], 640)
+        self.assertEqual(second_call.args[0].shape[0], 640)
+        self.assertTrue(torch.equal(first_call.kwargs["pertoken_scale"], pertoken_scale[:640]))
+        self.assertTrue(torch.equal(second_call.kwargs["pertoken_scale"], pertoken_scale[640:]))
         self.assertEqual(output.shape, (num_tokens, 256))
 
     @patch("vllm_ascend.utils.is_310p", return_value=True)

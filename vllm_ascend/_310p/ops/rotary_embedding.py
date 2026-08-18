@@ -128,6 +128,40 @@ def set_mrope_apply_rotary_slices(
 _draft_cos: torch.Tensor | None = None
 _draft_sin: torch.Tensor | None = None
 _draft_rope_dim: int | None = None
+_draft_min_capacity_tokens = 0
+
+
+def configure_draft_rope_capacity_310(capacity_tokens: int) -> None:
+    """Reserve stable draft RoPE storage before graph capture.
+
+    DFlash uses the same buffers for profile/capture query batches and runtime
+    context RoPE.  Reserving the runner token budget up front prevents a later
+    context batch from replacing tensors already bound to a Piecewise graph.
+    """
+    global _draft_cos, _draft_sin, _draft_min_capacity_tokens
+
+    capacity_tokens = int(capacity_tokens)
+    if capacity_tokens <= _draft_min_capacity_tokens:
+        return
+    _draft_min_capacity_tokens = capacity_tokens
+
+    if _draft_cos is None or _draft_cos.shape[1] >= capacity_tokens:
+        return
+    old_capacity = _draft_cos.shape[1]
+    new_cos = torch.ones(
+        1,
+        capacity_tokens,
+        1,
+        _draft_cos.shape[-1],
+        dtype=_draft_cos.dtype,
+        device=_draft_cos.device,
+    )
+    new_sin = torch.zeros_like(new_cos)
+    new_cos[:, :old_capacity].copy_(_draft_cos)
+    assert _draft_sin is not None
+    new_sin[:, :old_capacity].copy_(_draft_sin)
+    _draft_cos = new_cos
+    _draft_sin = new_sin
 
 
 def _build_draft_cos_sin_slice(
@@ -152,19 +186,22 @@ def _build_draft_cos_sin_slice(
         or _draft_cos.device != cos_sin_cache.device
         or _draft_cos.dtype != cos_sin_cache.dtype
     ):
-        capacity = max(num_tokens, 0 if _draft_cos is None else _draft_cos.shape[1])
-        _draft_cos = torch.ones(
-            1, capacity, 1, rope_dim, dtype=cos_sin_cache.dtype, device=cos_sin_cache.device
+        capacity = max(
+            num_tokens,
+            _draft_min_capacity_tokens,
+            0 if _draft_cos is None else _draft_cos.shape[1],
         )
-        _draft_sin = torch.zeros(
-            1, capacity, 1, rope_dim, dtype=cos_sin_cache.dtype, device=cos_sin_cache.device
-        )
+        _draft_cos = torch.ones(1, capacity, 1, rope_dim, dtype=cos_sin_cache.dtype, device=cos_sin_cache.device)
+        _draft_sin = torch.zeros(1, capacity, 1, rope_dim, dtype=cos_sin_cache.dtype, device=cos_sin_cache.device)
         _draft_rope_dim = rope_dim
 
+    draft_cos = _draft_cos
+    draft_sin = _draft_sin
+    assert draft_cos is not None and draft_sin is not None
     sel = cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2)
-    _draft_cos[:, :num_tokens] = sel.chunk(2, dim=-2)[0]
-    _draft_sin[:, :num_tokens] = sel.chunk(2, dim=-2)[1]
-    return _draft_cos[:, :num_tokens], _draft_sin[:, :num_tokens]
+    draft_cos[:, :num_tokens] = sel.chunk(2, dim=-2)[0]
+    draft_sin[:, :num_tokens] = sel.chunk(2, dim=-2)[1]
+    return draft_cos[:, :num_tokens], draft_sin[:, :num_tokens]
 
 
 def _rope_forward_oot(

@@ -90,6 +90,7 @@ def _reset_draft_globals():
     rotary_310._draft_cos = None
     rotary_310._draft_sin = None
     rotary_310._draft_rope_dim = None
+    rotary_310._draft_min_capacity_tokens = 0
 
 
 def test_build_draft_cos_sin_slice_uses_own_cache():
@@ -127,5 +128,30 @@ def test_build_draft_cos_sin_slice_reuses_buffer_address():
         cos2, _ = _build_draft_cos_sin_slice(cos_sin_cache, torch.arange(4, dtype=torch.long))
         assert cos2.data_ptr() == first_ptr
         assert tuple(cos2.shape) == (1, 4, 1, 128)
+    finally:
+        _reset_draft_globals()
+
+
+def test_configured_draft_capacity_prevents_runtime_growth_reallocation():
+    _reset_draft_globals()
+    try:
+        rotary_310.configure_draft_rope_capacity_310(64)
+        cos_sin_cache = torch.randn(128, 128, dtype=torch.float32)
+
+        cos1, sin1 = _build_draft_cos_sin_slice(
+            cos_sin_cache,
+            torch.arange(8, dtype=torch.long),
+        )
+        cos_ptr = cos1.data_ptr()
+        sin_ptr = sin1.data_ptr()
+        cos2, sin2 = _build_draft_cos_sin_slice(
+            cos_sin_cache,
+            torch.arange(48, dtype=torch.long),
+        )
+
+        assert rotary_310._draft_cos.shape[1] == 64
+        assert rotary_310._draft_sin.shape[1] == 64
+        assert cos2.data_ptr() == cos_ptr
+        assert sin2.data_ptr() == sin_ptr
     finally:
         _reset_draft_globals()

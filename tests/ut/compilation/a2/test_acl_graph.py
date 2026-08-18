@@ -149,6 +149,165 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(wrapper.aclgraph_options, self.mock_cudagraph_options)
         self.assertEqual(wrapper.concrete_aclgraph_entries, {})
 
+    @patch.dict(
+        "os.environ",
+        {"VLLM_ASCEND_310P_DFLASH_PIECEWISE_DEBUG_COMPONENT": "target"},
+    )
+    @patch(
+        "vllm_ascend.compilation.acl_graph.is_310p_dflash_piecewise",
+        return_value=True,
+        create=True,
+    )
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_exact_piecewise_debug_can_isolate_graph_component(
+        self,
+        mock_envs,
+        mock_current_platform,
+        mock_exact_scope,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+
+        self.assertTrue(wrapper._debug_component_is_enabled("target"))
+        self.assertFalse(wrapper._debug_component_is_enabled("draft"))
+
+    @patch(
+        "vllm_ascend.compilation.acl_graph.is_310p_dflash_piecewise",
+        return_value=True,
+        create=True,
+    )
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_exact_piecewise_debug_enables_recursive_input_contract(
+        self,
+        mock_envs,
+        mock_current_platform,
+        mock_exact_scope,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+        tensor = torch.arange(8).reshape(2, 4)
+
+        contracts = wrapper._capture_input_contracts(
+            ({"nested": [tensor[:, :2]]},),
+            {"mask": tensor[:, 2:]},
+        )
+
+        self.assertTrue(wrapper.validate_input_contracts)
+        self.assertEqual(
+            [contract.path for contract in contracts],
+            ["args[0].nested[0]", "kwargs.mask"],
+        )
+        mock_exact_scope.assert_called_once_with(self.mock_vllm_config)
+
+    @patch(
+        "vllm_ascend.compilation.acl_graph.is_310p_dflash_piecewise",
+        return_value=True,
+        create=True,
+    )
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_exact_piecewise_replay_reports_recursive_contract_before_flat_address_check(
+        self,
+        mock_envs,
+        mock_current_platform,
+        _mock_exact_scope,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+        captured = torch.arange(8)
+        entry = ACLGraphEntry(
+            batch_descriptor=BatchDescriptor(num_tokens=32, uniform=False),
+            input_contracts=wrapper._capture_input_contracts((captured,), {}),
+            component="draft",
+            rank=1,
+        )
+
+        with self.assertRaises(acl_graph.GraphInputContractError) as context:
+            wrapper._validate_replay_input_contracts(
+                entry,
+                (captured.clone(),),
+                {},
+            )
+
+        message = str(context.exception)
+        self.assertIn("component=draft", message)
+        self.assertIn("rank=1", message)
+        self.assertIn("descriptor=BatchDescriptor(num_tokens=32", message)
+        self.assertIn("args[0]", message)
+
+    @patch(
+        "vllm_ascend.compilation.acl_graph.is_310p_dflash_piecewise",
+        return_value=False,
+        create=True,
+    )
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_out_of_scope_debug_does_not_collect_recursive_input_contract(
+        self,
+        mock_envs,
+        mock_current_platform,
+        mock_exact_scope,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+
+        self.assertFalse(wrapper.validate_input_contracts)
+        self.assertIsNone(wrapper._capture_input_contracts((torch.ones(1),), {}))
+        mock_exact_scope.assert_called_once_with(self.mock_vllm_config)
+
+    @patch(
+        "vllm_ascend.compilation.acl_graph.is_310p_dflash_piecewise",
+        return_value=True,
+        create=True,
+    )
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_info_mode_does_not_collect_recursive_input_contract(
+        self,
+        mock_envs,
+        mock_current_platform,
+        mock_exact_scope,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+
+        self.assertFalse(wrapper.validate_input_contracts)
+        self.assertIsNone(wrapper._capture_input_contracts((torch.ones(1),), {}))
+        mock_exact_scope.assert_not_called()
+
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
     @patch("vllm_ascend.compilation.acl_graph.envs")
     def test_initialization_assertion_error(self, mock_envs, mock_current_platform):

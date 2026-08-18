@@ -13,10 +13,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -27,9 +29,11 @@ from vllm_ascend._310p.model_runner_310p import (
     _resize_dflash_draft_kv_cache_specs,
     _snapshot_num_computed_tokens_to_device,
 )
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 def _prepare_inputs_source() -> str:
@@ -166,6 +170,153 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
 
     assert calls == ["update", "model"]
     torch.testing.assert_close(hidden_states, torch.ones(1))
+
+
+def _load_dflash_piecewise_scope_module():
+    try:
+        return importlib.import_module("vllm_ascend._310p.dflash_piecewise")
+    except ModuleNotFoundError:
+        pytest.fail("310P DFlash Piecewise scope module is missing")
+
+
+@pytest.mark.parametrize(
+    ("is_310p_platform", "method", "mode", "expected"),
+    [
+        (True, "dflash", CUDAGraphMode.PIECEWISE, True),
+        (False, "dflash", CUDAGraphMode.PIECEWISE, False),
+        (True, "mtp", CUDAGraphMode.PIECEWISE, False),
+        (True, None, CUDAGraphMode.PIECEWISE, False),
+        (True, "dflash", CUDAGraphMode.NONE, False),
+        (True, "dflash", CUDAGraphMode.FULL, False),
+        (True, "dflash", CUDAGraphMode.FULL_DECODE_ONLY, False),
+        (True, "dflash", CUDAGraphMode.FULL_AND_PIECEWISE, False),
+    ],
+)
+def test_dflash_piecewise_scope_requires_every_condition(
+    is_310p_platform: bool,
+    method: str | None,
+    mode: CUDAGraphMode,
+    expected: bool,
+) -> None:
+    scope_module = _load_dflash_piecewise_scope_module()
+    config = SimpleNamespace(
+        speculative_config=(SimpleNamespace(method=method) if method is not None else None),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=mode,
+            cudagraph_capture_sizes=[64, 32],
+        ),
+    )
+
+    with patch.object(scope_module, "is_310p", return_value=is_310p_platform):
+        active = scope_module.is_310p_dflash_piecewise(config)
+
+    assert active is expected
+    assert config.compilation_config.cudagraph_mode is mode
+    assert config.compilation_config.cudagraph_capture_sizes == [64, 32]
+
+
+def test_dflash_piecewise_scope_has_no_sticky_process_state() -> None:
+    scope_module = _load_dflash_piecewise_scope_module()
+    piecewise = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dflash"),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+    )
+    eager = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dflash"),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+    )
+
+    with patch.object(scope_module, "is_310p", return_value=True):
+        assert scope_module.is_310p_dflash_piecewise(piecewise) is True
+        assert scope_module.is_310p_dflash_piecewise(eager) is False
+        assert scope_module.is_310p_dflash_piecewise(piecewise) is True
+
+
+@pytest.mark.parametrize(
+    ("is_310p_platform", "method", "mode", "expected_force_eager"),
+    [
+        (True, "dflash", CUDAGraphMode.PIECEWISE, False),
+        (False, "dflash", CUDAGraphMode.PIECEWISE, True),
+        (True, "mtp", CUDAGraphMode.PIECEWISE, True),
+        (True, "dflash", CUDAGraphMode.NONE, True),
+        (True, "dflash", CUDAGraphMode.FULL, True),
+        (True, "dflash", CUDAGraphMode.FULL_DECODE_ONLY, True),
+        (True, "dflash", CUDAGraphMode.FULL_AND_PIECEWISE, True),
+    ],
+)
+def test_only_dflash_piecewise_mixed_capture_bypasses_uniform_spec_guard(
+    is_310p_platform: bool,
+    method: str,
+    mode: CUDAGraphMode,
+    expected_force_eager: bool,
+) -> None:
+    scope_module = _load_dflash_piecewise_scope_module()
+    runner = object.__new__(NPUModelRunner310)
+    runner.attn_state = AscendAttentionState.DecodeOnly
+    runner._spec_dummy_capture = False
+    runner.speculative_config = SimpleNamespace(method=method)
+    runner.uniform_decode_query_len = 16
+    runner.input_batch = SimpleNamespace(num_computed_tokens_cpu=torch.zeros(16, dtype=torch.int32).numpy())
+    runner.vllm_config = SimpleNamespace(
+        speculative_config=runner.speculative_config,
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
+    )
+    observed_force_eager = []
+
+    def parent_determine(self, **kwargs):
+        observed_force_eager.append(kwargs["force_eager"])
+        return "dispatch"
+
+    with (
+        patch.object(scope_module, "is_310p", return_value=is_310p_platform),
+        patch.object(
+            NPUModelRunner,
+            "_determine_batch_execution_and_padding",
+            new=parent_determine,
+        ),
+    ):
+        result = runner._determine_batch_execution_and_padding(
+            num_tokens=64,
+            num_reqs=16,
+            num_scheduled_tokens_np=torch.full((16,), 4, dtype=torch.int32).numpy(),
+            max_num_scheduled_tokens=64,
+            use_cascade_attn=False,
+        )
+
+    assert result == "dispatch"
+    assert observed_force_eager == [expected_force_eager]
+
+
+def test_piecewise_dispatch_debug_handles_uninitialized_attention_state() -> None:
+    scope_module = _load_dflash_piecewise_scope_module()
+    runner = object.__new__(NPUModelRunner310)
+    runner.attn_state = None
+    runner.speculative_config = SimpleNamespace(method="dflash")
+    runner.uniform_decode_query_len = 16
+    runner.input_batch = SimpleNamespace(num_computed_tokens_cpu=torch.zeros(16, dtype=torch.int32).numpy())
+    runner.vllm_config = SimpleNamespace(
+        speculative_config=runner.speculative_config,
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+    )
+
+    with (
+        patch.object(scope_module, "is_310p", return_value=True),
+        patch.object(
+            NPUModelRunner,
+            "_determine_batch_execution_and_padding",
+            return_value="dispatch",
+        ),
+    ):
+        result = runner._determine_batch_execution_and_padding(
+            num_tokens=64,
+            num_reqs=16,
+            num_scheduled_tokens_np=torch.full((16,), 4, dtype=torch.int32).numpy(),
+            max_num_scheduled_tokens=64,
+            use_cascade_attn=False,
+            force_uniform_decode=False,
+        )
+
+    assert result == "dispatch"
 
 
 def test_async_correction_remaps_lengths_and_accepted_counts() -> None:
