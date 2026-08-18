@@ -196,7 +196,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             self.tp_group_context = nullcontext()
 
-        self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
+        # draft_model method: the drafter consumes R*(K+2) tokens per step
+        # (R*(K+1) verify tokens + 1 extra input slot per request, see
+        # net_num_new_slots_per_request), which is never a multiple of
+        # (K+1). The FULL-uniform dispatch path assumes num_tokens is a
+        # multiple of uniform_decode_query_len (assert num_tokens_padded %
+        # (K+1) == 0) and derives num_reqs = padded // (K+1), so it would
+        # fabricate phantom requests and produce a [padded_reqs, K] draft
+        # output that mismatches the [num_reqs, K] CPU buffer at
+        # _copy_draft_token_ids_to_cpu. Upstream vLLM keeps its drafter
+        # PIECEWISE-only for the same reason. Disable the drafter aclgraph
+        # for draft_model; the target model keeps its FULL graphs.
+        # TODO: implement drafter FULL-graph support (drafter-specific
+        # R*(K+2) capture sizes and dispatch).
+        self.use_cuda_graph = (
+            self.runner._use_aclgraph()
+            and not self.speculative_config.enforce_eager
+            and not self.speculative_config.uses_draft_model()
+        )
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
         # GLM series models: speculative decoding does not yet support running
