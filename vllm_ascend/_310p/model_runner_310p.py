@@ -65,6 +65,22 @@ _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
+def _is_stream_capturing() -> bool:
+    # Runtime truth first: the context flags are not set during the drafter's
+    # capture, so they cannot be relied on here.
+    try:
+        if torch.npu.is_current_stream_capturing():
+            return True
+    except Exception:
+        pass
+    try:
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+        return bool(getattr(_EXTRA_CTX, "capturing", False))
+    except Exception:
+        return False
+
+
 class NPUModelRunner310(NPUModelRunner):
     """
     310P model runner with a distinct ACL graph capture/replay contract from 910B:
@@ -642,6 +658,12 @@ class NPUModelRunner310(NPUModelRunner):
             and not self.enable_enpu
             and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
+            # the capture flag is set on _EXTRA_CTX in the v2 aclgraph
+            # path (worker/v2/aclgraph_utils.py:171). If only that one is set this
+            # guard passes and we call stream.synchronize() inside an ACL capture ->
+            # "Not allow to synchronize captured-stream" (plog 107027), which surfaces
+            # later as the 107030 memcpy failure. Check both flags.
+            and not _is_stream_capturing()
             and hasattr(self, "update_stream")
         )
 

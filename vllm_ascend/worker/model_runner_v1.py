@@ -3270,10 +3270,15 @@ class NPUModelRunner(GPUModelRunner):
                 self.dcp_manager.query_lens_full.copy_to_gpu()
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
-        else:
-            assert cudagraph_runtime_mode == _cudagraph_mode, (
-                f"Cudagraph runtime mode mismatch in dummy_run. "
-                f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
+        elif cudagraph_runtime_mode != _cudagraph_mode:
+            # with spec decode the batch descriptor carries draft-token
+            # slots, so the dispatcher does not recognise the padded size and returns
+            # NONE while capture_model is deliberately capturing PIECEWISE. The caller
+            # is the authority during capture -- honour it instead of asserting.
+            logger.warning(
+                "dummy_run cudagraph mode: dispatcher=%s caller=%s; using caller",
+                _cudagraph_mode,
+                cudagraph_runtime_mode,
             )
         num_tokens_padded = batch_desc.num_tokens
         num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
