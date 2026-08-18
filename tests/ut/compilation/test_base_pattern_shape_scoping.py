@@ -63,7 +63,7 @@ def _import_base_pattern():
         return bp
     except ImportError:
         stub = types.ModuleType("npugraph_ex")
-        stub.register_replacement = lambda **kwargs: None
+        stub.register_replacement = lambda **kwargs: None  # type: ignore[attr-defined]
         sys.modules.setdefault("npugraph_ex", stub)
         import vllm_ascend.compilation.passes.base_pattern as bp
 
@@ -89,7 +89,9 @@ def _fake_vllm_config(dtype=torch.float32):
     return types.SimpleNamespace(model_config=types.SimpleNamespace(dtype=dtype))
 
 
-class ToySplitCatPattern(BasePattern):
+class ToySplitCatPattern(BasePattern):  # type: ignore[misc, valid-type]
+    # (mypy cannot statically resolve BasePattern, which is imported from a
+    # function-returned module to stub the NPU backend when absent)
     """cat(split(x, [w/2, w/2])) with sizes baked from the input width.
 
     Structurally matches graphs of any width (torch's initial match ignores
@@ -232,7 +234,7 @@ def test_matched_width_unresolvable_symbolic_returns_none():
     # as unverifiable (None -> reject-on-unknown) instead of letting bool()
     # raise inside the caller's conditional and crash the compilation.
     sym_width = mock.MagicMock()
-    sym_width.__eq__.return_value = _UnresolvableBool()
+    sym_width.__eq__.return_value = _UnresolvableBool()  # type: ignore[attr-defined]
 
     fake_val = mock.MagicMock(spec=torch.Tensor)  # passes isinstance check
     fake_val.dim.return_value = 2
