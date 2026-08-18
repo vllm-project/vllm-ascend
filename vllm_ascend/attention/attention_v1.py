@@ -71,85 +71,12 @@ _ATTN_KEYS_BUFFER = None
 # FA3 captured NPU tensors keyed by num_tokens, updated before each replay
 # with the current batch data (cache_seqlens, cu_seqlens_q).
 _FA3_GRAPH_TENSORS: dict = {}
-# FA3 scheduler-metadata tensors (4MB each) keyed by num_tokens.  Kept separate
-# from _FA3_GRAPH_TENSORS so the E1 debug dump can check their addresses too.
-_FA3_SCHED_META_TENSORS: dict = {}
-# Set when an FA3 decode graph is captured; ACLGraphWrapper checks it after
-# capture to issue a stream sync (flushing FA3's AICPU residue) ONLY for FA3.
-_FA3_GRAPH_CAPTURED: bool = False
-# E1 diagnostic already dumped (env VLLM_ASCEND_DEBUG_FA3_MEM).
-_E1_DUMPED: bool = False
-
-
-def _dump_fa3_memory_overlap() -> None:
-    """Debug helper (E1): dump FA3 persistent buffer addresses and the CANN V1
-    FIA graph workspaces, then report any address overlap.
-
-    FA3 decode buffers live in the module globals ``_FA3_GRAPH_TENSORS`` /
-    ``_FA3_SCHED_META_TENSORS``; the CANN V1 FIA workspaces live in
-    ``graph_params.workspaces``.  An overlap between a FA3 buffer and a CANN
-    workspace means the FA3 capture/warmup allocation reused memory that the
-    prefill graph replay depends on — the leading suspect for the "first
-    prefill wrong when FA3 decode is enabled" symptom (M3).
-    """
-    from vllm_ascend.compilation.acl_graph import get_graph_params
-
-    def _rng(t: torch.Tensor):
-        return (t.data_ptr(), t.data_ptr() + t.numel() * t.element_size())
-
-    def _hex(r):
-        return f"[0x{r[0]:x}-0x{r[1]:x})"
-
-    print("[E1] FA3 persistent buffers:")
-    fa3_ranges = []
-    for num_tokens in sorted(set(_FA3_GRAPH_TENSORS) | set(_FA3_SCHED_META_TENSORS)):
-        meta = _FA3_SCHED_META_TENSORS.get(num_tokens)
-        if meta is not None:
-            r = _rng(meta)
-            fa3_ranges.append((num_tokens, "sched_meta", r))
-            print(f"  tok={num_tokens:6d} {'sched_meta':14s} {_hex(r)} {tuple(meta.shape)}")
-        for name, t in zip(
-            ("cache_seqlens", "cu_seqlens_q", "block_table"),
-            _FA3_GRAPH_TENSORS.get(num_tokens, (None, None, None)),
-        ):
-            if t is None:
-                continue
-            r = _rng(t)
-            fa3_ranges.append((num_tokens, name, r))
-            print(f"  tok={num_tokens:6d} {name:14s} {_hex(r)} {tuple(t.shape)} {t.dtype}")
-
-    print("[E1] CANN V1 FIA graph workspaces:")
-    gp = get_graph_params()
-    ws_ranges = []
-    if gp is not None:
-        for num_tokens, w in sorted(gp.workspaces.items()):
-            if w is None:
-                continue
-            if not isinstance(w, torch.Tensor):
-                print(f"  tok={num_tokens:6d} workspace (not a tensor): {w!r}")
-                continue
-            r = _rng(w)
-            ws_ranges.append((num_tokens, r))
-            print(f"  tok={num_tokens:6d} {'workspace':14s} {_hex(r)} {tuple(w.shape)}")
-
-    print("[E1] overlap check (FA3 buffer x CANN workspace):")
-    found = False
-    for nt, name, r1 in fa3_ranges:
-        for wt, r2 in ws_ranges:
-            if r1[0] < r2[1] and r2[0] < r1[1]:
-                found = True
-                print(f"  !! OVERLAP: FA3 {name}@{nt} {_hex(r1)} x workspace@{wt} {_hex(r2)}")
-    if not found:
-        print("  no overlap between FA3 buffers and CANN workspaces")
 
 
 def _no_fa3_graph_capture() -> bool:
-    """E3 diagnostic: disable FA3 decode GRAPH capture (decode captures via CANN
-    V1) while keeping FA3 eager decode active.  Set VLLM_ASCEND_DEBUG_FA3_NO_GRAPH=1.
-
-    If prefill recovers → the FA3 decode graph capture itself is the corruptor
-    (M1: CANN task-group / runtime state).  If prefill still wrong → the FA3
-    eager warmup activity is the corruptor (H3).
+    """Debug escape hatch: force decode to capture/replay via the CANN V1 graph
+    path instead of FA3, for A/B comparison while isolating FA3-graph decode
+    accuracy issues.  Set VLLM_ASCEND_DEBUG_FA3_NO_GRAPH=1.
     """
     return os.environ.get("VLLM_ASCEND_DEBUG_FA3_NO_GRAPH") == "1"
 
@@ -676,11 +603,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         fa3_graph = (meta, cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf)
         self._fa3_scheduler_metadata[num_tokens] = fa3_graph
         global _FA3_GRAPH_TENSORS
-        global _FA3_SCHED_META_TENSORS
         _FA3_GRAPH_TENSORS[num_tokens] = (
             cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf,
         )
-        _FA3_SCHED_META_TENSORS[num_tokens] = meta
         return fa3_graph
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
@@ -699,13 +624,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        # E1 diagnostic: dump FA3 buffer / CANN workspace addresses once,
-        # before the first replay.  Set VLLM_ASCEND_DEBUG_FA3_MEM=1 to enable.
-        global _E1_DUMPED
-        if os.environ.get("VLLM_ASCEND_DEBUG_FA3_MEM") and not _E1_DUMPED:
-            _dump_fa3_memory_overlap()
-            _E1_DUMPED = True
-
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
 
         # FA3 graph replay: refresh the captured NPU seq-length tensors with
@@ -1517,10 +1435,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         are fixed-size NPU buffers whose addresses are captured and whose data
         is refreshed before each replay by ``update_graph_params``.
         """
-        # Signal ACLGraphWrapper to flush AICPU residue after this FA3 capture.
-        global _FA3_GRAPH_CAPTURED
-        _FA3_GRAPH_CAPTURED = True
-
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
 
