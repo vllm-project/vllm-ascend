@@ -1,16 +1,18 @@
-KV_SHORT=16 KV_LONG=4096 CAUSAL=1 python tests/standalone/fa3/test_fa3_schedmeta_depends_on_seqlens.py 
-[W818 23:23:55.930292819 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_schedmeta_depends_on_seqlens.py 
+[W818 23:37:57.817298938 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
 short=16  long=4096  causal=True  window_size=(-1,-1)
 ========================================================================
-[W818 23:24:01.223496136 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[ref] manual short vs manual long            : 1.587359
+[W818 23:38:02.070324290 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[ref] manual short vs manual long            : 2.101331
 [fa3] FA3 short  vs FA3 long                 : 0.000000
-[ok ] FA3 short  vs manual short             : 0.003969
-[ok ] FA3 long   vs manual long              : 1.583923
+[ok ] FA3 short  vs manual short             : 0.007485
+[ok ] FA3 long   vs manual long              : 2.108816
+[ok ] FA3 noncausal long vs manual long      : 2.108816
+[causal] FA3 long causal vs noncausal        : 0.000000
 [meta] FA3(long+short meta) vs FA3(long)      : 0.000000
-[graph] grown-seq replay vs FA3(long)         : 1.583984
+[graph] grown-seq replay vs FA3(long)         : 2.108887
 [graph] short-seq replay vs FA3(short)        : 0.000000
 ------------------------------------------------------------------------
 Read:
@@ -19,28 +21,6 @@ Read:
   [ok ]  ~1e-2..1e-1 => FA3 matches correct output (bf16 vs fp32)
          large       => FA3 output is WRONG
   [meta] ~0 => scheduler_metadata does not depend on seq values
-  [graph]~0 => graph replay is correct; large => graph capture/replay bug
-------------------------------------------------------------------------
-KV_SHORT=16 KV_LONG=4096 CAUSAL=0 python tests/standalone/fa3/test_fa3_schedmeta_depends_on_seqlens.py 
-[W818 23:26:02.118948125 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
-[import] FA3 loaded from flash_attn_npu_3
-========================================================================
-short=16  long=4096  causal=False  window_size=(-1,-1)
-========================================================================
-[W818 23:26:08.360275776 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[ref] manual short vs manual long            : 1.522781
-[fa3] FA3 short  vs FA3 long                 : 0.000000
-[ok ] FA3 short  vs manual short             : 0.005188
-[ok ] FA3 long   vs manual long              : 1.519083
-[meta] FA3(long+short meta) vs FA3(long)      : 0.000000
-[graph] grown-seq replay vs FA3(long)         : 1.519165
-[graph] short-seq replay vs FA3(short)        : 0.000000
-------------------------------------------------------------------------
-Read:
-  [ref]  >0  => seq genuinely changes the correct output (expected)
-  [fa3]  should mirror [ref]; ~0 while [ref]>0 => FA3 ignores cache_seqlens
-  [ok ]  ~1e-2..1e-1 => FA3 matches correct output (bf16 vs fp32)
-         large       => FA3 output is WRONG
-  [meta] ~0 => scheduler_metadata does not depend on seq values
+  [causal] ~0 => causal==noncausal (decode MUST be); large => causal pos bug
   [graph]~0 => graph replay is correct; large => graph capture/replay bug
 ------------------------------------------------------------------------
