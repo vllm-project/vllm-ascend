@@ -41,7 +41,7 @@
 # /vllm_ascend/core
 /vllm_ascend/device @weijinqian0 @zzzzwwjj
 /vllm_ascend/device_allocator @weijinqian0
-/vllm_ascend/distributed @MengqingCao @LCAIZJ
+/vllm_ascend/distributed @LCAIZJ
 # /vllm_ascend/eplb
 /vllm_ascend/kv_offload @nalinaly
 /vllm_ascend/lora @paulyu12

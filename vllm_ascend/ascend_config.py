@@ -273,6 +273,7 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+        self._validate_mc2_hierarchy_comm()
 
         # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
         # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
@@ -323,6 +324,28 @@ class AscendConfig:
             additional_config.get("sparse_kv_offload_config", {}),
         )
         self._validate_sparse_c8_kv_offload_compatibility()
+
+    def _validate_mc2_hierarchy_comm(self) -> None:
+        if not self.enable_mc2_hierarchy_comm:
+            return
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        device_type = get_ascend_device_type()
+        if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+            raise NotImplementedError(
+                f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
+            )
+
+        num_logical_experts = self.vllm_config.model_config.get_num_experts()
+        num_redundant_experts = self.eplb_config.num_redundant_experts if self.eplb_config.dynamic_eplb else 0
+        num_experts = num_logical_experts + num_redundant_experts
+        if num_experts > 512:
+            raise ValueError(
+                "enable_mc2_hierarchy_comm supports at most 512 experts, "
+                f"but got {num_experts} experts "
+                f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
+            )
 
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
         if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
@@ -759,6 +782,12 @@ class ProfilingChunkConfig:
         # the start to skip online calibration entirely and rely solely on
         # the startup profiling model (avoids per-step sync overhead).
         self.need_timing: bool = config.get("need_timing", self.enabled)
+        if not self.enabled and self.need_timing:
+            logger.warning(
+                "profiling_chunk_config.need_timing=True is ignored because "
+                "profiling_chunk_config.enabled=False. Setting need_timing to False."
+            )
+            self.need_timing = False
         self.max_fit_chunk: int = int(config.get("max_fit_chunk", 30))
         self._validate()
 

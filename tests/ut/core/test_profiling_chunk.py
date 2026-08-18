@@ -76,8 +76,16 @@ class TestProfilingChunkConfig(TestBase):
     def test_default_values(self):
         cfg = ProfilingChunkConfig()
         self.assertFalse(cfg.enabled)
+        self.assertFalse(cfg.need_timing)
         self.assertAlmostEqual(cfg.smooth_factor, 1.0)
         self.assertEqual(cfg.min_chunk, 4096)
+
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    def test_need_timing_is_disabled_when_profiling_chunk_is_disabled(self, mock_warning):
+        cfg = ProfilingChunkConfig({"enabled": False, "need_timing": True})
+
+        self.assertFalse(cfg.need_timing)
+        mock_warning.assert_called_once()
 
     def test_invalid_smooth_factor_raises(self):
         with self.assertRaises(ValueError):
