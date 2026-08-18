@@ -25,6 +25,7 @@ before consuming the older output, so updating ``request.spec_token_ids`` from
 from __future__ import annotations
 
 import copy
+import os
 from functools import wraps
 from itertools import chain
 
@@ -59,6 +60,24 @@ def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
     if not use_pp or _is_pd_prefill_node(vllm_config):
         return False
     return not getattr(vllm_config, "use_v2_model_runner", False)
+
+
+def _supports_adaptive_physical_k(vllm_config) -> bool:
+    """Return whether the active worker can consume a variable draft width.
+
+    The V2 DSpark worker currently captures a FULL decode graph with a fixed
+    ``num_query_per_req``.  Changing only the scheduler's logical width leaves
+    the TND attention metadata at the old padded shape and can make ACL reject
+    the graph (``queryT != actualSequenceLengthQ[-1]``).  Keep the adaptive
+    controller available for V1/piecewise paths, but fail closed for V2 until
+    the worker-side metadata is updated atomically with the scheduler output.
+    """
+
+    if bool(getattr(vllm_config, "use_v2_model_runner", False)):
+        return False
+    # Some older vLLM configs do not expose the field yet; the launch
+    # environment is still authoritative for the Ascend V2 worker.
+    return os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0") != "1"
 
 
 def _patch_model_runner_output() -> None:
@@ -310,23 +329,30 @@ def _patch_scheduler_dynamic_gate_compat() -> None:
             and dynamic_spec_config.get("method") in ("dspark", "dflash")
             and bool(method_params.get("adaptive_draft_k", False))
         ):
-            try:
-                from vllm_ascend.spec_decode.dynamic.draft_k_controller import (
-                    AdaptiveDraftKController,
+            if not _supports_adaptive_physical_k(vllm_config):
+                logger.info(
+                    "Adaptive physical draft K is disabled for the V2 model "
+                    "runner; keeping the fixed DSpark query width for FULL "
+                    "graph attention metadata compatibility."
                 )
+            else:
+                try:
+                    from vllm_ascend.spec_decode.dynamic.draft_k_controller import (
+                        AdaptiveDraftKController,
+                    )
 
-                speculative_config = getattr(vllm_config, "speculative_config", None)
-                max_k = int(getattr(speculative_config, "num_speculative_tokens", 0))
-                self._ascend_physical_k_controller = AdaptiveDraftKController(
-                    max_k=max_k,
-                    min_k=int(method_params.get("adaptive_draft_k_min", 1)),
-                    slack=int(method_params.get("adaptive_draft_k_slack", 1)),
-                )
-            except (ImportError, TypeError, ValueError) as exc:
-                logger.warning(
-                    "Failed to initialize adaptive physical draft K controller: %s",
-                    exc,
-                )
+                    speculative_config = getattr(vllm_config, "speculative_config", None)
+                    max_k = int(getattr(speculative_config, "num_speculative_tokens", 0))
+                    self._ascend_physical_k_controller = AdaptiveDraftKController(
+                        max_k=max_k,
+                        min_k=int(method_params.get("adaptive_draft_k_min", 1)),
+                        slack=int(method_params.get("adaptive_draft_k_slack", 1)),
+                    )
+                except (ImportError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "Failed to initialize adaptive physical draft K controller: %s",
+                        exc,
+                    )
 
         if dynamic_spec_config.get("proposal_gate_enabled", False):
             try:
