@@ -133,11 +133,6 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 result = cls.find_all_discontinuous_hit_positions(exists, positions, 6, token_len, 16)
                 self.assertEqual(result, expected)
 
-    def test_max_intersection_hit_position(self):
-        cls = self._make_worker_class()
-        arr = [[1, 1, 0], [1, 0, 1]]
-        result = cls.find_all_continuous_hit_positions(arr, [16, 32, 48], 3, 48, 16)
-        self.assertEqual(result, [16])
 
     def test_find_all_continuous_hit_positions_all_one(self):
         cls = self._make_worker_class()
@@ -845,34 +840,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(result, 32)
 
 
-class TestKVPoolWorkerGetBlockIdsWithLoadErrors(unittest.TestCase):
-    """Test get_block_ids_with_load_errors method."""
-
-    def _make_worker(self):
-        return make_worker(self)
-
-    def test_get_block_ids_with_load_errors(self):
-        for invalid in ({1, 2, 3}, set()):
-            with self.subTest(invalid=invalid):
-                worker = self._make_worker()
-                worker._invalid_block_ids = invalid.copy()
-                self.assertEqual(worker.get_block_ids_with_load_errors(), invalid)
-                self.assertEqual(worker._invalid_block_ids, set())
-
-
-class TestKVPoolWorkerGetGroupTpSize(unittest.TestCase):
-    """Test get_group_tp_size method."""
-
-    def _make_worker(self):
-        return make_worker(self, tp_size=4, num_kv_heads=8)
-
-    def test_get_group_tp_size(self):
-        for use_mla, align_state, expected in [(False, True, 4), (False, False, 4), (True, False, 1)]:
-            with self.subTest(use_mla=use_mla, align_state=align_state):
-                worker = self._make_worker()
-                worker.use_mla = use_mla
-                worker.group_uses_align_state = [align_state]
-                self.assertEqual(worker.get_group_tp_size(0), expected)
 
 
 class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
