@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from typing import cast
+
 import torch
 import torch.nn.functional as F
 from vllm.distributed import (
@@ -75,17 +77,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
-            self.ascend_shared_experts = AscendSharedExperts(
-                shared_experts,
-                self.moe_config,
-                self.quant_type,
-                self._quant_method,
+            self._shared_experts = AscendSharedExperts(
+                layer=shared_experts,
+                moe_config=self.moe_config,
+                enable_dbo=enable_dbo,
+                mk_can_overlap_shared_experts=lambda: False,
+                quant_type=self.quant_type,
+                quant_method=self._quant_method,
             )
 
         setup_moe_comm_method(self.moe_config)
+
+    @property
+    def shared_experts(self) -> AscendSharedExperts | None:
+        return cast(AscendSharedExperts | None, self._shared_experts)
 
     @property
     def is_internal_router(self) -> bool:
@@ -101,8 +108,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     @property
     def _fused_output_is_reduced(self) -> bool:
         # For MC2/ALLTOALL/FUSED_MC2 comm types, finalize() already includes
-        # TP all-reduce for the routed output, and AscendSharedExperts.forward
-        # handles it for the shared output. Signal this to the upstream
+        # TP all-reduce for the routed output, and the Ascend shared-expert
+        # path handles it for the shared output. Signal this to the upstream
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
         return _EXTRA_CTX.moe_comm_type in {
@@ -112,7 +119,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         } or (_EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
 
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
-        shared_experts = getattr(self, "ascend_shared_experts", None)
+        shared_experts = self.shared_experts
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
             return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
         return shared_experts.parallel_mode()
@@ -190,8 +197,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context
-        if self.ascend_shared_experts is not None:
-            self.ascend_shared_experts.set_lora_context(lora_context)
+        if self.shared_experts is not None:
+            self.shared_experts.set_lora_context(lora_context)
 
     def _forward_impl(
         self,
@@ -201,7 +208,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
-            if self.ascend_shared_experts is None:
+            shared_experts = self.shared_experts
+            if shared_experts is None:
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -230,8 +238,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             fused_moe_events.before_routed_experts = before_routed_experts
             fused_moe_events.after_routed_experts = after_routed_experts
 
-            shared_out = self.ascend_shared_experts.forward(
+            shared_experts.forward_with_events(
                 hidden_states,
                 fused_moe_events,
             )
+            shared_out = shared_experts.output
             return shared_out, routed_out

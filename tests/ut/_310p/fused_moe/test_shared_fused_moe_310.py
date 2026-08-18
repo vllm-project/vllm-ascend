@@ -99,7 +99,7 @@ def test_runner_310_installs_specialized_comm():
     moe_config = MagicMock()
     runner.moe_config = moe_config
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
-    runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True)
+    runner._shared_experts = SimpleNamespace(multistream_overlap=True)
     comm_method = object()
 
     with (
@@ -116,7 +116,7 @@ def test_runner_310_installs_specialized_comm():
         )
 
         assert routed_experts.quant_method is None
-        assert runner.ascend_shared_experts.multistream_overlap is False
+        assert runner.shared_experts.multistream_overlap is False
         assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
         parent_init.assert_called_once()
 
@@ -209,7 +209,7 @@ def test_shared_experts_part2_310_applies_optional_gate(with_gate):
         expert_gate=_Gate() if with_gate else None,
     )
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
-    shared_experts.layer = shared_experts_layer
+    shared_experts._layer = shared_experts_layer
     hidden_states = torch.randn(3, 4)
     shared_gate_up = torch.randn(3, 4)
 
@@ -228,7 +228,10 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
-    ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
+    shared_experts = SimpleNamespace(
+        forward_with_events=MagicMock(),
+        output=shared_out,
+    )
     routed_events = FusedMoEEvents(
         before_routed_experts=None,
         after_routed_experts=None,
@@ -239,7 +242,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     runner.routed_experts = SimpleNamespace(
         forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
     )
-    runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
+    runner._shared_experts = shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     current_stream = MagicMock()
 
@@ -256,7 +259,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
-        ascend_shared_experts.forward.assert_called_once()
+        shared_experts.forward_with_events.assert_called_once()
     else:
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
@@ -264,4 +267,4 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
             input_ids=None,
         )
         assert result is routed_out
-        ascend_shared_experts.forward.assert_not_called()
+        shared_experts.forward_with_events.assert_not_called()
