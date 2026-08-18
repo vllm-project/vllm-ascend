@@ -1239,7 +1239,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # directly for target-space rejection sampling. The upstream
                 # compute_draft_token_ids guard falls back to greedy in this case;
                 # mirror that here since this autoregressive loop bypasses it.
-                # TODO: implement d2t scatter (like upstream speculator) to enable
+                # implement d2t scatter (like upstream speculator) to enable
                 # probabilistic sampling with vocab remapping.
                 dspark_has_vocab_mapping = getattr(self.model, "draft_id_to_target_id", None) is not None
                 use_probabilistic = self._enable_probabilistic_draft_probs and not dspark_has_vocab_mapping
@@ -1308,6 +1308,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
+            if draft_probs_step0 is not None:
+                self._last_draft_probs = draft_probs_step0.view(
+                    -1, self.num_speculative_tokens, draft_probs_step0.shape[-1]
+                ).contiguous()
             if self.method == "dspark":
                 return draft_token_ids[:, 1:]
             else:
