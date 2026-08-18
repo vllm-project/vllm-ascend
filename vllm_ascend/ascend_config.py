@@ -185,6 +185,18 @@ class AscendConfig:
         # when the weights are freed (issue #11882). Default False (preserve
         # existing memory-saving behavior).
         self.mlapo_keep_prefill_weights = additional_config.get("mlapo_keep_prefill_weights", False)
+        if self.mlapo_keep_prefill_weights:
+            if not self.enable_mlapo:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True requires enable_mlapo=True. "
+                    "The prefill weights are only freed when MLAPO is enabled."
+                )
+            if not vllm_config.model_config.is_deepseek_mla:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True is only supported for MLA models "
+                    "(e.g., DeepSeek). The prefill weights are only freed by MLAPO "
+                    "in the MLA attention path."
+                )
         self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
             "msmonitor_use_daemon",
