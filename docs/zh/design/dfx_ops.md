@@ -84,10 +84,10 @@ ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只
 
 1. 确认热更已开、`dump.enabled=true`、`dump.msprobe_config_path`（或启动时的 `dump_config_path`）有效（**不必**开 detector）。  
 2. 将 JSON 中 `"manual_trigger"` 设为：  
-   - `true`：**一直 dump**——每个「有本地 batch 请求」的真实 `execute_model` 拍都 arm，直到改回 `false`（不会自动清掉）；  
-   - 正整数 `N`：在接下来 **N** 个有本地 batch 的真实拍上各 arm 一次，每拍减 1，到 `0`/`false` 为止；  
+   - `true`：**一直 dump**——每个 **`scheduled_tokens > 0`** 的真实 `execute_model` 拍都 arm，直到改回 `false`（不会自动清掉）；  
+   - 正整数 `N`：在接下来 **N** 个有 scheduled tokens 的真实拍上各 arm 一次，每拍减 1，到 `0`/`false` 为止；  
    - `false` / `0`：关闭。  
-3. 等待**有真实请求的 batch** 的下一拍 `execute_model`（空闲 / `execute_dummy_batch` / **空 batch 清理拍** **不会**消费）。  
+3. 等待下一拍 **`total_num_scheduled_tokens > 0`（或等价 per-req scheduled）** 的 `execute_model`（空闲 / `execute_dummy_batch` / **`scheduled_tokens==0` 的 cleanup**、以及仅残留 `req_ids` 的拍 **不会**消费）。 Prefill 与 decode 都会消费（都有 scheduled tokens）。  
 4. 若 `dump.enabled=false`：**不消费**（`true` 也不清；int 次数不减）并打日志，修好后再等下一拍。  
 5. `true` 模式不写回 JSON；int 模式每成功消费一次写回剩余次数（最后一次写回 `false`）。日志可搜 `manual_trigger` / `[DFX manual_trigger]`。  
 6. **Report**：每次 arm 写一份 `manual_trigger` 报告；`detail.requests` 含该拍 batch **全部**请求的 prompt/output（`save_sensitive_info` 控制是否带 token ids）；`detail.manual_trigger_remaining_after` 为消费后剩余（`true` 时仍为 `true`）。
@@ -104,6 +104,7 @@ ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只
 | 开关 | 默认 | 作用 |
 |------|------|------|
 | `report.include_block_ids` | `true` | detail 带当前请求占用的 GPU `block_ids` |
+| `report.include_slot_mapping` | `false` | 从 GPU **D2H** 本拍真实 `slot_mapping` 切片写入 `detail.slot_mapping`（另有 `slot_mapping_span=[start,end]` 对齐 packed batch）。默认关：有 device sync；prefill 可能很长。anomaly / `dump_finish` / `manual_trigger` 的 `requests[]` 均可带。`manual_trigger` 若在 `execute_model` 入口写报告，可能仍是上一拍 buffer。 |
 | `report.block_last_write_wave` | `false` | 维护并写入各物理块最后写入的 DFX wave |
 | `report.block_last_writer` | `false` | 维护并写入各物理块最后写入的 `req_id` |
 

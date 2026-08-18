@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 
 
@@ -87,6 +88,180 @@ def touched_block_ids(
     if last < first:
         return []
     return list(block_ids[first : last + 1])
+
+
+def slot_mapping_for_request(
+    runner: Any,
+    req_id: str,
+    req_idx: int | None = None,
+    *,
+    kv_cache_group: int = 0,
+    scheduler_output: Any | None = None,
+) -> tuple[list[int], tuple[int, int]] | None:
+    """D2H this wave's GPU ``slot_mapping`` slice for ``req_id``.
+
+    Returns ``(values, (start, end))`` in the packed batch, or ``None`` if the
+    live tensor / query span cannot be resolved. Never raises.
+    """
+    if not req_id or runner is None:
+        return None
+    try:
+        batch = _runner_input_batch(runner)
+        idx = _resolve_req_idx(runner, batch, req_id, req_idx)
+        if idx is None:
+            return None
+        span = _query_span(runner, batch, idx, scheduler_output)
+        if span is None:
+            return None
+        start, end = span
+        gpu = _slot_mapping_gpu(batch, kv_cache_group)
+        if gpu is None:
+            return None
+        values = _d2h_int_list(gpu[start:end])
+        return values, (start, end)
+    except Exception:
+        return None
+
+
+def _runner_input_batch(runner: Any) -> Any | None:
+    batch = getattr(runner, "input_batch", None)
+    if batch is not None:
+        return batch
+    state = getattr(runner, "execute_model_state", None)
+    return getattr(state, "input_batch", None) if state is not None else None
+
+
+def _resolve_req_idx(
+    runner: Any,
+    batch: Any | None,
+    req_id: str,
+    req_idx: int | None,
+) -> int | None:
+    if req_idx is not None and int(req_idx) >= 0:
+        return int(req_idx)
+    mapping = getattr(batch, "req_id_to_index", None) if batch is not None else None
+    if isinstance(mapping, dict) and req_id in mapping:
+        return int(mapping[req_id])
+    req_ids = getattr(batch, "req_ids", None) if batch is not None else None
+    if req_ids:
+        try:
+            return list(req_ids).index(req_id)
+        except ValueError:
+            pass
+    req_states = getattr(runner, "req_states", None)
+    id_map = getattr(req_states, "req_id_to_index", None) if req_states is not None else None
+    if isinstance(id_map, dict) and req_id in id_map:
+        return int(id_map[req_id])
+    return None
+
+
+def _query_span(
+    runner: Any,
+    batch: Any | None,
+    req_idx: int,
+    scheduler_output: Any | None,
+) -> tuple[int, int] | None:
+    for qsl in (
+        getattr(runner, "query_start_loc", None),
+        getattr(getattr(runner, "input_buffers", None), "query_start_loc", None),
+        getattr(getattr(runner, "execute_model_state", None), "query_start_loc", None),
+    ):
+        span = _span_from_qsl(qsl, req_idx)
+        if span is not None:
+            return span
+    return _span_from_scheduler(batch, req_idx, scheduler_output)
+
+
+def _span_from_qsl(qsl: Any, req_idx: int) -> tuple[int, int] | None:
+    if qsl is None:
+        return None
+    arr = getattr(qsl, "np", None)
+    if arr is None:
+        cpu = getattr(qsl, "cpu", None)
+        arr = cpu if cpu is not None else qsl
+    try:
+        start = int(arr[req_idx].item() if hasattr(arr[req_idx], "item") else arr[req_idx])
+        nxt = arr[req_idx + 1]
+        end = int(nxt.item() if hasattr(nxt, "item") else nxt)
+    except Exception:
+        return None
+    if 0 <= start < end:
+        return start, end
+    return None
+
+
+def _span_from_scheduler(
+    batch: Any | None,
+    req_idx: int,
+    scheduler_output: Any | None,
+) -> tuple[int, int] | None:
+    if batch is None or scheduler_output is None:
+        return None
+    req_ids = getattr(batch, "req_ids", None)
+    num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+    if not req_ids or not isinstance(num_scheduled, dict):
+        return None
+    if req_idx < 0 or req_idx >= len(req_ids):
+        return None
+    start = 0
+    for i, rid in enumerate(req_ids):
+        n = int(num_scheduled.get(rid, 0) or 0)
+        if i == req_idx:
+            return (start, start + n) if n > 0 else None
+        start += max(n, 0)
+    return None
+
+
+def _slot_mapping_gpu(input_batch: Any, kv_cache_group: int) -> Any | None:
+    multi = getattr(input_batch, "block_table", None)
+    if multi is None:
+        return None
+    slots = getattr(multi, "slot_mappings", None)
+    if slots is not None:
+        try:
+            if int(getattr(slots, "ndim", 1) or 1) >= 2:
+                return slots[int(kv_cache_group)]
+            return slots
+        except Exception:
+            return None
+    table = _block_table_for_group(input_batch, kv_cache_group)
+    if table is None:
+        return None
+    sm = getattr(table, "slot_mapping", None)
+    if sm is None:
+        return None
+    return getattr(sm, "gpu", sm)
+
+
+def _d2h_int_list(gpu_slice: Any) -> list[int]:
+    """Blocking copy of a GPU (or CPU) 1-D integer tensor to ``list[int]``."""
+    if gpu_slice is None:
+        return []
+    if isinstance(gpu_slice, (list, tuple)):
+        return [int(x) for x in gpu_slice]
+    t = gpu_slice
+    detach = getattr(t, "detach", None)
+    if callable(detach):
+        t = detach()
+    to_fn = getattr(t, "to", None)
+    if callable(to_fn):
+        try:
+            t = to_fn("cpu")
+        except Exception:
+            cpu_fn = getattr(t, "cpu", None)
+            t = cpu_fn() if callable(cpu_fn) else t
+    elif callable(getattr(t, "cpu", None)):
+        t = t.cpu()
+    reshape = getattr(t, "reshape", None)
+    if callable(reshape):
+        with suppress(Exception):
+            t = reshape(-1)
+    if hasattr(t, "tolist"):
+        raw = t.tolist()
+        if isinstance(raw, list) and raw and isinstance(raw[0], list):
+            raw = [x for row in raw for x in row]
+        return [int(x) for x in raw]
+    return []
 
 
 def _normalize_block_ids(raw: Any, *, kv_cache_group: int) -> list[int]:

@@ -105,12 +105,25 @@ class ManualTriggerManager:
         self._runner = runner
 
     @staticmethod
-    def _local_batch_nonempty(
-        runner: Any,
-        scheduler_output: Any | None = None,
-    ) -> bool:
-        """True when this wave has at least one local request to snapshot."""
-        return bool(iter_local_request_rows(runner, scheduler_output))
+    def _wave_has_scheduled_tokens(scheduler_output: Any | None) -> bool:
+        """True when this ``execute_model`` wave has real scheduled work.
+
+        Idle cleanup often keeps residual ``input_batch.req_ids`` while
+        ``total_num_scheduled_tokens == 0``. Those waves must not burn
+        ``manual_trigger``. Prefill / decode always have scheduled tokens > 0.
+        """
+        if scheduler_output is None:
+            return False
+        total = getattr(scheduler_output, "total_num_scheduled_tokens", None)
+        if total is not None:
+            try:
+                return int(total) > 0
+            except (TypeError, ValueError):
+                pass
+        num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+        if isinstance(num_scheduled, dict) and num_scheduled:
+            return any(int(n or 0) > 0 for n in num_scheduled.values())
+        return False
 
     def consume_once(
         self,
@@ -138,11 +151,10 @@ class ManualTriggerManager:
                     remaining,
                 )
             return None
-        # Keep count until a wave with requests so report/detail is useful and
-        # empty idle cleanup steps do not burn remaining dumps.
-        if not self._local_batch_nonempty(self._runner, scheduler_output):
+        # Gate on this wave's scheduled tokens — not residual req_ids.
+        if not self._wave_has_scheduled_tokens(scheduler_output):
             logger.debug(
-                "[DFX manual_trigger] dump.manual_trigger deferred (empty batch); remaining=%d",
+                "[DFX manual_trigger] dump.manual_trigger deferred (no scheduled tokens); remaining=%d",
                 remaining,
             )
             return None

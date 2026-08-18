@@ -34,6 +34,7 @@ from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
 from vllm_ascend.dfx.kv_block_meta import (
     KvBlockMetaTracker,
     block_ids_for_request,
+    slot_mapping_for_request,
     touched_block_ids,
 )
 from vllm_ascend.dfx.manual_trigger import (
@@ -741,11 +742,12 @@ class DfxProcessor:
         req_id: str,
         req_idx: int | None = None,
     ) -> dict[str, Any]:
-        """Attach ``block_ids`` / ``blocks`` according to report.* flags."""
+        """Attach ``block_ids`` / ``blocks`` / ``slot_mapping`` per report.* flags."""
         include_ids = self.dfx_config.report_include_block_ids()
+        include_slots = self.dfx_config.report_include_slot_mapping()
         include_wave = self.dfx_config.report_block_last_write_wave()
         include_writer = self.dfx_config.report_block_last_writer()
-        if not include_ids and not include_wave and not include_writer:
+        if not include_ids and not include_slots and not include_wave and not include_writer:
             return detail
         out = dict(detail)
         ids = block_ids_for_request(self.runner, req_id, req_idx)
@@ -757,6 +759,17 @@ class DfxProcessor:
                 include_wave=include_wave,
                 include_writer=include_writer,
             )
+        if include_slots:
+            got = slot_mapping_for_request(
+                self.runner,
+                req_id,
+                req_idx,
+                scheduler_output=getattr(self, "_scheduler_output_for_step", None),
+            )
+            if got is not None:
+                values, span = got
+                out["slot_mapping"] = values
+                out["slot_mapping_span"] = [span[0], span[1]]
         return out
 
     def _batch_request_io_rows(self) -> list[tuple[str, int]]:

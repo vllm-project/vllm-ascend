@@ -607,3 +607,50 @@ def test_mark_finished_writes_dump_finish_when_meta_present():
     assert kwargs["detail"]["output_token_ids"] == [1, 2, 3, 4]
     proc.detectors.clear_finished.assert_called_once_with("r1")
     assert io.cumulative_output_ids("r1") == []
+
+
+def test_enrich_detail_slot_mapping_flag():
+    from types import SimpleNamespace
+
+    class _FakeGpu:
+        def __init__(self, data):
+            self._data = list(data)
+
+        def __getitem__(self, sl):
+            return _FakeGpu(self._data[sl])
+
+        def detach(self):
+            return self
+
+        def to(self, device):
+            return self
+
+        def reshape(self, *args):
+            return self
+
+        def tolist(self):
+            return list(self._data)
+
+    gpu = _FakeGpu([20, 21, 22])
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.runner = SimpleNamespace(
+        query_start_loc=SimpleNamespace(np=[0, 3]),
+        input_batch=SimpleNamespace(
+            req_ids=["r1"],
+            req_id_to_index={"r1": 0},
+            block_table=SimpleNamespace(slot_mapping=SimpleNamespace(gpu=gpu)),
+        ),
+        requests={},
+    )
+    proc._scheduler_output_for_step = None
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.report_include_block_ids.return_value = False
+    proc.dfx_config.report_block_last_write_wave.return_value = False
+    proc.dfx_config.report_block_last_writer.return_value = False
+    proc.dfx_config.report_include_slot_mapping.return_value = False
+    assert "slot_mapping" not in proc._enrich_detail_with_block_meta({}, "r1", 0)
+
+    proc.dfx_config.report_include_slot_mapping.return_value = True
+    out = proc._enrich_detail_with_block_meta({}, "r1", 0)
+    assert out["slot_mapping"] == [20, 21, 22]
+    assert out["slot_mapping_span"] == [0, 3]

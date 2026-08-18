@@ -146,22 +146,26 @@ def test_manual_trigger_manager_paths(tmp_path):
         use_async_scheduling=False,
         input_batch=SimpleNamespace(req_ids=["r1"]),
     )
+    so = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"r1": 1})
     mgr = ManualTriggerManager(dfx_config=cfg, runner=runner)
 
-    assert mgr.consume_once(allow_arm=False) is None
+    assert mgr.consume_once(allow_arm=False, scheduler_output=so) is None
     assert cfg.manual_trigger() is True
 
     cfg._data["dump"]["enabled"] = False
-    assert mgr.consume_once(allow_arm=True) is None
+    assert mgr.consume_once(allow_arm=True, scheduler_output=so) is None
 
-    # Empty batch must not burn remaining count.
+    # Zero-token wave must not burn remaining even with residual req_ids.
     cfg._data["dump"]["enabled"] = True
     cfg._data["dump"]["manual_trigger"] = 2
-    empty_mgr = ManualTriggerManager(
+    residual = ManualTriggerManager(
         dfx_config=cfg,
-        runner=SimpleNamespace(tp_rank=0, use_async_scheduling=False, input_batch=SimpleNamespace(req_ids=[])),
+        runner=SimpleNamespace(tp_rank=0, use_async_scheduling=False, input_batch=SimpleNamespace(req_ids=["r1"])),
     )
-    assert empty_mgr.consume_once(allow_arm=True) is None
+    idle_so = SimpleNamespace(total_num_scheduled_tokens=0, num_scheduled_tokens={})
+    assert residual.consume_once(allow_arm=True, scheduler_output=idle_so) is None
+    assert cfg.manual_trigger_count() == 2
+    assert residual.consume_once(allow_arm=True, scheduler_output=None) is None
     assert cfg.manual_trigger_count() == 2
 
     cfg._data["dump"]["enabled"] = True
@@ -171,7 +175,7 @@ def test_manual_trigger_manager_paths(tmp_path):
         return_value=False,
     ):
         # Continuous true: consume path still runs; value stays true.
-        assert mgr.consume_once(allow_arm=True) is None
+        assert mgr.consume_once(allow_arm=True, scheduler_output=so) is None
     assert cfg.manual_trigger() is True
     assert cfg.manual_trigger_continuous() is True
 
@@ -181,7 +185,7 @@ def test_manual_trigger_manager_paths(tmp_path):
         "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
         return_value=False,
     ):
-        assert mgr.consume_once(allow_arm=True) is None
+        assert mgr.consume_once(allow_arm=True, scheduler_output=so) is None
     assert cfg.manual_trigger() is False
 
     cfg._data["dump"]["manual_trigger"] = 2
@@ -190,7 +194,7 @@ def test_manual_trigger_manager_paths(tmp_path):
         "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
         return_value=True,
     ):
-        ev = mgr.consume_once(allow_arm=True)
+        ev = mgr.consume_once(allow_arm=True, scheduler_output=so)
     assert ev is not None
     assert ev.trigger_type == "manual_trigger"
     assert ev.to_report_detail()["source"] == "dump.manual_trigger"
@@ -218,18 +222,22 @@ def test_manual_trigger_v2_req_states_and_scheduler_output(tmp_path):
         req_states=SimpleNamespace(req_id_to_index={"r_v2": 3}),
     )
     assert iter_local_request_rows(v2_runner) == [("r_v2", 3)]
+    # Residual req_states alone (no scheduled tokens) must not consume.
+    assert ManualTriggerManager(dfx_config=cfg, runner=v2_runner).consume_once(allow_arm=True) is None
+    assert cfg.manual_trigger_count() == 2
+    so_v2 = SimpleNamespace(total_num_scheduled_tokens=4, num_scheduled_tokens={"r_v2": 4})
     with patch(
         "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",
         return_value=True,
     ):
-        ev = ManualTriggerManager(dfx_config=cfg, runner=v2_runner).consume_once(allow_arm=True)
+        ev = ManualTriggerManager(dfx_config=cfg, runner=v2_runner).consume_once(allow_arm=True, scheduler_output=so_v2)
     assert ev is not None
     assert cfg.manual_trigger_count() == 1
 
     cfg._data["dump"]["enabled"] = True
     cfg._data["dump"]["manual_trigger"] = 1
     first_wave = SimpleNamespace(tp_rank=0, input_batch=None, requests=None, req_states=None)
-    so = SimpleNamespace(num_scheduled_tokens={"new_req": 11})
+    so = SimpleNamespace(total_num_scheduled_tokens=11, num_scheduled_tokens={"new_req": 11})
     assert iter_local_request_rows(first_wave, so) == [("new_req", -1)]
     with patch(
         "vllm_ascend.dfx.manual_trigger.should_run_anomaly_check_on_rank",

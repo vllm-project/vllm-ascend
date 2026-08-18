@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from vllm_ascend.dfx.kv_block_meta import (
     KvBlockMetaTracker,
     block_ids_for_request,
+    slot_mapping_for_request,
     touched_block_ids,
 )
 
@@ -55,3 +56,63 @@ def test_kv_block_meta_tracker_record_and_detail():
     ]
     wave_only = tr.blocks_detail([1], include_wave=True, include_writer=False)
     assert wave_only == [{"block_id": 1, "last_write_wave": 5}]
+
+
+class _FakeGpu:
+    def __init__(self, data, to_calls=None):
+        self._data = list(data)
+        self.to_calls = to_calls if to_calls is not None else []
+
+    def __getitem__(self, sl):
+        return _FakeGpu(self._data[sl], self.to_calls)
+
+    def detach(self):
+        return self
+
+    def to(self, device):
+        self.to_calls.append(device)
+        return self
+
+    def reshape(self, *args):
+        return self
+
+    def tolist(self):
+        return list(self._data)
+
+
+def test_slot_mapping_for_request_d2h_slice():
+    to_calls: list[object] = []
+    gpu = _FakeGpu([10, 11, 12, 13, 14], to_calls)
+    runner = SimpleNamespace(
+        query_start_loc=SimpleNamespace(np=[0, 2, 5]),
+        input_batch=SimpleNamespace(
+            req_ids=["a", "b"],
+            req_id_to_index={"a": 0, "b": 1},
+            block_table=SimpleNamespace(slot_mapping=SimpleNamespace(gpu=gpu)),
+        ),
+    )
+    got = slot_mapping_for_request(runner, "b", 1)
+    assert got == ([12, 13, 14], (2, 5))
+    assert "cpu" in to_calls
+
+
+def test_slot_mapping_for_request_from_scheduler_output():
+    gpu = _FakeGpu([7, 8, 9])
+    runner = SimpleNamespace(
+        query_start_loc=None,
+        input_buffers=None,
+        execute_model_state=None,
+        input_batch=SimpleNamespace(
+            req_ids=["a", "b"],
+            req_id_to_index={"a": 0, "b": 1},
+            block_table=SimpleNamespace(slot_mapping=SimpleNamespace(gpu=gpu)),
+        ),
+    )
+    so = SimpleNamespace(num_scheduled_tokens={"a": 1, "b": 2})
+    got = slot_mapping_for_request(runner, "b", scheduler_output=so)
+    assert got == ([8, 9], (1, 3))
+
+
+def test_slot_mapping_for_request_missing_returns_none():
+    runner = SimpleNamespace(input_batch=None, execute_model_state=None, query_start_loc=None)
+    assert slot_mapping_for_request(runner, "r1") is None

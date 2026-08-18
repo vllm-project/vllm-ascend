@@ -86,10 +86,11 @@ _DEFAULTS: dict[str, Any] = {
         # Auto-arm quota only; 0 = no auto dump. Does not affect detect or manual_trigger.
         "max_times": 0,
         "cooldown_seconds": 5 * 60,
-        # Manual dump arm: false/0 = off; true = keep dumping every nonempty
-        # real execute_model wave until set false; positive int N = next N
+        # Manual dump arm: false/0 = off; true = keep dumping every wave with
+        # scheduled_tokens>0 until set false; positive int N = next N such
         # waves then off. Skips max_times / cooldown / input filters.
-        # Needs dump.enabled=true and reload > 0.
+        # Idle / 0-token cleanup does not consume. Needs dump.enabled=true
+        # and reload > 0.
         "manual_trigger": False,
         # Effective msprobe JSON path (seeded from ascend dump_config_path at
         # bootstrap when null). Hot-change → recreate debugger.
@@ -122,6 +123,8 @@ _DEFAULTS: dict[str, Any] = {
         "max_output_token_ids": 1000,
         # Persist each request's current GPU block_ids in report detail.
         "include_block_ids": True,
+        # D2H this wave's real paged-attention slot_mapping slice (default off).
+        "include_slot_mapping": False,
         # Track/report last write wave per physical block (see blocks[]).
         "block_last_write_wave": False,
         # Track/report last writer req_id per physical block (see blocks[]).
@@ -508,12 +511,46 @@ class DfxRuntimeConfig:
         # Persist startup hot-reload interval for visibility (runtime gate is still
         # ``self._reload_interval`` only).
         merged["reload_interval_seconds"] = self._reload_interval
-        # Seed visible msprobe path when JSON left it null.
-        dump = merged.setdefault("dump", {})
-        cur = dump.get("msprobe_config_path")
-        if (cur is None or (isinstance(cur, str) and not cur.strip())) and self._startup_msprobe_config_path:
-            dump["msprobe_config_path"] = self._startup_msprobe_config_path
+        # Seed visible msprobe path when JSON left it null / omitted.
+        self._apply_msprobe_path_seed(merged, loaded if self._explicit_config_path else None)
         return _normalize_config_sections(merged)
+
+    @staticmethod
+    def _dump_omits_msprobe_config_path(data: dict[str, Any] | None) -> bool:
+        """True when ``dump.msprobe_config_path`` is absent (not explicitly null)."""
+        if not isinstance(data, dict):
+            return True
+        dump = data.get("dump")
+        if not isinstance(dump, dict):
+            return True
+        return "msprobe_config_path" not in dump
+
+    def _fallback_msprobe_config_path(self) -> str | None:
+        """In-memory path, else the startup dump_config path used to seed JSON."""
+        cur = (self._data.get("dump") or {}).get("msprobe_config_path")
+        if isinstance(cur, str) and cur.strip():
+            return cur.strip()
+        return self._startup_msprobe_config_path
+
+    def _apply_msprobe_path_seed(
+        self,
+        merged: dict[str, Any],
+        loaded: dict[str, Any] | None,
+    ) -> None:
+        """Keep / seed ``dump.msprobe_config_path`` unless JSON set it explicitly.
+
+        Omitted key: bootstrap seed or previous in-memory value.
+        Explicit ``null`` / empty string: leave cleared (user intent).
+        """
+        dump = merged.setdefault("dump", {})
+        if loaded is not None and not self._dump_omits_msprobe_config_path(loaded):
+            return
+        cur = dump.get("msprobe_config_path")
+        if isinstance(cur, str) and cur.strip():
+            return
+        fallback = self._fallback_msprobe_config_path()
+        if fallback:
+            dump["msprobe_config_path"] = fallback
 
     def _write_data_unlocked(self, data: dict[str, Any]) -> None:
         """Atomic write; caller must hold config lock / own the path."""
@@ -618,7 +655,9 @@ class DfxRuntimeConfig:
         per process. Call from ``DfxProcessor`` so API/EngineCore never persist.
 
         If the JSON already exists and this is an **explicit** ``dfx_config_path``,
-        skip rewrite: disk is the source of truth. Default path (no explicit
+        skip rewrite: disk is the source of truth — except when
+        ``dump.msprobe_config_path`` is **omitted** and a bootstrap seed exists,
+        in which case only that key is backfilled. Default path (no explicit
         path) always materializes ``defaults←startup`` so a restart does not
         keep leftover fields from a previous run.
         """
@@ -634,6 +673,27 @@ class DfxRuntimeConfig:
         try:
             with self._lock_config():
                 if self.config_path.exists() and not overwrite_default:
+                    on_disk = self._read_json_object()
+                    fallback = self._fallback_msprobe_config_path()
+                    if fallback and self._dump_omits_msprobe_config_path(on_disk):
+                        if not isinstance(on_disk, dict):
+                            on_disk = {}
+                        dump = on_disk.setdefault("dump", {})
+                        if not isinstance(dump, dict):
+                            dump = {}
+                            on_disk["dump"] = dump
+                        dump["msprobe_config_path"] = fallback
+                        self._write_data_unlocked(on_disk)
+                        mtime = self.config_path.stat().st_mtime
+                        self.dump["msprobe_config_path"] = fallback
+                        self._mtime = mtime
+                        self._version = float(mtime)
+                        self._bootstrap_persisted = True
+                        logger.info(
+                            "[DFX runtime_config] ensure_persisted backfilled dump.msprobe_config_path path=%s",
+                            self.config_path,
+                        )
+                        return True
                     mtime = self.config_path.stat().st_mtime
                     self._mtime = mtime
                     self._version = float(mtime)
@@ -1056,6 +1116,11 @@ class DfxRuntimeConfig:
         report = self._data.get("report") or {}
         return bool(report.get("include_block_ids", True))
 
+    def report_include_slot_mapping(self) -> bool:
+        """Whether reports D2H this wave's real ``slot_mapping`` slice (default off)."""
+        report = self._data.get("report") or {}
+        return bool(report.get("include_slot_mapping", False))
+
     def report_block_last_write_wave(self) -> bool:
         """Track and report each block's last KV-write wave."""
         report = self._data.get("report") or {}
@@ -1339,6 +1404,8 @@ class DfxRuntimeConfig:
                 logger.error("[DFX runtime_config] root must be object, got %s", type(loaded).__name__)
                 return False
             merged = _deep_merge(_DEFAULTS, _normalize_config_sections(loaded))
+            # Missing key ≠ explicit null: do not let _DEFAULTS wipe a seeded path.
+            self._apply_msprobe_path_seed(merged, loaded)
             return self._apply_loaded(_normalize_config_sections(merged), version=mtime)
         except Exception as exc:
             logger.error("[DFX runtime_config] reload failed path=%s error=%s", self.config_path, exc)
@@ -1529,6 +1596,7 @@ class DfxRuntimeConfig:
             data["report"][max_key] = int(max_val)
         for block_key in (
             "include_block_ids",
+            "include_slot_mapping",
             "block_last_write_wave",
             "block_last_writer",
         ):
