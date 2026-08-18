@@ -103,11 +103,11 @@ test_cases:
       - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
   - name: "Qwen36_27B_A5_Single_Maximum_Context_Test_01"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    envs:
+      <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"
       - "262144"
       - "--speculative-config"
       - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
-    envs:
-      <<: *envs
