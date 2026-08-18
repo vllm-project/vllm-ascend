@@ -232,7 +232,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
 
     vllm serve your_model_path \
@@ -252,8 +251,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
     ```bash
     export ASCEND_RT_VISIBLE_DEVICES=0,1
-    export VLLM_USE_V1=1
-    export TASK_QUEUE_ENABLE=1
     export HCCL_BUFFSIZE=1024
     vllm serve your_model_path \
         --port 8004 \
@@ -525,7 +522,6 @@ For detailed parameter descriptions, please refer to the deployment examples in 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
@@ -550,7 +546,6 @@ vllm serve your_model_path \
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
@@ -576,7 +571,6 @@ vllm serve your_model_path \
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \

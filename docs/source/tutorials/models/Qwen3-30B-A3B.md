@@ -229,8 +229,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
     export HCCL_BUFFSIZE=1024
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve your_model_path \
@@ -521,8 +519,6 @@ vllm bench serve \
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -557,8 +553,6 @@ vllm serve your_model_path \
 export ASCEND_RT_VISIBLE_DEVICES=0
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -592,8 +586,6 @@ vllm serve your_model_path \
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
