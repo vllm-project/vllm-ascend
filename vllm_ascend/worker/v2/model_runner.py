@@ -56,7 +56,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.sp_utils import (
     _all_gather_hidden_states_and_aux,
     _flashcomm_enabled,
@@ -123,11 +123,9 @@ class NPUModelRunner(GPUModelRunner):
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
-        # The following features are not yet supported in Ascend NPU model runner v2:
-        # - Context parallelism (prefill or decode)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
+        if parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("Decode context parallelism is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -205,19 +203,15 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
+    @property
+    def pcp_manager_cls(self) -> type[AscendPCPManager]:
+        return AscendPCPManager
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
-
-            # GPUModelRunner constructs the community PCP manager while initializing
-            # the KV cache. Replace it with the Ascend subclass.
-            self.pcp_manager = maybe_build_ascend_pcp_manager(
-                self.vllm_config,
-                self.device,
-                self.supports_mm_inputs,
-                self.req_states,
-                self.block_tables,
-            )
+        if isinstance(self.pcp_manager, AscendPCPManager):
+            self.pcp_manager.set_mtp_enabled(self.speculative_config is not None)
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
@@ -487,6 +481,15 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+        if self.pcp_manager is not None:
+            input_batch.attn_state = build_attn_state(
+                self.vllm_config,
+                input_batch.seq_lens_np,
+                input_batch.num_reqs,
+                input_batch.num_scheduled_tokens,
+                input_batch.num_scheduled_tokens
+                - (input_batch.num_draft_tokens_per_req if input_batch.num_draft_tokens_per_req is not None else 0),
+            )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
