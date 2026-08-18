@@ -31,9 +31,9 @@
 # /tests
 
 # c++ source code
-/cmake @zzzzwwjj
-/csrc @zzzzwwjj
-/CMakeLists.txt @zzzzwwjj
+/cmake @zzzzwwjj @ZT-AIA
+/csrc @zzzzwwjj @ZT-AIA
+/CMakeLists.txt @zzzzwwjj @ZT-AIA
 
 # python source code
 /vllm_ascend/attention @weijinqian0
