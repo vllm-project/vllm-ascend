@@ -33,6 +33,13 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 
 
+def _is_stream_capturing() -> bool:
+    try:
+        return bool(torch.npu.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
     message = str(exc)
     lowered_message = message.lower()
@@ -261,7 +268,13 @@ class ACLGraphWrapper:
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-        if not self.enable_enpu and need_sync:
+        # never synchronize a stream that is being captured -- ACL
+        # rejects it ("Not allow to synchronize captured-stream", plog 107027) and
+        # it surfaces later as a 107030 memcpy failure. This replay-ordering
+        # barrier is only meaningful outside capture anyway. The existing
+        # `is_draft_eagle` exemption does not cover MTP, whose drafter replays
+        # from inside the target's capture region.
+        if not self.enable_enpu and need_sync and not _is_stream_capturing():
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
