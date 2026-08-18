@@ -73,7 +73,7 @@ jobs:
           echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "base_sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -166,7 +166,7 @@ jobs:
           path: timing-artifacts/
           merge-multiple: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
