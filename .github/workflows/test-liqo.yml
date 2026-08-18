@@ -1,0 +1,10 @@
+name: test-liqo
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [liqo-test]
+    steps:
+      - run: echo "hello liqo-test"
+      - run: sleep 600
