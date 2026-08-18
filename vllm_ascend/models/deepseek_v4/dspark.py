@@ -145,7 +145,7 @@ class DeepseekV4DSparkModel(nn.Module):
         _model_quant_cfg = getattr(config, "quantization_config", None)
         _main_proj_qconfig = (
             vllm_config.quant_config
-            if _model_quant_cfg is not None and _model_quant_cfg.get("quant_method") == "deepseek_v4_fp8"
+            if _model_quant_cfg is not None and _model_quant_cfg.get("quant_method") == "fp8"
             else None
         )
         self.main_proj = ReplicatedLinear(
