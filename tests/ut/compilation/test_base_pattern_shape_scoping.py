@@ -221,6 +221,31 @@ def test_search_fn_wrapper_preserves_signature():
     assert list(inspect.signature(wrapped).parameters) == ["x", "bias"]
 
 
+class _UnresolvableBool:
+    def __bool__(self):
+        raise RuntimeError("GuardOnDataDependentSymNode: data-dependent symbol")
+
+
+def test_matched_width_unresolvable_symbolic_returns_none():
+    # Symbolic shapes: val.shape[-1] is a SymInt whose comparison yields a
+    # SymBool that cannot be statically resolved. The guard must treat that
+    # as unverifiable (None -> reject-on-unknown) instead of letting bool()
+    # raise inside the caller's conditional and crash the compilation.
+    sym_width = mock.MagicMock()
+    sym_width.__eq__.return_value = _UnresolvableBool()
+
+    fake_val = mock.MagicMock(spec=torch.Tensor)  # passes isinstance check
+    fake_val.dim.return_value = 2
+    fake_val.shape.__getitem__.return_value = sym_width
+
+    fake_node = mock.MagicMock()
+    fake_node.meta = {"val": fake_val}
+    fake_match = mock.MagicMock()
+    fake_match.kwargs = {"x": fake_node}
+
+    assert base_pattern._matched_main_input_has_expected_width(fake_match, "x", 64) is None
+
+
 def test_search_fn_guard_raises_runtime_error_on_provable_mismatch():
     def search_fn(x):
         return x

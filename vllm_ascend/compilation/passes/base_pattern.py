@@ -63,7 +63,15 @@ def _matched_main_input_has_expected_width(match: Match, main_argname: str, expe
     val = main_node.meta.get("val")
     if not isinstance(val, torch.Tensor) or val.dim() < 2:
         return None
-    return val.shape[-1] == expected_width
+    try:
+        return bool(val.shape[-1] == expected_width)
+    except Exception:
+        # Symbolic widths (SymInt) compare to a SymBool that may not be
+        # statically resolvable (e.g. GuardOnDataDependentSymNode); bool()
+        # would raise inside the caller's conditional and crash the
+        # compilation. Treat as unverifiable and reject the match
+        # (reject-on-unknown), mirroring _wrap_search_fn_with_width_guard.
+        return None
 
 
 def _wrap_search_fn_with_width_guard(
