@@ -373,9 +373,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 device=runtime_cum_query_lens.device,
                 dtype=runtime_cum_query_lens.dtype,
             )
-            actual_seq_lengths_query[num_reqs:num_input_tokens].copy_(
-                dummy_query_lens
-            )
+            actual_seq_lengths_query[num_reqs:num_input_tokens].copy_(dummy_query_lens)
         cum_query_lens = actual_seq_lengths_query[:num_reqs]
         runtime_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         actual_seq_lengths_key.zero_()

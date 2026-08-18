@@ -38,7 +38,7 @@ from vllm_ascend.utils import (
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-class AscendSFACPImpl(AscendSFAImpl):
+class AscendSFAPCPImpl(AscendSFAImpl):
     def _get_sfa_kv_slot_mapping(
         self,
         attn_metadata: M,
@@ -1297,5 +1297,5 @@ def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImp
     if dcp_enabled:
         return AscendSFADCPImpl
     if vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1:
-        return AscendSFACPImpl
+        return AscendSFAPCPImpl
     return AscendSFAImpl
