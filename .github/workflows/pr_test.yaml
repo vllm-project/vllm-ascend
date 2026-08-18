@@ -233,7 +233,7 @@ jobs:
             .github/workflows/_build_csrc_cache.yaml \
             .github/workflows/scripts/csrc_cache_targets.json \
             .github/workflows/scripts/resolve_csrc_cache_targets.py; then
-            echo "::error::CSRC build workflows changed on $BASE_REF after this run was created."
+            echo "::error::CSRC build workflows changed on $BASE_REF, please rebase the code."
             echo "::error::Trigger a new PR workflow run."
             exit 1
           fi
@@ -244,6 +244,7 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          list-files: json
           filters: |
             src:
               - 'vllm_ascend/**'
@@ -264,7 +265,10 @@ jobs:
               - '.github/workflows/scripts/run_selected_tests.sh'
               - '.github/workflows/scripts/test_config.yaml'
               - '.github/workflows/scripts/runner_label.json'
-              - 'tests/**'
+              - 'tests/ut/**'
+              - 'tests/e2e/pull_request/**'
+              - 'tests/e2e/*.py'
+              - 'tests/e2e/*.sh'
               - 'tools/**'
               - 'CMakeLists.txt'
 
@@ -280,7 +284,8 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }}
+            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
+            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}'
 
       - name: Set no-tests output when source paths unchanged
         id: noop
