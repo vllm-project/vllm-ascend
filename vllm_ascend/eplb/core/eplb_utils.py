@@ -74,6 +74,7 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
             )
             planner.config.dump_dir = eplb_config.expert_map_record_path
             planner.config.enable_dump = os.getenv("EXPERT_MAP_RECORD", "false") == "true"
+            planner.enable_dynamic = os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
         except Exception as e:
             logger.error("[eplb/omni] Failed to initialize OmniPlanner: %s", e)
             raise

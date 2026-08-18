@@ -3761,7 +3761,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_moe_layers = len(_VllmEplbAdaptor._registered_moe_layers)
                 omni_planner = OmniPlanner()  # get singleton
                 omni_planner.init_dynamic_components(num_moe_layers)
-                #TODO(kuang.wenwei) register the moe weights data_ptr
+                omni_planner.init_dram_weights(self.eplb_adaptor.param_dict, 0, param_dict_type="vllm_ascend")
                 omni_planner.start_dynamic_optimize_expert_load_balance()
                 logger.info("[eplb/omni] OmniPlanner stage 2 initialized, num_moe_layers=%s", num_moe_layers)
             except Exception as e:
