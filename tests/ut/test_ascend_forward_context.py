@@ -118,6 +118,25 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     assert afc.get_mc2_tokens_capacity() == 520
 
 
+def test_set_mc2_tokens_capacity_megamoe_uses_max_num_batched_tokens(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=1),
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=8,
+        cudagraph_capture_sizes=[128],
+        max_cudagraph_capture_size=128,
+        max_num_batched_tokens=513,
+    )
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == 520
+
+
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
