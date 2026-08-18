@@ -1,3 +1,4 @@
+import gc
 import math
 from dataclasses import dataclass
 
@@ -274,6 +275,7 @@ def _assert_selection_state_matches_full_cache(case: FusedSparseAttentionOverlap
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("topk", [32, 128])
+@torch.inference_mode()
 def test_fused_sparse_attention_overlap_internal_planner_miss_then_all_hit_precision(
     dtype: torch.dtype,
     topk: int,
@@ -297,3 +299,7 @@ def test_fused_sparse_attention_overlap_internal_planner_miss_then_all_hit_preci
     torch.testing.assert_close(case.selection_block_status, status_after_miss, rtol=0, atol=0)
     torch.testing.assert_close(case.selection_kv_cache, kv_after_miss, rtol=0, atol=0, equal_nan=True)
     torch.testing.assert_close(case.selection_k_rope, rope_after_miss, rtol=0, atol=0, equal_nan=True)
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
