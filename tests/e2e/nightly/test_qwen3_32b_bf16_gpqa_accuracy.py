@@ -113,7 +113,7 @@ def _run_gpqa_accuracy(env):
     return accuracy
 
 
-def test_qwen3_32b_w8a8_gpqa_v1_v2_accuracy_within_tolerance():
+def test_qwen3_32b_bf16_gpqa_v1_v2_accuracy_within_tolerance():
     v1_accuracy = _run_gpqa_accuracy(_V1_ENV)
     v2_accuracy = _run_gpqa_accuracy(_V2_ENV)
     delta = abs(v2_accuracy - v1_accuracy)
