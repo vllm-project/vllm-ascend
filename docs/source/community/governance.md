@@ -49,3 +49,7 @@ Maintainers will be granted write access to the [vllm-project/vllm-ascend](https
 
 - Nomination: Anyone can nominate a candidate to become a maintainer, including self-nominations. All existing maintainers are responsible for reviewing and evaluating each nomination. The nominator should provide relevant information about the nominee's qualifications—such as review quality, quality contribution, and community involvement—among other strengths.
 - Removal: Anyone may nominate an individual for removal from the maintainer role, including self-nominations. All current maintainers are responsible for reviewing and evaluating such nominations. The nominator should provide relevant information about the nominee—such as prolonged inactivity, misalignment with the project's overall direction, or other factors that may render them unsuitable for the maintainer position.
+
+### Maintainer Emeritus
+
+When a maintainer is no longer able to actively maintain vLLM Ascend due to job changes, personal reasons, voluntary resignation, prolonged inactivity, or any other active or passive factors, they may retire and be moved to the **emeritus** list. Emeritus maintainers retain their historical recognition and maintainer permissions, and are always welcome to return to active contribution at any time—no re-confirmation needed. The transition to emeritus status can be initiated by the maintainer themselves (self-nomination) or by any other maintainer, and is confirmed by a simple majority vote among active maintainers.
