@@ -45,7 +45,7 @@ _server_cmd: &server_cmd
 _benchmarks_perf2: &benchmarks_perf
   acc:
     case_type: performance
-    dataset_path: /mnt/share/modelscope/hub/datasets/vllm-ascend/DeepSeek-V3.1-w4a4c8-mxfp4_input_16384_lines_200
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V3.1-w4a4c8-mxfp4_input_16384_lines_200
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 32
