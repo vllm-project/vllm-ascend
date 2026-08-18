@@ -811,7 +811,7 @@ def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 
 
-def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
+def enable_sp(vllm_config=None) -> bool:
     global _ENABLE_SP
     if vllm_config is None:
         try:
@@ -833,16 +833,12 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             except RuntimeError:
                 _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
-        if not _ENABLE_SP and enable_shared_expert_dp:
-            _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
-
     return bool(_ENABLE_SP)
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
+    return get_ascend_config().enable_shared_expert_dp
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1117,7 +1113,7 @@ def get_potential_max_tokens() -> int:
     return _potential_max_tokens
 
 
-def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
+def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
     Skipping is applicable for all dense models and for moe models only on ranks
@@ -1157,13 +1153,16 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    decode_must_use_mc2 = needs_mc2(get_potential_max_tokens())
+    # if mc2 is used in decode max potential tokens case, we can skip allreduce in decode only case.
+    decode_can_skip = needs_mc2(get_potential_max_tokens())
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
+    # if mc2 is used in prefill max potential tokens case and prefill and decode have the same cudagraph mode,
+    # we can skip allreduce in chunked prefill case.
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
-    # Skip all-reduce if decode requires MC2 and either prefill also
-    # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (
-        prefill_must_use_mc2 or get_ascend_config().scheduler_config.recompute_scheduler_enable
+    uniform_cudagraph_mode = not vllm_config.compilation_config.cudagraph_mode.separate_routine()
+    chunked_prefill_can_skip = prefill_must_use_mc2 and uniform_cudagraph_mode
+    return decode_can_skip and (
+        chunked_prefill_can_skip or get_ascend_config().scheduler_config.recompute_scheduler_enable
     )
 
 

@@ -114,12 +114,13 @@ jobs:
 
           # Dedup: keep only the latest run per workflow name (by run ID)
           CANDIDATE_RUNS=$(echo "$RUNS" | jq -r '
-            [.workflow_runs[] | {id: .id, name: .name, status: .status, conclusion: .conclusion}] |
+            [.workflow_runs[] | {id: .id, name: .name, status: .status, conclusion: .conclusion, event: .event}] |
             group_by(.name) |
             map(max_by(.id)) |
-            .[] | "\(.id)|\(.name)|\(.status)|\(.conclusion // "null")"')
+            .[] | "\(.id)|\(.name)|\(.status)|\(.conclusion // "null")|\(.event)"')
 
           RERUNNED=""
+          RERUNNED_JOBS=""
           FAILED=""
           RERUN_COUNT=0
 
@@ -129,6 +130,7 @@ jobs:
             RUN_NAME=$(echo "$RUN" | cut -d'|' -f2)
             STATUS=$(echo "$RUN" | cut -d'|' -f3)
             CONCLUSION=$(echo "$RUN" | cut -d'|' -f4)
+            EVENT=$(echo "$RUN" | cut -d'|' -f5)
 
             if [ "$STATUS" != "completed" ]; then
               echo "Skipping $RUN_NAME (ID: $RUN_ID) - still in progress."
@@ -136,43 +138,154 @@ jobs:
               continue
             fi
 
-            if [ "$CONCLUSION" != "failure" ]; then
-              echo "Skipping $RUN_NAME (ID: $RUN_ID) - conclusion is '$CONCLUSION'."
+            # Reusable workflow runs are re-run through their caller job to
+            # avoid executing the tests twice.
+            if [ "$EVENT" = "workflow_call" ]; then
+              echo "Skipping $RUN_NAME (ID: $RUN_ID) - reusable workflow run, rerun handled via caller job."
               continue
             fi
 
-            echo "Re-running failed jobs in $RUN_NAME (ID: $RUN_ID)..."
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
-            if [ "$HTTP_CODE" = "201" ]; then
+            case "$CONCLUSION" in
+              failure|cancelled|timed_out|startup_failure|action_required)
+                ;;
+              *)
+                echo "Skipping $RUN_NAME (ID: $RUN_ID) - conclusion is '$CONCLUSION'."
+                continue
+                ;;
+            esac
+
+            # Collect jobs that did not complete successfully. Only these are
+            # re-run so that already successful jobs are not executed again.
+            JOBS=""
+            JOB_PAGE=1
+            while :; do
+              JOB_RESP=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100&page=$JOB_PAGE" \
+                | tr -d '\000-\010\013\014\016-\037')
+              JOB_BATCH=$(echo "$JOB_RESP" | jq -r '.jobs[]? | "\(.id)|\(.conclusion // "null")"')
+              [ -z "$JOB_BATCH" ] && break
+              JOBS="${JOBS}${JOB_BATCH}"$'\n'
+              JOB_TOTAL=$(echo "$JOB_RESP" | jq '.total_count // 0')
+              if [ "$JOB_PAGE" -ge $(( (JOB_TOTAL + 99) / 100 )) ] || [ "$JOB_TOTAL" = "0" ]; then
+                break
+              fi
+              JOB_PAGE=$((JOB_PAGE + 1))
+            done
+
+            TARGET_IDS=$(echo "$JOBS" | awk -F'|' '$2 != "success" && $2 != "neutral" && $2 != "skipped" && $2 != "null" && $2 != "" {print $1}' | sort -u)
+            TARGET_COUNT=$(echo "$TARGET_IDS" | sed '/^$/d' | wc -l)
+            HAS_CANCELLED=$(echo "$JOBS" | awk -F'|' '$2 == "cancelled" {found = 1} END {print found + 0}')
+
+            # A startup failure usually leaves no jobs to re-run individually;
+            # fall back to re-running the whole workflow run.
+            if [ "$TARGET_COUNT" = "0" ] && [ "$CONCLUSION" = "startup_failure" ]; then
+              echo "Re-running $RUN_NAME (ID: $RUN_ID) - no jobs available, full rerun..."
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun")
+              if [ "$HTTP_CODE" = "201" ]; then
+                echo "  -> Success."
+                RERUNNED="${RERUNNED}"$'\n'"- $RUN_NAME"
+                RERUN_COUNT=$((RERUN_COUNT + 1))
+              else
+                echo "  -> Failed (HTTP $HTTP_CODE)."
+                FAILED="${FAILED}"$'\n'"- $RUN_NAME: API returned HTTP $HTTP_CODE"
+              fi
+              continue
+            fi
+
+            if [ "$TARGET_COUNT" = "0" ]; then
+              echo "Skipping $RUN_NAME (ID: $RUN_ID) - no failed or cancelled jobs found."
+              continue
+            fi
+
+            # Pure failure without any cancelled jobs: keep the single
+            # rerun-failed-jobs call so only failed jobs are re-run.
+            if [ "$CONCLUSION" = "failure" ] && [ "$HAS_CANCELLED" = "0" ]; then
+              echo "Re-running failed jobs in $RUN_NAME (ID: $RUN_ID)..."
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
+              if [ "$HTTP_CODE" = "201" ]; then
+                echo "  -> Success."
+                RERUNNED="${RERUNNED}"$'\n'"- $RUN_NAME"
+                RERUN_COUNT=$((RERUN_COUNT + 1))
+              else
+                echo "  -> Failed (HTTP $HTTP_CODE)."
+                FAILED="${FAILED}"$'\n'"- $RUN_NAME: API returned HTTP $HTTP_CODE"
+              fi
+              continue
+            fi
+
+            # Cancelled / timed-out / startup-failure runs, or failure runs
+            # containing cancelled jobs: re-run the remaining jobs one by one.
+            # A per-job rerun can return 409 while its upstream needs are not
+            # re-run yet, so retry the leftovers a few times.
+            echo "Re-running remaining jobs in $RUN_NAME (ID: $RUN_ID)..."
+            REMAINING="$TARGET_IDS"
+            JOB_FAILED=""
+            ATTEMPT=0
+            while [ -n "$REMAINING" ] && [ "$ATTEMPT" -lt 3 ]; do
+              RETRY=""
+              while IFS= read -r JOB_ID; do
+                [ -z "$JOB_ID" ] && continue
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  "https://api.github.com/repos/$REPO/actions/jobs/$JOB_ID/rerun")
+                if [ "$HTTP_CODE" = "201" ]; then
+                  echo "  -> Job $JOB_ID re-run accepted."
+                elif [ "$HTTP_CODE" = "409" ] && [ "$ATTEMPT" -lt 2 ]; then
+                  echo "  -> Job $JOB_ID not ready (409), will retry."
+                  RETRY="${RETRY}"$'\n'"$JOB_ID"
+                else
+                  echo "  -> Job $JOB_ID failed (HTTP $HTTP_CODE)."
+                  JOB_FAILED="${JOB_FAILED}"$'\n'"$JOB_ID"
+                fi
+              done <<< "$REMAINING"
+              REMAINING=$(echo "$RETRY" | sed '/^$/d')
+              if [ -n "$REMAINING" ]; then
+                ATTEMPT=$((ATTEMPT + 1))
+                if [ "$ATTEMPT" -lt 3 ]; then
+                  echo "Waiting 15s before retrying leftover jobs..."
+                  sleep 15
+                fi
+              fi
+            done
+
+            if [ -z "$REMAINING" ] && [ -z "$JOB_FAILED" ]; then
               echo "  -> Success."
-              RERUNNED="${RERUNNED}"$'\n'"- $RUN_NAME"
+              RERUNNED_JOBS="${RERUNNED_JOBS}"$'\n'"- $RUN_NAME"
               RERUN_COUNT=$((RERUN_COUNT + 1))
             else
-              echo "  -> Failed (HTTP $HTTP_CODE)."
-              FAILED="${FAILED}"$'\n'"- $RUN_NAME: API returned HTTP $HTTP_CODE"
+              echo "  -> Some jobs could not be re-run."
+              FAILED="${FAILED}"$'\n'"- $RUN_NAME: some jobs could not be re-run (still waiting on dependencies)"
             fi
           done <<< "$CANDIDATE_RUNS"
 
           # Build comment body
           {
             echo "comment_body<<CMTEOF"
-            if [ -n "$RERUNNED" ]; then
+            if [ -n "$RERUNNED" ] || [ -n "$RERUNNED_JOBS" ]; then
               echo "[Bot]: rerun completed."
               echo ""
-              echo "**Rerun:**$RERUNNED"
-              echo ""
+              if [ -n "$RERUNNED" ]; then
+                echo "**Rerun:**$RERUNNED"
+                echo ""
+              fi
+              if [ -n "$RERUNNED_JOBS" ]; then
+                echo "**Rerun (remaining cancelled/failed jobs):**$RERUNNED_JOBS"
+                echo ""
+              fi
             fi
             if [ -n "$FAILED" ]; then
-              if [ -z "$RERUNNED" ]; then
+              if [ -z "$RERUNNED" ] && [ -z "$RERUNNED_JOBS" ]; then
                 echo "[Bot]: rerun completed."
                 echo ""
               fi
               echo "**Failed:**$FAILED"
               echo ""
             fi
-            if [ -z "$RERUNNED" ] && [ -z "$FAILED" ]; then
+            if [ -z "$RERUNNED" ] && [ -z "$RERUNNED_JOBS" ] && [ -z "$FAILED" ]; then
               echo "[Bot]: rerun completed. No failed jobs found."
             fi
             echo "CMTEOF"
