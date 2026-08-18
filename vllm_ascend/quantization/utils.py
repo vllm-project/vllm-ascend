@@ -60,10 +60,7 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     model_type = getattr(hf_text_config, "model_type", None)
     if (
-        any(
-            isinstance(architecture, str) and architecture.startswith("MiniMaxM3")
-            for architecture in architectures
-        )
+        any(isinstance(architecture, str) and architecture.startswith("MiniMaxM3") for architecture in architectures)
         or model_type == "minimax_m3"
     ):
         return 1

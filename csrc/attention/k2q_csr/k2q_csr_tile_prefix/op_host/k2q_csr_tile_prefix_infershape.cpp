@@ -9,11 +9,11 @@ using namespace ge;
 namespace ops {
 static ge::graphStatus InferShapeK2qCsrTilePrefix(gert::InferShapeContext *context)
 {
-    const gert::Shape *scratchIn = context->GetInputShape(0);
+    const gert::Shape *scratchInput = context->GetInputShape(0);
     gert::Shape *scratchOut = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, scratchIn);
+    OP_CHECK_NULL_WITH_CONTEXT(context, scratchInput);
     OP_CHECK_NULL_WITH_CONTEXT(context, scratchOut);
-    *scratchOut = *scratchIn;
+    *scratchOut = *scratchInput;
     return GRAPH_SUCCESS;
 }
 

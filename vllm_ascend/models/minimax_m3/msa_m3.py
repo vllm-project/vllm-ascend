@@ -64,11 +64,7 @@ def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool
     # The A5 Triton decode kernel operates on the complete, replicated index-K
     # cache on every TP rank. Keep the mainline block-sharded optimization for
     # the other device families only.
-    return (
-        get_ascend_device_type() != AscendDeviceType.A5
-        and tp_size > 1
-        and num_prefills == 0
-    )
+    return get_ascend_device_type() != AscendDeviceType.A5 and tp_size > 1 and num_prefills == 0
 
 
 def _active_decode_num_reqs(

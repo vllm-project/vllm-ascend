@@ -470,10 +470,7 @@ def _get_rope_parameters(config: PretrainedConfig) -> dict[str, Any] | None:
 def _is_w8a8_mxfp8_linear(layer: nn.Module) -> bool:
     quant_method = getattr(layer, "quant_method", None)
     quant_scheme = getattr(quant_method, "quant_method", quant_method)
-    return (
-        quant_scheme is not None
-        and quant_scheme.__class__.__name__ == "AscendW8A8MXFP8DynamicLinearMethod"
-    )
+    return quant_scheme is not None and quant_scheme.__class__.__name__ == "AscendW8A8MXFP8DynamicLinearMethod"
 
 
 class MiniMaxM3SwiGLUOAI(nn.Module):

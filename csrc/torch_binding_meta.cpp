@@ -1319,15 +1319,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
     (void)q_global_offset;
 
     TORCH_CHECK(q2k.dim() == 3, "q2k must be 3-D [H, T, topk]");
-    const int64_t H = q2k.size(0);
-    const int64_t T = q2k.size(1);
-    const int64_t topk = q2k.size(2);
+    const c10::SymInt H = q2k.sym_size(0);
+    const c10::SymInt T = q2k.sym_size(1);
+    const c10::SymInt topk = q2k.sym_size(2);
     // ACLGraph capture should pass total_rows explicitly; fallback keeps shape valid.
-    const int64_t tr = total_rows >= 0 ? total_rows : 1;
+    const c10::SymInt tr = total_rows >= 0 ? c10::SymInt(total_rows) : c10::SymInt(1);
     auto opts = q2k.options().dtype(at::kInt);
-    at::Tensor row_ptr = at::empty({H, tr + 1}, opts);
-    at::Tensor q_ind = at::empty({H, T * topk}, opts);
-    at::Tensor slot = at::empty({H, T * topk}, opts);
+    at::Tensor row_ptr = at::empty_symint(c10::SymDimVector{H, tr + 1}, opts);
+    at::Tensor q_ind = at::empty_symint(c10::SymDimVector{H, T * topk}, opts);
+    at::Tensor slot = at::empty_symint(c10::SymDimVector{H, T * topk}, opts);
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(row_ptr, q_ind, slot);
 }
 

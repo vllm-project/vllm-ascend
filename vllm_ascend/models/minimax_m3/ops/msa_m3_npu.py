@@ -199,9 +199,7 @@ def minimax_m3_sparse_attn(
 ) -> None:
     del prefix_lens, max_query_len
     sparse_attn_impl = (
-        _minimax_m3_sparse_attn_a5
-        if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5
-        else _minimax_m3_sparse_attn_a3
+        _minimax_m3_sparse_attn_a5 if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5 else _minimax_m3_sparse_attn_a3
     )
     sparse_attn_impl(
         q,
