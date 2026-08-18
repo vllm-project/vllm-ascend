@@ -4,6 +4,7 @@ on:
 
 jobs:
   # 800i-4：liqo-test label → 远程 offload 到 aiframework / mind-third-ci，job 容器申请 4 卡 ascend-1980
+  # runner 已加 liqo.io/api-server-support: remote 注解（ascend-ci-deployment PR #1361），验证远端 API 访问与 NPU 分配
   test-800i-4-remote:
     runs-on: [liqo-test]
     container:
