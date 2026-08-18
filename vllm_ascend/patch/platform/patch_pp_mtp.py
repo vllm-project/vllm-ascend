@@ -237,7 +237,8 @@ def _patch_scheduler_dynamic_gate_compat() -> None:
 
     from vllm.v1.core.sched.scheduler import Scheduler
 
-    if not hasattr(Scheduler, "_apply_ascend_proposal_gate"):
+    original_gate_helper = getattr(Scheduler, "_apply_ascend_proposal_gate", None)
+    if not getattr(original_gate_helper, "_vllm_ascend_adaptive_k_patched", False):
 
         def _apply_ascend_proposal_gate(
             self,
@@ -247,23 +248,37 @@ def _patch_scheduler_dynamic_gate_compat() -> None:
             num_scheduled_requests: int,
             prefill_scheduled: bool = False,
         ) -> int:
-            gate = getattr(self, "_ascend_proposal_gate", None)
-            if gate is None:
-                return configured_k
-            streaming_waiting = getattr(self, "num_waiting_for_streaming_input", 0)
-            if not isinstance(streaming_waiting, int):
-                streaming_waiting = len(streaming_waiting)
-            return gate.select_k(
-                configured_k,
-                num_running=len(getattr(self, "running", ()))
-                + streaming_waiting,
-                num_waiting=len(getattr(self, "waiting", ()))
-                + len(getattr(self, "skipped_waiting", ())),
-                total_num_scheduled_tokens=total_num_scheduled_tokens,
-                num_scheduled_requests=num_scheduled_requests,
-                prefill_scheduled=prefill_scheduled,
-            )
+            if original_gate_helper is not None:
+                selected_k = original_gate_helper(
+                    self,
+                    configured_k,
+                    total_num_scheduled_tokens=total_num_scheduled_tokens,
+                    num_scheduled_requests=num_scheduled_requests,
+                    prefill_scheduled=prefill_scheduled,
+                )
+            else:
+                gate = getattr(self, "_ascend_proposal_gate", None)
+                if gate is None:
+                    selected_k = configured_k
+                else:
+                    streaming_waiting = getattr(self, "num_waiting_for_streaming_input", 0)
+                    if not isinstance(streaming_waiting, int):
+                        streaming_waiting = len(streaming_waiting)
+                    selected_k = gate.select_k(
+                        configured_k,
+                        num_running=len(getattr(self, "running", ()))
+                        + streaming_waiting,
+                        num_waiting=len(getattr(self, "waiting", ()))
+                        + len(getattr(self, "skipped_waiting", ())),
+                        total_num_scheduled_tokens=total_num_scheduled_tokens,
+                        num_scheduled_requests=num_scheduled_requests,
+                        prefill_scheduled=prefill_scheduled,
+                    )
 
+            controller = getattr(self, "_ascend_physical_k_controller", None)
+            return controller.cap(selected_k) if controller is not None else selected_k
+
+        _apply_ascend_proposal_gate._vllm_ascend_adaptive_k_patched = True  # type: ignore[attr-defined]
         Scheduler._apply_ascend_proposal_gate = _apply_ascend_proposal_gate
 
     original_init = Scheduler.__init__
@@ -275,42 +290,72 @@ def _patch_scheduler_dynamic_gate_compat() -> None:
         original_init(self, *args, **kwargs)
         self._latest_proposal_lengths = {}
         self._ascend_proposal_gate = None
+        self._ascend_physical_k_controller = None
 
         vllm_config = args[0] if args else kwargs.get("vllm_config")
         additional_config = getattr(vllm_config, "additional_config", None) or {}
         dynamic_spec_config = additional_config.get("dynamic_spec_config", {})
         if not isinstance(dynamic_spec_config, dict):
             dynamic_spec_config = {}
-        if not dynamic_spec_config.get("proposal_gate_enabled", False):
-            return
 
-        try:
-            from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
+        method_params = dynamic_spec_config.get("method_params", {})
+        if not isinstance(method_params, dict):
+            method_params = {}
 
-            gate_params = dynamic_spec_config.get("proposal_gate_params", {})
-            if not isinstance(gate_params, dict):
-                raise TypeError("proposal_gate_params must be a dict")
-            accepted = {
-                key: value
-                for key, value in gate_params.items()
-                if key
-                in {
-                    "enter_ratio",
-                    "exit_ratio",
-                    "max_avg_scheduled_tokens",
-                    "enter_steps",
-                    "exit_steps",
+        # The confidence scheduler chooses a logical verify prefix after the
+        # draft has run.  Opt-in adaptive K feeds that result back to the next
+        # scheduler step so unused draft positions are not computed again.
+        if (
+            dynamic_spec_config.get("policy") == "hardware_aware"
+            and dynamic_spec_config.get("method") in ("dspark", "dflash")
+            and bool(method_params.get("adaptive_draft_k", False))
+        ):
+            try:
+                from vllm_ascend.spec_decode.dynamic.draft_k_controller import (
+                    AdaptiveDraftKController,
+                )
+
+                speculative_config = getattr(vllm_config, "speculative_config", None)
+                max_k = int(getattr(speculative_config, "num_speculative_tokens", 0))
+                self._ascend_physical_k_controller = AdaptiveDraftKController(
+                    max_k=max_k,
+                    min_k=int(method_params.get("adaptive_draft_k_min", 1)),
+                    slack=int(method_params.get("adaptive_draft_k_slack", 1)),
+                )
+            except (ImportError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "Failed to initialize adaptive physical draft K controller: %s",
+                    exc,
+                )
+
+        if dynamic_spec_config.get("proposal_gate_enabled", False):
+            try:
+                from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
+
+                gate_params = dynamic_spec_config.get("proposal_gate_params", {})
+                if not isinstance(gate_params, dict):
+                    raise TypeError("proposal_gate_params must be a dict")
+                accepted = {
+                    key: value
+                    for key, value in gate_params.items()
+                    if key
+                    in {
+                        "enter_ratio",
+                        "exit_ratio",
+                        "max_avg_scheduled_tokens",
+                        "enter_steps",
+                        "exit_steps",
+                    }
                 }
-            }
-            self._ascend_proposal_gate = ProposalGate(
-                max_num_seqs=getattr(self, "max_num_running_reqs", 1),
-                **accepted,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to initialize Ascend proposal gate compatibility patch: %s",
-                exc,
-            )
+                self._ascend_proposal_gate = ProposalGate(
+                    max_num_seqs=getattr(self, "max_num_running_reqs", 1),
+                    **accepted,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to initialize Ascend proposal gate compatibility patch: %s",
+                    exc,
+                )
 
     _patched_init._vllm_ascend_dynamic_gate_patched = True  # type: ignore[attr-defined]
     Scheduler.__init__ = _patched_init
@@ -358,7 +403,29 @@ def _patch_scheduler_update_from_output() -> None:
     has_native_proposal_lengths = "proposal_lengths" in getattr(
         outputs_mod.ModelRunnerOutput, "__dataclass_fields__", {}
     )
+
     if has_native_proposal_lengths:
+        # Newer vLLM versions already consume proposal_lengths.  Keep the
+        # native bookkeeping untouched and add only the adaptive-K feedback
+        # side channel, so existing deployments do not pay the legacy PP/MTP
+        # compatibility work on every output.
+        original_update_from_output = Scheduler.update_from_output
+
+        @wraps(original_update_from_output)
+        def _patched_native_update_from_output(self, scheduler_output, model_runner_output):
+            engine_core_outputs = original_update_from_output(
+                self,
+                scheduler_output,
+                model_runner_output,
+            )
+            controller = getattr(self, "_ascend_physical_k_controller", None)
+            lengths = getattr(model_runner_output, "proposal_lengths", None)
+            if controller is not None and lengths is not None:
+                controller.update(lengths)
+            return engine_core_outputs
+
+        _patched_native_update_from_output._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
+        Scheduler.update_from_output = _patched_native_update_from_output
         return
 
     def _update_proposal_lengths(self, model_runner_output) -> None:
@@ -386,6 +453,10 @@ def _patch_scheduler_update_from_output() -> None:
                 request.spec_token_ids = []
             else:
                 request.spec_token_ids = [-1] * length
+
+        controller = getattr(self, "_ascend_physical_k_controller", None)
+        if controller is not None:
+            controller.update(lengths)
 
     original_update_from_output = Scheduler.update_from_output
 

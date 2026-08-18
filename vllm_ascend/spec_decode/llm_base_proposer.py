@@ -832,6 +832,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # handled just below.
         self.num_speculative_tokens = num_speculative_tokens
 
+        # DSpark keeps max-sized query buffers, but its query metadata used to
+        # remain fixed at the configured maximum K.  When adaptive physical K
+        # is enabled, update the logical query width as well so the draft
+        # forward does not execute the unused suffix.  Backing buffers remain
+        # max-sized, so this does not invalidate graph/profile allocations.
+        if self.method == "dspark" and hasattr(self, "sample_from_anchor"):
+            self.num_query_per_req = (
+                self.num_speculative_tokens
+                if self.sample_from_anchor
+                else 1 + self.num_speculative_tokens
+            )
+
         # Dynamic SD may schedule K == 0 draft tokens for the current batch
         # size. Return an empty [batch_size, 0] draft so downstream copy/unpack
         # paths (which key off ``draft_token_ids.shape[1]``) stay consistent.
