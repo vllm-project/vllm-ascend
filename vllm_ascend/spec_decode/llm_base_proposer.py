@@ -362,11 +362,32 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.draft_window_size = get_ascend_config().draft_window_size
         if self.draft_window_size is not None:
+            # Compatibility validation before enabling sliding-window draft attention.
+            _target_model_type = getattr(
+                getattr(self.vllm_config.model_config, "hf_config", None),
+                "model_type",
+                "",
+            )
+            _target_is_deepseek_v4 = _target_model_type.startswith("deepseek_v4")
+            if self.method == "mtp":
+                # MTP reuses the target's own layers; capping its attention to a
+                # window is not applicable -> force the window off.
+                logger.info(
+                    "[sliding-window] draft method is MTP, 与滑窗不适配, 已强制关闭 draft_window_size (forced OFF)."
+                )
+                self.draft_window_size = None
+            elif self.method == "dspark" and _target_is_deepseek_v4:
+                logger.info(
+                    "[sliding-window] DSpark 为和主模型 DeepseekV4 一起训练的原生草稿模型, 开启滑窗会导致接收长度劣化。"
+                )
+
+        if self.draft_window_size is not None:
             # EAGLE3: seq_lens is context-only, K draft positions lie beyond it
             #   -> future_offset = K.
-            # DFlash: set_inputs_first_pass bakes the query stretch into seq_lens
-            #   -> future_offset = 0.
-            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
+            # DFlash / DSpark: set_inputs_first_pass bakes the query stretch into
+            #   seq_lens (dspark_proposer adds num_query_per_req at cad.seq_lens),
+            #   so the window end must not add K again -> future_offset = 0.
+            future_offset = 0 if self.method in ("dflash", "dspark") else self.num_speculative_tokens
             self.sliding_window = SlidingWindowAdapter(
                 self.draft_window_size,
                 self.kernel_block_size,
@@ -935,7 +956,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
-        if self.draft_window_size is not None:
+        if self.draft_window_size is not None and self.method != "dspark":
+            # DSpark's draft attention reads the per-group block_table assembled
+            # in build_draft_attn_metadata (which overwrites this table), so the
+            # window is applied there instead. Applying here would window a table
+            # that gets discarded and leave seq_lens windowed against an unwindowed
+            # table -> FIA reads the oldest blocks. See sw-dspark-flow-analysis.md.
             self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
@@ -2323,6 +2349,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                # Apply the sliding window to the per-group block_table + seq_lens
+                # that DSpark's draft FIA actually reads. This branch overwrites
+                # common_attn_metadata.block_table_tensor with the full per-group
+                # table, so the window applied earlier (line 922) is bypassed; we
+                # skipped it there for dspark and re-apply here on the per-group
+                # table so FIA reads the recent-blocks clone instead of block 0.
+                if self.draft_window_size is not None:
+                    self.sliding_window.apply(common_attn_metadata)
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
