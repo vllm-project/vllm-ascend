@@ -1239,7 +1239,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         return output_padded
 
-    def _mla_prolog_single_stream(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping):
+    def _mla_prolog_single_stream(
+        self,
+        hidden_states,
+        cos,
+        sin,
+        swa_kv_cache,
+        slot_mapping,
+        write_swa_cache=True,
+    ):
         """Run the MLA prolog on the current stream."""
         share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
         if share_hs_quant:
@@ -1283,35 +1291,36 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         )
 
         # win kv & tok_dis
-        if share_hs_quant:
-            kv = torch_npu.npu_quant_matmul(
-                hs_int8,
-                self.wkv.weight,
-                self.wkv.weight_scale,
-                pertoken_scale=hs_pertoken_scale,
-                bias=self.wkv.bias,
-                output_dtype=hidden_states.dtype,
+        if write_swa_cache:
+            if share_hs_quant:
+                kv = torch_npu.npu_quant_matmul(
+                    hs_int8,
+                    self.wkv.weight,
+                    self.wkv.weight_scale,
+                    pertoken_scale=hs_pertoken_scale,
+                    bias=self.wkv.bias,
+                    output_dtype=hidden_states.dtype,
+                )
+            else:
+                kv = self.wkv(hidden_states)
+            kv = self.kv_norm(kv)
+            assert self.rope_head_dim is not None
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
             )
-        else:
-            kv = self.wkv(hidden_states)
-        kv = self.kv_norm(kv)
-        assert self.rope_head_dim is not None
-        kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-
-        # swa exec kv
-        DeviceOperator.dsa_kv_compress_scatter(
-            swa_kv_cache,
-            kv,
-            slot_mapping,
-        )
+            # swa exec kv
+            DeviceOperator.dsa_kv_compress_scatter(
+                swa_kv_cache,
+                kv,
+                slot_mapping,
+            )
 
         return q, qr, qr_pertoken_scale
 
@@ -1412,7 +1421,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         return q, qr, qr_pertoken_scale
 
-    def _update_compressed_caches_and_select_topk(
+    def _maybe_update_compressed_caches_and_select_topk(
         self,
         layer_name: str,
         hidden_states: torch.Tensor,
@@ -1422,6 +1431,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         qr_pertoken_scale: torch.Tensor | None,
         compress_kv_cache: torch.Tensor,
         state_cache: torch.Tensor,
+        write_cache: bool = True,
     ) -> torch.Tensor | None:
         """Update compressed caches and return Indexer top-k indices."""
         compressor = self.compressor
@@ -1463,8 +1473,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 overlap_plan=overlap_plan,
                 layer_name=layer_name,
                 qr_pertoken_scale=qr_pertoken_scale,
+                write_cache=write_cache,
             )
 
+        if not write_cache:
+            return None
         compressed_kv, compress_slot_mapping = compressor(
             hidden_states=hidden_states,
             state_cache=state_cache,
@@ -1484,7 +1497,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
+        cache_is_prepared: bool = False,
     ) -> torch.Tensor:
+        # DSA PCP sets cache_is_prepared after global cache updates and forces
+        # single-stream attention because there is no local KV update to overlap.
+        if cache_is_prepared and self.multistream_dsv4_dsa_overlap:
+            raise RuntimeError("Prepared DSA caches require single-stream attention.")
+
         (
             compress_kv_cache,
             swa_kv_cache,
@@ -1526,6 +1545,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 sin,
                 swa_kv_cache,
                 swa_req_metadata.slot_mapping,
+                write_swa_cache=not cache_is_prepared,
             )
 
         compress_topk_idxs = None
@@ -1533,7 +1553,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio > 1:
             compressor_metadata = layer_metadata.compressor
             assert compressor_metadata is not None
-            compress_topk_idxs = self._update_compressed_caches_and_select_topk(
+            compress_topk_idxs = self._maybe_update_compressed_caches_and_select_topk(
                 layer_name=layer_name,
                 hidden_states=hidden_states,
                 qr=qr,
@@ -1542,6 +1562,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 qr_pertoken_scale=qr_pertoken_scale,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
+                write_cache=not cache_is_prepared,
             )
 
         notify_kv_cache_written(layer_name)
