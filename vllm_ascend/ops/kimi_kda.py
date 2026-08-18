@@ -35,7 +35,11 @@ try:
     from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
 except ModuleNotFoundError:
     from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+)
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
 )
@@ -69,6 +73,84 @@ if HAS_TRITON:
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
 _FUSED_QKV_NAME = "fused_qkv"
+_FUSED_BFG_NAME = "fused_bfg_proj"
+_F_A_SHARD_ID = 1
+
+
+class _KDAFusedBFGLinear(MergedColumnParallelLinear):
+    """Fuse KDA's float B, F-A, and output-gate projections.
+
+    ``b_proj`` and ``g_proj`` are column-parallel, while ``f_a_proj`` is
+    replicated. Represent the replicated output as ``head_dim * tp_size`` in
+    the logical merged matrix so every rank still owns one complete
+    ``head_dim`` slice. Its checkpoint shard is copied verbatim into that local
+    slice instead of being narrowed by TP rank.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        tp_size: int,
+        quant_config,
+        prefix: str,
+    ) -> None:
+        projection_size = num_heads * head_dim
+        super().__init__(
+            input_size=hidden_size,
+            output_sizes=[
+                num_heads,
+                head_dim * tp_size,
+                projection_size,
+            ],
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+        if self.tp_size != tp_size:
+            raise ValueError(f"KDA fused BFG TP mismatch: layer={self.tp_size}, attention={tp_size}")
+
+    def _load_replicated_f_a_shard(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+    ) -> None:
+        output_dim = getattr(param, "output_dim", None)
+        if output_dim is None:
+            raise ValueError("KDA fused f_a_proj requires an output-sharded parameter")
+
+        shard_offset = sum(self.output_sizes[:_F_A_SHARD_ID]) // self.tp_size
+        shard_size = self.output_sizes[_F_A_SHARD_ID] // self.tp_size
+        param_shard = param.data.narrow(output_dim, shard_offset, shard_size)
+        if param_shard.shape != loaded_weight.shape:
+            raise ValueError(
+                "KDA fused f_a_proj checkpoint shape mismatch: "
+                f"expected {tuple(param_shard.shape)}, got {tuple(loaded_weight.shape)}"
+            )
+        param_shard.copy_(loaded_weight)
+
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        if loaded_shard_id == _F_A_SHARD_ID:
+            self._load_replicated_f_a_shard(param, loaded_weight)
+            return
+        super().weight_loader(param, loaded_weight, loaded_shard_id)
+
+    def weight_loader_v2(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        if loaded_shard_id == _F_A_SHARD_ID:
+            self._load_replicated_f_a_shard(param, loaded_weight)
+            return
+        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
 
 
 def _zero_padded_spec_output(
@@ -200,12 +282,20 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         if self.use_full_rank_gate:
             del self.g_a_proj
             del self.g_b_proj
-            self.g_proj = ColumnParallelLinear(
-                self.hidden_size,
-                self.head_dim * self.num_heads,
-                bias=False,
+            del self.b_proj
+            del self.f_a_proj
+            self.fused_bfg_proj = _KDAFusedBFGLinear(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                tp_size=self.tp_size,
                 quant_config=self.quant_config,
-                prefix=f"{prefix}.g_proj",
+                prefix=f"{prefix}.{_FUSED_BFG_NAME}",
+            )
+            self._fused_bfg_output_sizes = (
+                self.local_num_heads,
+                self.head_dim,
+                self.local_num_heads * self.head_dim,
             )
 
         # The upstream class used FusedRMSNormGated's default epsilon.  K3's
@@ -269,15 +359,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         projection_size = self.local_num_heads * self.head_dim
         q, k, v = qkv.split([projection_size] * 3, dim=-1)
 
-        beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
-        raw_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
-        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
-
-        if self.use_full_rank_gate:
-            output_gate = self.g_proj(hidden_states)[0]
-        else:
-            output_gate = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
-        output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
+        beta, raw_gate, output_gate = self._project_bfg(hidden_states)
 
         core_attn_out = torch.zeros(
             (1, num_tokens, self.local_num_heads, self.head_dim),
@@ -296,6 +378,27 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         core_attn_out = self._apply_output_norm_gate(core_attn_out, output_gate)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _project_bfg(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.use_full_rank_gate:
+            fused_bfg = self.fused_bfg_proj(hidden_states)[0]
+            beta, f_a, output_gate = fused_bfg.split(
+                self._fused_bfg_output_sizes,
+                dim=-1,
+            )
+        else:
+            beta = self.b_proj(hidden_states)[0]
+            f_a = self.f_a_proj(hidden_states)[0]
+            output_gate = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
+
+        beta = beta.float().sigmoid().unsqueeze(0)
+        raw_gate = self.f_b_proj(f_a)[0]
+        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
+        output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
+        return beta, raw_gate, output_gate
 
     def _apply_output_norm_gate(
         self,
