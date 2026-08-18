@@ -347,7 +347,7 @@ jobs:
           compression-level: 0
 
   upload-coverage-to-obs:
-      if: ${{ always() && !cancelled() && inputs.enable-coverage }}
+      if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
       runs-on: ubuntu-latest
       continue-on-error: true
