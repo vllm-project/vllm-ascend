@@ -1772,10 +1772,16 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
             expanded_slot_mapping,
             attn_metadata.num_decode_tokens,
         )
-        attn_metadata.slot_mapping = cache_slot_mapping
-        ret = super().reshape_and_cache(query, cache_key, cache_value, kv_cache, attn_metadata, output)
-        attn_metadata.slot_mapping = expanded_slot_mapping
-        return ret
+        local_num_actual_tokens = attn_metadata.num_actual_tokens
+        try:
+            attn_metadata.slot_mapping = cache_slot_mapping
+            attn_metadata.num_actual_tokens = cache_key.shape[0]
+            super().reshape_and_cache(query, cache_key, cache_value, kv_cache, attn_metadata, output)
+        finally:
+            attn_metadata.slot_mapping = expanded_slot_mapping
+            attn_metadata.num_actual_tokens = local_num_actual_tokens
+
+        return query, key, value, output
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):

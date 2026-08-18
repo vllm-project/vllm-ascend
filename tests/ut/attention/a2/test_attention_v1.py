@@ -244,13 +244,16 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     impl.kv_sharing_target_layer_name = None
     impl.is_kv_producer = True
 
+    query = torch.empty((4, 2, 1))
+    output = torch.empty((4, 2, 1))
     key = torch.arange(4).reshape(4, 1, 1)
     value = key + 10
-    gathered_key = key + 20
-    gathered_value = value + 20
-    gathered_slots = torch.tensor([10, 11, -1, 20, 21, -1])
+    gathered_key = torch.arange(20, 27).reshape(7, 1, 1)
+    gathered_value = torch.arange(30, 37).reshape(7, 1, 1)
+    gathered_slots = torch.tensor([10, 11, -1, -1, 21, -1, -1])
     slot_mapping = torch.tensor([10, 11, -1, -1, 20, 21, -1, -1])
     metadata = AscendAttentionPCPMetadata(
+        num_actual_tokens=3,
         num_decode_tokens=1,
         pcp_local_num_input_tokens=4,
         slot_mapping=slot_mapping,
@@ -269,13 +272,13 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
         patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
         patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
     ):
-        impl.reshape_and_cache(
-            torch.empty((4, 2, 1)),
+        result = impl.reshape_and_cache(
+            query,
             key,
             value,
             (key_cache, value_cache),
             metadata,
-            torch.empty((4, 2, 1)),
+            output,
         )
 
     local_inputs, actual_slots, num_decode_tokens = gather_inputs.call_args.args
@@ -285,9 +288,15 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     assert num_decode_tokens == 1
 
     cache_args = reshape_and_cache.call_args.kwargs
-    assert cache_args["key"] is gathered_key
-    assert cache_args["value"] is gathered_value
-    assert cache_args["slot_mapping"] is gathered_slots
+    torch.testing.assert_close(cache_args["key"], gathered_key)
+    torch.testing.assert_close(cache_args["value"], gathered_value)
+    torch.testing.assert_close(cache_args["slot_mapping"], gathered_slots)
+    assert metadata.slot_mapping is slot_mapping
+    assert metadata.num_actual_tokens == 3
+    assert result[0] is query
+    assert result[1] is key
+    assert result[2] is value
+    assert result[3] is output
 
 
 def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
