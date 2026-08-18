@@ -194,7 +194,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "hc_post"
         "hc_pre"
         "swiglu_group_quant"
-        "grouped_matmul_swiglu_quant_v2"
         "indexer_compress_epilog_v2"
         "causal_conv1d"
         "recurrent_gated_delta_rule"

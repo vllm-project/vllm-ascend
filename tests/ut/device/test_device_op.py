@@ -19,8 +19,9 @@ def _packed_w8a8_gmm_swiglu_kwargs(*, swiglu_limit=0.0):
     }
 
 
-def test_gmm_swiglu_normalizes_single_tensor_inputs_for_custom_v2():
+def test_gmm_swiglu_forwards_single_tensor_inputs_to_custom_v2():
     expected = (torch.zeros(2, 4, dtype=torch.int8), torch.ones(2))
+    kwargs = _packed_w8a8_gmm_swiglu_kwargs()
     with (
         mock.patch(
             "vllm_ascend.device.device_op.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
@@ -28,7 +29,7 @@ def test_gmm_swiglu_normalizes_single_tensor_inputs_for_custom_v2():
             create=True,
         ) as custom_v2,
     ):
-        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**_packed_w8a8_gmm_swiglu_kwargs())
+        output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(**kwargs)
 
     assert output[0] is expected[0]
     assert output[1] is expected[1]
@@ -37,14 +38,15 @@ def test_gmm_swiglu_normalizes_single_tensor_inputs_for_custom_v2():
     assert len(call_kwargs["weight_scale"]) == 1
     assert call_kwargs["weight_assist_matrix"] is None
     assert call_kwargs["dequant_mode"] == 0
+    assert call_kwargs["group_list"] is kwargs["group_list"]
     assert call_kwargs["group_list_type"] == 0
 
 
 @pytest.mark.parametrize(
-    ("single_tensor", "per_group", "expected_group_list_type"),
+    ("single_tensor", "per_group", "group_list_type"),
     [(True, False, 0), (True, True, 0), (False, False, 1), (False, True, 1)],
 )
-def test_gmm_swiglu_custom_v2_covers_tensor_and_scale_layouts(single_tensor, per_group, expected_group_list_type):
+def test_gmm_swiglu_custom_v2_preserves_group_list_contract(single_tensor, per_group, group_list_type):
     num_experts, hidden_size, intermediate_size = 3, 4, 8
     if single_tensor:
         weight = torch.zeros(num_experts, hidden_size, intermediate_size, dtype=torch.int8)
@@ -57,6 +59,7 @@ def test_gmm_swiglu_custom_v2_covers_tensor_and_scale_layouts(single_tensor, per
         weight_scale = [torch.ones(scale_shape) for _ in range(num_experts)]
         bias = [torch.zeros(intermediate_size) for _ in range(num_experts)]
 
+    group_list = torch.tensor([1, 1, 0] if group_list_type == 1 else [1, 2, 2])
     expected = (torch.zeros(2, 4, dtype=torch.int8), torch.ones(2))
     with mock.patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
@@ -66,8 +69,8 @@ def test_gmm_swiglu_custom_v2_covers_tensor_and_scale_layouts(single_tensor, per
         output = BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
             x=torch.zeros(2, hidden_size, dtype=torch.int8),
             weight=weight,
-            group_list=torch.tensor([1, 1, 0] if expected_group_list_type == 1 else [1, 2, 2]),
-            group_list_type=expected_group_list_type,
+            group_list=group_list,
+            group_list_type=group_list_type,
             weight_scale=weight_scale,
             x_scale=torch.ones(2),
             bias=bias,
@@ -81,8 +84,8 @@ def test_gmm_swiglu_custom_v2_covers_tensor_and_scale_layouts(single_tensor, per
     assert len(call_kwargs["weight_scale"]) == len(call_kwargs["weight"])
     assert len(call_kwargs["weight_assist_matrix"]) == len(call_kwargs["weight"])
     assert call_kwargs["dequant_mode"] == int(per_group)
-    assert call_kwargs["group_list_type"] == 0
-    torch.testing.assert_close(call_kwargs["group_list"], torch.tensor([1, 2, 2]))
+    assert call_kwargs["group_list"] is group_list
+    assert call_kwargs["group_list_type"] == group_list_type
     assert call_kwargs["swiglu_limit"] == 1.0
 
 

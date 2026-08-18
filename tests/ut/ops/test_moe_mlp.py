@@ -906,28 +906,24 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
                 mock_fused.assert_called_once()
                 self.assertIs(output, final_output)
 
-    def test_multi_tensor_fused_paths_pass_expert_counts_to_v2(self):
-        expected_group_list = torch.tensor([1, 2, 0], dtype=torch.int64)
-
+    def test_multi_tensor_fused_paths_preserve_group_list_contract(self):
         for group_list_type, group_list in (
             (0, torch.tensor([1, 3, 3], dtype=torch.int64)),
-            (1, expected_group_list),
+            (1, torch.tensor([1, 2, 0], dtype=torch.int64)),
         ):
             for moe_comm_type in (-1, MoECommType.MC2):
                 with self.subTest(group_list_type=group_list_type, moe_comm_type=moe_comm_type):
-                    self._assert_fused_path_passes_expert_counts_to_v2(
+                    self._assert_multi_tensor_path_preserves_group_list_contract(
                         group_list=group_list,
                         group_list_type=group_list_type,
-                        expected_group_list=expected_group_list,
                         moe_comm_type=moe_comm_type,
                     )
 
-    def _assert_fused_path_passes_expert_counts_to_v2(
+    def _assert_multi_tensor_path_preserves_group_list_contract(
         self,
         *,
         group_list: torch.Tensor,
         group_list_type: int,
-        expected_group_list: torch.Tensor,
         moe_comm_type: int,
     ):
         mock_ctx = MagicMock()
@@ -967,34 +963,28 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
             output, _ = quant_apply_mlp(**kwargs)
 
         call_kwargs = mock_gmm_swiglu.call_args.kwargs
-        torch.testing.assert_close(call_kwargs["group_list"], expected_group_list)
-        self.assertEqual(call_kwargs["group_list_type"], 1)
-        if group_list_type == 1:
-            self.assertIs(call_kwargs["group_list"], group_list)
+        self.assertIs(call_kwargs["group_list"], group_list)
+        self.assertEqual(call_kwargs["group_list_type"], group_list_type)
         self.assertIs(output, final_output)
 
-    def test_single_tensor_fused_paths_pass_cumulative_boundaries_to_v2(self):
-        expected_group_list = torch.tensor([1, 3, 3], dtype=torch.int64)
-
+    def test_single_tensor_fused_paths_preserve_group_list_contract(self):
         for group_list_type, group_list in (
-            (0, expected_group_list),
+            (0, torch.tensor([1, 3, 3], dtype=torch.int64)),
             (1, torch.tensor([1, 2, 0], dtype=torch.int64)),
         ):
             for moe_comm_type in (-1, MoECommType.MC2):
                 with self.subTest(group_list_type=group_list_type, moe_comm_type=moe_comm_type):
-                    self._assert_single_tensor_path_passes_cumulative_boundaries_to_v2(
+                    self._assert_single_tensor_path_preserves_group_list_contract(
                         group_list=group_list,
                         group_list_type=group_list_type,
-                        expected_group_list=expected_group_list,
                         moe_comm_type=moe_comm_type,
                     )
 
-    def _assert_single_tensor_path_passes_cumulative_boundaries_to_v2(
+    def _assert_single_tensor_path_preserves_group_list_contract(
         self,
         *,
         group_list: torch.Tensor,
         group_list_type: int,
-        expected_group_list: torch.Tensor,
         moe_comm_type: int,
     ):
         mock_ctx = MagicMock()
@@ -1033,10 +1023,8 @@ class TestQuantApplyMlpGmmSwigluV2(_GeluPathBase):
             output, _ = quant_apply_mlp(**kwargs)
 
         call_kwargs = mock_gmm_swiglu.call_args.kwargs
-        torch.testing.assert_close(call_kwargs["group_list"], expected_group_list)
-        self.assertEqual(call_kwargs["group_list_type"], 0)
-        if group_list_type == 0:
-            self.assertIs(call_kwargs["group_list"], group_list)
+        self.assertIs(call_kwargs["group_list"], group_list)
+        self.assertEqual(call_kwargs["group_list_type"], group_list_type)
         self.assertIs(output, final_output)
 
     def test_mc2_swiglustep_forwards_count_type_to_both_gmms(self):

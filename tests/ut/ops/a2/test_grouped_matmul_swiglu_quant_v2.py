@@ -558,11 +558,11 @@ def test_grouped_matmul_swiglu_quant_v2_a8w8_graph_matches_compat():
 
 
 @pytest.mark.parametrize("single_tensor", [True, False], ids=["single", "multi"])
-@pytest.mark.parametrize("group_list_type", [0, 1], ids=["cumulative", "counts"])
 @torch.inference_mode()
-def test_grouped_matmul_swiglu_quant_v2_a8w8_graph_replay(single_tensor, group_list_type):
-    """Replay must consume fresh x, x-scale, and group-list values."""
+def test_grouped_matmul_swiglu_quant_v2_a8w8_count_graph_replay(single_tensor):
+    """The MoE count contract must consume fresh values on every replay."""
     torch.manual_seed(1)
+    group_list_type = 1
     weights, weight_scales = _make_a8w8_case(single_tensor)
     static_x = torch.zeros(NUM_TOKENS, HIDDEN_SIZE, dtype=torch.int8, device="npu")
     static_token_scales = torch.ones(NUM_TOKENS, dtype=torch.float32, device="npu")

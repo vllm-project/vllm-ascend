@@ -216,10 +216,6 @@ class BaseDeviceAdaptor:
         x_scale: torch.Tensor,
         bias: list[torch.Tensor] | torch.Tensor | None = None,
         dequant_mode: int | None = None,
-        dequant_dtype: torch.dtype | None = None,
-        quant_mode: int | None = None,
-        quant_dtype: torch.dtype | None = None,
-        transpose_weight: bool = False,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
@@ -243,12 +239,7 @@ class BaseDeviceAdaptor:
             per_channel_scale_dim = 2 if len(weights) == 1 else 1
             dequant_mode = int(weight_scales[0].dim() > per_channel_scale_dim)
 
-        if group_list_type == 1:
-            # Keep one custom-op attribute signature across ACLGraph captures.
-            # The device-side cumsum remains replayable when expert token
-            # counts change between requests.
-            group_list = group_list.cumsum(dim=0)
-        elif group_list_type != 0:
+        if group_list_type not in (0, 1):
             raise ValueError(f"group_list_type must be 0 or 1, but got {group_list_type}.")
 
         return torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
@@ -259,11 +250,7 @@ class BaseDeviceAdaptor:
             group_list=group_list,
             weight_assist_matrix=weight_assist_matrix,
             dequant_mode=dequant_mode,
-            dequant_dtype=dequant_dtype,
-            quant_mode=quant_mode,
-            quant_dtype=quant_dtype,
-            transpose_weight=transpose_weight,
-            group_list_type=0,
+            group_list_type=group_list_type,
             swiglu_limit=swiglu_limit,
         )
 
@@ -1207,10 +1194,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         x_scale: torch.Tensor,
         bias: list[torch.Tensor] | torch.Tensor | None = None,
         dequant_mode: int | None = None,
-        dequant_dtype: torch.dtype | None = None,
-        quant_mode: int | None = None,
-        quant_dtype: torch.dtype | None = None,
-        transpose_weight: bool = False,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
@@ -1229,9 +1212,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     group_list=group_list,
                     group_list_type=group_list_type,
                     dequant_mode=0 if dequant_mode is None else dequant_mode,
-                    dequant_dtype=torch.float32 if dequant_dtype is None else dequant_dtype,
-                    quant_mode=0 if quant_mode is None else quant_mode,
-                    quant_dtype=act_quant_type if quant_dtype is None else quant_dtype,
+                    dequant_dtype=torch.float32,
+                    quant_mode=0,
+                    quant_dtype=act_quant_type,
                 )
             return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
@@ -1296,9 +1279,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 x_scale=x_scale,
                 group_list_type=group_list_type,
                 dequant_mode=2 if dequant_mode is None else dequant_mode,
-                quant_mode=2 if quant_mode is None else quant_mode,
-                dequant_dtype=torch.float32 if dequant_dtype is None else dequant_dtype,
-                quant_dtype=act_quant_type if quant_dtype is None else quant_dtype,
+                quant_mode=2,
+                dequant_dtype=torch.float32,
+                quant_dtype=act_quant_type,
                 x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
                 weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
                 weight_scale_dtype=torch_npu.float8_e8m0fnu,
