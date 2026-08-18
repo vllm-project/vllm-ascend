@@ -114,81 +114,60 @@ class TestProbabilisticDraftProbHandoff(unittest.TestCase):
     @patch(
         "vllm_ascend.worker.model_runner_v1.logger.warning",
     )
-    @patch(
-        "vllm_ascend.worker.model_runner_v1.lmhead_tp_enable",
-        return_value=False,
-    )
     def test_mixed_batch_fills_missing_padding_probs(
         self,
-        _mock_lmhead_tp_enable,
         mock_warning,
     ):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.input_batch = SimpleNamespace(
             req_ids=["req_cached", "req_padding"],
-            sampling_metadata=SimpleNamespace(top_k=None),
-            update_async_output_token_ids=MagicMock(),
         )
         cached_probs = torch.arange(3 * 4, dtype=torch.float32).reshape(1, 3, 4)
         runner._draft_probs = cached_probs
         runner._draft_prob_req_ids = ["req_cached"]
-        runner.rejection_sampler = MagicMock(return_value="sampler_output")
         spec_decode_metadata = SpecDecodeMetadata.make_dummy(
             [[1, 2], [-1, -1]],
             device=torch.device("cpu"),
         )
 
-        output = NPUModelRunner._sample(
+        draft_probs = NPUModelRunner._get_spec_decode_draft_probs(
             runner,
-            torch.randn(6, 4),
             spec_decode_metadata,
             {"req_padding"},
         )
 
-        self.assertEqual(output, "sampler_output")
-        passed_draft_probs = runner.rejection_sampler.call_args.args[1]
         expected_draft_probs = torch.cat(
             [cached_probs[0, :2], torch.zeros((2, 4))],
             dim=0,
         )
-        self.assertTrue(torch.equal(passed_draft_probs, expected_draft_probs))
+        self.assertTrue(torch.equal(draft_probs, expected_draft_probs))
         mock_warning.assert_not_called()
 
     @patch(
         "vllm_ascend.worker.model_runner_v1.logger.warning",
     )
-    @patch(
-        "vllm_ascend.worker.model_runner_v1.lmhead_tp_enable",
-        return_value=False,
-    )
     def test_mixed_batch_warns_for_missing_real_draft_probs(
         self,
-        _mock_lmhead_tp_enable,
         mock_warning,
     ):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.input_batch = SimpleNamespace(
             req_ids=["req_cached", "req_padding", "req_missing"],
-            sampling_metadata=SimpleNamespace(top_k=None),
-            update_async_output_token_ids=MagicMock(),
         )
         runner._draft_probs = torch.ones((1, 3, 4))
         runner._draft_prob_req_ids = ["req_cached"]
-        runner.rejection_sampler = MagicMock(return_value="sampler_output")
         spec_decode_metadata = SpecDecodeMetadata.make_dummy(
             [[1], [-1], [2]],
             device=torch.device("cpu"),
         )
 
-        output = NPUModelRunner._sample(
+        draft_probs = NPUModelRunner._get_spec_decode_draft_probs(
             runner,
-            torch.randn(6, 4),
             spec_decode_metadata,
             {"req_padding"},
         )
 
-        self.assertEqual(output, "sampler_output")
-        self.assertIsNone(runner.rejection_sampler.call_args.args[1])
+        self.assertIsNone(draft_probs)
         mock_warning.assert_called_once()
 
 
