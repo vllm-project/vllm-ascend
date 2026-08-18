@@ -124,7 +124,7 @@ ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只
 | 开关 | 作用 |
 |------|------|
 | `log.print_sampling_meta` | 写 anomaly / manual report 时，TP0+last-PP 打 `[SamplingMeta]` 日志（不进 JSON） |
-| `log.print_output_on_finish` | **每个**请求结束时 TP0 打 output ids/text 日志（噪声大，默关） |
+| `log.print_output_on_finish` | **每个**请求结束时 TP0 打 output ids/text 日志（噪声大，默关）。**仅在开关为 true 的 sample 步开始向 DFX 累积**，不回填开启前已生成的 token。热更中途打开时，对已在跑的请求：finish 日志可能是**部分** output，也可能是**空**（`output_token_count=0` / text 空，若开启后该请求未再走过累积路径）。要完整输出请在发请求前打开。 |
 
 **文件产物**（默认目录 `<dfx_root>/report/`）：
 
@@ -197,7 +197,7 @@ ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只
 | `[DFX print_input]` | `print_input_token_ids_once` 打印 length + prompt token ids |
 | `[DFX manual_trigger]` / `manual_trigger` | `manual_trigger` |
 | `[DFX report]` / `[DFX dump_finish]` | 即时 anomaly report / 请求结束 dump_finish 落盘 |
-| `[DFX print_output]` | `log.print_output_on_finish` |
+| `[DFX print_output]` | `log.print_output_on_finish`（开启期间累积的 output；热开 in-flight 可能不全或空） |
 | `[SamplingMeta]` | `log.print_sampling_meta` |
 | `[Anomaly spec short]` / `[Anomaly token_logprob` / `[Anomaly output_substring]` / `[Anomaly token_repeat]` | 检测 short |
 | `[Anomaly msprobe]` | dump arm / activate / 配额 |
