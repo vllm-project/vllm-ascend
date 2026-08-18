@@ -28,6 +28,11 @@ Two input modes are supported (mutually exclusive):
   comment. Module matching is bypassed entirely; each path is routed
   directly to the appropriate runner.
 
+- ``--test-list-file``: File-driven. The input is a text file with one
+  pytest target per line (UT or E2E). Lines starting with ``#`` and
+  blank lines are ignored. Supports file paths, directories, and
+  ``::nodeid`` suffixes for test classes or methods.
+
 Pipeline (PR-driven mode):
   1. Diff       -- get changed files from git.
   2. Match      -- identify affected modules via test_config.yaml.
@@ -98,6 +103,12 @@ _DEFAULT_KEY: RunnerKey = (0, NpuType.CPU)
 # The always-on CPU UT module. In test-only changes, only this module
 # is selected for UT runs (along with the changed test files).
 DEFAULT_CPU_UT_MODULE = "default_cpu_ut"
+
+# Coverage-based recommendation emits this batch label (not a real pytest
+# path) to represent the always-on CPU UT suite. Map it to ``tests/ut`` so
+# the ``--test-list-file`` flow runs the same CPU UTs as the diff flow.
+CPU_UT_BATCH_ALIAS = "cpu-ut"
+CPU_UT_BATCH_PATH = "tests/ut"
 
 _BISECT_TOOL_ROOTS = ("tools/bisect", "tests/ut/tools/bisect")
 _BISECT_TOOL_SUPPORT_FILES = {
@@ -480,6 +491,74 @@ def _scan_e2e_test_dir(
                 _scan_e2e_test_dir(str(entry), groups)
 
 
+def _load_test_list_file(path: Path) -> list[str]:
+    """Load pytest targets from *path*, one per non-empty, non-comment line."""
+    targets: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if line:
+            targets.append(_as_posix_path(line))
+    return targets
+
+
+def _route_explicit_test_target(
+    target: str,
+    groups: dict[RunnerKey, list[str]],
+) -> None:
+    """Route a single explicit UT/E2E target to the appropriate runner group."""
+    # The coverage recommender emits "cpu-ut" (the batch label of the
+    # default_cpu_ut module) instead of the real pytest path "tests/ut".
+    # Map it back so the recommended path runs the same CPU UTs the
+    # diff-based select-tests path selects for default_cpu_ut: tests/ut
+    # scanned with cpu_only=True, i.e. NPU-convention subdirs are skipped
+    # and the remaining files route to the CPU runner.
+    cpu_only = False
+    if target == CPU_UT_BATCH_ALIAS:
+        target = CPU_UT_BATCH_PATH
+        file_path = target
+        cpu_only = True
+    else:
+        file_path = _pytest_node_file_path(target)
+    if not _is_test_path(file_path):
+        print(
+            f"Warning: Skipping non-test path: {target}",
+            file=sys.stderr,
+        )
+        return
+
+    path = Path(file_path)
+    if not path.exists():
+        print(
+            f"Warning: Path does not exist: {target}",
+            file=sys.stderr,
+        )
+        return
+
+    if _is_ut_path(file_path):
+        if "::" in target or path.is_file():
+            key = _route_ut_dir(file_path)
+            if cpu_only and key != _DEFAULT_KEY:
+                print(
+                    f"Warning: cpu_only module test {target} routes to NPU runner;"
+                    " check test_config.yaml for misconfigured cpu_only tests.",
+                    file=sys.stderr,
+                )
+                return
+            groups[key].append(target)
+        else:
+            _scan_ut_test_dir(target, groups, cpu_only=cpu_only)
+        return
+
+    if _is_e2e_path(file_path):
+        _scan_e2e_test_dir(target, groups)
+        return
+
+    print(
+        f"Warning: Skipping unrecognized test path: {target}",
+        file=sys.stderr,
+    )
+
+
 def _dedup_groups(groups: dict[RunnerKey, list[str]]) -> None:
     for key in groups:
         seen: set[str] = set()
@@ -737,6 +816,13 @@ def main():
         "Supports ``::nodeid`` suffix (e.g. ``test_foo.py::TestClass::test_method``) "
         "to run a single test method.",
     )
+    input_group.add_argument(
+        "--test-list-file",
+        type=Path,
+        help="Path to a text file listing pytest targets to run (one per line). "
+        "Supports UT and E2E paths, directories, and ``::nodeid`` suffixes for "
+        "test classes or methods. Blank lines and ``#`` comments are ignored.",
+    )
     parser.add_argument(
         "--filtered-changed-files-json",
         type=str,
@@ -782,13 +868,31 @@ def main():
         matched_modules: list[str] = []
         all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
         for path in args.explicit_e2e_tests:
-            if not _is_e2e_path(path):
+            if not _is_e2e_path(_pytest_node_file_path(path)):
                 print(
                     f"Warning: Skipping non-e2e path: {path}",
                     file=sys.stderr,
                 )
                 continue
             _scan_e2e_test_dir(path, all_groups)
+    elif args.test_list_file:
+        if not args.test_list_file.is_file():
+            print(
+                f"ERROR: Test list file does not exist: {args.test_list_file}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        matched_modules = []
+        all_groups = defaultdict(list)
+        explicit_targets = _load_test_list_file(args.test_list_file)
+        if not explicit_targets:
+            print(
+                f"Warning: Test list file is empty: {args.test_list_file}",
+                file=sys.stderr,
+            )
+        for target in explicit_targets:
+            _route_explicit_test_target(target, all_groups)
+        _dedup_groups(all_groups)
     else:
         changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
         filtered_changed_files = changed_files
