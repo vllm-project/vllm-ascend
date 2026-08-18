@@ -58,4 +58,3 @@ def test_offline_switches_constraints_without_state_leak(offline_runner: VllmRun
 
         assert outputs[0].outputs
         assert_structured_output(outputs[0].outputs[0].text, case)
-

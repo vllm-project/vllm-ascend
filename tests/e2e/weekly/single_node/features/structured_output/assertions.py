@@ -41,9 +41,7 @@ def assert_structured_output(text: str, case: StructuredOutputCase) -> None:
         return
 
     if case.constraint_type == "grammar":
-        assert text in case.allowed_outputs, (
-            f"{case.case_id} output {text!r} is not one of {case.allowed_outputs!r}"
-        )
+        assert text in case.allowed_outputs, f"{case.case_id} output {text!r} is not one of {case.allowed_outputs!r}"
         return
 
     raise AssertionError(f"Unsupported constraint type: {case.constraint_type}")
@@ -51,4 +49,3 @@ def assert_structured_output(text: str, case: StructuredOutputCase) -> None:
 
 def assert_plain_output(text: str) -> None:
     assert text and text.strip(), "plain request returned empty output"
-

@@ -42,8 +42,9 @@ ADDITIONAL_CONFIG = {
 
 @pytest.fixture(scope="module")
 def offline_runner() -> Generator[VllmRunner, None, None]:
-    with patch.dict(os.environ, SERVER_ENV, clear=False):
-        with VllmRunner(
+    with (
+        patch.dict(os.environ, SERVER_ENV, clear=False),
+        VllmRunner(
             model_name=MODEL_NAME,
             max_model_len=40960,
             max_num_seqs=64,
@@ -53,8 +54,9 @@ def offline_runner() -> Generator[VllmRunner, None, None]:
             gpu_memory_utilization=0.9,
             compilation_config={"cudagraph_capture_sizes": [64]},
             additional_config=ADDITIONAL_CONFIG,
-        ) as runner:
-            yield runner
+        ) as runner,
+    ):
+        yield runner
 
 
 @pytest.fixture(scope="module")

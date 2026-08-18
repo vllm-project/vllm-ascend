@@ -92,4 +92,3 @@ def raw_chat_completion_payload(model: str, structured_outputs: dict[str, Any]) 
         "max_tokens": 32,
         "structured_outputs": structured_outputs,
     }
-
