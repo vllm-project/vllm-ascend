@@ -345,8 +345,10 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         ) as mock_logger:
             b.put(["k1"], [[100]], [[10]])  # Should log error but not raise
         error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("event=kv pool backend put failed", error_log)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
+        self.assertEqual(mock_logger.debug.call_args.args[-1], ["k1"])
 
     def test_get(self):
         b = self._make_backend()
@@ -367,8 +369,10 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         ) as mock_logger:
             b.get(["k1"], [[100]], [[10]])
         error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("event=kv pool backend get failed", error_log)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
+        self.assertEqual(mock_logger.debug.call_args.args[-1], ["k1"])
 
     def test_register_buffer(self):
         b = self._make_backend()

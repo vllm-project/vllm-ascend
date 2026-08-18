@@ -212,7 +212,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
-            "KV pool connector start_load_kv metadata_requests=%d specs=%s",
+            "event=kv pool load started request_count=%d request_details=%s",
             len(metadata.requests),
             [
                 (

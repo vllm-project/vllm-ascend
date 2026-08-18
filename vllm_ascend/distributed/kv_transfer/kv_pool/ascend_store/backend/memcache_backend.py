@@ -73,6 +73,11 @@ class MemcacheBackend(Backend):
             self._register_buffers_if_needed()
 
     def _setup_store(self):
+        started_at = time.perf_counter()
+        logger.info(
+            "event=kv pool backend init started backend=memcache rank_id=%d",
+            self.local_rank,
+        )
         try:
             from memcache_hybrid import DistributedObjectStore  # type: ignore
         except ImportError as e:
@@ -87,14 +92,36 @@ class MemcacheBackend(Backend):
         try:
             res = store.init(self.local_rank, init_bm=self._init_bm)
         except ValueError as e:
-            logger.error("Configuration loading failed. error=%s. Check memcache config and environment.", e)
+            logger.error(
+                "event=kv pool backend init failed backend=memcache rank_id=%d "
+                "duration_ms=%.3f reason=%s error_type=%s "
+                "next_action=check_memcache_config_and_environment",
+                self.local_rank,
+                (time.perf_counter() - started_at) * 1e3,
+                e,
+                type(e).__name__,
+            )
             raise
         except Exception as exc:
-            logger.error("Store initialization failed. error=%s. Check memcache setup and dependencies.", exc)
+            logger.error(
+                "event=kv pool backend init failed backend=memcache rank_id=%d "
+                "duration_ms=%.3f reason=%s error_type=%s "
+                "next_action=check_memcache_setup_and_dependencies",
+                self.local_rank,
+                (time.perf_counter() - started_at) * 1e3,
+                exc,
+                type(exc).__name__,
+            )
             raise
 
         assert res == 0
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
+        logger.info(
+            "event=kv pool backend init succeeded backend=memcache rank_id=%d "
+            "duration_ms=%.3f",
+            self.local_rank,
+            (time.perf_counter() - started_at) * 1e3,
+        )
         return store
 
     @classmethod
@@ -174,12 +201,12 @@ class MemcacheBackend(Backend):
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
             logger.error(
-                "Failed to get %d keys out of %d. Store is not initialized; "
-                "call put() first to trigger initialization.",
+                "event=kv pool backend get failed backend=memcache "
+                "failed_keys=%d key_count=%d reason=store_not_initialized "
+                "next_action=call_put_to_initialize_store",
                 len(key),
                 len(key),
             )
-            logger.debug("Failed to get key details. keys=%s", key)
             return
         assert self.store is not None
         try:
@@ -189,22 +216,26 @@ class MemcacheBackend(Backend):
             if failed_count:
                 error_codes = sorted(set(failed_codes))
                 logger.error(
-                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
+                    "event=kv pool backend get failed backend=memcache "
+                    "failed_keys=%d key_count=%d error_codes=%s reason=backend_returned_error "
+                    "next_action=check_key_existence_and_memory_state",
                     failed_count,
                     len(key),
                     error_codes,
                 )
-                logger.debug("Failed to get key details. keys=%s, result=%s", key, res)
+                logger.debug("event=kv pool backend get keys sample_keys=%s", key[:3])
             return res
         except Exception as e:
             logger.error(
-                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
+                "event=kv pool backend get failed backend=memcache "
+                "failed_keys=%d key_count=%d error_type=%s reason=%s "
+                "next_action=check_store_state_and_network",
                 len(key),
                 len(key),
                 type(e).__name__,
                 e,
             )
-            logger.debug("Failed to get key details. keys=%s", key)
+            logger.debug("event=kv pool backend get keys sample_keys=%s", key[:3])
             return None
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
@@ -217,22 +248,26 @@ class MemcacheBackend(Backend):
             if failed_count:
                 error_codes = sorted(set(failed_codes))
                 logger.error(
-                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
+                    "event=kv pool backend put failed backend=memcache "
+                    "failed_keys=%d key_count=%d error_codes=%s reason=backend_returned_error "
+                    "next_action=check_memory_and_store_capacity",
                     failed_count,
                     len(key),
                     error_codes,
                 )
-                logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
+                logger.debug("event=kv pool backend put keys sample_keys=%s", key[:3])
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
+                "event=kv pool backend put failed backend=memcache "
+                "failed_keys=%d key_count=%d error_type=%s reason=%s "
+                "next_action=check_store_state_and_memory",
                 len(key),
                 len(key),
                 type(e).__name__,
                 e,
             )
-            logger.debug("Failed to put key details. keys=%s", key)
+            logger.debug("event=kv pool backend put keys sample_keys=%s", key[:3])
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")

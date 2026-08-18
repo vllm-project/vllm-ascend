@@ -96,6 +96,18 @@ class TestKVPoolScheduler(unittest.TestCase):
         return config
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.logger")
+    def test_init_logs_scheduler_config(self, mock_logger, mock_client_cls):
+        KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
+
+        messages = [call.args[0] for call in mock_logger.info.call_args_list]
+        self.assertIn(
+            "event=kv pool scheduler configured backend=%s page_size_bytes=%d "
+            "use_layerwise=%s use_gva_layerwise=%s load_async=%s",
+            messages,
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_consumer_no_load(self, mock_client_cls):
         config = self._make_config(kv_role="kv_consumer")
         scheduler = KVPoolScheduler(config, use_layerwise=False)
@@ -114,7 +126,8 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(result, (0, False))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_get_num_new_matched_tokens_hit(self, mock_client_cls):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.logger")
+    def test_get_num_new_matched_tokens_hit(self, mock_logger, mock_client_cls):
         config = self._make_config(block_size=16)
         scheduler = KVPoolScheduler(config, use_layerwise=False)
         mock_client_cls.return_value.lookup.return_value = 48
@@ -135,6 +148,9 @@ class TestKVPoolScheduler(unittest.TestCase):
             [0],
             hbm_hit_tokens=16,
         )
+        self.assertEqual(mock_logger.info.call_count, 2)
+        self.assertIn("event=kv pool lookup completed", mock_logger.info.call_args_list[0].args[0])
+        self.assertIn("event=kv pool load spec created", mock_logger.info.call_args_list[1].args[0])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_all_hit(self, mock_client_cls):
@@ -1305,6 +1321,20 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
         request.block_hashes = [b"\xaa"]
         result = scheduler._get_layerwise_gva_hit_tokens(request, 16, 0)
         self.assertEqual(result, 0)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.logger")
+    def test_result_count_mismatch_logs_structured_error(self, mock_logger):
+        scheduler = self._make_scheduler()
+        scheduler.store_scheduler.batch_get_key_info.return_value = []
+
+        request = MagicMock()
+        request.block_hashes = [b"\xaa"]
+        result = scheduler._get_layerwise_gva_hit_tokens(request, 16, 0)
+
+        self.assertEqual(result, 0)
+        message = mock_logger.error.call_args.args[0]
+        self.assertIn("event=kv pool lookup result invalid", message)
+        self.assertIn("reason=result_count_mismatch", message)
 
     def test_with_computed_tokens(self):
         scheduler = self._make_scheduler()

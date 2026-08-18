@@ -768,8 +768,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_lookup_scheduler_exception(self):
         worker = self._make_worker()
         worker.m_store.exists.side_effect = Exception("fail")
-        result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger"
+        ) as mock_logger:
+            result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 0)
+        mock_logger.exception.assert_called_once()
+        self.assertIn("event=kv pool exists failed", mock_logger.exception.call_args.args[0])
+        self.assertIn("reason=backend_exists_exception", mock_logger.exception.call_args.args[0])
 
     def test_lookup_layerwise(self):
         worker = self._make_worker()

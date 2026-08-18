@@ -1712,7 +1712,10 @@ class KVPoolWorker:
             return
         while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
             self.kv_recv_thread.raise_if_failed()
-            logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
+            logger.info(
+                "event=kv pool layer load waiting layer_id=%d",
+                self.current_layer,
+            )
         self.layer_load_finished_events[self.current_layer].clear()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -1740,7 +1743,10 @@ class KVPoolWorker:
         if self.current_layer == self.num_layers - 1:
             while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):
                 send_thread.raise_if_failed()
-                logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
+                logger.info(
+                    "event=kv pool layer save waiting layer_id=%d",
+                    self.current_layer,
+                )
             reuse_source_layers = set(self.prefetch_layer_map.values())
             for layer_id in range(self.num_layers):
                 if layer_id in reuse_source_layers:
@@ -2193,9 +2199,10 @@ class KVPoolWorker:
                             break
                 hits.append(hit_end)
         except Exception as e:
-            logger.error(
-                "Remote connection failed in get_common_prefix_length. type=%s, error=%s. "
-                "Check network and remote store.",
+            logger.exception(
+                "event=kv pool exists failed operation=exists "
+                "reason=backend_exists_exception error_type=%s error=%s "
+                "next_action=check_backend_exists_implementation",
                 type(e).__name__,
                 e,
             )
@@ -2412,8 +2419,10 @@ class KVPoolWorker:
                     token_len,
                 )
         except Exception as e:
-            logger.error(
-                "Remote connection failed in lookup. type=%s, error=%s. Check network and remote store.",
+            logger.exception(
+                "event=kv pool exists failed operation=exists "
+                "reason=backend_exists_exception error_type=%s error=%s "
+                "next_action=check_backend_exists_implementation",
                 type(e).__name__,
                 e,
             )

@@ -165,10 +165,18 @@ class KVPoolScheduler:
         self.tp_mismatch = tp_mismatch_info.enabled
 
         self.page_size_bytes = page_size_bytes
-        logger.info("KV pool page_size_bytes: %d", page_size_bytes)
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        logger.info(
+            "event=kv pool scheduler configured backend=%s page_size_bytes=%d "
+            "use_layerwise=%s use_gva_layerwise=%s load_async=%s",
+            self.backend_name,
+            self.page_size_bytes,
+            self.use_layerwise,
+            self.use_gva_layerwise,
+            self.load_async,
+        )
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -373,7 +381,11 @@ class KVPoolScheduler:
             key_infos = self.store_scheduler.batch_get_key_info(all_keys)
             if len(key_infos) != len(all_keys):
                 logger.error(
-                    "KV pool batch_get_key_info returned unexpected number of results: expected=%d, actual=%d",
+                    "event=kv pool lookup result invalid backend=%s "
+                    "operation=batch_get_key_info expected_count=%d "
+                    "actual_count=%d reason=result_count_mismatch "
+                    "next_action=check_backend_response_and_key_alignment",
+                    self.backend_name,
                     len(all_keys),
                     len(key_infos),
                 )
@@ -592,9 +604,9 @@ class KVPoolScheduler:
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.debug(
-            "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
-            request.request_id,
+        logger.info(
+            "event=kv pool lookup completed total_tokens=%d "
+            "kvpool_hit_tokens=%d load_tokens=%d",
             request.num_tokens,
             num_external_hit_tokens,
             need_to_allocate,
@@ -613,10 +625,10 @@ class KVPoolScheduler:
             can_load=force_layerwise_load,
             kvpool_store_skip_tokens=store_skip_tokens,
         )
-        logger.debug(
-            "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
-            "need_to_allocate=%d load_async=%s use_layerwise=%s",
-            request.request_id,
+        logger.info(
+            "event=kv pool load spec created vllm_cached_tokens=%d "
+            "kvpool_cached_tokens=%d load_tokens=%d "
+            "load_async=%s use_layerwise=%s",
             num_computed_tokens,
             num_external_hit_tokens,
             need_to_allocate,
@@ -1071,7 +1083,13 @@ class KVPoolScheduler:
             logger.debug("event %s update with %s", event_id, count)
             total = self.sending_events.get(event_id, -1)
             if total == -1:
-                logger.warning("worker reports an invalid event: %s, count %s", event_id, count)
+                logger.warning(
+                    "event=kv pool worker event invalid event_id=%s count=%s "
+                    "reason=unknown_event "
+                    "next_action=check_worker_scheduler_event_lifecycle",
+                    event_id,
+                    count,
+                )
                 continue
             total = total + count
             if total >= self._expected_worker_count:
