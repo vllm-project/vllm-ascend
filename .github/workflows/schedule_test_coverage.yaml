@@ -18,16 +18,6 @@
 name: Schedule Test Coverage
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - labeled
-    branches:
-      - 'main'
-      - '*-dev'
-      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -49,7 +39,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -66,7 +56,7 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_ref || 'main' }}
+          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0
 
       - name: Resolve refs
@@ -97,13 +87,9 @@ jobs:
         run: |
           pip install regex pyyaml
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cat > extra_tests.txt <<'EOF'
-          tests/ut/test_utils.py
-          tests/e2e/pull_request/one_card/_310p/test_classification_310p.py
-          tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py::test_qwen3_vl_8b_tp1_fp16
-          EOF
           python3 .github/workflows/scripts/select_tests.py \
-            --test-list-file extra_tests.txt
+            --changed-files vllm_ascend/dummy.py \
+            --run-all-modules
 
   ensure-csrc-cache:
     needs: select-full-tests
