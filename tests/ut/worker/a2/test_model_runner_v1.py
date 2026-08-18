@@ -189,7 +189,7 @@ class TestProbabilisticDraftProbHandoff(unittest.TestCase):
             runner,
             torch.randn(6, 4),
             spec_decode_metadata,
-            {"req_padding": 2},
+            {"req_padding"},
         )
 
         self.assertEqual(output, "sampler_output")
@@ -231,7 +231,7 @@ class TestProbabilisticDraftProbHandoff(unittest.TestCase):
             runner,
             torch.randn(6, 4),
             spec_decode_metadata,
-            {"req_padding": 1},
+            {"req_padding"},
         )
 
         self.assertEqual(output, "sampler_output")
