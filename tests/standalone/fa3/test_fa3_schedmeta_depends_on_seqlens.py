@@ -1,46 +1,34 @@
 # Copyright (c) 2026. Reproduction-only diagnostic, not a correctness test.
 #
-# Experiment A: does FA3's scheduler_metadata depend on the VALUES of
-# cache_seqlens (per-sequence KV lengths), or only on max_seqlen_k?
+# Experiment A (v2): where does FA3 decode precision break?
+#
+# v1 found that FA3 eager output was IDENTICAL for seq=16 vs seq=4096 under
+# CAUSAL=1, which is impossible for a correct decode (q attends cache_seqlens
+# KVs).  This v2 adds two things to pin it down:
+#
+#   1. window_size=(-1,-1)  -- production full_graph_fa3 always passes this
+#      (no sliding window); v1 omitted it, so the FA3 default window may have
+#      masked the causal behaviour.
+#   2. a float32 manual attention reference (einsum GQA), independent of both
+#      CANN V1 and FA3, to establish the CORRECT output for a given cache_seqlens.
 #
 # ---------------------------------------------------------------------------
-# Why this matters
+# What it prints
 # ---------------------------------------------------------------------------
-# vllm-ascend captures the FA3 decode graph with a DUMMY cache_seqlens (the
-# warmup batch, length 1..num_tokens) and builds scheduler_metadata from it.
-# At replay, update_graph_params overwrites cache_seqlens with the REAL length
-# (which grows to max_model_len), but does NOT rebuild scheduler_metadata.  If
-# get_scheduler_metadata reads the per-sequence lengths to pre-compute tiling,
-# that stale scheduler_metadata produces wrong decode output.
-#
-# ---------------------------------------------------------------------------
-# What this script does (batch=1 decode, same q/k/v throughout)
-# ---------------------------------------------------------------------------
-#   [1] eager  short seq + short meta          (baseline A)
-#   [2] eager  long  seq + long  meta          (baseline B = correct reference)
-#   [3] eager  long  seq + short meta          (direct test, no graph involved)
-#   [4] graph  capture(short seq + short meta) -> overwrite seq to long -> replay
-#                                               (production path)
-#   [5] graph  capture(short seq + short meta) -> replay with UNCHANGED seq
-#                                               (positive control)
-#
-# ---------------------------------------------------------------------------
-# Interpretation
-# ---------------------------------------------------------------------------
-#   * [3] != [2]  -> scheduler_metadata DEPENDS on cache_seqlens values.
-#                    The decode bug is a root cause (stale scheduler_metadata).
-#   * [4] != [2] while [5] == [1] -> production graph path is broken by the
-#     cache_seqlens growth relative to the captured scheduler_metadata, while
-#     graph replay itself is fine.
-#   * [4] == [2]  -> scheduler_metadata only depends on max_seqlen_k; the
-#     decode bug is elsewhere (block_table/cu_seqlens_q refresh, or the
-#     flash_attn_npu.patch GetCachedOutputTensor aliasing).
+#   manual short vs manual long      -> does seq affect the CORRECT output?
+#   FA3 short vs FA3 long            -> does seq affect FA3 output? (must mirror)
+#   FA3 short vs manual short        -> FA3 correctness @ short
+#   FA3 long  vs manual long         -> FA3 correctness @ long
+#   FA3(long+short meta) vs FA3(long)-> does scheduler_metadata depend on seq?
+#   graph grown vs FA3 long          -> graph-replay correctness (grown seq)
+#   graph short vs FA3 short         -> graph-replay positive control
 #
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
 #   python test_fa3_schedmeta_depends_on_seqlens.py
-#   KV_SHORT=128 KV_LONG=4096 CAUSAL=1 python test_fa3_schedmeta_depends_on_seqlens.py
+#   KV_SHORT=16 KV_LONG=4096 CAUSAL=1 python test_fa3_schedmeta_depends_on_seqlens.py
+#   KV_SHORT=16 KV_LONG=4096 CAUSAL=0 python test_fa3_schedmeta_depends_on_seqlens.py
 
 import os
 from importlib import util as importlib_util
@@ -76,6 +64,7 @@ NUM_KV_HEADS = 8
 BLOCK_SIZE = 128
 DTYPE = torch.bfloat16
 SCALE = 1.0 / (HEAD_SIZE ** 0.5)
+GROUP = NUM_HEADS // NUM_KV_HEADS
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -113,25 +102,44 @@ def _run_fa3(q, k, v, cache_seqlens, cu_q, page_table, meta, causal):
         max_seqlen_q=1,
         softmax_scale=SCALE,
         causal=causal,
+        window_size=(-1, -1),  # production full_graph_fa3 always passes this
         scheduler_metadata=meta,
     )
 
 
+def manual_ref(q, k, v, seq_len):
+    """float32 GQA attention over the first seq_len KVs (paged -> flat).
+
+    decode has a single query token at position seq_len-1, so causal == full
+    attention over all seq_len cached KVs.  This is the CORRECT output for the
+    given cache_seqlens, independent of CANN V1 and FA3.
+    """
+    nblk = _ceil_div(seq_len, BLOCK_SIZE)
+    k_flat = k[:nblk].reshape(-1, NUM_KV_HEADS, HEAD_SIZE)[:seq_len].float()
+    v_flat = v[:nblk].reshape(-1, NUM_KV_HEADS, HEAD_SIZE)[:seq_len].float()
+    # GQA: expand each KV head to GROUP query heads.
+    k_g = k_flat.repeat_interleave(GROUP, dim=1)  # (seq_len, H, D)
+    v_g = v_flat.repeat_interleave(GROUP, dim=1)
+    q_f = q.float()  # (1, H, D)
+    scores = torch.einsum("bhd,thd->bht", q_f, k_g) * SCALE  # (1, H, seq_len)
+    attn = torch.softmax(scores, dim=-1)
+    return torch.einsum("bht,thd->bhd", attn, v_g)  # (1, H, D)
+
+
 def main():
-    short = int(os.environ.get("KV_SHORT", "128"))
-    long = int(os.environ.get("KV_LONG", "512"))
+    short = int(os.environ.get("KV_SHORT", "16"))
+    long = int(os.environ.get("KV_LONG", "4096"))
     causal = os.environ.get("CAUSAL", "1") == "1"
 
     if not torch.npu.is_available():
         raise SystemExit("No NPU device available.")
 
     print("=" * 72)
-    print(f"short={short}  long={long}  causal={causal}")
+    print(f"short={short}  long={long}  causal={causal}  window_size=(-1,-1)")
     print("=" * 72)
 
     num_blocks = _ceil_div(long, BLOCK_SIZE)
 
-    # ---- shared data: one query token, paged K/V with enough blocks for LONG --
     q = torch.randn(1, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
     k = torch.randn(num_blocks, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
     v = torch.randn_like(k)
@@ -144,74 +152,58 @@ def main():
     meta_short = _make_meta(short, seq_short, cu_q, causal)
     meta_long = _make_meta(long, seq_long, cu_q, causal)
 
-    # ---- [1] eager short + short meta ----
-    out1 = _run_fa3(q, k, v, seq_short, cu_q, page_table, meta_short, causal)
+    # ---- correct references ----
+    ref_short = manual_ref(q, k, v, short)
+    ref_long = manual_ref(q, k, v, long)
     torch.npu.synchronize()
 
-    # ---- [2] eager long + long meta (correct reference) ----
-    out2 = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_long, causal)
+    # ---- FA3 eager ----
+    fa3_short = _run_fa3(q, k, v, seq_short, cu_q, page_table, meta_short, causal)
+    fa3_long = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_long, causal)
+    fa3_long_shortmeta = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_short, causal)
     torch.npu.synchronize()
 
-    # ---- [3] eager long + short meta (direct test, no graph) ----
-    out3 = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_short, causal)
-    torch.npu.synchronize()
-
-    d_short_vs_long = _max_abs_diff(out1, out2)
-    d_stale_meta = _max_abs_diff(out3, out2)
-    print(f"[1] eager short+shortmeta vs [2] eager long+longmeta : "
-          f"max_abs_diff={d_short_vs_long:.6f}")
-    print(f"[3] eager long+shortmeta  vs [2] eager long+longmeta : "
-          f"max_abs_diff={d_stale_meta:.6f}")
-
-    # ---- [4] graph: capture(short+shortmeta) -> overwrite seq to long -> replay
-    seq_buf = torch.tensor([short], dtype=torch.int32).npu()  # overwritten below
+    # ---- graph replay ----
+    seq_buf = torch.tensor([short], dtype=torch.int32).npu()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         captured = _run_fa3(q, k, v, seq_buf, cu_q, page_table, meta_short, causal)
     torch.npu.synchronize()
 
-    seq_buf.copy_(seq_long)  # real decode: cache_seqlens grows
+    seq_buf.copy_(seq_long)
     graph.replay()
     torch.npu.synchronize()
-    out4 = captured.clone()
-    d_graph_grown = _max_abs_diff(out4, out2)
-    print(f"[4] graph grown-seq replay  vs [2] eager long+longmeta : "
-          f"max_abs_diff={d_graph_grown:.6f}")
+    graph_long = captured.clone()
 
-    # ---- [5] graph positive control: replay with UNCHANGED short seq ----
-    seq_buf.copy_(seq_short)  # restore
+    seq_buf.copy_(seq_short)
     graph.replay()
     torch.npu.synchronize()
-    out5 = captured.clone()
-    d_graph_short = _max_abs_diff(out5, out1)
-    print(f"[5] graph short-seq replay  vs [1] eager short+shortmeta: "
-          f"max_abs_diff={d_graph_short:.6f}")
+    graph_short = captured.clone()
+
+    # ---- diffs ----
+    print(f"[ref] manual short vs manual long            : "
+          f"{_max_abs_diff(ref_short, ref_long):.6f}")
+    print(f"[fa3] FA3 short  vs FA3 long                 : "
+          f"{_max_abs_diff(fa3_short, fa3_long):.6f}")
+    print(f"[ok ] FA3 short  vs manual short             : "
+          f"{_max_abs_diff(fa3_short, ref_short):.6f}")
+    print(f"[ok ] FA3 long   vs manual long              : "
+          f"{_max_abs_diff(fa3_long, ref_long):.6f}")
+    print(f"[meta] FA3(long+short meta) vs FA3(long)      : "
+          f"{_max_abs_diff(fa3_long_shortmeta, fa3_long):.6f}")
+    print(f"[graph] grown-seq replay vs FA3(long)         : "
+          f"{_max_abs_diff(graph_long, fa3_long):.6f}")
+    print(f"[graph] short-seq replay vs FA3(short)        : "
+          f"{_max_abs_diff(graph_short, fa3_short):.6f}")
 
     print("-" * 72)
-    threshold = 1e-2
-    stale = d_stale_meta > threshold
-    grown = d_graph_grown > threshold
-    control_ok = d_graph_short <= threshold
-
-    if stale:
-        print("VERDICT: scheduler_metadata DEPENDS on cache_seqlens VALUES.")
-        print("  -> [3] already diverged; graph capture is not required to")
-        print("     reproduce.  Stale scheduler_metadata is a root cause.")
-    else:
-        print("VERDICT: scheduler_metadata does NOT depend on cache_seqlens")
-        print("         values at these lengths (only on max_seqlen_k).")
-
-    if not control_ok:
-        print("  -> [5] control itself diverged: graph replay is broken even")
-        print("     with unchanged seq; investigate capture/replay first.")
-    elif grown:
-        print("  -> [4] graph replay with grown seq diverges while [5] control")
-        print("     matches: production decode is broken by cache_seqlens growth")
-        print("     relative to the captured scheduler_metadata.")
-    else:
-        print("  -> graph replay matches in BOTH cases: decode bug is elsewhere")
-        print("     (block_table/cu_seqlens_q refresh, or the flash_attn_npu.patch")
-        print("     GetCachedOutputTensor aliasing).")
+    print("Read:")
+    print("  [ref]  >0  => seq genuinely changes the correct output (expected)")
+    print("  [fa3]  should mirror [ref]; ~0 while [ref]>0 => FA3 ignores cache_seqlens")
+    print("  [ok ]  ~1e-2..1e-1 => FA3 matches correct output (bf16 vs fp32)")
+    print("         large       => FA3 output is WRONG")
+    print("  [meta] ~0 => scheduler_metadata does not depend on seq values")
+    print("  [graph]~0 => graph replay is correct; large => graph capture/replay bug")
     print("-" * 72)
 
 
