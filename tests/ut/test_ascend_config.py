@@ -16,6 +16,7 @@
 import json
 import os
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
@@ -23,6 +24,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
     AscendConfig,
+    DyntraLBConfig,
     EplbConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
@@ -30,7 +32,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.utils import clear_enable_sp, enable_sp
+from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
 class TestAscendConfig(TestBase):
@@ -52,6 +54,7 @@ class TestAscendConfig(TestBase):
         total_num_attention_heads: int = 32,
         total_num_kv_heads: int = 8,
         is_deepseek_mla: bool = False,
+        num_experts: int = 0,
     ):
         return SimpleNamespace(
             is_deepseek_mla=is_deepseek_mla,
@@ -59,7 +62,27 @@ class TestAscendConfig(TestBase):
             enforce_eager=True,
             model_arch_config=SimpleNamespace(total_num_attention_heads=total_num_attention_heads),
             get_total_num_kv_heads=lambda: total_num_kv_heads,
+            get_num_experts=lambda: num_experts,
         )
+
+    @classmethod
+    def _make_mc2_hierarchy_vllm_config(
+        cls,
+        num_experts: int,
+        *,
+        dynamic_eplb: bool = False,
+        num_redundant_experts: int = 0,
+    ):
+        vllm_config = VllmConfig()
+        vllm_config.model_config = cls._make_model_config(num_experts=num_experts)
+        vllm_config.additional_config = {
+            "enable_mc2_hierarchy_comm": True,
+            "eplb_config": {
+                "dynamic_eplb": dynamic_eplb,
+                "num_redundant_experts": num_redundant_experts,
+            },
+        }
+        return vllm_config
 
     @staticmethod
     def _make_sparse_li_c8_config(quant_description):
@@ -116,6 +139,52 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig({"load_collection_phase": "prompt"})
 
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    def test_mc2_hierarchy_comm_rejects_a5(self, _mock_device_type):
+        vllm_config = self._make_mc2_hierarchy_vllm_config(512)
+
+        with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
+            AscendConfig(vllm_config)
+
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_device_type):
+        vllm_config = self._make_mc2_hierarchy_vllm_config(513)
+
+        with self.assertRaisesRegex(ValueError, "at most 512 experts"):
+            AscendConfig(vllm_config)
+
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_mc2_hierarchy_comm_counts_dynamic_eplb_redundancy(self, _mock_device_type):
+        vllm_config = self._make_mc2_hierarchy_vllm_config(
+            480,
+            dynamic_eplb=True,
+            num_redundant_experts=33,
+        )
+
+        with (
+            patch.dict(os.environ, {"DYNAMIC_EPLB": "true"}),
+            self.assertRaisesRegex(
+                ValueError,
+                r"513 experts \(480 logical experts \+ 33 EPLB redundant experts\)",
+            ),
+        ):
+            AscendConfig(vllm_config)
+
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_mc2_hierarchy_comm_ignores_redundancy_when_dynamic_eplb_is_disabled(self, _mock_device_type):
+        vllm_config = self._make_mc2_hierarchy_vllm_config(480, num_redundant_experts=33)
+
+        AscendConfig(vllm_config)
+
+    @patch("vllm_ascend.utils.get_ascend_device_type")
+    def test_mc2_hierarchy_comm_accepts_512_experts_on_a2_and_a3(self, mock_device_type):
+        for device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
+            with self.subTest(device_type=device_type):
+                mock_device_type.return_value = device_type
+                vllm_config = self._make_mc2_hierarchy_vllm_config(512)
+
+                AscendConfig(vllm_config)
+
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
@@ -170,6 +239,16 @@ class TestAscendConfig(TestBase):
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True, "threshold": 512},
                 "profiling_chunk_config": {"enabled": False},
+                "dyntra_lb_config": {
+                    "enabled": True,
+                    "enable_diagnostics": True,
+                    "mode": "dynamic",
+                    "start_step": 100,
+                    "end_step": 500,
+                    "bubble_threshold": 3.0,
+                    "long_req_block_threshold": 512,
+                    "dynamic_max_step": 128,
+                },
             }
         }
 
@@ -180,6 +259,11 @@ class TestAscendConfig(TestBase):
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
         self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
+        self.assertTrue(scheduler_config.dyntra_lb_config.enabled)
+        self.assertTrue(scheduler_config.dyntra_lb_config.enable_diagnostics)
+        self.assertEqual(scheduler_config.dyntra_lb_config.mode, "dynamic")
+        self.assertEqual(scheduler_config.dyntra_lb_config.start_step, 100)
+        self.assertEqual(scheduler_config.dyntra_lb_config.end_step, 500)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -315,9 +399,11 @@ class TestAscendConfig(TestBase):
         )
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.AscendConfig._is_megamoe_supported_by_config")
     @patch("vllm_ascend.ascend_config.logger.info_once")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once):
+    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once, mock_is_megamoe):
+        mock_is_megamoe.return_value = True
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         with patch.dict(
@@ -420,6 +506,41 @@ class TestAscendConfig(TestBase):
             patch("vllm.config.get_current_vllm_config", side_effect=AssertionError),
         ):
             self.assertTrue(enable_sp())
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_and_shared_expert_dp_are_independent(self, mock_check_and_update_config):
+        for enable_flashcomm1, enable_shared_expert_dp in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                enable_flashcomm1=enable_flashcomm1,
+                enable_shared_expert_dp=enable_shared_expert_dp,
+            ):
+                clear_ascend_config()
+                clear_enable_sp()
+                test_vllm_config = VllmConfig()
+                test_vllm_config.parallel_config.tensor_parallel_size = 2
+                test_vllm_config.parallel_config.enable_expert_parallel = True
+                test_vllm_config.additional_config = {
+                    "enable_flashcomm1": enable_flashcomm1,
+                    "enable_shared_expert_dp": enable_shared_expert_dp,
+                }
+
+                ascend_config = init_ascend_config(test_vllm_config)
+
+                self.assertEqual(enable_sp(test_vllm_config), enable_flashcomm1)
+                self.assertEqual(
+                    ascend_config.enable_shared_expert_dp,
+                    enable_shared_expert_dp,
+                )
+                self.assertEqual(
+                    shared_expert_dp_enabled(),
+                    enable_shared_expert_dp,
+                )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -532,6 +653,61 @@ class TestShortRequestFirstConfig(TestBase):
         self.assertEqual(cfg.long_max_wait_ms, 0.0)
 
 
+class TestDyntraLBConfig(TestBase):
+    def test_defaults(self):
+        config = DyntraLBConfig()
+
+        self.assertFalse(config.enabled)
+        self.assertFalse(config.enable_diagnostics)
+        self.assertEqual(config.mode, "dynamic")
+        self.assertEqual(config.start_step, 250)
+        self.assertEqual(config.end_step, -1)
+        self.assertEqual(config.bubble_threshold, 5.0)
+        self.assertEqual(config.long_req_block_threshold, 700)
+        self.assertEqual(config.dynamic_max_step, 256)
+
+    def test_configures_dynamic_mode(self):
+        config = DyntraLBConfig(
+            {
+                "enabled": True,
+                "enable_diagnostics": True,
+                "mode": "dynamic",
+                "start_step": 100,
+                "end_step": 500,
+                "bubble_threshold": 3,
+                "long_req_block_threshold": 512,
+                "dynamic_max_step": 128,
+            }
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertTrue(config.enable_diagnostics)
+        self.assertEqual(config.mode, "dynamic")
+        self.assertEqual(config.start_step, 100)
+        self.assertEqual(config.end_step, 500)
+        self.assertEqual(config.bubble_threshold, 3.0)
+        self.assertEqual(config.long_req_block_threshold, 512)
+        self.assertEqual(config.dynamic_max_step, 128)
+
+    def test_rejects_invalid_config(self):
+        invalid_configs: tuple[tuple[Any, str], ...] = (
+            ([], "must be a dict"),
+            ({"unknown": True}, "Unknown dyntra_lb_config keys"),
+            ({"enabled": 1}, "enabled must be a bool"),
+            ({"enable_diagnostics": 1}, "enable_diagnostics must be a bool"),
+            ({"mode": "invalid"}, "mode must be one of"),
+            ({"start_step": -1}, "start_step must be >= 0"),
+            ({"start_step": 10, "end_step": 10}, "end_step must be greater than start_step"),
+            ({"bubble_threshold": 0}, "bubble_threshold must be > 0"),
+            ({"long_req_block_threshold": 0}, "long_req_block_threshold must be > 0"),
+            ({"dynamic_max_step": 0}, "dynamic_max_step must be > 0"),
+        )
+
+        for user_config, message in invalid_configs:
+            with self.subTest(user_config=user_config), self.assertRaisesRegex(ValueError, message):
+                DyntraLBConfig(user_config)
+
+
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
         config = SchedulerConfig({}, balance_env_value=False)
@@ -540,6 +716,7 @@ class TestSchedulerConfig(TestBase):
         self.assertFalse(config.recompute_scheduler_enable)
         self.assertFalse(config.short_request_first_config.enabled)
         self.assertFalse(config.profiling_chunk_config.enabled)
+        self.assertFalse(config.dyntra_lb_config.enabled)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_none_config_uses_defaults_and_legacy_fallback(self, mock_warning_once):
@@ -570,6 +747,13 @@ class TestSchedulerConfig(TestBase):
                         "long_max_wait_ms": 2000,
                     },
                     "profiling_chunk_config": {"enabled": True, "need_timing": False},
+                    "dyntra_lb_config": {
+                        "enabled": True,
+                        "enable_diagnostics": True,
+                        "mode": "dynamic",
+                        "start_step": 100,
+                        "end_step": 500,
+                    },
                 }
             },
             balance_env_value=False,
@@ -582,6 +766,11 @@ class TestSchedulerConfig(TestBase):
         self.assertEqual(config.short_request_first_config.long_max_wait_ms, 2000.0)
         self.assertTrue(config.profiling_chunk_config.enabled)
         self.assertFalse(config.profiling_chunk_config.need_timing)
+        self.assertTrue(config.dyntra_lb_config.enabled)
+        self.assertTrue(config.dyntra_lb_config.enable_diagnostics)
+        self.assertEqual(config.dyntra_lb_config.mode, "dynamic")
+        self.assertEqual(config.dyntra_lb_config.start_step, 100)
+        self.assertEqual(config.dyntra_lb_config.end_step, 500)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):

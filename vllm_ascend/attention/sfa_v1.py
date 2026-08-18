@@ -36,13 +36,13 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    record_attention_compute_start,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_K_CACHE_NPU_INDEX,
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
-)
-from vllm_ascend.memcache_comm_fence import (
-    record_attention_compute_start,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
@@ -231,6 +231,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
+        self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
+        self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
+        self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
@@ -239,7 +244,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
             )
-
+            self.spec_actual_seq_lengths_query = [
+                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
+            self.spec_actual_seq_lengths_key = [
+                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
         self.reorder_batch_threshold = self.decode_threshold
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
@@ -331,15 +343,31 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
-
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = self.kernel_block_size
 
-        cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
-        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        # TODO: Revisit this logic after ModelRunner V1 is fully removed,
+        # and remove it if ModelRunner V2 no longer depends on these per-step buffers.
+        if draft_index is not None:
+            assert self.spec_actual_seq_lengths_query is not None
+            assert self.spec_actual_seq_lengths_key is not None
+            actual_seq_lengths_query = self.spec_actual_seq_lengths_query[draft_index - 1]
+            actual_seq_lengths_key = self.spec_actual_seq_lengths_key[draft_index - 1]
+        else:
+            actual_seq_lengths_query = self.actual_seq_lengths_query
+            actual_seq_lengths_key = self.actual_seq_lengths_key
+
+        runtime_cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
+        actual_seq_lengths_query.zero_()
+        actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)
+        cum_query_lens = actual_seq_lengths_query[:num_reqs]
+        runtime_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        actual_seq_lengths_key.zero_()
+        actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
+        seq_lens = actual_seq_lengths_key[:num_reqs]
 
         # Prefer _seq_lens_cpu (always available, updated during draft
         # iterations) over seq_lens_cpu (None in async spec decode mode).

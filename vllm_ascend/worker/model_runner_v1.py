@@ -174,6 +174,7 @@ from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
+    enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     enable_sp_by_pass,
@@ -370,11 +371,7 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-            vllm_config.model_config.hf_text_config, "index_topk"
-        ) and not hasattr(
-            vllm_config.model_config.hf_text_config, "compress_ratios"
-        )
+        self.use_sparse = enable_sfa(vllm_config)
         # dsa c8
         self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
         self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
@@ -1756,7 +1753,12 @@ class NPUModelRunner(GPUModelRunner):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         out = super().take_draft_token_ids()
-        per_req_k = getattr(self.drafter, "_dspark_num_verify_tokens", None)
+        if out is None:
+            return None
+        dynamic_spec = getattr(self.drafter, "dynamic_spec", None)
+        if dynamic_spec is None:
+            return out
+        per_req_k = dynamic_spec.num_verify_tokens
         if per_req_k is None:
             return out
         per_req_k = [
@@ -1778,17 +1780,18 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if vllm_version_is("0.26.0"):
+        if vllm_version_is("0.27.1"):
             if self.vllm_config.model_config.enable_return_routed_experts and self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
-        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
+        profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
+        if profiling_chunk_config.enabled and profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
             # This flag is set cross-process via scheduler_output because
             # modifying the config singleton in the scheduler process does
             # not affect this worker process.
             if getattr(scheduler_output, "disable_profiling_timing", False):
-                self.ascend_config.scheduler_config.profiling_chunk_config.need_timing = False
+                profiling_chunk_config.need_timing = False
             else:
                 self._sync_device()
                 self._execution_start_time = time.perf_counter()
@@ -2087,9 +2090,9 @@ class NPUModelRunner(GPUModelRunner):
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
-        # vLLM 0.26.0 still supports runtime KV scale calculation. Upstream main
+        # vLLM v0.27.1 still supports runtime KV scale calculation. Upstream main
         # removed this state in vllm-project/vllm#49389.
-        if vllm_version_is("0.26.0") and self.calculate_kv_scales:  # type: ignore[has-type]
+        if vllm_version_is("0.27.1") and self.calculate_kv_scales:  # type: ignore[has-type]
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
@@ -2203,6 +2206,7 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
@@ -2363,8 +2367,10 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
-        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing and hasattr(
-            self, "_execution_start_time"
+        if (
+            profiling_chunk_config.enabled
+            and profiling_chunk_config.need_timing
+            and hasattr(self, "_execution_start_time")
         ):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
@@ -3016,8 +3022,6 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_gid: int,
             attn_gid: int,
             common_attn_metadata: CommonAttentionMetadata,
-            prefill_ratio_to_sas_metadata: dict,
-            decode_ratio_to_sas_metadata: dict,
             common_ratio_to_sas_metadata: dict,
             ubid: int | None = None,
         ) -> None:
@@ -3037,13 +3041,9 @@ class NPUModelRunner(GPUModelRunner):
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 if for_cudagraph_capture:
-                    prefill_ratio_to_sas_metadata = {}
-                    decode_ratio_to_sas_metadata = {}
                     common_ratio_to_sas_metadata = {}
                 extra_attn_metadata_args = dict(
                     num_reqs_actual=num_reqs,
-                    prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
@@ -3068,8 +3068,6 @@ class NPUModelRunner(GPUModelRunner):
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
             if isinstance(builder, AscendDSAMetadataBuilder):
-                prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
-                decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 
             if ubid is None:
@@ -3084,8 +3082,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
-        decode_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -3134,8 +3130,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                     attn_gid,
                     cm,
-                    prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata,
                 )
         if self.is_mm_prefix_lm:
@@ -3727,15 +3721,6 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
-
-    def _bind_routed_experts_capturer(self, capturer=None) -> None:
-        # test_qwen3_moe_routing_replay
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-        for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, AscendMoERunner):
-                module._ascend_routed_experts_capturer = capturer
-                module.routed_experts._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()

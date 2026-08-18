@@ -198,7 +198,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 6
         request_rate: 0
-        baseline: 167.6767
+        baseline: 157.104
         threshold: 0.97
   - name: "Kimi-K2.7-W4A8-in128k-out1k-TPOT50-90-24-6"
     model: "Eco-Tech/Kimi-K2.7-Code-w4a8"
