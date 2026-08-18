@@ -21,6 +21,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    enable_pcp,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -90,10 +91,18 @@ class AscendDSABackend(AttentionBackend):
     def get_builder_cls():
         from vllm_ascend.utils import enable_dsa_cp
 
-        if enable_dsa_cp():
+        use_dsa_cp = enable_dsa_cp()
+        use_pcp = enable_pcp()
+        if use_dsa_cp and use_pcp:
+            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 
             return AscendDSACPMetadataBuilder
+        if use_pcp:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
+
+            return AscendDSAPCPMetadataBuilder
         return AscendDSAMetadataBuilder
 
     @staticmethod
@@ -114,10 +123,18 @@ class AscendDSABackend(AttentionBackend):
     def get_impl_cls() -> type[AttentionImplBase[Any]]:
         from vllm_ascend.utils import enable_dsa_cp
 
-        if enable_dsa_cp():
+        use_dsa_cp = enable_dsa_cp()
+        use_pcp = enable_pcp()
+        if use_dsa_cp and use_pcp:
+            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 
             return AscendDSACPImpl
+        if use_pcp:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
+
+            return AscendDSAPCPImpl
         return AscendDSAImpl
 
     @staticmethod
@@ -1181,6 +1198,26 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         return output
 
+    def _prepare_caches_before_attention(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: DSAMetadataDict,
+    ) -> bool:
+        """Prepare cache updates and report whether local writes can be skipped."""
+        return False
+
+    def _get_o_proj_input_shape(
+        self,
+        attn_metadata: DSAMetadataDict | None,
+    ) -> tuple[int, int, int]:
+        return (
+            _EXTRA_CTX.num_tokens,
+            self.n_local_heads,
+            self.head_dim,
+        )
+
     def forward(
         self,
         layer_name,
@@ -1191,16 +1228,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         output_padded = output
-        o_proj_input_shape = (
-            _EXTRA_CTX.num_tokens,
-            self.n_local_heads,
-            self.head_dim,
-        )
+        o_proj_input_shape = self._get_o_proj_input_shape(attn_metadata)
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
             if oproj_tp_enable():
-                o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+                o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
             else:
                 output.fill_(0)
@@ -1211,30 +1244,42 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             common_attn_metadata = layer_metadata.swa
         actual_tokens = common_attn_metadata.num_actual_tokens
 
-        o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
+        cache_is_prepared = self._prepare_caches_before_attention(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+        )
+        if actual_tokens == 0:
+            output.zero_()
+            notify_kv_cache_written(layer_name)
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output
+
         req_metadata = _require_req_metadata(common_attn_metadata)
         o_proj_input[:actual_tokens] = self._forward_attention(
             layer_name,
             hidden_states[:actual_tokens],
             kv_cache,
             layer_metadata,
+            cache_is_prepared,
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            o_proj_input.unsqueeze(1),
-            cos,
-            -sin,
+            o_proj_input[:actual_tokens].unsqueeze(1),
+            cos[:actual_tokens],
+            -sin[:actual_tokens],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
         # o
         self._forward_o_proj(o_proj_input, output)
-
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output_padded
