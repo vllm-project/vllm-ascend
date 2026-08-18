@@ -211,7 +211,12 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
     from vllm.model_executor.models.interfaces import EagleModelMixin
 
-    if isinstance(inner_model, DeepseekV2Model):
+    native_forward = getattr(
+        inner_model, "eagle3_pp_aux_propagation_native", False
+    )
+    if native_forward:
+        make_forward = None
+    elif isinstance(inner_model, DeepseekV2Model):
         make_forward = _make_deepseek_v2_forward
     elif isinstance(inner_model, EagleModelMixin):
         make_forward = _make_eagle_mixin_forward
@@ -223,7 +228,10 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
         )
         return False
 
-    if not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
+    if (
+        make_forward is not None
+        and not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False)
+    ):
         inner_model.forward = make_forward().__get__(inner_model, type(inner_model))
         inner_model._eagle3_pp_aux_forward_patched = True
     _patch_make_empty_intermediate_tensors(inner_model)
