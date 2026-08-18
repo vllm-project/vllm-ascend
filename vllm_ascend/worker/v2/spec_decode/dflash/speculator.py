@@ -275,22 +275,29 @@ def _prepare_dflash_inputs_kernel_ascend(
     if req_idx == num_reqs - 1:
         # Pad per-request buffers to max_num_reqs for CUDA graph safety.
         last_query_end = num_reqs * num_query_per_req
-        for i in range(num_reqs, max_num_reqs + 1):
-            tl.store(out_query_start_loc_ptr + i, last_query_end)
-        for i in range(num_reqs, max_num_reqs):
-            tl.store(out_seq_lens_ptr + i, 0)
+        for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
+            offsets = i + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < max_num_reqs + 1
+            tl.store(out_query_start_loc_ptr + offsets, last_query_end, mask=mask)
+        for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
+            offsets = i + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < max_num_reqs
+            tl.store(out_seq_lens_ptr + offsets, 0, mask=mask)
         # Padded sample slots point at query index 0 (a valid row in
         # last_hidden_states) so CG replay never reads OOB. Padded sample
         # idx mappings point to -1, which is ignored during sampling.
         pad_start = num_reqs * num_speculative_steps
         pad_end = max_num_reqs * num_speculative_steps
-        for i in range(pad_start, pad_end):
-            tl.store(out_sample_indices_ptr + i, 0)
-            tl.store(out_sample_pos_ptr + i, 0)
-            tl.store(out_sample_idx_mapping_ptr + i, -1)
-        # Pad query slot mappings past num_query_tokens with PAD so the
-        # captured CG sees PAD slots (no K/V write) for replay sizes
-        # larger than the current request count.
+        for i in range(pad_start, pad_end, BLOCK_SIZE):
+            offsets = i + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < pad_end
+            tl.store(out_sample_indices_ptr + offsets, 0, mask=mask)
+            tl.store(out_sample_pos_ptr + offsets, 0, mask=mask)
+            tl.store(out_sample_idx_mapping_ptr + offsets, -1, mask=mask)
+        # Pad query slot mappings with BLOCK_SIZE-wide vector stores so the
+        # captured graph sees no K/V write on replay.
         q_pad_start = num_reqs * num_query_per_req
-        for i in range(q_pad_start, max_num_tokens):
-            tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
+        for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
+            offsets = i + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < max_num_tokens
+            tl.store(out_query_slot_mapping_ptr + offsets, PAD_SLOT_ID, mask=mask)
