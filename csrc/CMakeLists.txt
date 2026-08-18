@@ -97,8 +97,8 @@ if (BUILD_OPEN_PROJECT)
             -Wl,--whole-archive
             ops_aclnn
             -Wl,--no-whole-archive
-            -lopapi
             nnopbase
+            -Wl,-Bsymbolic
             profapi
             ge_common_base
             ascend_dump
