@@ -95,6 +95,15 @@ torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFun
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
 
+# These control buffers are created outside the weights mem-pool, so Level-1
+# sleep must save them explicitly. They are matched against the trailing
+# segment of each buffer name (e.g. "..._dsa_cp_hadamard").
+_allowed_names = (
+    "_dsa_cp_hadamard",
+    "_dsa_hadamard",
+)
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -222,22 +231,13 @@ class NPUWorker(WorkerBase):
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         model = self.model_runner.model
         if level == 1:
-            # These control buffers are created outside the weights mem-pool,
-            # so Level-1 sleep must save them explicitly.
-            allowed_names = (
-                "_dsa_cp_hadamard",
-                "_dsa_hadamard",
-            )
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone()
                 for name, buffer in model.named_buffers()
-                if name.rsplit(".", maxsplit=1)[-1] in allowed_names
+                if name.rsplit(".", maxsplit=1)[-1] in _allowed_names
             }
         else:
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone()
-                for name, buffer in model.named_buffers()
-            }
+            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
