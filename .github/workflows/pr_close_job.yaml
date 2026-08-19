@@ -50,7 +50,7 @@ jobs:
   upload-merged-new-tests:
     name: Upload merged new tests to OBS
     if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     env:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
