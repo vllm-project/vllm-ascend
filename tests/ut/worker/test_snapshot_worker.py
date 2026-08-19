@@ -77,13 +77,14 @@ def test_aclrt_snapshot_wrappers_call_expected_api(worker, method_name, api_name
 def test_snapshot_suspend_runs_npu_snapshot_sequence(worker):
     with (
         patch.object(worker, "dump_model") as dump_model,
+        patch("vllm_ascend.worker.worker.gc.collect") as collect,
         patch.object(worker, "snapshot_process_lock") as process_lock,
         patch.object(worker, "snapshot_process_backup") as process_backup,
     ):
-        worker.snapshot_prepare_suspend("/tmp/model")
-        worker.snapshot_suspend()
+        worker.suspend("/tmp/model")
 
     dump_model.assert_called_once_with("/tmp/model")
+    collect.assert_called_once_with()
     process_lock.assert_called_once_with()
     process_backup.assert_called_once_with()
 
@@ -98,9 +99,7 @@ def test_snapshot_resume_runs_npu_restore_phases(worker):
         patch.object(worker, "recapture_graph") as recapture_graph,
         patch.object(worker, "rebuild_kv_transfer_engine_after_resume") as rebuild_kv,
     ):
-        worker.snapshot_prepare_resume("10.0.0.2", "10.0.0.3")
-        worker.snapshot_restore_model("/tmp/model")
-        worker.snapshot_rebuild_kv_transfer("10.0.0.2", "engine-id")
+        worker.resume("10.0.0.2", "10.0.0.3", "/tmp/model", "engine-id")
 
     process_restore.assert_called_once_with()
     process_unlock.assert_called_once_with()

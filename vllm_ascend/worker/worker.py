@@ -731,35 +731,28 @@ class NPUWorker(WorkerBase):
     def snapshot_process_unlock(self) -> None:
         self._call_aclrt_snapshot_api("aclrtSnapShotProcessUnlock")
 
-    def snapshot_prepare_suspend(self, model_save_path: str | None = None) -> None:
+    def suspend(self, model_save_path: str | None = None) -> None:
         self.dump_model(model_save_path)
-
-    def snapshot_suspend(self) -> None:
+        gc.collect()
         self.snapshot_process_lock()
         self.snapshot_process_backup()
 
-    def snapshot_unlock(self) -> None:
+    def device_unlock(self) -> None:
         self.snapshot_process_unlock()
 
-    def snapshot_prepare_resume(
+    def resume(
         self,
         local_ip: str,
         data_parallel_master_ip: str,
+        model_path: str | None = None,
+        new_engine_id: str | None = None,
     ) -> None:
         self.snapshot_process_restore()
         self.snapshot_process_unlock()
         self.update_worker_info_after_resume(local_ip, data_parallel_master_ip)
         self.rebuild_parallel_group_after_resume()
-
-    def snapshot_restore_model(self, model_path: str | None = None) -> None:
         self.re_load_weights(model_path)
         self.recapture_graph()
-
-    def snapshot_rebuild_kv_transfer(
-        self,
-        local_ip: str,
-        new_engine_id: str | None = None,
-    ) -> None:
         self.rebuild_kv_transfer_engine_after_resume(local_ip, new_engine_id)
 
     def dump_model(self, model_save_path=None) -> None:
