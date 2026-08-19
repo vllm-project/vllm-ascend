@@ -49,7 +49,6 @@ from vllm_ascend.utils import (
 )
 
 from .methods import get_scheme_class
-from .methods.w4a8 import _is_kimi_k3_model
 
 
 def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
@@ -598,10 +597,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if self.enable_fa_quant:
-            # Kimi K3's multimodal wrapper and language model both use an
-            # AutoWeightsLoader. The mapper is therefore applied twice while
-            # loading FAQuant weights. Match only the source form so a name
-            # already mapped under ``mla_attn.mla_attn`` remains unchanged.
+            # Nested model wrappers can apply AutoWeightsLoader more than once.
+            # Match only the source form so a name already mapped under
+            # ``mla_attn.mla_attn`` remains unchanged.
             regex_map.update(
                 {
                     re.compile(
@@ -722,13 +720,14 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
-            if _is_kimi_k3_model(vllm_config) and ".shared_experts." in prefix:
-                # Kimi K3 stores W4A8 shared-expert linears with per-channel
-                # scales, while its routed experts remain per-group.
+            if ".shared_experts." in prefix:
+                # Per-channel W4A8 shared-expert linears use the single-expert
+                # grouped-matmul path. Select it from quantization metadata,
+                # independent of the model architecture that owns the layer.
                 from .methods.w4a8 import AscendW4A8DynamicLinearMethod
 
-                if isinstance(scheme, AscendW4A8DynamicLinearMethod):
-                    scheme.enable_per_channel_for_kimi_shared_expert()
+                if isinstance(scheme, AscendW4A8DynamicLinearMethod) and scheme.is_per_channel_weight:
+                    scheme.enable_per_channel_shared_expert()
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (

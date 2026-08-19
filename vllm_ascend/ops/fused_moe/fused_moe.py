@@ -790,7 +790,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._shared_experts.down_proj, "weight_scale"
             )
             shared_uses_situ = isinstance(self._shared_experts.act_fn, AscendSituAndMul)
-            # Kimi K3 shared experts use per-channel W4A8. Their Linear
+            # Per-channel W4A8 shared experts expose floating-point scales.
             # methods expose floating-point scales after converting the INT4
             # checkpoint weights to the single-expert GMM layout. This path
             # reuses those GMM methods with already-quantized activations,
@@ -918,8 +918,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
-                # Per-group W4A8 shared experts use this path. Kimi K3's
-                # per-channel W4A8 shared experts take the fused branch above.
+                # Per-group W4A8 shared experts use this path. Per-channel
+                # W4A8 shared experts take the fused branch above.
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)

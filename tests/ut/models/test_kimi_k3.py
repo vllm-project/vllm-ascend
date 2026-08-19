@@ -16,8 +16,6 @@ from vllm_ascend.models.kimi_k3 import (
     KimiK3MultiModalProjector,
     KimiK3TextModel,
     KimiK3VisionEncoderLayer,
-    _get_decoder_layer_idx_from_weight_name,
-    _get_kimi_k3_num_loaded_layers,
     _move_module_to_device,
     _resolve_packed_expert_weight_name,
     _routed_latent_quant_config,
@@ -92,60 +90,6 @@ def test_kimi_k3_quantizes_latent_projections_only_for_modelslim(
 
 def test_kimi_k3_unquantized_model_keeps_latent_projections_unquantized():
     assert _routed_latent_quant_config(None) is None
-
-
-@pytest.mark.parametrize(("env_value", "expected"), [("0", 4), ("3", 3)])
-def test_kimi_k3_layer_reduction_config(
-    monkeypatch: pytest.MonkeyPatch,
-    env_value: str,
-    expected: int,
-):
-    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", env_value)
-    assert _get_kimi_k3_num_loaded_layers(4) == expected
-
-
-@pytest.mark.parametrize("env_value", ["-1", "5", "True", "3.0"])
-def test_kimi_k3_layer_reduction_config_rejects_invalid_values(
-    monkeypatch: pytest.MonkeyPatch,
-    env_value: str,
-):
-    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", env_value)
-    with pytest.raises(ValueError, match="VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS"):
-        _get_kimi_k3_num_loaded_layers(4)
-
-
-@pytest.mark.parametrize(
-    ("weight_name", "expected_layer"),
-    [
-        ("model.layers.2.mlp.gate_proj.weight", 2),
-        ("layers.3.self_attn.q_proj.weight", 3),
-        ("language_model.model.layers.4.mlp.up_proj.weight", 4),
-        ("model.layers.invalid.mlp.gate_proj.weight", None),
-        ("model.embed_tokens.weight", None),
-    ],
-)
-def test_kimi_k3_layer_reduction_parses_loader_prefixes(
-    weight_name: str,
-    expected_layer: int | None,
-):
-    assert _get_decoder_layer_idx_from_weight_name(weight_name) == expected_layer
-
-
-def test_kimi_k3_layer_reduction_skips_weights_for_omitted_layers(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    model = KimiK3TextModel.__new__(KimiK3TextModel)
-    nn.Module.__init__(model)
-    model.config = SimpleNamespace(num_experts=0)
-    model.num_loaded_layers = 2
-    model.named_parameters = lambda: iter(())
-    monkeypatch.setattr(kimi_k3, "fused_moe_make_expert_params_mapping", lambda *args, **kwargs: [])
-
-    loaded = model.load_weights(
-        [("model.layers.2.mlp.gate_proj.weight", torch.tensor([1.0]))]
-    )
-
-    assert loaded == set()
 
 
 def test_kimi_k3_projector_registers_rotation_for_weight_loading(

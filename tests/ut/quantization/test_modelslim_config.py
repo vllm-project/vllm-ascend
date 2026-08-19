@@ -193,14 +193,20 @@ class TestAscendModelSlimConfig(TestBase):
             "experts.0.down_proj",
         ]
 
-    def test_kimi_k3_shared_expert_w4a8_uses_per_channel_scheme(self):
+    def test_per_channel_shared_expert_w4a8_uses_grouped_matmul_scheme(self):
         prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
-        config = AscendModelSlimConfig({f"{prefix}.weight": "W4A8_DYNAMIC"})
+        config = AscendModelSlimConfig(
+            {
+                "group_size": 0,
+                f"{prefix}.weight": "W4A8_DYNAMIC",
+            }
+        )
         vllm_config = MagicMock()
-        vllm_config.model_config.hf_config.model_type = "kimi_k3"
+        vllm_config.model_config.hf_config.model_type = "future_hybrid_moe"
         vllm_config.model_config.hf_text_config = MagicMock()
         linear = MagicMock(spec=LinearBase)
         scheme = MagicMock(spec=AscendW4A8DynamicLinearMethod)
+        scheme.is_per_channel_weight = True
 
         with (
             patch(
@@ -215,19 +221,22 @@ class TestAscendModelSlimConfig(TestBase):
         ):
             config.get_quant_method(linear, prefix)
 
-        scheme.enable_per_channel_for_kimi_shared_expert.assert_called_once_with()
+        scheme.enable_per_channel_shared_expert.assert_called_once_with()
 
-    def test_kimi_k3_text_config_shared_expert_w4a8_uses_per_channel_scheme(self):
-        """Keep the K3 override when vLLM exposes only the nested text config."""
+    def test_per_group_shared_expert_does_not_use_grouped_matmul_scheme(self):
         prefix = "model.layers.0.block_sparse_moe.shared_experts.gate_up_proj"
-        config = AscendModelSlimConfig({f"{prefix}.weight": "W4A8_DYNAMIC"})
+        config = AscendModelSlimConfig(
+            {
+                "group_size": 256,
+                f"{prefix}.weight": "W4A8_DYNAMIC",
+            }
+        )
         vllm_config = MagicMock()
-        vllm_config.model_config.hf_config.model_type = "kimi_linear"
-        vllm_config.model_config.hf_text_config.model_type = "kimi_linear"
-        vllm_config.model_config.hf_text_config.mla_use_output_gate = True
-        vllm_config.model_config.hf_text_config.routed_expert_hidden_size = 3584
+        vllm_config.model_config.hf_config.model_type = "future_hybrid_moe"
+        vllm_config.model_config.hf_text_config = MagicMock()
         linear = MagicMock(spec=LinearBase)
         scheme = MagicMock(spec=AscendW4A8DynamicLinearMethod)
+        scheme.is_per_channel_weight = False
 
         with (
             patch(
@@ -242,7 +251,7 @@ class TestAscendModelSlimConfig(TestBase):
         ):
             config.get_quant_method(linear, prefix)
 
-        scheme.enable_per_channel_for_kimi_shared_expert.assert_called_once_with()
+        scheme.enable_per_channel_shared_expert.assert_not_called()
 
     def test_missing_linear_weight_without_gate_capability_does_not_fall_back(self):
         config = AscendModelSlimConfig({})

@@ -1224,7 +1224,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", side_effect=lambda value, enabled: value)
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
-    def test_kimi_k3_forwards_no_rope_to_fused_decode_preprocess(
+    def test_no_rope_bypasses_fused_decode_preprocess(
         self,
         mock_device_operator,
         mock_gather_unpad,
@@ -1245,7 +1245,7 @@ class TestAscendMLAImpl(TestBase):
             k_nope=MagicMock(),
             k_pe=MagicMock(),
         )
-        mock_device_operator.mla_preprocess_only_decode.return_value = (decode_result, None)
+        self.impl._mla_preprocess = MagicMock(return_value=(decode_result, None))
         self.impl._forward_decode = MagicMock(return_value=attention_output)
         self.impl.o_proj = MagicMock(return_value=(projected,))
         attn_metadata = SimpleNamespace(
@@ -1266,12 +1266,13 @@ class TestAscendMLAImpl(TestBase):
                 output=output,
             )
 
-        mock_device_operator.mla_preprocess_only_decode.assert_called_once_with(
-            self.impl,
+        mock_device_operator.mla_preprocess_only_decode.assert_not_called()
+        self.impl._mla_preprocess.assert_called_once_with(
+            "model.layers.3.self_attn.attn",
             hidden_states,
             kv_cache,
             attn_metadata,
-            use_mla_rope=False,
+            False,
         )
         torch.testing.assert_close(output, projected)
 
@@ -2424,6 +2425,7 @@ class TestAscendMLAImpl(TestBase):
             kv_sharing_target_layer_name=None,
             **kwargs,
         )
+        impl.fa_quant_layer = False
         S, N, D, VD = 2, num_heads, impl.qk_head_dim, impl.v_head_dim
         latent_kv_dim = impl.kv_lora_rank
         num_blocks, block_size = 100, 20
@@ -2657,14 +2659,13 @@ class TestAscendMLAImpl(TestBase):
 
         torch.testing.assert_close(k_pe, raw_k_pe)
         torch.testing.assert_close(k_nope, kv_c_normed)
-        mock_npu_quantize.assert_called_once_with(
-            kv_c_normed,
-            self.impl.fak_descale_reciprocal,
-            None,
-            torch.qint8,
-            -1,
-            False,
-        )
+        mock_npu_quantize.assert_called_once()
+        quantize_args = mock_npu_quantize.call_args.args
+        torch.testing.assert_close(quantize_args[0], kv_c_normed)
+        self.assertIs(quantize_args[1], self.impl.fak_descale_reciprocal)
+        self.assertIsNone(quantize_args[2])
+        self.assertIs(quantize_args[3], torch.qint8)
+        self.assertEqual(quantize_args[4:], (-1, False))
         self.assertEqual(mock_scatter_pa_kv_cache.call_count, 2)
         latent_call, position_call = mock_scatter_pa_kv_cache.call_args_list
         latent_call = latent_call.kwargs

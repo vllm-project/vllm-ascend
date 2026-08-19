@@ -8,6 +8,9 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
+from vllm_ascend.quantization.utils import model_uses_fa_quantization
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+
 
 def _using_kv_store(vllm_config) -> bool:
     """
@@ -27,21 +30,35 @@ def _using_kv_store(vllm_config) -> bool:
     return False
 
 
-def _uses_kimi_k3_mla_c8_cache(vllm_config) -> bool:
-    """Return whether Kimi-K3 stores its MLA latent K cache as INT8."""
+def _uses_mla_fa_quant_cache(vllm_config) -> bool:
+    """Return whether MLA stores its latent KV cache in an 8-bit dtype.
+
+    ``verify_and_update_config`` can run before vLLM initializes
+    ``quant_config``. Prefer the initialized object when available and fall
+    back to the checkpoint's lightweight ModelSlim metadata otherwise.
+    """
     model_config = vllm_config.model_config
-    quant_config = vllm_config.quant_config
-    if not model_config.use_mla or quant_config is None:
+    if not model_config.use_mla:
         return False
 
-    hf_config = getattr(model_config, "hf_config", None)
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    is_kimi_k3 = getattr(hf_config, "model_type", None) == "kimi_k3" or (
-        getattr(hf_text_config, "model_type", None) == "kimi_linear"
-        and bool(getattr(hf_text_config, "mla_use_output_gate", False))
-        and getattr(hf_text_config, "routed_expert_hidden_size", None) is not None
+    quant_config = getattr(vllm_config, "quant_config", None)
+    if quant_config is not None:
+        if getattr(quant_config, "enable_fa_quant", False):
+            return True
+        # A populated quantization description is authoritative. An empty
+        # ModelSlim config can still occur before maybe_update_config loads
+        # the checkpoint metadata, so only that state falls through.
+        if getattr(quant_config, "quant_description", None):
+            return False
+
+    quantization = getattr(model_config, "quantization", None)
+    if quantization not in (None, ASCEND_QUANTIZATION_METHOD):
+        return False
+
+    return model_uses_fa_quantization(
+        model_config.model,
+        revision=getattr(model_config, "revision", None),
     )
-    return is_kimi_k3 and getattr(quant_config, "enable_fa_quant", False)
 
 
 @classmethod
@@ -101,7 +118,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
         attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
-        if _uses_kimi_k3_mla_c8_cache(vllm_config):
+        if _uses_mla_fa_quant_cache(vllm_config):
             # MLA C8 quantizes only the latent K cache; RoPE/V remains in the
             # model dtype. Account for the actual INT8 K bytes here so the
             # logical block grows from 384 to 768 tokens and a contiguous K
@@ -114,7 +131,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
             )
             attn_single_token_k_page_size //= kv_dtype_size
             logger.info(
-                "Using hybrid MLA C8 double-token block layout: K=%d "
+                "Using hybrid MLA 8-bit latent-cache double-token block layout: K=%d "
                 "B/token, V=%d B/token.",
                 attn_single_token_k_page_size,
                 attn_rope_token_page_size,

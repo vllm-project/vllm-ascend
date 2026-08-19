@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import regex as re
@@ -91,8 +90,10 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_kimi_shared_expert_uses_w4a8_grouped_matmul(self, mock_dynamic_quant, mock_grouped_matmul):
-        self.method.enable_per_channel_for_kimi_shared_expert()
+    def test_apply_per_channel_shared_expert_uses_w4a8_grouped_matmul(
+        self, mock_dynamic_quant, mock_grouped_matmul
+    ):
+        self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(torch.empty(1, 4, 1, dtype=torch.int32), requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(torch.ones(8, dtype=torch.int64), requires_grad=False)
@@ -131,8 +132,10 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_kimi_shared_expert_reuses_quantized_input(self, mock_dynamic_quant, mock_grouped_matmul):
-        self.method.enable_per_channel_for_kimi_shared_expert()
+    def test_apply_per_channel_shared_expert_reuses_quantized_input(
+        self, mock_dynamic_quant, mock_grouped_matmul
+    ):
+        self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(torch.empty(1, 4, 1, dtype=torch.int32), requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(torch.ones(8, dtype=torch.int64), requires_grad=False)
@@ -154,8 +157,10 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_kimi_shared_expert_sums_owned_tp_scale_bias(self, mock_dynamic_quant, mock_grouped_matmul):
-        self.method.enable_per_channel_for_kimi_shared_expert()
+    def test_apply_per_channel_shared_expert_sums_owned_tp_scale_bias(
+        self, mock_dynamic_quant, mock_grouped_matmul
+    ):
+        self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.tp_size = 4
         layer.tp_rank = 3
@@ -179,8 +184,10 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_kimi_shared_expert_tp1_sums_all_scale_bias(self, mock_dynamic_quant, mock_grouped_matmul):
-        self.method.enable_per_channel_for_kimi_shared_expert()
+    def test_apply_per_channel_shared_expert_tp1_sums_all_scale_bias(
+        self, mock_dynamic_quant, mock_grouped_matmul
+    ):
+        self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.tp_size = 1
         layer.tp_rank = 0
@@ -201,28 +208,6 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
         grouped_bias = mock_grouped_matmul.call_args.kwargs["bias"][0]
         torch.testing.assert_close(grouped_bias, layer.scale_bias.sum(dim=1).reshape(1, -1))
-
-    @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size", return_value=1)
-    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
-    def test_kimi_k3_text_config_marks_only_shared_expert(self, mock_get_current_vllm_config, _mock_get_tp_world_size):
-        """Text-only K3 loading exposes kimi_linear as its immediate config."""
-        mock_get_current_vllm_config.return_value = SimpleNamespace(
-            quant_config=SimpleNamespace(quant_description={"group_size": 256}),
-            model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(model_type="kimi_linear"),
-                hf_text_config=SimpleNamespace(
-                    model_type="kimi_linear",
-                    mla_use_output_gate=True,
-                    routed_expert_hidden_size=3584,
-                ),
-            ),
-        )
-        method = AscendW4A8DynamicLinearMethod()
-        shared_layer = SimpleNamespace(prefix="model.layers.0.block_sparse_moe.shared_experts.gate_up_proj")
-        routed_layer = SimpleNamespace(prefix="model.layers.0.block_sparse_moe.experts")
-
-        self.assertTrue(method._uses_per_channel_shared_expert(shared_layer))
-        self.assertFalse(method._uses_per_channel_shared_expert(routed_layer))
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity)
     def test_process_per_channel_weight_without_second_level_scale(self, _mock_maybe_trans_nz):
@@ -320,8 +305,10 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_convert_weight_to_int4pack")
-    def test_process_kimi_shared_expert_prepares_grouped_nz_weight(self, mock_int4pack, mock_maybe_trans_nz):
-        self.method.enable_per_channel_for_kimi_shared_expert()
+    def test_process_per_channel_shared_expert_prepares_grouped_nz_weight(
+        self, mock_int4pack, mock_maybe_trans_nz
+    ):
+        self.method.enable_per_channel_shared_expert()
         self.method.new_quant_version = True
         mock_maybe_trans_nz.side_effect = identity
         layer = torch.nn.Module()
@@ -350,8 +337,10 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(layer.scale_bias.shape, torch.Size([32]))
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity)
-    def test_process_kimi_shared_expert_tp1_sums_down_scale_bias(self, _mock_maybe_trans_nz):
-        self.method.enable_per_channel_for_kimi_shared_expert()
+    def test_process_per_channel_shared_expert_tp1_sums_down_scale_bias(
+        self, _mock_maybe_trans_nz
+    ):
+        self.method.enable_per_channel_shared_expert()
         self.method.new_quant_version = True
         layer = torch.nn.Module()
         layer.tp_size = 1
@@ -366,8 +355,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
         torch.testing.assert_close(layer.scale_bias, original_bias.sum(dim=1))
 
-    def test_process_kimi_shared_expert_rejects_old_quant_version(self):
-        self.method.enable_per_channel_for_kimi_shared_expert()
+    def test_process_per_channel_shared_expert_rejects_old_quant_version(self):
+        self.method.enable_per_channel_shared_expert()
         self.method.new_quant_version = False
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(torch.zeros((32, 8), dtype=torch.int8), requires_grad=False)

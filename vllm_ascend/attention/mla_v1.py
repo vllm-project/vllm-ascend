@@ -956,8 +956,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         device_type = get_ascend_device_type()
         # A3's generic FA-quant gate is restricted to KV consumers because it
-        # normally takes the fused MLA-prolog path. K3 must bypass that prolog:
-        # its no-RoPE positional slice cannot be reordered by the fused kernel.
+        # normally takes the fused MLA-prolog path. No-RoPE MLA layers bypass
+        # that prolog because their positional slice must not be reordered.
         if (
             not self.fa_quant_layer
             and not self.use_mla_rope
@@ -1387,8 +1387,8 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return kv_c_normed, k_pe
 
-    def _uses_a3_kimi_c8_cache(self) -> bool:
-        """Whether K3's A3 C8 cache needs its mixed dtypes loaded separately."""
+    def _uses_a3_mla_fa_quant_cache(self) -> bool:
+        """Whether A3 MLA uses separate 8-bit latent and model-dtype caches."""
         return (
             bool(self.fa_quant_layer)
             and not self.use_mla_rope
@@ -1402,7 +1402,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return referenced cache blocks and a block table indexed into them.
 
-        K3 A3 C8 writes PA-NZ bytes into the regular vLLM cache pool.  The
+        A3 MLA FA quant writes PA-NZ bytes into the regular vLLM cache pool. The
         Gather wrapper determines PA-NZ from the source tensor's format, so
         chunked prefill works on a temporary compact cache segment rather than
         format-casting the complete layer cache.
@@ -1424,7 +1424,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         return block_ids, compact_table.to(dtype=block_table.dtype)
 
     @staticmethod
-    def _format_compact_a3_kimi_c8_cache_for_gather(
+    def _format_compact_a3_mla_c8_cache_for_gather(
         cache: torch.Tensor,
         block_ids: torch.Tensor,
         *,
@@ -1473,7 +1473,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
-        is_a3_c8_cache = self._uses_a3_kimi_c8_cache()
+        is_a3_c8_cache = self._uses_a3_mla_fa_quant_cache()
         if is_a3_c8_cache:
             num_heads = self.num_kv_heads
             latent_kv_dim = self.kv_lora_rank
@@ -1481,14 +1481,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 cache_kv_c,
                 prefill_metadata.block_table,
             )
-            cache_kv_c_for_load = self._format_compact_a3_kimi_c8_cache_for_gather(
+            cache_kv_c_for_load = self._format_compact_a3_mla_c8_cache_for_gather(
                 cache_kv_c,
                 block_ids,
                 num_kv_heads=num_heads,
                 head_dim=latent_kv_dim,
                 nz_width=32,
             )
-            cache_k_pe_for_load = self._format_compact_a3_kimi_c8_cache_for_gather(
+            cache_k_pe_for_load = self._format_compact_a3_mla_c8_cache_for_gather(
                 cache_k_pe,
                 block_ids,
                 num_kv_heads=num_heads,
@@ -1725,7 +1725,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize/cache MLA KV while preserving K3's raw q/k slice."""
+        """Normalize and cache MLA KV while preserving a no-RoPE q/k slice."""
         assert self.kv_a_layernorm is not None
         assert len(kv_cache) > 1, "MLA requires separate latent and positional KV caches"
         num_tokens = kv_no_split.shape[0]
@@ -1905,8 +1905,8 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         if not self.use_mla_rope:
             # npu_interleave_rope with cos=1/sin=0 still reorders dimensions
-            # from [0, 1, 2, 3, ...] to [0, 2, ..., 1, 3, ...]. K3 has no
-            # rotary transform at all, so its positional slice must bypass it.
+            # from [0, 1, 2, 3, ...] to [0, 2, ..., 1, 3, ...]. A no-RoPE
+            # layer has no rotary transform, so its positional slice bypasses it.
             return x
         B, N, D = x.shape
         S = 1

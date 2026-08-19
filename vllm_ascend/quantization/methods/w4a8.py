@@ -36,28 +36,6 @@ from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_lo
 from .registry import register_scheme
 
 
-def _is_kimi_k3_model(vllm_config: Any) -> bool:
-    """Identify K3 from either its outer multimodal or inner text config.
-
-    The full K3 checkpoint has ``hf_config.model_type == "kimi_k3"``. Some
-    text-only loading paths expose the nested K3 text config instead, whose
-    inherited model type is ``"kimi_linear"``. The latter is distinguished
-    from a regular Kimi Linear model by the K3 MLA/output-gate and routed-MoE
-    fields.
-    """
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    if getattr(hf_config, "model_type", None) == "kimi_k3":
-        return True
-
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    return (
-        getattr(hf_text_config, "model_type", None) == "kimi_linear"
-        and bool(getattr(hf_text_config, "mla_use_output_gate", False))
-        and getattr(hf_text_config, "routed_expert_hidden_size", None) is not None
-    )
-
-
 @register_scheme("W4A8_DYNAMIC", "linear")
 class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_DYNAMIC.
@@ -110,14 +88,14 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
 
     Per-group linear weights use ``torch_npu.npu_weight_quant_batchmatmul``.
     Generic per-channel linear weights use ``torch_npu.npu_quant_matmul``.
-    K3 shared experts use the per-channel W4A8 grouped-matmul path: activations
+    Per-channel W4A8 shared experts use the grouped-matmul path: activations
     are dynamically quantized to int8, packed int4 weights are converted to NZ,
     and the projection is evaluated as a single expert by
-    ``torch_npu.npu_grouped_matmul``. This avoids silently degrading K3 shared
+    ``torch_npu.npu_grouped_matmul``. This avoids silently degrading shared
     experts to W4A16.
 
     The generic linear operators consume ``weight`` as ``torch.int32`` with
-    shape ``[input_size, output_size // 8]``. The K3 shared-expert grouped
+    shape ``[input_size, output_size // 8]``. The shared-expert grouped
     operator consumes a leading singleton expert dimension, with shape
     ``[1, input_size, output_size // 8]``.
     """
@@ -132,26 +110,22 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         self.is_per_channel_weight = self.group_size == 0
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
-        self._uses_kimi_k3_shared_expert_per_channel = _is_kimi_k3_model(vllm_config)
-        self._force_kimi_shared_expert_per_channel = False
+        self._use_grouped_matmul_for_shared_expert = False
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def _uses_per_channel_shared_expert(self, layer: torch.nn.Module) -> bool:
-        # This is deliberately not a model-wide K3 flag: only K3 shared
-        # experts have per-channel W4A8 scales. Routed experts stay per-group.
-        return self._force_kimi_shared_expert_per_channel or (
-            self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
-        )
+        del layer
+        return self.is_per_channel_weight and self._use_grouped_matmul_for_shared_expert
 
-    def enable_per_channel_for_kimi_shared_expert(self) -> None:
-        """Select the per-channel W4A8 path for a Kimi shared expert."""
+    def enable_per_channel_shared_expert(self) -> None:
+        """Select the grouped-matmul path for a per-channel shared expert."""
         self.group_size = 0
         self.is_per_channel_weight = True
         # This scheme instance is attached to one shared-expert projection.
         # Retain that selection through weight loading, where layer.prefix is
         # not a reliable discriminator for every vLLM Linear wrapper.
-        self._force_kimi_shared_expert_per_channel = True
+        self._use_grouped_matmul_for_shared_expert = True
 
     def _local_scale_bias(self, layer: torch.nn.Module, tp_rank: int | None = None) -> torch.Tensor:
         """Combine the offline scale-bias shards owned by this projection."""
@@ -337,7 +311,9 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
 
         if uses_per_channel_shared_expert:
             if not self.new_quant_version:
-                raise ValueError("K3 shared-expert W4A8 requires quantization version 1.0.0")
+                raise ValueError(
+                    "Per-channel shared-expert W4A8 requires quantization version 1.0.0"
+                )
 
             # Preserve the floating-point scale for the fused SiTU path, then
             # bit-cast it to the int64 representation required by grouped
@@ -348,7 +324,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale.data = torch.from_numpy(scale_np.astype(np.int64)).to(layer.weight_scale.device)
 
             if not hasattr(layer, "scale_bias"):
-                raise ValueError("K3 shared-expert W4A8 requires scale_bias")
+                raise ValueError("Per-channel shared-expert W4A8 requires scale_bias")
             layer.scale_bias.data = self._local_scale_bias(layer).contiguous()
 
             # Treat the shared projection as one grouped expert. Keep packed

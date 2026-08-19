@@ -3,10 +3,34 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.patch.platform.patch_mamba_config import verify_and_update_config
+from vllm_ascend.patch.platform.patch_mamba_config import (
+    _uses_mla_fa_quant_cache,
+    verify_and_update_config,
+)
 
 
-def test_kimi_k3_hybrid_c8_doubles_attention_block_size():
+def test_non_modelslim_quantization_does_not_enable_mla_fa_quant_cache():
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            use_mla=True,
+            quantization="compressed-tensors",
+            model="/weights/other-model",
+            revision=None,
+        ),
+        quant_config=None,
+    )
+
+    with patch(
+        "vllm_ascend.patch.platform.patch_mamba_config."
+        "model_uses_fa_quantization",
+        return_value=True,
+    ) as detect_fa_quant:
+        assert not _uses_mla_fa_quant_cache(vllm_config)
+
+    detect_fa_quant.assert_not_called()
+
+
+def test_mla_fa_quant_metadata_doubles_attention_block_size_before_quant_config_init():
     cache_config = SimpleNamespace(
         cache_dtype="auto",
         block_size=None,
@@ -16,17 +40,15 @@ def test_kimi_k3_hybrid_c8_doubles_attention_block_size():
         mamba_block_size=None,
     )
     text_config = SimpleNamespace(
-        model_type="kimi_linear",
-        mla_use_output_gate=True,
-        routed_expert_hidden_size=1024,
         kv_lora_rank=512,
         qk_rope_head_dim=64,
     )
     model_config = SimpleNamespace(
         use_mla=True,
         dtype=torch.bfloat16,
-        architecture="KimiK3ForCausalLM",
-        hf_config=SimpleNamespace(model_type="kimi_k3"),
+        architecture="AnyHybridMLAModel",
+        model="/weights/any-mla-model",
+        revision=None,
         hf_text_config=text_config,
         max_model_len=32768,
         get_num_kv_heads=MagicMock(return_value=1),
@@ -38,11 +60,9 @@ def test_kimi_k3_hybrid_c8_doubles_attention_block_size():
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         kv_transfer_config=None,
         speculative_config=None,
-        quant_config=SimpleNamespace(
-            enable_fa_quant=True,
-            # This is the value used by the Kimi-K3 W4A8C8 checkpoint.
-            quant_description={"fa_quant_type": "FAKQuant"},
-        ),
+        # Match the real initialization order: ModelSlim quant_config is
+        # populated only after hybrid cache verification.
+        quant_config=None,
     )
     model_cls = SimpleNamespace(
         get_mamba_state_shape_from_config=MagicMock(
@@ -63,9 +83,18 @@ def test_kimi_k3_hybrid_c8_doubles_attention_block_size():
             "ModelRegistry.resolve_model_cls",
             return_value=(model_cls, None),
         ),
+        patch(
+            "vllm_ascend.patch.platform.patch_mamba_config."
+            "model_uses_fa_quantization",
+            return_value=True,
+        ) as detect_fa_quant,
     ):
         verify_and_update_config.__func__(None, vllm_config)
 
     assert cache_config.block_size == 768
     assert cache_config.mamba_page_size_padded == 505344
     assert cache_config.mamba_block_size == 768
+    detect_fa_quant.assert_called_once_with(
+        "/weights/any-mla-model",
+        revision=None,
+    )
