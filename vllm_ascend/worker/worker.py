@@ -228,7 +228,6 @@ class NPUWorker(WorkerBase):
             allowed_names = (
                 "_dsa_cp_hadamard",
                 "_dsa_hadamard",
-                "expert_ids_per_ep_rank",
             )
             buffers_to_save = (
                 (name, buffer)
