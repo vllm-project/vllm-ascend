@@ -85,7 +85,9 @@ class AscendMergedColumnParallelLinearWithLoRA(_PackedLoRAAWeightsMixin):
         model_config: PretrainedConfig | None,
     ) -> bool:
         return (
-            type(source_layer) is maybe_get_oot_by_class(MergedColumnParallelLinear) and len(packed_modules_list) == 2
+            lora_config.max_loras == 1
+            and type(source_layer) is maybe_get_oot_by_class(MergedColumnParallelLinear)
+            and len(packed_modules_list) == 2
         )
 
 
@@ -99,7 +101,11 @@ class AscendMergedQKVParallelLinearWithLoRA(_PackedLoRAAWeightsMixin, MergedQKVP
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        return type(source_layer) is AscendQKVParallelLinear and len(packed_modules_list) == 3
+        return (
+            lora_config.max_loras == 1
+            and type(source_layer) is AscendQKVParallelLinear
+            and len(packed_modules_list) == 3
+        )
 
 
 def refresh_all_lora_classes():
