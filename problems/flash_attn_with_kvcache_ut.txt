@@ -1,66 +1,34 @@
-python tests/standalone/fa3/test_fa3_graph_workspace_scale.py --predict
-[W819 15:08:44.133337893 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
-predicted FA3 workspace (MB) = 33024 * batch * ceil(maxk/128) / 1e6
- batch     maxk  blocks/s  ws_pred(MB)
-    16     1024         8          4.2
-    32     1024         8          8.5
-    64     1024         8         16.9
-   128     1024         8         33.8
-   256     1024         8         67.6
-    16     2048        16          8.5
-    32     2048        16         16.9
-    64     2048        16         33.8
-   128     2048        16         67.6
-   256     2048        16        135.3
-    16     4096        32         16.9
-    32     4096        32         33.8
-    64     4096        32         67.6
-   128     4096        32        135.3
-   256     4096        32        270.5
-    16     8192        64         33.8
-    32     8192        64         67.6
-    64     8192        64        135.3
-   128     8192        64        270.5
-   256     8192        64        541.1
-    16    16384       128         67.6
-    32    16384       128        135.3
-    64    16384       128        270.5
-   128    16384       128        541.1
-   256    16384       128       1082.1
-    16    32768       256        135.3
-    32    32768       256        270.5
-    64    32768       256        541.1
-   128    32768       256       1082.1
-   256    32768       256       2164.3
-python tests/standalone/fa3/test_fa3_graph_workspace_scale.py 
-[W819 15:09:19.644490471 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
-======================================================================================
- batch     maxk  blocks/s  ws_pred(MB)     result  ws_meas(MB)
-======================================================================================
-    16     2048        16          8.5         OK  55.4
-    32     2048        16         16.9         OK  55.5
-    16     4096        32         16.9         OK  55.5
-    64     2048        16         33.8         OK  55.8
-    32     4096        32         33.8         OK  55.6
-    16     8192        64         33.8         OK  55.7
-   128     2048        16         67.6         OK  56.3
-    64     4096        32         67.6         OK  55.9
-    32     8192        64         67.6         OK  55.9
-    16    16384       128         67.6         OK  56.3
-   256     2048        16        135.3         OK  57.3
-   128     4096        32        135.3         OK  56.4
-    64     8192        64        135.3         OK  56.1
-    32    16384       128        135.3         OK  56.4
-    16    32768       256        135.3         OK  57.3
-   256     4096        32        270.5         OK  57.5
-   128     8192        64        270.5         OK  56.7
-    64    16384       128        270.5         OK  56.7
-    32    32768       256        270.5         OK  57.5
-   256     8192        64        541.1         OK  57.7
-   128    16384       128        541.1         OK  57.2
-    64    32768       256        541.1         OK  57.7
-   256    16384       128       1082.1         OK  58.3
-   128    32768       256       1082.1         OK  58.3
-   256    32768       256       2164.3         OK  59.3
-======================================================================================
-If a CRASH leaves the device in a bad state, reset it before re-running.
+python tests/standalone/fa3/test_fa3_graph_meta_2x2.py 
+[W819 15:29:53.445663230 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+==============================================================================
+C7 2x2 (batch=3, replay=[64, 128, 200])
+==============================================================================
+   small,small  -> CRASH(1)   [small,small] batch=3 plan=16 maxk=16 seq0/seq1/seq2 = 0.002209 0.917989 0.538227 -> WRONG
+   small,large  -> OK   [small,large] batch=3 plan=16 maxk=2048 seq0/seq1/seq2 = 0.002361 0.001428 0.001279 -> OK
+   large,small  -> CRASH(1)   [large,small] batch=3 plan=2048 maxk=16 seq0/seq1/seq2 = 0.002206 0.707323 0.624439 -> WRONG
+   large,large  -> OK   [large,large] batch=3 plan=2048 maxk=2048 seq0/seq1/seq2 = 0.002373 0.001240 0.001329 -> OK
+==============================================================================
+Read:
+  B(small,large) CRASH/WRONG -> max_seqlen_k alone does not over-cover;
+       fix must also set cache_seqlens = max_model_len in the plan.
+  C(large,small) CRASH       -> cache_seqlens drives tiles, maxk sizes
+       workspace; too-small maxk OOBs.
+  B OK and D OK              -> tiles driven by maxk; crash elsewhere.
+==============================================================================
+python tests/standalone/fa3/test_fa3_graph_meta_2x2.py --batch 64
+[W819 15:31:52.560590259 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+==============================================================================
+C7 2x2 (batch=64, replay=[64, 128, 200])
+==============================================================================
+   small,small  -> CRASH(1)   [ERROR] 2026-08-19-15:32:10 (PID:160912, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+   small,large  -> CRASH(1)   [ERROR] 2026-08-19-15:32:26 (PID:160941, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+   large,small  -> CRASH(1)   [ERROR] 2026-08-19-15:32:42 (PID:160970, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+   large,large  -> CRASH(1)   [ERROR] 2026-08-19-15:32:58 (PID:160999, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+==============================================================================
+Read:
+  B(small,large) CRASH/WRONG -> max_seqlen_k alone does not over-cover;
+       fix must also set cache_seqlens = max_model_len in the plan.
+  C(large,small) CRASH       -> cache_seqlens drives tiles, maxk sizes
+       workspace; too-small maxk OOBs.
+  B OK and D OK              -> tiles driven by maxk; crash elsewhere.
+==============================================================================
