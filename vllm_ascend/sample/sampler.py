@@ -10,7 +10,13 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    enable_custom_op,
+    get_ascend_device_type,
+    global_stream,
+    npu_stream_switch,
+)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -119,7 +125,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             self.top_k = None
 
     def forward_native(self, logits, generators, k, p):
-        """Override pytorch native implementation to torch_npu"""
+        """Override PyTorch native implementation with Ascend optimized top-k/top-p."""
         # when batch_invariant mode is enabled, we should use vllm's implementation.
         # or it will make batch_invariant mode not working.
         if envs.VLLM_BATCH_INVARIANT:
@@ -233,7 +239,7 @@ def _apply_top_k_top_p_pytorch(
         return logits
 
 
-def _apply_top_k_top_p_torch_npu(
+def _apply_top_k_top_p_ascendc(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
@@ -255,16 +261,21 @@ def _apply_top_k_top_p_torch_npu(
         gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
-            gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)
+            if enable_custom_op():
+                gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k=k, p=p)
+            else:
+                gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)
         return gathered_vals, gathered_idx
 
     if p is None and k is None:
         return logits
+    if enable_custom_op():
+        return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
     return torch_npu.npu_top_k_top_p(logits, k=k, p=p)
 
 
 apply_top_k_top_p = (
-    _apply_top_k_top_p_torch_npu
+    _apply_top_k_top_p_ascendc
     if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
     else _apply_top_k_top_p_pytorch
 )
