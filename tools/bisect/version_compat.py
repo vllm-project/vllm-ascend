@@ -18,11 +18,7 @@ Nightly images are built from the version metadata kept in each
 ``vllm-ascend`` commit:
 
 * ``.github/vllm-release-tag.commit`` selects the vLLM release;
-* ``requirements.txt`` selects the torch-npu distribution;
-* ``csrc/version.info`` records the CANN compatibility version.
-
-CANN is intentionally read-only here. Switching a CANN runtime requires
-recreating the image and is outside the scope of a live bisect container.
+* ``requirements.txt`` selects the torch-npu distribution.
 """
 
 import importlib.metadata
@@ -32,7 +28,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-import regex as re
 import tomllib
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
@@ -44,19 +39,12 @@ logger = logging.getLogger(__name__)
 
 VLLM_PACKAGE = "vllm"
 TORCH_NPU_PACKAGE = "torch-npu"
-CANN_PACKAGE = "cann"
 
-SWITCHABLE_PACKAGES = (VLLM_PACKAGE, TORCH_NPU_PACKAGE)
-ALL_PACKAGES = (VLLM_PACKAGE, TORCH_NPU_PACKAGE, CANN_PACKAGE)
+ALL_PACKAGES = (VLLM_PACKAGE, TORCH_NPU_PACKAGE)
 
 VLLM_TAG_FILE = ".github/vllm-release-tag.commit"
 TORCH_NPU_REQUIREMENTS_FILE = "requirements.txt"
 TORCH_NPU_PYPROJECT_FILE = "pyproject.toml"
-CANN_VERSION_FILE = "csrc/version.info"
-
-_CANN_VERSION_RE = re.compile(r"^\s*Version\s*=\s*(?P<version>[^#\s]+)", re.MULTILINE)
-_VLLM_DIR_ENV = "VLLM_DIR"
-_DEFAULT_VLLM_DIR = "/vllm-workspace/vllm"
 
 
 @dataclass(frozen=True)
@@ -65,15 +53,12 @@ class PackageVersions:
 
     vllm: str | None = None
     torch_npu: str | None = None
-    cann: str | None = None
 
     def get(self, package: str) -> str | None:
         if package == VLLM_PACKAGE:
             return self.vllm
         if package == TORCH_NPU_PACKAGE:
             return self.torch_npu
-        if package == CANN_PACKAGE:
-            return self.cann
         raise ValueError(f"unsupported package {package!r}")
 
     def as_dict(self, packages: tuple[str, ...] = ALL_PACKAGES) -> dict[str, str]:
@@ -85,7 +70,6 @@ class PackageVersions:
         return cls(
             vllm=values.get(VLLM_PACKAGE),
             torch_npu=values.get(TORCH_NPU_PACKAGE),
-            cann=values.get(CANN_PACKAGE),
         )
 
 
@@ -99,11 +83,7 @@ class VersionPolicy:
 
     @classmethod
     def between(cls, good: PackageVersions, bad: PackageVersions) -> "VersionPolicy":
-        # CANN is deliberately excluded: it can be discovered, but not changed
-        # safely inside the already-running nightly container.
-        checked = tuple(
-            package for package in SWITCHABLE_PACKAGES if not versions_equal(good.get(package), bad.get(package))
-        )
+        checked = tuple(package for package in ALL_PACKAGES if not versions_equal(good.get(package), bad.get(package)))
         return cls(checked_packages=checked, good=good, bad=bad)
 
     def checks(self, package: str) -> bool:
@@ -159,64 +139,22 @@ def _read_torch_npu_from_pyproject(content: str | None) -> str | None:
     return _read_torch_npu_requirement("\n".join(requires))
 
 
-def _read_cann_version(content: str | None) -> str | None:
-    if not content:
-        return None
-    match = _CANN_VERSION_RE.search(content)
-    return match.group("version") if match else None
+def _file_content(repo: Path, commit: str | None, relative_path: str) -> str | None:
+    if commit is None:
+        path = repo / relative_path
+        return path.read_text(encoding="utf-8") if path.exists() else None
+    return git_ops.file_at_commit(repo, commit, relative_path)
 
 
-def expected_vllm_version(repo: Path) -> str | None:
-    path = repo / VLLM_TAG_FILE
-    return path.read_text(encoding="utf-8").strip() or None if path.exists() else None
-
-
-def expected_vllm_version_at(repo: Path, commit: str) -> str | None:
-    content = git_ops.file_at_commit(repo, commit, VLLM_TAG_FILE)
-    return content.strip() if content else None
-
-
-def expected_torch_npu_version(repo: Path) -> str | None:
-    path = repo / TORCH_NPU_REQUIREMENTS_FILE
-    version = _read_torch_npu_requirement(path.read_text(encoding="utf-8") if path.exists() else None)
-    if version:
-        return version
-    pyproject = repo / TORCH_NPU_PYPROJECT_FILE
-    return _read_torch_npu_from_pyproject(pyproject.read_text(encoding="utf-8") if pyproject.exists() else None)
-
-
-def expected_torch_npu_version_at(repo: Path, commit: str) -> str | None:
-    content = git_ops.file_at_commit(repo, commit, TORCH_NPU_REQUIREMENTS_FILE)
-    version = _read_torch_npu_requirement(content)
-    if version:
-        return version
-    return _read_torch_npu_from_pyproject(git_ops.file_at_commit(repo, commit, TORCH_NPU_PYPROJECT_FILE))
-
-
-def expected_cann_version(repo: Path) -> str | None:
-    path = repo / CANN_VERSION_FILE
-    return _read_cann_version(path.read_text(encoding="utf-8") if path.exists() else None)
-
-
-def expected_cann_version_at(repo: Path, commit: str) -> str | None:
-    content = git_ops.file_at_commit(repo, commit, CANN_VERSION_FILE)
-    return _read_cann_version(content)
-
-
-def expected_versions(repo: Path) -> PackageVersions:
-    return PackageVersions(
-        vllm=expected_vllm_version(repo),
-        torch_npu=expected_torch_npu_version(repo),
-        cann=expected_cann_version(repo),
+def expected_versions(repo: Path, commit: str | None = None) -> PackageVersions:
+    """Versions declared by the working tree, or by ``commit`` when given."""
+    vllm_tag = (_file_content(repo, commit, VLLM_TAG_FILE) or "").strip() or None
+    torch_npu = _read_torch_npu_requirement(
+        _file_content(repo, commit, TORCH_NPU_REQUIREMENTS_FILE),
+    ) or _read_torch_npu_from_pyproject(
+        _file_content(repo, commit, TORCH_NPU_PYPROJECT_FILE),
     )
-
-
-def expected_versions_at(repo: Path, commit: str) -> PackageVersions:
-    return PackageVersions(
-        vllm=expected_vllm_version_at(repo, commit),
-        torch_npu=expected_torch_npu_version_at(repo, commit),
-        cann=expected_cann_version_at(repo, commit),
-    )
+    return PackageVersions(vllm=vllm_tag, torch_npu=torch_npu)
 
 
 def installed_package_version(package: str) -> str | None:
@@ -242,34 +180,10 @@ def installed_torch_npu_version() -> str | None:
     return installed_package_version(TORCH_NPU_PACKAGE)
 
 
-def installed_cann_version() -> str | None:
-    """Read the CANN install-info version for diagnostics only."""
-    env = os.getenv("CANN_VERSION")
-    if env:
-        return env.strip()
-
-    candidates = []
-    explicit = os.getenv("CANN_INSTALL_INFO")
-    if explicit:
-        candidates.append(Path(explicit))
-    ascend_home = os.getenv("ASCEND_HOME_PATH")
-    if ascend_home:
-        candidates.append(Path(ascend_home) / "aarch64-linux" / "ascend_toolkit_install.info")
-    candidates.extend(Path("/usr/local/Ascend/ascend-toolkit/latest").glob("*-linux/ascend_toolkit_install.info"))
-    for path in candidates:
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("version="):
-                return line.partition("=")[2].strip().strip('"')
-    return None
-
-
 def installed_versions() -> PackageVersions:
     return PackageVersions(
         vllm=installed_vllm_version(),
         torch_npu=installed_torch_npu_version(),
-        cann=installed_cann_version(),
     )
 
 
@@ -278,11 +192,11 @@ class VersionAdapter:
 
     def __init__(self, options):
         self.opt = options
-        self.vllm_dir = Path(os.getenv(_VLLM_DIR_ENV, str(options.vllm_dir)))
+        self.vllm_dir = Path(options.vllm_dir)
         self._overrides: dict[str, str] = {}
 
     def targets_at(self, repo: Path, commit: str, policy: VersionPolicy) -> dict[str, str]:
-        return expected_versions_at(repo, commit).as_dict(policy.checked_packages)
+        return expected_versions(repo, commit).as_dict(policy.checked_packages)
 
     def ensure_at_commit(
         self,
@@ -296,7 +210,7 @@ class VersionAdapter:
     def ensure_targets(
         self,
         targets: dict[str, str],
-        checked_packages: tuple[str, ...] | list[str] = SWITCHABLE_PACKAGES,
+        checked_packages: tuple[str, ...] | list[str] = ALL_PACKAGES,
         log_file: Path | None = None,
     ) -> dict[str, str]:
         for package in checked_packages:
@@ -324,7 +238,7 @@ class VersionAdapter:
             return installed_vllm_version()
         if package == TORCH_NPU_PACKAGE:
             return installed_torch_npu_version()
-        return installed_cann_version()
+        raise ValueError(f"unsupported package {package!r}")
 
     def _switch_vllm(self, expected: str, log_file: Path | None) -> None:
         if self.vllm_dir.is_dir():
