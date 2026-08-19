@@ -74,6 +74,43 @@ def test_aclrt_snapshot_wrappers_call_expected_api(worker, method_name, api_name
     mock_call.assert_called_once_with(api_name)
 
 
+def test_snapshot_suspend_runs_npu_snapshot_sequence(worker):
+    with (
+        patch.object(worker, "dump_model") as dump_model,
+        patch.object(worker, "snapshot_process_lock") as process_lock,
+        patch.object(worker, "snapshot_process_backup") as process_backup,
+    ):
+        worker.snapshot_prepare_suspend("/tmp/model")
+        worker.snapshot_suspend()
+
+    dump_model.assert_called_once_with("/tmp/model")
+    process_lock.assert_called_once_with()
+    process_backup.assert_called_once_with()
+
+
+def test_snapshot_resume_runs_npu_restore_phases(worker):
+    with (
+        patch.object(worker, "snapshot_process_restore") as process_restore,
+        patch.object(worker, "snapshot_process_unlock") as process_unlock,
+        patch.object(worker, "update_worker_info_after_resume") as update_worker,
+        patch.object(worker, "rebuild_parallel_group_after_resume") as rebuild_parallel,
+        patch.object(worker, "re_load_weights") as reload_weights,
+        patch.object(worker, "recapture_graph") as recapture_graph,
+        patch.object(worker, "rebuild_kv_transfer_engine_after_resume") as rebuild_kv,
+    ):
+        worker.snapshot_prepare_resume("10.0.0.2", "10.0.0.3")
+        worker.snapshot_restore_model("/tmp/model")
+        worker.snapshot_rebuild_kv_transfer("10.0.0.2", "engine-id")
+
+    process_restore.assert_called_once_with()
+    process_unlock.assert_called_once_with()
+    update_worker.assert_called_once_with("10.0.0.2", "10.0.0.3")
+    rebuild_parallel.assert_called_once_with()
+    reload_weights.assert_called_once_with("/tmp/model")
+    recapture_graph.assert_called_once_with()
+    rebuild_kv.assert_called_once_with("10.0.0.2", "engine-id")
+
+
 def test_call_aclrt_snapshot_api_invokes_aclrt_library(worker):
     mock_api = MagicMock(return_value=0)
     mock_lib = MagicMock()

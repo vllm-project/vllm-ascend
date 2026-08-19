@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 sys.modules.setdefault("torch_npu", types.ModuleType("torch_npu"))
 
-from vllm_ascend.distributed.snapshot import (  # noqa: E402
+from vllm_ascend.snapshot.distributed import (  # noqa: E402
     _abort_hccl_process_group,
     cleanup_dist_env_for_snapshot,
 )
@@ -18,7 +18,7 @@ def test_abort_hccl_process_group_uses_npu_backend():
     backend = process_group._get_backend.return_value
 
     with patch(
-        "vllm_ascend.distributed.snapshot.torch.device",
+        "vllm_ascend.snapshot.distributed.torch.device",
         return_value="npu-device",
     ):
         _abort_hccl_process_group(process_group)
@@ -29,9 +29,9 @@ def test_abort_hccl_process_group_uses_npu_backend():
 
 def test_snapshot_cleanup_injects_hccl_destroyer():
     with (
-        patch("vllm_ascend.distributed.snapshot.destroy_model_parallel") as destroy_model,
-        patch("vllm_ascend.distributed.snapshot.destroy_distributed_environment") as destroy_world,
-        patch("vllm_ascend.distributed.snapshot.reset_group_name_registry") as reset,
+        patch("vllm_ascend.snapshot.distributed.destroy_model_parallel") as destroy_model,
+        patch("vllm_ascend.snapshot.distributed.destroy_distributed_environment") as destroy_world,
+        patch("vllm_ascend.snapshot.distributed.reset_group_name_registry") as reset,
     ):
         cleanup_dist_env_for_snapshot()
 
