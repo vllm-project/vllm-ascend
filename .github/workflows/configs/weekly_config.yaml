@@ -3,6 +3,7 @@
 # exercised by schedule_weekly_test_a2.yaml and schedule_weekly_test_a3.yaml.
 # Adding a new weekly test case is just appending a `- name: ...` entry
 # under the matching section.
+# Add `/weekly <name> --a3-560t` cases under the dedicated `a3-560t` section.
 # Every A3 multi-node case must set `config_base_path` to its internal_dp/config
 # or external_dp/config directory.
 
@@ -354,3 +355,15 @@ a3:
         os: linux-aarch64-310p-2
         config_file_path: Qwen3.6-27B-W8A8-310P-300I-DUO.yaml
 
+a3-560t:
+  single_node:
+    test_config:
+      - name: Qwen3.5-122B-A10B-W8A8-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
+  multi_card:
+    test_config:
+      # pytest-driven tests
+      - name: qwen3-30b-acc
+        os: linux-aarch64-a3-4-cn12-001
+        tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
