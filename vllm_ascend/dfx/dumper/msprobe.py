@@ -38,10 +38,19 @@ class MsprobeBridgeMixin:
     def _init_debugger(self, cudagraph_mode: CUDAGraphMode):
         """Best-effort msprobe debugger init. Never raises — dump stays optional.
 
+        Skip construction when DFX ``dump.enabled=false`` even if
+        ``dump_config_path`` is set — PrecisionDebugger may wrap torch APIs
+        when msprobe ``dump_enable`` is omitted (treated as on). Hot-reload
+        that flips dump on retries via ``Dumper._enforce_dump_requires_debugger``.
+
         Missing ``dump_config_path`` or msprobe import/construct failure leaves
         ``_debugger=None``. Callers that want dump must then force
         ``dump.enabled=false`` (see ``Dumper._enforce_dump_requires_debugger``).
         """
+        if not bool(self.dfx_config.dump_enabled()):
+            self._debugger = None
+            self._uses_aclgraph_dumper = False
+            return None
         dump_cfg = self.runner.ascend_config.dump_config_path
         if dump_cfg is None:
             self._debugger = None

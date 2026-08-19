@@ -649,6 +649,23 @@ def test_dump_count_snapshot_pending_reserves_next_slot():
     assert dumper.dump_count_snapshot(dump_armed=True) == (2, 5)
 
 
+def test_init_debugger_skips_when_dump_disabled(tmp_path):
+    """dump.enabled=false must not construct PrecisionDebugger even with a path."""
+    from vllm.config.compilation import CUDAGraphMode
+
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["dump"]["enabled"] = False
+    dumper = _make_dumper()
+    dumper.dfx_config = cfg
+    dumper.runner = SimpleNamespace(
+        ascend_config=SimpleNamespace(dump_config_path="/tmp/msprobe.json"),
+    )
+    out = dumper._init_debugger(CUDAGraphMode.NONE)
+    assert out is None
+    assert dumper._debugger is None
+    assert dumper._uses_aclgraph_dumper is False
+
+
 def test_init_debugger_soft_fails_and_forces_dump_off(tmp_path):
     from vllm.config.compilation import CUDAGraphMode
 
@@ -717,6 +734,7 @@ def test_init_debugger_real_import_error_soft_fails():
     from vllm.config.compilation import CUDAGraphMode
 
     dumper = _make_dumper()
+    dumper.dfx_config = SimpleNamespace(dump_enabled=lambda: True)
     dumper.runner = SimpleNamespace(
         ascend_config=SimpleNamespace(dump_config_path="/tmp/msprobe.json"),
     )
