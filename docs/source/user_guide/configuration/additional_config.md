@@ -96,6 +96,60 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. |
 
+### Fused MC2 / MegaMoe prefill capacity
+
+`enable_fused_mc2` and `enable_prefill_mc2` control different behaviors:
+
+- `enable_fused_mc2=1` selects the fused MC2 path (`dispatch_ffn_combine` or MegaMoe).
+- `enable_prefill_mc2=true` sizes the MC2/MegaMoe token capacity from
+  `max_num_batched_tokens` instead of the decode-only ACL graph capacity. It
+  does not enable MegaMoe by itself.
+
+Enable `enable_prefill_mc2` when the fused path can process prefill or startup
+profiling batches larger than the decode-only capacity. Otherwise, the
+MegaMoe symmetric buffer can be initialized too small and CANN may fail during
+tiling with an error similar to:
+
+```text
+num_max_tokens_per_rank is invalid, should be >= bs(512), but got 16
+```
+
+For example, with `max_num_batched_tokens=8192`, TP=16, and a maximum decode
+graph size of 256:
+
+- decode-only sizing reserves `256 / 16 = 16` tokens per rank;
+- prefill sizing reserves `8192 / 16 = 512` tokens per rank.
+
+The second value is required if the startup profile or prefill forward passes
+512 tokens per rank. Keep `max_num_batched_tokens` no larger than
+`tp_size * 512`, as recommended for prefill MC2.
+
+```bash
+vllm serve <model> \
+  --tensor-parallel-size 16 \
+  --max-num-batched-tokens 8192 \
+  --enable-expert-parallel \
+  --additional-config \
+  '{"enable_fused_mc2":1,"enable_prefill_mc2":true,"multistream_overlap_shared_expert":false}'
+```
+
+When fused MC2 is disabled and the prefill batch exceeds the decode-only MC2
+capacity, the normal communication selector can fall back to AlltoAll instead
+of producing this MegaMoe buffer error. Therefore, `enable_prefill_mc2=false`
+does not necessarily fail when `enable_fused_mc2=0`; it means prefill MC2 is
+not reserved.
+
+Fused MC2 and `multistream_overlap_shared_expert` are mutually exclusive. The
+fused operator owns the dispatch, expert FFN, and combine schedule and does not
+expose the intermediate events required by shared-expert multi-stream overlap.
+When both are requested, vLLM Ascend keeps fused MC2 enabled and forces
+`multistream_overlap_shared_expert` to `false`.
+
+For PD disaggregation, enable prefill MC2 on P nodes that use fused MC2. It is
+normally unnecessary on D-only nodes, unless their startup/profile path also
+executes prefill-sized MegaMoe batches. Use identical capacity-related settings
+on every rank in the same distributed P or D group.
+
 The details of each configuration option are as follows:
 
 **xlite_graph_config**

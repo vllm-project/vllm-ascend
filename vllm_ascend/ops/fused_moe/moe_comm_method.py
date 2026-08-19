@@ -333,9 +333,13 @@ class FusedMC2CommImpl(MoECommMethod):
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
-        max_recv_token_num = max(
+        theoretical_max_recv_token_num = max(
             1,
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
+        )
+        max_recv_token_num = min(
+            theoretical_max_recv_token_num,
+            get_ascend_config().mega_moe_max_tokens,
         )
 
         logger.info(

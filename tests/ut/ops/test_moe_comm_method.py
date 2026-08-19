@@ -30,6 +30,7 @@ class TestMoECommMethod(TestBase):
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant = False
         self.mock_ascend_config.enable_fused_mc2 = False
+        self.mock_ascend_config.mega_moe_max_tokens = 6144
         self._patch_get_ascend_config = patch(
             "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_config",
             return_value=self.mock_ascend_config,
@@ -132,6 +133,27 @@ class TestMoECommMethod(TestBase):
 
         self.assertTrue(comm_utils.cann_mega_moe_supports_situ(mega_moe))
         self.assertFalse(comm_utils.cann_mega_moe_supports_situ(legacy_mega_moe))
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
+    def test_cann_mega_moe_caps_max_recv_tokens(self, mock_get_mc2_group):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.moe_config = self.moe_config
+        comm_impl.moe_config.num_experts = 384
+        comm_impl.moe_config.experts_per_token = 8
+        comm_impl.moe_config.hidden_dim = 4096
+        comm_impl.moe_config.intermediate_size_per_partition = 1024
+        comm_impl.token_dispatcher = MagicMock(spec=TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.global_bs = 32768
+        comm_impl.token_dispatcher.ep_world_size = 64
+        comm_impl.token_dispatcher.ep_rank_id = 0
+        comm_impl.get_symm_buffer_for_mega_moe = MagicMock(return_value=object())
+        mock_get_mc2_group.return_value.device_group = MagicMock()
+
+        comm_impl._init_mega_moe_symm_buffer(2, torch.int8)
+
+        call = comm_impl.get_symm_buffer_for_mega_moe.call_args
+        self.assertEqual(call.args[2], 512)
+        self.assertEqual(call.kwargs["max_recv_token_num"], 6144)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
