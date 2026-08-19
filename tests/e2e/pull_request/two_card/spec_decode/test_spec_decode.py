@@ -53,6 +53,13 @@ VWN_EAGLE3_MODELS = {
     },
 }
 
+DFLASH2_MODELS = {
+    "dflash2": {
+        "main": "Qwen/Qwen3.8-27B",
+        "spec": "z-lab/Qwen3.8-27B-DFlash2",
+    },
+}
+
 # MoE main models with a built-in MTP draft (the draft itself is MoE), used to
 # reproduce the spec-decode hang fixed by vllm-ascend#10117. No separate spec
 # checkpoint — qwen3_5_mtp reuses the main model's MTP layer.
@@ -68,6 +75,7 @@ BASELINES_SP = {
     "eagle3": [0.68, 0.40, 0.18],
     "p-eagle": [0.5625, 0.25, 0.0625, 0.0, 0.0, 0.0, 0.0, 0.0],
     "vwn_eagle3": [0.75, 0.5, 0.3],
+    "dflash2": [0.855, 0.593, 0.359, 0.290, 0.193, 0.152, 0.076, 0.007],
 }
 
 
@@ -541,3 +549,86 @@ def test_hang():
         generated_text = output[1][0]
         print(f"Generated text: {generated_text!r}")
         print(f"Output tokens: {output_tokens}")
+
+
+@pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [8])
+def test_dflash2_acceptance(
+    method: str,
+    num_speculative_tokens: int,
+):
+    main_model_name = DFLASH2_MODELS[method]["main"]
+    spec_model_name = DFLASH2_MODELS[method]["spec"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        main_model_name,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=512,
+    )
+
+    prompts = [
+        {
+            "role": "user",
+            "content": "What is your name, please provide a detailed introduction.",
+        },
+    ]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": "dflash",
+        "model": spec_model_name,
+        "num_speculative_tokens": num_speculative_tokens,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
+
+    with VllmRunner(
+        main_model_name,
+        max_model_len=2048,
+        disable_log_stats=False,
+        tensor_parallel_size=2,
+        max_num_seqs=1,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.9,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        enable_prefix_caching=False,
+    ) as llm:
+        outputs = llm.model.generate(prompts, sampling_params)
+        metrics = llm.model.get_metrics()
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
+
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
+    golden = BASELINES_SP[method]
+
+    match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
