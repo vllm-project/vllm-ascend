@@ -143,7 +143,7 @@ def test_single_lora_linear_masks_base_rows(add_inputs: bool) -> None:
     adapter_mask = token_indices.eq(0).unsqueeze(1).to(torch.bfloat16)
     wrapper: Any = SimpleNamespace(
         _single_lora_slot=True,
-        _get_single_lora_mask=Mock(return_value=adapter_mask),
+        _single_lora_mask=adapter_mask,
     )
     x = torch.randn(5, 6, dtype=torch.bfloat16)
     y = torch.randn(5, 7, dtype=torch.bfloat16)
@@ -188,17 +188,6 @@ def test_single_lora_mask_is_refreshed_with_metadata() -> None:
     )
 
 
-def test_single_lora_mask_matches_input_rows() -> None:
-    wrapper: Any = SimpleNamespace(
-        _single_lora_mask=torch.tensor([[1], [0], [1], [0]], dtype=torch.bfloat16),
-    )
-    x = torch.empty(3, 5)
-
-    mask = PunicaWrapperNPU._get_single_lora_mask(wrapper, x)
-
-    torch.testing.assert_close(mask, wrapper._single_lora_mask[:3])
-
-
 @pytest.mark.parametrize("add_inputs", [True, False])
 @pytest.mark.parametrize("scale", [0.5, 1.0])
 def test_single_lora_linear_packed_slices(add_inputs: bool, scale: float) -> None:
@@ -206,7 +195,7 @@ def test_single_lora_linear_packed_slices(add_inputs: bool, scale: float) -> Non
     adapter_mask = token_indices.eq(0).unsqueeze(1).to(torch.bfloat16)
     wrapper: Any = SimpleNamespace(
         _single_lora_slot=True,
-        _get_single_lora_mask=Mock(return_value=adapter_mask),
+        _single_lora_mask=adapter_mask,
     )
     x = torch.randn(4, 6, dtype=torch.bfloat16)
     y = torch.randn(4, 7, dtype=torch.bfloat16)
@@ -247,7 +236,7 @@ def test_single_lora_linear_uses_prepacked_a(add_inputs: bool, scale: float) -> 
     adapter_mask = torch.tensor([[1], [0], [1], [0]], dtype=torch.bfloat16)
     wrapper: Any = SimpleNamespace(
         _single_lora_slot=True,
-        _get_single_lora_mask=Mock(return_value=adapter_mask),
+        _single_lora_mask=adapter_mask,
     )
     x = torch.randn(4, 6, dtype=torch.bfloat16)
     y = torch.randn(4, 7, dtype=torch.bfloat16)
@@ -324,6 +313,40 @@ def test_packed_lora_wrappers_extend_only_non_sharded_merged_layers() -> None:
     )
     assert MergedQKVParallelLinearWithLoRA in AscendMergedQKVParallelLinearWithLoRA.__mro__
     assert all("Sharded" not in base.__name__ for base in AscendMergedQKVParallelLinearWithLoRA.__mro__)
+
+
+@pytest.mark.parametrize(("max_loras", "expected"), [(1, True), (2, False)])
+def test_merged_column_packed_wrapper_requires_single_adapter_slot(max_loras: int, expected: bool) -> None:
+    lora_config: Any = SimpleNamespace(max_loras=max_loras, fully_sharded_loras=False)
+
+    with patch("vllm_ascend.lora.utils.maybe_get_oot_by_class", return_value=nn.Linear):
+        can_replace = AscendMergedColumnParallelLinearWithLoRA.can_replace_layer(
+            source_layer=nn.Linear(2, 2),
+            lora_config=lora_config,
+            packed_modules_list=["gate", "up"],
+            model_config=None,
+        )
+
+    assert can_replace is expected
+
+
+@pytest.mark.parametrize(("max_loras", "expected"), [(1, True), (2, False)])
+def test_qkv_packed_wrapper_requires_single_adapter_slot(max_loras: int, expected: bool) -> None:
+    class FakeAscendQKVParallelLinear(nn.Module):
+        pass
+
+    lora_config: Any = SimpleNamespace(max_loras=max_loras, fully_sharded_loras=False)
+    source_layer = FakeAscendQKVParallelLinear()
+
+    with patch("vllm_ascend.lora.utils.AscendQKVParallelLinear", FakeAscendQKVParallelLinear):
+        can_replace = AscendMergedQKVParallelLinearWithLoRA.can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=["q", "k", "v"],
+            model_config=None,
+        )
+
+    assert can_replace is expected
 
 
 def test_refresh_lora_classes_prioritizes_packed_wrappers() -> None:
