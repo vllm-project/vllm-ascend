@@ -22,6 +22,7 @@ surface while routing prefill through the Kimi AscendC kernels and decode
 through the recurrent KDA AscendC kernel.
 """
 
+from collections.abc import Callable
 from functools import partial, wraps
 
 import torch
@@ -34,12 +35,13 @@ try:
     from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
 except ModuleNotFoundError:
     from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -50,8 +52,23 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
+apply_kda_rms_norm_sigmoid_gate: (
+    Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, float],
+        torch.Tensor,
+    ]
+    | None
+) = None
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.kda.fused_norm_gate import (
+        apply_kda_rms_norm_sigmoid_gate as triton_apply_kda_rms_norm_sigmoid_gate,
+    )
+
+    apply_kda_rms_norm_sigmoid_gate = triton_apply_kda_rms_norm_sigmoid_gate
+
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
+_FUSED_QKV_NAME = "fused_qkv"
 
 
 def _zero_padded_spec_output(
@@ -156,6 +173,23 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         gate_lower_bound = kda_config.get("gate_lower_bound")
         self.gate_lower_bound = float(gate_lower_bound) if gate_lower_bound is not None else None
 
+        # KDA uses the same hidden states and TP head layout for Q, K, and V.
+        # Pack their checkpoint shards into one standard QKV linear so MXFP8
+        # performs one dynamic quantization and one quantized matmul.
+        fused_qkv = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.num_heads,
+            self.num_heads,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.{_FUSED_QKV_NAME}",
+        )
+        del self.q_proj
+        del self.k_proj
+        del self.v_proj
+        self.fused_qkv = fused_qkv
+
         self.A_log.weight_loader = partial(
             _load_a_log,
             num_heads=self.num_heads,
@@ -221,18 +255,19 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
     ) -> None:
         del positions
         # KDA metadata and its recurrent state describe the complete sequence.
-        # Unlike Qwen GDN, Kimi's independent q/k/v/g projections do not match
-        # SequenceColumnParallelOp's prefix whitelist.  Gather the token shard
-        # once before all projections instead of gathering for every linear.
+        # KDA's gate projections do not match SequenceColumnParallelOp's prefix
+        # whitelist, so gather the token shard once before every projection.
+        # The fused module deliberately uses the ``fused_qkv`` prefix instead
+        # of ``qkv_proj`` to avoid a second automatic gather inside the linear.
         # The multimodal first layer is already full-sized and must not gather.
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             hidden_states.contiguous(),
             not self.is_vl_first_layer,
         )
         num_tokens = hidden_states.size(0)
-        q = self.q_proj(hidden_states)[0]
-        k = self.k_proj(hidden_states)[0]
-        v = self.v_proj(hidden_states)[0]
+        qkv = self.fused_qkv(hidden_states)[0]
+        projection_size = self.local_num_heads * self.head_dim
+        q, k, v = qkv.split([projection_size] * 3, dim=-1)
 
         beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
         raw_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
@@ -258,9 +293,23 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             core_attn_out,
             self.prefix,
         )
-        core_attn_out = self.o_norm(core_attn_out, output_gate)
+        core_attn_out = self._apply_output_norm_gate(core_attn_out, output_gate)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _apply_output_norm_gate(
+        self,
+        core_attn_out: torch.Tensor,
+        output_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        if apply_kda_rms_norm_sigmoid_gate is not None:
+            return apply_kda_rms_norm_sigmoid_gate(
+                core_attn_out,
+                output_gate,
+                self.o_norm.weight,
+                self.o_norm.eps,
+            )
+        return self.o_norm(core_attn_out, output_gate)
 
     @staticmethod
     def _run_causal_conv1d(

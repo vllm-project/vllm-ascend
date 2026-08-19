@@ -123,6 +123,10 @@ class BalanceScheduler(Scheduler):
             include_finished_set,
             log_stats,
         )
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self._use_consumer_partial_group_hits = not bool(
+            kv_transfer_config is not None and kv_transfer_config.is_kv_producer
+        )
         short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
         if short_request_first_config.enabled:
             from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
@@ -163,6 +167,17 @@ class BalanceScheduler(Scheduler):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if not self._balance_enabled:
+            if not self._use_consumer_partial_group_hits and self.has_mamba_layers:
+                # Upstream's per-group lookup is a remote-prefill consumer
+                # optimization that intentionally omits Mamba state. Producer
+                # requests must use the normal all-group lookup instead. The
+                # current upstream schedule reads has_mamba_layers only when
+                # selecting between these two lookup paths.
+                self.has_mamba_layers = False
+                try:
+                    return super().schedule(throttle_prefills)
+                finally:
+                    self.has_mamba_layers = True
             return super().schedule(throttle_prefills)
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -447,6 +462,7 @@ class BalanceScheduler(Scheduler):
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
+                        and self._use_consumer_partial_group_hits
                         and self.has_mamba_layers
                         and isinstance(
                             self.kv_cache_manager.coordinator,

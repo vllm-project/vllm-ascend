@@ -79,6 +79,27 @@ def correct_optimistic_seq_lens_cpu(
     optimistic_seq_lens_cpu_np[:num_reqs] -= correction.astype(optimistic_seq_lens_cpu_np.dtype, copy=False)
 
 
+def build_parallel_draft_seq_lens_cpu(
+    seq_lens_cpu: torch.Tensor,
+    num_reqs: int,
+    query_len: int,
+) -> torch.Tensor:
+    """Build optimistic FIA KV lengths for one parallel-draft pass on the CPU.
+
+    ``seq_lens_cpu`` contains the target pass's optimistic lengths (async mode
+    assumes all prior drafts accepted). Add the parallel draft query block that
+    will be written to cache. The post-rejection correction is deferred to the
+    FIA forward entry (``pending_reject_*`` on the attention metadata), where
+    the asynchronously-copied reject counts are synchronized and subtracted
+    from ``seq_lens_list``; this lets the accepted-token-count D2H overlap with
+    metadata build and the early draft forward instead of synchronizing in the
+    proposer. The source tensor is never modified.
+    """
+    out = seq_lens_cpu.clone()
+    out[:num_reqs].add_(query_len)
+    return out
+
+
 class SlidingWindowAdapter:
     """
     Sliding-window draft attention for the draft model (EAGLE3 and DFlash).
@@ -164,7 +185,12 @@ class SlidingWindowAdapter:
 
         # update CPU mirrors: recompute from each one's own CPU tensor -> stays on CPU,
         # no D2H sync. numerically identical to the NPU
-        for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
+        for name in (
+            "seq_lens_cpu",
+            "_seq_lens_cpu",
+            "seq_lens_cpu_upper_bound",
+            "parallel_draft_seq_lens_cpu",
+        ):
             src = getattr(common_attn_metadata, name, None)
             if src is not None:
                 _windowed_cpu = src - ((src + k_future - w).clamp(min=0) // b) * b

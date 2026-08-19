@@ -12,8 +12,13 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.transformers_utils.configs.kimi_k3 import (
+    K3_DSPARK_USE_MLA_ROPE,
+    K3DSparkConfig,
+)
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -53,7 +58,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "model runner; use greedy (the default) instead."
             )
         super().__init__(vllm_config, device, runner=runner)
-        self.sample_from_anchor = not getattr(self.draft_model_config.hf_config, "dspark_bonus_anchor", False)
+        self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
         else:
@@ -209,6 +214,22 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
 
+        # Kimi-K3 MLA dspark: the MLA metadata builder derives use_mla_rope
+        # from the TARGET's hf_text_config (K3 target is NoPE), so the draft
+        # groups' builders would emit identity cos/sin while the draft's
+        # context KV is written with real YaRN rotations -- silently breaking
+        # the draft's positional alignment. The builders created above serve
+        # draft layers only, so flip them to the draft's own RoPE setting.
+        draft_hf_config = self.draft_model_config.hf_config
+        if isinstance(draft_hf_config, K3DSparkConfig):
+            for attn_group in self.draft_attn_groups:
+                for builder in attn_group.metadata_builders:
+                    if not isinstance(builder, AscendMLAMetadataBuilder):
+                        raise TypeError(
+                            f"K3 DSpark requires Ascend MLA metadata builders, got {type(builder).__name__}."
+                        )
+                    builder.use_mla_rope = K3_DSPARK_USE_MLA_ROPE
+
         name_to_gid = {
             ln: gid
             for gid, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -338,8 +359,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + self.num_query_per_req
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
-        # Currently, attention causality across draft layers are uniform.
-        cad.causal = self.model.get_draft_attn_causal()[0]
+        if hasattr(self.model, "get_draft_attn_causal"):
+            # Currently, attention causality across draft layers are uniform.
+            cad.causal = self.model.get_draft_attn_causal()[0]
+        else:
+            cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
