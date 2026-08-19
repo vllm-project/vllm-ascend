@@ -94,7 +94,7 @@ def test_ec_cpu_offloading() -> None:
     created_mmaps: set[Path]
     with VllmRunner(
         MODEL,
-        max_model_len=2048,
+        max_model_len=4096,
         gpu_memory_utilization=0.5,
         enforce_eager=True,
         limit_mm_per_prompt={"image": 1},
