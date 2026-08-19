@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.models.utils import StageMissingLayer
 
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
@@ -152,7 +153,7 @@ def test_kimi_k3_enables_projector_rotation_only_when_weight_is_loaded(
     assert ("mm_projector.rot_proj.weight" in dict(wrapper.named_parameters())) is has_rot_proj
 
 
-def test_kimi_k3_skips_projector_rotation_on_non_vision_pp_stage(
+def test_kimi_k3_skips_forwarded_projector_rotation_on_non_vision_pp_stage(
     monkeypatch: pytest.MonkeyPatch,
 ):
     class StubLoader:
@@ -170,7 +171,9 @@ def test_kimi_k3_skips_projector_rotation_on_non_vision_pp_stage(
         AscendKimiK3ForConditionalGeneration
     )
     nn.Module.__init__(wrapper)
-    wrapper.mm_projector = kimi_k3.PPMissingLayer()
+    wrapped_projector = nn.Module()
+    wrapped_projector.rot_proj = nn.Linear(1, 1, bias=False)
+    wrapper.mm_projector = StageMissingLayer("vision_tower", wrapped_projector)
 
     assert wrapper.load_weights(iter(())) == set()
 

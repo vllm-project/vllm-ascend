@@ -606,11 +606,11 @@ class AscendKimiK3ForConditionalGeneration(
         # ModelSlim checkpoints may include an explicit projector rotation.
         # Build the optional layer before loading so streaming checkpoint
         # iterators can populate it, then release it when the weight is absent.
-        # PPMissingLayer forwards arbitrary attribute access to another
-        # StageMissingLayer sentinel. Treat the whole projector as absent
-        # explicitly; otherwise ``rot_proj`` looks present and the cleanup
-        # below attempts to delete an attribute that was never registered.
-        projector_is_missing = isinstance(self.mm_projector, PPMissingLayer)
+        # A StageMissingLayer forwards attribute access to the wrapped module,
+        # so a plain getattr can make ``rot_proj`` look locally registered on
+        # pipeline stages that do not own the vision tower. Use vLLM's common
+        # PP ownership helper before inspecting or mutating the projector.
+        projector_is_missing = is_pp_missing_parameter("mm_projector.rot_proj", self)
         rot_proj = (
             None if projector_is_missing else getattr(self.mm_projector, "rot_proj", None)
         )
