@@ -30,7 +30,6 @@ from itertools import islice
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm._aiter_ops import rocm_aiter_ops
@@ -70,8 +69,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
-from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache  # type: ignore[import-not-found,no-redef]
-from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ignore[import-not-found,no-redef]
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
@@ -80,6 +77,8 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.models.deepseek_v4.compressor import Compressor
+from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -92,91 +91,6 @@ from vllm_ascend.utils import (
 )
 
 
-def _get_ascend_dsa_backend():
-    # Keep this lazy to avoid vLLM model-inspection circular imports.
-    from vllm_ascend.attention.dsa_v1 import AscendDSABackend
-
-    return AscendDSABackend
-
-
-def _dsv4_block_sizes():
-    # Lazy import to avoid the circular import chain (layer -> dsa_v1 ->
-    # attention_v1 -> device_op) hit during vLLM subprocess model inspection.
-    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
-
-    return DSV4_BLOCK_SIZES
-
-
-class AscendCompressorStateCache(CompressorStateCache):
-    def __init__(
-        self,
-        state_dim: int,
-        dtype: torch.dtype,
-        compress_ratio: int,
-        block_size: int,
-        prefix: str,
-    ):
-        super().__init__(state_dim, dtype, compress_ratio, prefix)
-        self.compress_ratio = compress_ratio
-        self.block_size = block_size
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
-        page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
-
-        return AscendSlidingWindowMLASpec(
-            block_size=self.block_size,
-            num_kv_heads=1,
-            head_size=self.state_dim,
-            dtype=self.dtype,
-            sliding_window=self.sliding_window,
-            alignment=None,
-            page_size_padded=page_size_padded,
-        )
-
-    def forward(self): ...
-
-    def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
-
-
-class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
-    def __init__(
-        self,
-        head_dim: int,
-        dtype: torch.dtype,
-        prefix: str,
-        cache_config: CacheConfig,
-        compress_ratio: int = 1,
-    ):
-        super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-
-        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-
-        block_size = _dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0]
-        return AscendMLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=self.head_dim,
-            dtype=self.dtype,
-            model_version="deepseek_v4",
-            compress_ratio=self.compress_ratio,
-            cache_dtype_str=self.cache_config.cache_dtype,
-            scale_dim=1 if self.head_dim == 128 else 0,
-            scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
-        )
-
-    def forward(self): ...
-
-    def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
-
-
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def __init__(
         self,
@@ -187,9 +101,11 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         cache_config: CacheConfig,
     ):
         super().__init__(head_dim, window_size, torch.uint8, prefix, cache_config)
+        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+
         self.dtype = dtype
 
-        self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
+        self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if get_ascend_device_type() in {AscendDeviceType.A5}:
@@ -210,29 +126,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
+        from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 
-
-def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
-    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-
-    if hadamard is None:
-        raise ImportError("Please install scipy")
-    x_shape = x.shape
-    dim = x.shape[-1]
-    x = x.reshape(-1, dim)
-    log_dim = math.ceil(math.log2(dim))
-    dim_padded = 2**log_dim
-    if dim != dim_padded:
-        x = F.pad(x, (0, dim_padded - dim))
-    out = F.linear(x, torch.tensor(hadamard(dim_padded, dtype=float), dtype=x.dtype, device=x.device))
-    out = out * scale
-    return out[..., :dim].reshape(*x_shape)
-
-
-def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-    hidden_size = x.size(-1)
-    return hadamard_transform_ref(x, scale=hidden_size**-0.5)
+        return AscendDSABackend
 
 
 def precompute_freqs_cis_cpu(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow) -> torch.Tensor:
@@ -540,186 +436,6 @@ def _get_llama_4_scaling(
     return scaling[..., None, None]
 
 
-class Indexer(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
-        compress_ratio: int,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.vllm_config = vllm_config
-        self.config = config
-        self.n_heads = config.index_n_heads
-        self.head_dim = config.index_head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
-        self.index_topk = config.index_topk
-        self.q_lora_rank = config.q_lora_rank
-        self.softmax_scale = self.head_dim**-0.5
-        self.compress_ratio = compress_ratio
-
-        self.wq_b = ReplicatedLinear(
-            self.q_lora_rank,
-            self.n_heads * self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wq_b",
-            return_bias=False,
-        )
-
-        self.weights_proj = ReplicatedLinear(
-            config.hidden_size,
-            self.n_heads,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.weights_proj",
-            return_bias=False,
-        )
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
-
-        if self.compress_ratio == 4:
-            # TODO(cmq): change the dtype of cache
-            self.k_cache = AscendDeepseekV4IndexerCache(
-                head_dim=self.head_dim,
-                dtype=k_dtype,
-                prefix=f"{prefix}.k_cache",
-                cache_config=cache_config,
-                compress_ratio=self.compress_ratio,
-            )
-        self.compressor = None
-        if self.compress_ratio > 1:
-            self.compressor = Compressor(
-                vllm_config,
-                config,
-                self.compress_ratio,
-                head_dim=self.head_dim,
-                rotate=True,
-                quant_config=quant_config,
-                cache_config=cache_config,
-                prefix=f"{prefix}.compressor",
-            )  # Compressor(4, 128)
-
-    def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb) -> torch.Tensor:
-        return
-
-
-class Compressor(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
-        compress_ratio: int = 4,
-        head_dim: int = 512,
-        rotate: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.vllm_config = vllm_config
-        self.config = config
-        self.dim = config.hidden_size
-        self.head_dim = head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
-        self.nope_head_dim = head_dim - config.qk_rope_head_dim
-        self.compress_ratio = compress_ratio
-        self.overlap = compress_ratio == 4
-        self.rotate = rotate
-        self.norm_eps = config.rms_norm_eps
-        self.coff = 1 + self.overlap
-
-        self.ape = nn.Parameter(torch.empty(compress_ratio, self.coff * self.head_dim, dtype=torch.float32))
-        self.wkv = ReplicatedLinear(
-            self.dim,
-            self.coff * self.head_dim,
-            bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
-            prefix=f"{prefix}.wkv",
-            return_bias=False,
-        )
-        self.wgate = ReplicatedLinear(
-            self.dim,
-            self.coff * self.head_dim,
-            bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
-            prefix=f"{prefix}.wgate",
-            return_bias=False,
-        )
-
-        # A5 compressor kernel needs float for norm_weight input
-        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
-        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
-
-        state_dtype = torch.float32
-        # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
-        if compress_ratio == 4:
-            self.state_cache = AscendCompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=_dsv4_block_sizes()[cache_config.block_size][0][2],  # type: ignore[union-attr]
-            )
-        elif compress_ratio == 128:
-            self.state_cache = AscendCompressorStateCache(
-                state_dim=2 * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=_dsv4_block_sizes()[cache_config.block_size][0][3],  # type: ignore[union-attr]
-            )
-        else:
-            raise ValueError(
-                f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}"
-            )
-
-    def overlap_transform(self, tensor: torch.Tensor, value=0):
-        b, s, _, _ = tensor.size()
-        ratio, d = self.compress_ratio, self.head_dim
-        new_tensor = tensor.new_full((b, s, 2 * ratio, d), value)
-        new_tensor[:, :, ratio:] = tensor[:, :, :, d:]
-        new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
-        return new_tensor
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
-        pass
-
-    def rope_single(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        inverse: bool = False,
-    ) -> torch.Tensor:
-        dtype = x.dtype
-        if inverse:
-            sin = sin * -1
-        tnd_layout = 1
-        if len(x.shape) == 3:
-            num_tokens, num_heads, rotary_dim = x.shape
-        else:
-            tnd_layout = 0
-            _, num_tokens, num_heads, rotary_dim = x.shape
-        x_rot = torch_npu.npu_rotary_mul(
-            x.reshape(num_tokens, num_heads, 1, rotary_dim).to(torch.float32), cos, sin, rotary_mode="interleave"
-        )
-        if tnd_layout:
-            x = x_rot.reshape(num_tokens, -1, rotary_dim)
-        else:
-            x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
-        return x.to(dtype)
-
-
 class DeepseekV4Attention(nn.Module):
     def __init__(
         self,
@@ -822,7 +538,28 @@ class DeepseekV4Attention(nn.Module):
         )
 
         self.compressor: Compressor | None = None
-        self.indexer: Indexer | None = None
+        self.indexer: DeepseekV4Indexer | None = None
+
+        use_index_cache = getattr(config, "use_index_cache", False)
+
+        # IndexCache: decide whether this layer reuses topk from a previous
+        # indexer-bearing layer. Refer: https://arxiv.org/abs/2603.12201
+        # Only meaningful when this layer actually owns an Indexer (c4) and
+        # IndexCache is enabled via hf-overrides. MTP layers are excluded
+        # because spec_decode shares topk_indices_buffer at the model level
+        # only, leaving impl-level references stale.
+        skip_topk = False
+        if self.compress_ratio == 4 and use_index_cache and ".mtp." not in prefix:
+            compress_ratios = getattr(config, "compress_ratios", None) or []
+            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
+            pattern = getattr(config, "index_topk_pattern", None)
+            freq = getattr(config, "index_topk_freq", 1)
+            if pattern is None:
+                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
+            else:
+                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
+                if 0 <= indexer_seq_idx < len(pattern):
+                    skip_topk = pattern[indexer_seq_idx] == "S"
 
         if self.compress_ratio > 1:
             self.compressor = Compressor(
@@ -836,33 +573,17 @@ class DeepseekV4Attention(nn.Module):
             )  # Compressor(4, 128)
 
             if self.compress_ratio == 4:
-                self.indexer = Indexer(
+                self.indexer = DeepseekV4Indexer(
                     vllm_config,
                     config,
                     self.compress_ratio,
+                    skip_topk=skip_topk,
+                    use_index_cache=use_index_cache,
                     quant_config=quant_config,
                     cache_config=cache_config,
                     prefix=f"{prefix}.indexer",
+                    topk_indices_buffer=topk_indices_buffer,
                 )
-
-        # IndexCache: decide whether this layer reuses topk from a previous
-        # indexer-bearing layer. Refer: https://arxiv.org/abs/2603.12201
-        # Only meaningful when this layer actually owns an Indexer (c4) and
-        # IndexCache is enabled via hf-overrides. MTP layers are excluded
-        # because spec_decode shares topk_indices_buffer at the model level
-        # only, leaving impl-level references stale.
-        skip_topk = False
-        if self.compress_ratio == 4 and getattr(config, "use_index_cache", False) and ".mtp." not in prefix:
-            compress_ratios = getattr(config, "compress_ratios", None) or []
-            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
-            pattern = getattr(config, "index_topk_pattern", None)
-            freq = getattr(config, "index_topk_freq", 1)
-            if pattern is None:
-                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
-            else:
-                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
-                if 0 <= indexer_seq_idx < len(pattern):
-                    skip_topk = pattern[indexer_seq_idx] == "S"
 
         ascend_device_type = get_ascend_device_type()
         k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
@@ -887,8 +608,6 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             compressor=self.compressor,
             swa_cache_layer=swa_cache_layer,
-            topk_indices_buffer=topk_indices_buffer,
-            skip_topk=skip_topk,
         )
 
         self.dsa_attn = AscendDeepseekSparseAttention(

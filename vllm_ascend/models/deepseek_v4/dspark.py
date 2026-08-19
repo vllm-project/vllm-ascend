@@ -33,7 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
-from vllm_ascend.models.deepseek_v4 import (
+from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV4MoE,

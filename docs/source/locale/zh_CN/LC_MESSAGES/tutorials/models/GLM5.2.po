@@ -1013,3 +1013,69 @@ msgstr ""
 "|`enable_sparse_sfa_c8` / `enable_sparse_li_c8`|`false` / `true`|`true` / "
 "`true` (PD)|`false` / `true`|`enable_sparse_sfa_c8` 是针对 C8 量化模型的实验性 SFA "
 "优化；由于已知问题，在 v0.23.0 中请勿将其与 DCP 结合使用。`enable_sparse_li_c8` 是独立的，仍然推荐启用。|"
+
+msgid "##### 5.1.1.4 Multi-Node Deployment over RoCE"
+msgstr "##### 5.1.1.4 基于RoCE的多节点部署"
+
+msgid ""
+"This section describes the additional configuration for A3 deployments that "
+"use RoCE between physical nodes, such as deployments across SuperPods. Apply"
+" these settings in addition to the corresponding A3 deployment commands "
+"above."
+msgstr "本节介绍在物理节点之间使用RoCE的A3部署（例如跨SuperPod的部署）所需的额外配置。请在上文对应的A3部署命令基础上应用这些设置。"
+
+msgid "1. **Logical SuperPod configuration**"
+msgstr "1. **逻辑SuperPod配置**"
+
+msgid ""
+"Set a unique `HCCL_LOGIC_SUPERPOD_ID` for each physical node. All vLLM "
+"processes on the same physical node must use the same value."
+msgstr "为每个物理节点设置唯一的`HCCL_LOGIC_SUPERPOD_ID`。同一物理节点上的所有vLLM进程必须使用相同的值。"
+
+msgid "2. **Expert Parallel communication configuration**"
+msgstr "2. **专家并行通信配置**"
+
+msgid ""
+"The supported MC2 communication mode depends on whether the Expert Parallel "
+"(EP) communication domain spans physical nodes:"
+msgstr "支持的MC2通信模式取决于专家并行（EP）通信域是否跨越物理节点："
+
+msgid ""
+"- If the EP communication domain is contained within a physical node, no change to the existing configuration is required. Fused MC2 remains supported.\n"
+"    - If the EP communication domain spans physical nodes, Fused MC2 is not supported. Hierarchical MC2 communication over RoCE is required and must be enabled by adding `\"enable_mc2_hierarchy_comm\": true` to `--additional-config`."
+msgstr ""
+"- 如果EP通信域包含在单个物理节点内，则无需更改现有配置，仍支持Fused MC2。\n"
+"    - 如果EP通信域跨越物理节点，则不支持Fused MC2。需要通过RoCE进行分层MC2通信，并且必须通过在`--additional-config`中添加`\"enable_mc2_hierarchy_comm\": true`来启用。"
+
+msgid "**Example**"
+msgstr "**示例**"
+
+msgid ""
+"For the 1P1D (2+2) scenario, configure the logical SuperPod ID as follows:"
+msgstr "对于1P1D（2+2）场景，请按如下方式配置逻辑SuperPod ID："
+
+msgid "| Physical node | Configuration |"
+msgstr "| Physical node | Configuration |"
+
+msgid "| Prefill node 0 | `export HCCL_LOGIC_SUPERPOD_ID=0` |"
+msgstr "| Prefill node 0 | `export HCCL_LOGIC_SUPERPOD_ID=0` |"
+
+msgid "| Prefill node 1 | `export HCCL_LOGIC_SUPERPOD_ID=1` |"
+msgstr "| Prefill node 1 | `export HCCL_LOGIC_SUPERPOD_ID=1` |"
+
+msgid "| Decode node 0 | `export HCCL_LOGIC_SUPERPOD_ID=2` |"
+msgstr "| Decode node 0 | `export HCCL_LOGIC_SUPERPOD_ID=2` |"
+
+msgid "| Decode node 1 | `export HCCL_LOGIC_SUPERPOD_ID=3` |"
+msgstr "| Decode node 1 | `export HCCL_LOGIC_SUPERPOD_ID=3` |"
+
+msgid "Apply the following Fused MC2 setting on every node:"
+msgstr "在每个节点上应用以下Fused MC2设置："
+
+msgid ""
+"Merge `\"enable_mc2_hierarchy_comm\": true` into the existing `--additional-"
+"config` JSON object. The following pattern uses `...` to represent the "
+"existing fields:"
+msgstr ""
+"将`\"enable_mc2_hierarchy_comm\": true`合并到现有的`--additional-config` "
+"JSON对象中。以下模式使用`...`表示现有字段："

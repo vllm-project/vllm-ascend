@@ -108,8 +108,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_smolvlm.py
     estimated_time: 20
-  - name: tests/models/multimodal/processing/test_transformers.py
-    estimated_time: 20
   - name: tests/models/test_utils.py
     estimated_time: 20
   - name: tests/models/test_vision.py
@@ -850,8 +848,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/openai/responses/test_response_input_to_harmony.py
     estimated_time: 20
-  - name: tests/entrypoints/openai/parser/test_harmony_render_parity.py
-    estimated_time: 20
   - name: tests/lora/test_moe_lora_ep_load.py
     estimated_time: 20
   - name: tests/model_executor/model_loader/test_modelexpress_loader.py
@@ -1104,8 +1100,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/multimodal/test_parse.py
     estimated_time: 20
-  - name: tests/parser/test_harmony.py
-    estimated_time: 20
   - name: tests/parser/engine/test_ufffd_reasoning_transition.py
     estimated_time: 20
   - name: tests/parser/engine/test_parser_engine.py
@@ -1217,8 +1211,6 @@ e2e-upstream_singlecard:
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20
-  - name: tests/reasoning/test_mistral_reasoning_parser.py
-    estimated_time: 20
   - name: tests/renderers/test_mistral.py
     estimated_time: 20
   - name: tests/entrypoints/openai/completion/test_token_in_token_out.py
@@ -1226,8 +1218,6 @@ e2e-upstream_online_1:
   - name: tests/reasoning/test_olmo3_reasoning_parser.py
     estimated_time: 20
   - name: tests/tokenizers_/test_basic.py
-    estimated_time: 20
-  - name: tests/tool_parsers/test_mistral_tool_parser.py
     estimated_time: 20
   - name: tests/v1/structured_output/test_backend_guidance.py
     estimated_time: 20
@@ -1242,6 +1232,10 @@ e2e-upstream_online_1:
   - name: tests/entrypoints/llm/offline_mode/test_offline_mode.py
     estimated_time: 20
   - name: tests/model_executor/test_model_load_with_params.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/parser/test_harmony_render_parity.py
+    estimated_time: 20
+  - name: tests/parser/test_harmony.py
     estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/v1/distributed/test_async_llm_dp.py
