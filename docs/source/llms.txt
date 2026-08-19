@@ -1,14 +1,14 @@
 # vLLM Ascend Plugin
 > vLLM Ascend is a community-maintained hardware plugin for running vLLM on Huawei Ascend NPUs.
 
-Each section links to canonical HTML pages. If a public Markdown twin is available and reachable, it may be used. (e.g., latest/installation.html --> latest/_sources/installation.md).
+Each section links to canonical HTML pages. If a public Markdown twin is available and reachable, it may be used. (e.g., latest/getting_started/installation.html --> latest/_sources/getting_started/installation.md).
 
 Official repository: https://github.com/vllm-project/vllm-ascend
 Documentation: https://docs.vllm.ai/projects/ascend/en/latest/index.html
 
 ## Getting Started
-- [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html): environment preparation and installation methods.
-- [Quick Start](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html): first successful serve and inference flow.
+- [Installation](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html): environment preparation and installation methods.
+- [Quick Start](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/quick_start.html): first successful serve and inference flow.
 - [Model Tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/index.html): model-specific guides.
 - [Feature Tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/index.html): feature-focused walkthroughs.
 - [Hardware Tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/hardwares/index.html): hardware-specific setup and usage.

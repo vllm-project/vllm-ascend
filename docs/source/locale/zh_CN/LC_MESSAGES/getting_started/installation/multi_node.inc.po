@@ -1,0 +1,125 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "### 5.2 Multi-node Deployment {: #multi-node-deployment }"
+msgstr "### 5.2 Multi-node Deployment {: #multi-node-deployment }"
+
+msgid "Before a multi-node deployment, verify:"
+msgstr "Multi-node 部署要求先验证："
+
+msgid ""
+"1. physical links;\n"
+"2. the NPU network on each node;\n"
+"3. communication between nodes;\n"
+"4. consistent containers and software stacks across all nodes."
+msgstr ""
+"1. 物理链路；\n"
+"2. 单节点 NPU 网络；\n"
+"3. 节点间通信；\n"
+"4. 每个节点的容器和软件栈一致性。"
+
+msgid "#### 5.2.1 Physical Layer Requirements"
+msgstr "#### 5.2.1 物理层要求"
+
+msgid ""
+"- The physical hosts are on mutually reachable networks;\n"
+"- optical modules and network links between NPUs are working;\n"
+"- switch, NIC, and NPU network configurations match the deployment topology."
+msgstr ""
+"- 多台物理机位于可互通网络；\n"
+"- NPU 间光模块/网络链路正常；\n"
+"- 交换机、网卡和 NPU 网络配置符合部署拓扑。"
+
+msgid "#### 5.2.2 Checks on Each Node"
+msgstr "#### 5.2.2 每个节点检查"
+
+msgid "Example for Atlas A2 / a typical node with eight NPU indices:"
+msgstr "Atlas A2 / 典型 8-index 节点示例："
+
+msgid "??? note \"Atlas A3\""
+msgstr "??? note \"Atlas A3\""
+
+msgid ""
+"If the current topology exposes 16 NPU indices, replace `{0..7}` with "
+"`{0..15}`."
+msgstr "如果当前拓扑暴露 16 个 NPU index，将 `{0..7}` 替换为 `{0..15}`。"
+
+msgid "#### 5.2.3 Obtain NPU IP Addresses"
+msgstr "#### 5.2.3 获取 NPU IP"
+
+msgid "For an Atlas A3 topology with 16 indices, use `{0..15}`."
+msgstr "Atlas A3 16-index 拓扑使用 `{0..15}`。"
+
+msgid "#### 5.2.4 Ping Across Nodes"
+msgstr "#### 5.2.4 跨节点 Ping"
+
+msgid "Run the following command on the source node:"
+msgstr "在目标节点执行："
+
+msgid "Verify every NPU link that will participate in communication."
+msgstr "所有参与通信的 NPU 链路都应通过验证。"
+
+msgid "#### 5.2.5 Additional Ascend 950DT Pre-checks"
+msgstr "#### 5.2.5 Ascend 950DT 额外预检查"
+
+msgid ""
+"Before deploying the Ascend 950 series, confirm that the following files or "
+"directories exist and match the actual UB topology:"
+msgstr "Ascend 950 系列部署前，应确认下列文件或目录存在并与实际 UB 拓扑匹配："
+
+msgid ""
+"If the contents are missing or do not match the actual topology, generate "
+"and validate them first according to the corresponding HiXLEP configuration "
+"documentation."
+msgstr "如果内容缺失或与实际拓扑不匹配，需要先按照对应 HiXLEP 配置文档完成生成和校验。"
+
+msgid "#### 5.2.6 Software Environment on Each Node"
+msgstr "#### 5.2.6 各节点软件环境"
+
+msgid "All nodes must use the same:"
+msgstr "所有节点应使用相同的："
+
+msgid ""
+"- vLLM Ascend release;\n"
+"- vLLM version;\n"
+"- CANN/TorchNPU versions;\n"
+"- model weights;\n"
+"- container image;\n"
+"- runtime configuration."
+msgstr ""
+"- vLLM Ascend release；\n"
+"- vLLM；\n"
+"- CANN/TorchNPU；\n"
+"- 模型权重；\n"
+"- 容器镜像；\n"
+"- runtime configuration。"
+
+msgid ""
+"Continue to follow the hardware- and model-specific deployment documentation"
+" for container device mappings."
+msgstr "容器启动的 device mapping 仍按具体硬件和模型部署文档执行。"
+
+msgid ""
+"Multi-node model serving commands are outside the scope of Installation. "
+"After completing the environment checks, proceed to the corresponding "
+"[Feature Tutorials](../tutorials/features/index.md) or model tutorial."
+msgstr ""
+"Multi-node 的模型服务命令不在 Installation 中展开；完成环境检查后，\n"
+"进入对应的 [Feature Tutorials](../tutorials/features/index.md) 或模型教程。"

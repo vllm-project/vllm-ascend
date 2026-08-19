@@ -1,0 +1,193 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "### 5.3 Troubleshooting {: #installation-troubleshooting }"
+msgstr "### 5.3 Troubleshooting {: #installation-troubleshooting }"
+
+msgid "#### 5.3.1 `npu-smi` Works, but Python Cannot Detect the NPU"
+msgstr "#### 5.3.1 `npu-smi` 正常，但 Python 看不到 NPU"
+
+msgid "Also confirm that you have loaded the environment:"
+msgstr "同时确认："
+
+msgid "#### 5.3.2 `libatb.so` Cannot Be Found"
+msgstr "#### 5.3.2 `libatb.so` 找不到"
+
+msgid ""
+"This usually means that the NNAL environment is not installed or has not "
+"been loaded."
+msgstr "通常表示 NNAL 环境未安装或未加载。"
+
+msgid "Then load it:"
+msgstr "并加载："
+
+msgid "#### 5.3.3 The Device Is Not Visible in Docker"
+msgstr "#### 5.3.3 Docker 中看不到设备"
+
+msgid "First, check the host:"
+msgstr "先确认 Host："
+
+msgid "Then verify that:"
+msgstr "然后检查："
+
+msgid ""
+"- `docker run --device` passes the correct device nodes;\n"
+"- the required driver libraries are mounted;\n"
+"- Atlas A3 uses the complete dual-DIE device pair;\n"
+"- Atlas 200I Pro uses the additional product-specific devices and mounts."
+msgstr ""
+"- `docker run --device` 是否传入了正确 device node；\n"
+"- 是否挂载了需要的 driver libraries；\n"
+"- Atlas A3 是否使用了完整的 dual-DIE device pair；\n"
+"- Atlas 200I Pro 是否使用了产品专用的额外 device/mount。"
+
+msgid "#### 5.3.4 `docker pull` Fails"
+msgstr "#### 5.3.4 `docker pull` 失败"
+
+msgid ""
+"The Docker daemon and the current shell use separate network configurations."
+msgstr "Docker daemon 与当前 shell 使用不同的网络配置。"
+
+msgid "Check the following first:"
+msgstr "优先检查："
+
+msgid ""
+"- daemon proxy;\n"
+"- registry mirror;\n"
+"- DNS;\n"
+"- organization network policy."
+msgstr ""
+"- daemon proxy；\n"
+"- registry mirror；\n"
+"- DNS；\n"
+"- 组织网络策略。"
+
+msgid "#### 5.3.5 Device Type Mismatch After pip / Wheel Installation"
+msgstr "#### 5.3.5 pip / wheel 安装后 device type 不匹配"
+
+msgid "Check:"
+msgstr "检查："
+
+msgid "If the wheel does not match the target hardware:"
+msgstr "如果 wheel 与目标硬件不匹配："
+
+msgid ""
+"- switch to WheelNext;\n"
+"- use a pre-built image for the hardware;\n"
+"- or build from source for the target hardware."
+msgstr ""
+"- 改用 WheelNext；\n"
+"- 使用预构建硬件镜像；\n"
+"- 或从源码为目标硬件构建。"
+
+msgid "#### 5.3.6 `pip check` Reports Dependency Conflicts"
+msgstr "#### 5.3.6 `pip check` 报告依赖冲突"
+
+msgid "First distinguish between:"
+msgstr "先区分："
+
+msgid ""
+"- core software conflicts;\n"
+"- optional feature dependencies;\n"
+"- known metadata conflicts in the current release."
+msgstr ""
+"- 核心软件冲突；\n"
+"- 可选 feature dependency；\n"
+"- 当前 release 已知 metadata conflict。"
+
+msgid ""
+"Do not ignore additional conflicts involving any of the following "
+"components:"
+msgstr "任何涉及以下组件的额外冲突都不应直接忽略："
+
+msgid "To avoid wheel metadata issues, use a pre-built image."
+msgstr "如果希望避免 wheel metadata 问题，优先使用预构建镜像。"
+
+msgid "#### 5.3.7 ModelScope Download Compatibility Issues"
+msgstr "#### 5.3.7 ModelScope 下载兼容问题"
+
+msgid "If Hugging Face is inaccessible, you can use:"
+msgstr "如果 Hugging Face 不可访问，可以使用："
+
+msgid ""
+"ModelScope 1.38 and later releases changed Hub behavior, the cache layout, "
+"and repository metadata, which may cause older vLLM model-ID integrations to"
+" fail."
+msgstr ""
+"ModelScope 1.38 及以上版本的 Hub 行为、cache layout 和 repository metadata\n"
+"发生变化，旧版 vLLM model-ID integration 可能因此失败。"
+
+msgid ""
+"If you need to use a newer version, explicitly download the model first:"
+msgstr "需要使用新版本时，建议先显式下载："
+
+msgid "Then replace the model ID in the Quickstart with:"
+msgstr "然后在 Quickstart 中把 model ID 替换为："
+
+msgid ""
+"#### 5.3.8 Installation Verification Passes, but the Model Fails to Run"
+msgstr "#### 5.3.8 Installation verification 通过，但模型运行失败"
+
+msgid "If the following checks pass:"
+msgstr "如果下面条件已经通过："
+
+msgid ""
+"- NPU tensor operation;\n"
+"- vLLM Ascend plugin registration;\n"
+"- core package check;"
+msgstr ""
+"- NPU tensor operation；\n"
+"- vLLM Ascend plugin registration；\n"
+"- core package check；"
+
+msgid "then troubleshoot the failure at the model layer:"
+msgstr "那么模型失败通常应转到模型层排查："
+
+msgid ""
+"- whether the model supports the target hardware;\n"
+"- dtype/quantization;\n"
+"- TP/DP/EP;\n"
+"- graph parameters;\n"
+"- device memory;\n"
+"- model weights and tokenizer."
+msgstr ""
+"- 模型是否支持目标硬件；\n"
+"- dtype/quantization；\n"
+"- TP/DP/EP；\n"
+"- graph 参数；\n"
+"- 显存；\n"
+"- 模型权重和 tokenizer。"
+
+msgid "Continue with:"
+msgstr "此时继续查看："
+
+msgid ""
+"- [Quickstart](quick_start.md)\n"
+"- [Supported Models](../user_guide/support_matrix/supported_models.md)\n"
+"- [Model Tutorials](../tutorials/models/index.md)\n"
+"- [FAQs](../faqs.md)"
+msgstr ""
+"- [Quickstart](quick_start.md)\n"
+"- [Supported Models](../user_guide/support_matrix/supported_models.md)\n"
+"- [Model Tutorials](../tutorials/models/index.md)\n"
+"- [FAQs](../faqs.md)"
+
+msgid "Confirm:"
+msgstr "确认："

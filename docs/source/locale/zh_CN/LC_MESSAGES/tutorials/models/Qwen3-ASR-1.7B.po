@@ -103,9 +103,9 @@ msgstr "### 4.2 源码安装"
 
 msgid ""
 "f you prefer to build from source instead of using the Docker image, install"
-" vLLM-Ascend following the [Installation Guide](../../installation.md)."
+" vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md)."
 msgstr ""
-"如果您希望从源码构建而非使用 Docker 镜像，请按照[安装指南](../../installation.md)安装 vLLM-Ascend。"
+"如果您希望从源码构建而非使用 Docker 镜像，请按照[安装指南](../../getting_started/installation.md)安装 vLLM-Ascend。"
 
 msgid "To verify the source installation:"
 msgstr "验证源码安装："

@@ -6,7 +6,7 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
 
 ## Overview
 
-**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas800I A2 (see [quick_start](../docs/source/quick_start.md) to learn more supported devices list), with different models(coming soon).
+**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas800I A2 (see [quick_start](../docs/source/getting_started/quick_start.md) to learn more supported devices list), with different models(coming soon).
 
 - Latency tests
     - Input length: 32 tokens.

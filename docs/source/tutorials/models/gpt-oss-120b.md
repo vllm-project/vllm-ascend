@@ -69,7 +69,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 ## Deployment
 

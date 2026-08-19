@@ -1,0 +1,40 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:21+0000\n"
+"PO-Revision-Date: 2026-08-19 09:21+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "### 3.3 Run vLLM"
+msgstr "### 3.3 运行 vLLM"
+
+msgid "{% include \"getting_started/quick_start/model_download.inc.md\" %}"
+msgstr "{% include \"getting_started/quick_start/model_download.inc.md\" %}"
+
+msgid "=== \"Offline batch inference\""
+msgstr "=== \"离线批量推理\""
+
+msgid "!!! info \"Currently unsupported\""
+msgstr "!!! info \"当前暂不支持\""
+
+msgid "This Quickstart does not currently provide a standalone offline inference example for Atlas 300I DUO or Atlas 200I Pro. When support is added, commands will be added directly to this tab without changing the page structure."
+msgstr "本 Quickstart 当前不提供 Atlas 300I DUO / Atlas 200I Pro 的独立离线推理示例。后续补充支持时会直接在此标签中增加命令，页面结构不需要调整。"
+
+msgid "=== \"Online serving\""
+msgstr "=== \"在线服务\""
+
+msgid "Verify the service from another terminal on the host:"
+msgstr "在 Host 的另一个终端验证："

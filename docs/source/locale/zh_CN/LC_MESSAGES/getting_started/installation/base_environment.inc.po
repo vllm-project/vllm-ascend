@@ -1,0 +1,102 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "=== \"Base environment\""
+msgstr "=== \"基础环境\""
+
+msgid "## 4.3 Build from a Base Environment {: #base-environment }"
+msgstr "## 4.3 从基础环境开始构建 {: #base-environment }"
+
+msgid ""
+"This path is intended for advanced users who need to manage the userspace "
+"software stack themselves."
+msgstr "这条路径适合需要自行控制 userspace 软件栈的高级用户。"
+
+msgid "You can:"
+msgstr "可以："
+
+msgid ""
+"- install on an existing Linux host;\n"
+"    - or start with a minimal Linux container, then install CANN and vLLM Ascend."
+msgstr ""
+"- 在现有 Linux Host 上完成安装；\n"
+"    - 或先进入一个最小 Linux 容器，再安装 CANN 和 vLLM Ascend。"
+
+msgid "### 4.3.1 Prepare the Base System {: #base-environment-prepare }"
+msgstr "### 4.3.1 准备基础系统 {: #base-environment-prepare }"
+
+msgid "For example, use Ubuntu 22.04:"
+msgstr "例如使用 Ubuntu 22.04："
+
+msgid "!!! important \"Device and driver mounts\""
+msgstr "!!! important \"设备与 driver mount\""
+
+msgid ""
+"For a minimal container to access the NPU, you must still map the device "
+"nodes and host driver files required by the target hardware into the "
+"container."
+msgstr ""
+"最小容器要真正访问 NPU 时，仍需把目标硬件所需的 device node 和 Host\n"
+"        driver 文件映射进容器。"
+
+msgid ""
+"Device mappings differ between hardware products, so this base environment "
+"example does not present a single `docker run` command as universally "
+"applicable."
+msgstr ""
+"不同硬件的 device mapping 不完全一致，因此本基础环境示例不伪装成一个\n"
+"        所有硬件都可直接复制的 `docker run` 命令。"
+
+msgid ""
+"If you need to install CANN in the container, add the appropriate device and"
+" driver mounts according to the official CANN/container documentation for "
+"the target hardware."
+msgstr ""
+"如果需要在容器内安装 CANN，请按照目标硬件的官方 CANN/container 文档\n"
+"        添加对应 device 和 driver mount。"
+
+msgid "### 4.3.2 Install CANN {: #base-environment-install-cann }"
+msgstr "### 4.3.2 安装 CANN {: #base-environment-install-cann }"
+
+msgid "{% include \"getting_started/installation/install_cann.inc.md\" %}"
+msgstr "{% include \"getting_started/installation/install_cann.inc.md\" %}"
+
+msgid ""
+"### 4.3.3 Install vLLM and vLLM Ascend {: #base-environment-install-vllm }"
+msgstr "### 4.3.3 安装 vLLM 和 vLLM Ascend {: #base-environment-install-vllm }"
+
+msgid "{% include \"getting_started/installation/install_vllm_ascend.inc.md\" %}"
+msgstr "{% include \"getting_started/installation/install_vllm_ascend.inc.md\" %}"
+
+msgid "### 4.3.4 Verify the Installation {: #base-environment-verify }"
+msgstr "### 4.3.4 验证安装 {: #base-environment-verify }"
+
+msgid "{% include \"getting_started/installation/verify_installation.inc.md\" %}"
+msgstr "{% include \"getting_started/installation/verify_installation.inc.md\" %}"
+
+msgid "### 4.3.5 Completion Criteria {: #base-environment-complete }"
+msgstr "### 4.3.5 完成标准 {: #base-environment-complete }"
+
+msgid ""
+"This path is complete after the CANN, NPU tensor operation, vLLM Ascend "
+"plugin registration, and core dependency checks all pass."
+msgstr ""
+"CANN、NPU tensor operation、vLLM Ascend plugin registration 和核心依赖检查\n"
+"    全部通过后，本路径完成。"

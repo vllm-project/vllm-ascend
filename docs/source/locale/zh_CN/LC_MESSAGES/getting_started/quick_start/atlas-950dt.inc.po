@@ -1,0 +1,70 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:21+0000\n"
+"PO-Revision-Date: 2026-08-19 09:21+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "=== \"Atlas 950DT\""
+msgstr "=== \"Atlas 950DT\""
+
+msgid "**This path uses**"
+msgstr "**本路径使用**"
+
+msgid ""
+"- Image: a prebuilt image specifically for Atlas 950DT\n"
+"    - Environment verification: the NPU, PyTorch, and vLLM Ascend plugin inside the container\n"
+"    - Model verification reference: [DeepSeek-V4-Flash](../tutorials/models/DeepSeek-V4-Flash.md)"
+msgstr ""
+"- 镜像：Atlas 950DT 专用预构建镜像；\n"
+"    - 环境验证：容器内 NPU、PyTorch 和 vLLM Ascend plugin；\n"
+"    - 模型验证参考：[DeepSeek-V4-Flash](../tutorials/models/DeepSeek-V4-Flash.md)。"
+
+msgid "### 3.1 Start the Container {: #quickstart-atlas-950dt-container }"
+msgstr "### 3.1 启动容器 {: #quickstart-atlas-950dt-container }"
+
+msgid "The commands below expose eight NPUs on an Atlas 950DT node. Before running a command, confirm that `/dev/davinci0` through `/dev/davinci7` exist on the host and adjust the command for the actual device topology."
+msgstr "下面的命令暴露一个 Atlas 950DT 节点上的 8 个 NPU。执行前确认 Host 上存在 `/dev/davinci0` 到 `/dev/davinci7`，并按实际设备拓扑调整。"
+
+msgid "=== \"Ubuntu\""
+msgstr "=== \"Ubuntu\""
+
+msgid "=== \"openEuler\""
+msgstr "=== \"openEuler\""
+
+msgid "<a id=\"quickstart-atlas-950dt-verify\"></a>"
+msgstr "<a id=\"quickstart-atlas-950dt-verify\"></a>"
+
+msgid "{% include \"getting_started/quick_start/container_verification.inc.md\" %}"
+msgstr "{% include \"getting_started/quick_start/container_verification.inc.md\" %}"
+
+msgid "### 3.3 Verify a Model {: #quickstart-atlas-950dt-model }"
+msgstr "### 3.3 验证模型 {: #quickstart-atlas-950dt-model }"
+
+msgid "Model deployment on Atlas 950DT might require a specialized device topology, parallelism, communication, quantization, NPU memory, and runtime parameters. After verifying the container environment above, continue in the following order:"
+msgstr "Atlas 950DT 上的模型部署可能需要专用的设备拓扑、并行、通信、量化、显存和 runtime 参数。完成上面的容器环境验证后，请按以下顺序继续："
+
+msgid ""
+"1. Check the current support status of the model on Atlas 950DT in [Supported Models](../user_guide/support_matrix/supported_models.md).\n"
+"    2. Follow [DeepSeek-V4-Flash](../tutorials/models/DeepSeek-V4-Flash.md) to prepare the model weights and model-specific parameters.\n"
+"    3. Adjust the deployment parameters for the actual 950DT topology, and then verify the model."
+msgstr ""
+"1. 在 [Supported Models](../user_guide/support_matrix/supported_models.md) 确认模型与 Atlas 950DT 的当前支持状态；\n"
+"    2. 参考 [DeepSeek-V4-Flash](../tutorials/models/DeepSeek-V4-Flash.md) 准备模型权重和模型专用参数；\n"
+"    3. 根据 950DT 的实际拓扑调整部署参数后执行模型验证。"
+
+msgid "This page does not repeat the general A2/A3 model commands, to avoid giving the impression that a command that only verifies the environment also verifies a model on 950DT."
+msgstr "本页不复制 A2/A3 的通用模型命令，避免把仅完成环境验证的命令误认为已完成 950DT 模型验证。"

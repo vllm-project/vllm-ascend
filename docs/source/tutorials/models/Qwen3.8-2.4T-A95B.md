@@ -60,14 +60,14 @@ multiple nodes, such as `/root/.cache/`.
 
 If you want to deploy the model in a multi-node environment, verify the
 communication environment according to
-[verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+[verify multi-node communication environment](../../getting_started/installation.md#multi-node-deployment).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
 Select the A3 image and start the docker image on each node. Refer to
-[using docker](../../installation.md#set-up-using-docker).
+[using docker](../../getting_started/installation.md#pre-built-image).
 
 ```{code-block} bash
   :substitutions:
@@ -116,7 +116,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 ### 4.2 Source Code Installation
 
 You can also build and install `vllm-ascend` from source. Refer to
-[set up using Python](../../installation.md#set-up-using-python).
+[set up using Python](../../getting_started/installation.md#existing-cann-environment).
 
 If you want to deploy a multi-node service, install the same version of vLLM
 and vLLM-Ascend on each node.

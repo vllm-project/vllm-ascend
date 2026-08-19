@@ -1,0 +1,68 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:21+0000\n"
+"PO-Revision-Date: 2026-08-19 09:21+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "=== \"Atlas A3\""
+msgstr "=== \"Atlas A3\""
+
+msgid "**This path uses**"
+msgstr "**本路径使用**"
+
+msgid ""
+"- Model: `Qwen/Qwen3-0.6B`\n"
+"    - Mode: offline batch inference / online OpenAI-compatible serving\n"
+"    - Model reference: [Qwen3 Dense](../tutorials/models/Qwen3-Dense.md)"
+msgstr ""
+"- 模型：`Qwen/Qwen3-0.6B`\n"
+"    - 模式：离线批量推理 / 在线 OpenAI-compatible serving\n"
+"    - 模型参考：[Qwen3 Dense](../tutorials/models/Qwen3-Dense.md)"
+
+msgid "!!! note \"A3 device mapping\""
+msgstr "!!! note \"A3 设备映射\""
+
+msgid "Atlas A3 uses a dual-DIE design. This Quickstart exposes two Ascend device nodes for one selected A3 device, such as `/dev/davinci0` and `/dev/davinci1`."
+msgstr "Atlas A3 采用 dual-DIE 设计。当前 Quickstart 为一个选定的 A3 设备暴露两个 Ascend device node，例如 `/dev/davinci0` 和 `/dev/davinci1`。"
+
+msgid ""
+"These two device nodes do not mean that Quickstart automatically uses\n"
+"        `tensor_parallel_size=2`. Whether to enable parallelism depends on the specific model and deployment method."
+msgstr ""
+"这两个 device node 不代表 Quickstart 自动使用\n"
+"        `tensor_parallel_size=2`。是否启用并行应由具体模型和部署方式决定。"
+
+msgid "### 3.1 Start the Container {: #quickstart-atlas-a3-container }"
+msgstr "### 3.1 启动容器 {: #quickstart-atlas-a3-container }"
+
+msgid "=== \"Ubuntu\""
+msgstr "=== \"Ubuntu\""
+
+msgid "=== \"openEuler\""
+msgstr "=== \"openEuler\""
+
+msgid "<a id=\"quickstart-atlas-a3-verify\"></a>"
+msgstr "<a id=\"quickstart-atlas-a3-verify\"></a>"
+
+msgid "{% include \"getting_started/quick_start/container_verification.inc.md\" %}"
+msgstr "{% include \"getting_started/quick_start/container_verification.inc.md\" %}"
+
+msgid "<a id=\"quickstart-atlas-a3-inference\"></a>"
+msgstr "<a id=\"quickstart-atlas-a3-inference\"></a>"
+
+msgid "{% include \"getting_started/quick_start/qwen3_inference.inc.md\" %}"
+msgstr "{% include \"getting_started/quick_start/qwen3_inference.inc.md\" %}"

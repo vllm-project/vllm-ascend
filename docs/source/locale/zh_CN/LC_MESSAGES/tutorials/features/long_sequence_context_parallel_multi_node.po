@@ -79,11 +79,10 @@ msgstr "### 验证多节点通信"
 
 msgid ""
 "Refer to [verify multi-node communication "
-"environment](../../installation.md#verify-multi-node-communication) to "
+"environment](../../getting_started/installation.md#multi-node-deployment) to "
 "verify multi-node communication."
 msgstr ""
-"请参考[验证多节点通信环境](../../installation.md#verify-multi-node-"
-"communication)来验证多节点通信。"
+"请参考[验证多节点通信环境](../../getting_started/installation.md#multi-node-deployment)来验证多节点通信。"
 
 msgid "### Installation"
 msgstr "### 安装"
@@ -93,11 +92,10 @@ msgstr "您可以使用我们的官方 Docker 镜像直接运行 `DeepSeek-V3.1`
 
 msgid ""
 "Select an image based on your machine type and start the Docker image on "
-"your node, refer to [using Docker](../../installation.md#set-up-using-"
+"your node, refer to [using Docker](../../getting_started/installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
-"using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../getting_started/installation.md#pre-built-image)。"
 
 msgid "You need to set up environment on each node."
 msgstr "您需要在每个节点上设置环境。"

@@ -32,10 +32,10 @@ msgstr "## 准备工作"
 
 msgid ""
 "Please follow the [Installation "
-"Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to "
+"Guide](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html) to "
 "make sure vLLM and vLLM Ascend are installed correctly."
 msgstr ""
-"请遵循[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)确保"
+"请遵循[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html)确保"
 " vLLM 和 vLLM Ascend 已正确安装。"
 
 msgid "## Optimizations"

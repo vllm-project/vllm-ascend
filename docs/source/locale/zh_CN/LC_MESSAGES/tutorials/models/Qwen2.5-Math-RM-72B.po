@@ -75,10 +75,10 @@ msgstr "这些版本支持多NPU部署，允许模型利用所有可用的NPU设
 
 msgid ""
 "Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
+"your node, refer to [using docker](../../getting_started/installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动Docker镜像，请参考[安装指南](../../installation.md#set-up-using-"
+"根据您的机器类型选择镜像，并在节点上启动Docker镜像，请参考[安装指南](../../getting_started/installation.md#set-up-using-"
 "docker)。"
 
 msgid "## Deployment"

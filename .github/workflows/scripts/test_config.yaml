@@ -664,7 +664,8 @@
   cpu_only: true
   source_file_dependencies:
     - docs/source/community/versioning_policy.md
-    - docs/source/installation.md
+    - docs/source/getting_started/installation.md
+    - docs/source/getting_started/installation/
     - mkdocs.yml
     - pyproject.toml
     - requirements.txt

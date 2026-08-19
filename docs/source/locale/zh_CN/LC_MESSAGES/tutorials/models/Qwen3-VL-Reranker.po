@@ -61,8 +61,8 @@ msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所�
 
 msgid ""
 "- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../getting_started/installation.md)。"
 
 msgid ""
 "The Qwen3-VL-Reranker model requires a specific chat template for proper "
@@ -105,11 +105,10 @@ msgstr "您可以使用我们官方的docker镜像直接运行`Qwen3-VL-Reranker
 
 msgid ""
 "Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
+"your node, refer to [using docker](../../getting_started/installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像并在节点上启动docker镜像，请参考[使用docker](../../installation.md#set-up-"
-"using-docker)。"
+"根据您的机器类型选择镜像并在节点上启动docker镜像，请参考[使用docker](../../getting_started/installation.md#pre-built-image)。"
 
 msgid "=== \"A3 series\""
 msgstr "=== \"A3系列\""

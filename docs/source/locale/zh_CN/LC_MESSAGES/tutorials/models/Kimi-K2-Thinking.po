@@ -53,10 +53,10 @@ msgstr "您可以使用官方 Docker 镜像直接运行 `Kimi-K2-Thinking`。"
 
 msgid ""
 "Select an image based on your machine type and start the Docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
+"your node, refer to [using docker](../../getting_started/installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../getting_started/installation.md#set-"
 "up-using-docker)。"
 
 msgid "**Parameter Descriptions:**"

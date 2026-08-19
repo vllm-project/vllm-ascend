@@ -100,8 +100,8 @@ msgstr "您可以直接使用官方 Docker 镜像来运行 `MiniMax-M2.5`。"
 
 msgid ""
 "Select an image based on your machine type and start the container on "
-"your node. See [using docker](../../installation.md#set-up-using-docker)."
-msgstr "根据您的机器类型选择镜像，并在节点上启动容器。请参阅[使用 Docker](../../installation.md#set-up-using-docker)。"
+"your node. See [using docker](../../getting_started/installation.md#pre-built-image)."
+msgstr "根据您的机器类型选择镜像，并在节点上启动容器。请参阅[使用 Docker](../../getting_started/installation.md#pre-built-image)。"
 
 msgid "Run with Docker"
 msgstr "使用 Docker 运行"

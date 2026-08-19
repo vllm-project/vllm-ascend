@@ -55,7 +55,7 @@ pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pyt
 export VLLM_USE_MODELSCOPE=True
 ```
 
-Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vLLM Ascend are installed correctly.
+Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html) to make sure vLLM and vLLM Ascend are installed correctly.
 
 !!! note
 

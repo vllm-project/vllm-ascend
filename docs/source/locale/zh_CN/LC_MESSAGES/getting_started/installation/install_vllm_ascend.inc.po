@@ -1,0 +1,128 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "Choose one method."
+msgstr "选择一种方式。"
+
+msgid "=== \"Standard pip wheel\""
+msgstr "=== \"普通 pip wheel\""
+
+msgid "!!! warning \"Standard pip installation currently supports Atlas A2 only\""
+msgstr "!!! warning \"普通 pip 安装当前仅支持 Atlas A2\""
+
+msgid ""
+"The current standard PyPI `vllm-ascend` wheel is built for **Atlas A2**. It "
+"does not automatically support Atlas A3, Atlas 300I DUO, Atlas 200I Pro, or "
+"Atlas 950DT."
+msgstr ""
+"当前普通 PyPI `vllm-ascend` wheel 构建面向 **Atlas A2**，不能自动覆盖\n"
+"            Atlas A3、Atlas 300I DUO、Atlas 200I Pro 或 Atlas 950DT。"
+
+msgid ""
+"For non-A2 hardware, use a pre-built image, WheelNext, or a source "
+"installation."
+msgstr "非 A2 硬件请使用预构建镜像、WheelNext 或源码安装。"
+
+msgid "Check the installed device build:"
+msgstr "检查已安装的 device build："
+
+msgid "=== \"uv-wheelnext\""
+msgstr "=== \"uv-wheelnext\""
+
+msgid ""
+"WheelNext selects a vLLM Ascend wheel that matches the hardware from a "
+"variant repository."
+msgstr "WheelNext 用于从 variant repository 中选择匹配硬件的 vLLM Ascend wheel。"
+
+msgid "First, install and verify `uv`:"
+msgstr "先安装并验证 `uv`："
+
+msgid "Install vLLM:"
+msgstr "安装 vLLM："
+
+msgid "Install the vLLM Ascend variant:"
+msgstr "安装 vLLM Ascend variant："
+
+msgid "Check the device build:"
+msgstr "检查 device build："
+
+msgid "??? warning \"Known dependency metadata conflict\""
+msgstr "??? warning \"已知依赖 metadata 冲突\""
+
+msgid ""
+"The current release wheel combination may declare inconsistent PyTorch "
+"versions for vLLM and vLLM Ascend, causing the final `pip check` to report a"
+" conflict."
+msgstr ""
+"当前 release wheel 组合可能存在 vLLM 与 vLLM Ascend 对 PyTorch\n"
+"            版本声明不一致的问题，导致最终 `pip check` 报告冲突。"
+
+msgid ""
+"If you need a fully consistent and reproducible dependency environment, use "
+"a **pre-built vLLM Ascend image** or a **source installation**."
+msgstr ""
+"如果你需要完全一致、可复现的依赖环境，优先使用：\n"
+"            **预构建 vLLM Ascend 镜像** 或 **源码安装**。"
+
+msgid "=== \"Source installation\""
+msgstr "=== \"源码安装\""
+
+msgid ""
+"This method is intended for users who need to modify Python/C++/kernel code "
+"or build the environment in release dependency order."
+msgstr "适用于需要修改 Python/C++/kernel 代码，或希望按发布依赖顺序构建环境的用户。"
+
+msgid "Install the base tools:"
+msgstr "安装基础工具："
+
+msgid "=== \"Ubuntu / Debian\""
+msgstr "=== \"Ubuntu / Debian\""
+
+msgid "=== \"openEuler / RHEL-like\""
+msgstr "=== \"openEuler / RHEL-like\""
+
+msgid "Clone the matching versions:"
+msgstr "拉取匹配版本："
+
+msgid "Install the vLLM Ascend requirements first, then install vLLM:"
+msgstr "先安装 vLLM Ascend requirements，再安装 vLLM："
+
+msgid ""
+"In environments that support Triton Ascend, install the version specified in"
+" `requirements.txt` last:"
+msgstr "对支持 Triton Ascend 的环境，最后按 `requirements.txt` 中的版本安装："
+
+msgid "!!! note \"Atlas 300I DUO / Atlas 200I Pro\""
+msgstr "!!! note \"Atlas 300I DUO / Atlas 200I Pro\""
+
+msgid ""
+"For paths that do not support Triton/Triton Ascend, do not install the "
+"Triton combination above:"
+msgstr "对不支持 Triton/Triton Ascend 的路径，不安装上述 Triton 组合："
+
+msgid "After installation, run:"
+msgstr "安装完成后："
+
+msgid ""
+"Resolve any additional conflicts involving vLLM, vLLM Ascend, PyTorch, "
+"TorchNPU, or Triton Ascend before proceeding to the Quickstart."
+msgstr ""
+"对任何涉及 vLLM、vLLM Ascend、PyTorch、TorchNPU 或 Triton Ascend 的\n"
+"        额外冲突，都应先处理后再进入 Quickstart。"

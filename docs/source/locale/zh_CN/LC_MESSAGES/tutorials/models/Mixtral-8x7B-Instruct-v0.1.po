@@ -84,11 +84,10 @@ msgstr "您可以使用我们的官方 Docker 镜像直接运行 `Mixtral-8x7B-I
 
 msgid ""
 "Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
+"your node, refer to [using docker](../../getting_started/installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
-"using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../getting_started/installation.md#pre-built-image)。"
 
 msgid "## Deployment"
 msgstr "## 部署"
