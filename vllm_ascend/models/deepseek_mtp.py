@@ -40,7 +40,21 @@ class AscendDeepSeekMTP(DeepSeekMTP):
         weights_mapper = WeightsMapper(
             orig_to_new_prefix={"rot.": f"model.layers.{self.config.num_hidden_layers}.rot."},
         )
-        return super().load_weights(weights_mapper.apply(weights))
+        loaded_weights = super().load_weights(weights_mapper.apply(weights))
+
+        # DeepSeekMTP always constructs shared_head modules, even when the
+        # checkpoint does not contain independently trained head weights.
+        mtp_layer_idx = self.model.mtp_start_layer_idx
+        own_head_weight = f"model.layers.{mtp_layer_idx}.shared_head.head.weight"
+        if own_head_weight in loaded_weights:
+            self.has_own_lm_head = True
+            mtp_layer = self.model.layers[str(mtp_layer_idx)]
+            # This alias is only used by the runner's sharing decision.
+            # Bypass nn.Module registration to avoid a duplicate state-dict
+            # entry for the same per-layer head.
+            object.__setattr__(self, "lm_head", mtp_layer.shared_head.head)
+
+        return loaded_weights
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         if "rot" in name:
