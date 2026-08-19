@@ -3,6 +3,8 @@
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import deepseek_v4
 
+from vllm_ascend.patch.platform import patch_deepseek_v4_thinking_defaults
+
 
 class FakeTokenizer:
     vocab_size = 1
@@ -12,6 +14,35 @@ class FakeTokenizer:
 
     def encode(self, text, add_special_tokens=False, **kwargs):
         return text
+
+
+def test_deepseek_v4_renderer_applies_thinking_defaults(monkeypatch):
+    captured_kwargs = []
+
+    def fake_apply_chat_template(self, *args, **kwargs):
+        captured_kwargs.append(kwargs)
+        return "prompt"
+
+    monkeypatch.setattr(
+        patch_deepseek_v4_thinking_defaults,
+        "_original_apply_chat_template",
+        fake_apply_chat_template,
+    )
+
+    cases = [
+        ({}, {"enable_thinking": True, "reasoning_effort": "high"}),
+        ({"reasoning_effort": "low"}, {"enable_thinking": True, "reasoning_effort": "low"}),
+        ({"reasoning_effort": "none"}, {"enable_thinking": False, "reasoning_effort": "none"}),
+        ({"enable_thinking": False}, {"enable_thinking": False, "reasoning_effort": "high"}),
+        ({"thinking": False}, {"thinking": False, "reasoning_effort": "high"}),
+    ]
+    for provided_kwargs, expected_kwargs in cases:
+        result = patch_deepseek_v4_thinking_defaults._apply_chat_template(
+            object(), [{"role": "user", "content": "hi"}], **provided_kwargs
+        )
+
+        assert result == "prompt"
+        assert captured_kwargs[-1] == expected_kwargs
 
 
 def test_deepseek_v4_reasoning_effort_accepts_latest_values():
