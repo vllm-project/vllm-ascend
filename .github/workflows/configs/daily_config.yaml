@@ -34,7 +34,7 @@ daily:
         tests/e2e/pull_request/one_card/test_attention_fa3.py
         tests/e2e/pull_request/one_card/test_sampler.py
         tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
-        tests/e2e/pull_request/one_card/test_batch_invariant.py
+        # tests/e2e/pull_request/one_card/test_batch_invariant.py
         tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py
         tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
         tests/e2e/pull_request/one_card/test_multi_instance.py
