@@ -15,6 +15,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.connector import (
 )
 
 import vllm_ascend.distributed.ec_transfer.ec_connector.cpu.connector as connector_mod
+import vllm_ascend.distributed.ec_transfer.ec_connector.cpu.scheduler as scheduler_mod
 from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.connector import (
     AscendECCPUConnector,
 )
@@ -63,6 +64,19 @@ def test_valid_cpu_bytes_delegates_to_upstream_connector(monkeypatch):
     AscendECCPUConnector(config, ECConnectorRole.SCHEDULER)
 
     assert calls == [(config, ECConnectorRole.SCHEDULER)]
+
+
+def test_make_scheduler_uses_ascend_scheduler(monkeypatch):
+    scheduler = object()
+    config = _config("64")
+    monkeypatch.setattr(
+        scheduler_mod,
+        "AscendECCPUScheduler",
+        lambda received_config: scheduler if received_config is config else None,
+    )
+    connector = AscendECCPUConnector.__new__(AscendECCPUConnector)
+
+    assert connector._make_scheduler(config) is scheduler
 
 
 def test_build_connector_meta_orders_blocks_for_dma_coalescing():

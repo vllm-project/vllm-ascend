@@ -169,7 +169,7 @@ def patch_init_dependencies(
     register_calls = []
     pcp_group = SimpleNamespace(rank_in_group=0)
 
-    monkeypatch.setattr(worker_mod, "create_ec_shared_region", lambda cfg: region)
+    monkeypatch.setattr(worker_mod, "create_ascend_ec_shared_region", lambda cfg: region)
     monkeypatch.setattr(worker_mod, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(worker_mod, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(worker_mod, "_supports_eccpu_offload", lambda: supported)
