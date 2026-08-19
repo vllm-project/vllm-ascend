@@ -22,7 +22,7 @@ class FakeBackend:
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
 
-    def compile_grammar(self, request_type, grammar_spec):
+    def compile_grammar(self, request_type, grammar_spec, stop_token_ids=None):
         return (type(self).__name__, request_type, grammar_spec)
 
 
@@ -45,7 +45,10 @@ def make_manager() -> StructuredOutputManager:
 
 def make_request(backend: str):
     return SimpleNamespace(
-        sampling_params=SimpleNamespace(structured_outputs=SimpleNamespace(_backend=backend)),
+        sampling_params=SimpleNamespace(
+            structured_outputs=SimpleNamespace(_backend=backend),
+            all_stop_token_ids=[],
+        ),
         structured_output_request=SimpleNamespace(
             structured_output_key=(StructuredOutputOptions.JSON, "{}"),
             grammar=None,

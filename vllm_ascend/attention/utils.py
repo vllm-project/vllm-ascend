@@ -17,6 +17,7 @@ from vllm_ascend.utils import (
     get_ascend_config,
     get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 SFA_QSFA_TILE_SIZE = 128
@@ -164,7 +165,18 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         scheduler_config.max_num_seqs * cache_config.block_size,
     )
 
-    return chunked_prefill_workspace_size
+    if vllm_version_is("0.27.1"):
+        return chunked_prefill_workspace_size
+
+    # Upstream MLA DCP requires the chunked-context workspace to be a multiple
+    # of lcm(block_size, decode_context_parallel_size * kv_interleave), or the
+    # metadata builder's divisibility assert fails; mirror the upstream
+    # alignment on the main branch.
+    from vllm.model_executor.layers.attention.mla_attention import (
+        align_mla_chunked_context_workspace_size,
+    )
+
+    return align_mla_chunked_context_workspace_size(vllm_config, chunked_prefill_workspace_size)
 
 
 def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:

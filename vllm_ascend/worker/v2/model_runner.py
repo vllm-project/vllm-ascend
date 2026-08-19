@@ -51,7 +51,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp, set_potential_max_tokens
+from vllm_ascend.utils import enable_sp, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -283,7 +283,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
-    def prepare_inputs(
+    def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
         batch_desc: BatchExecutionDescriptor,
@@ -449,6 +449,9 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        # `has_prefill` was added to upstream InputBatch on main; the release
+        # dataclass does not have the field.
+        has_prefill_kwargs = {} if vllm_version_is("0.27.1") else {"has_prefill": batch_has_prefill}
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -484,6 +487,7 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
+            **has_prefill_kwargs,
         )
 
         input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
@@ -492,6 +496,26 @@ class NPUModelRunner(GPUModelRunner):
         update_cos_sin(input_batch.positions)
 
         return input_batch
+
+    if vllm_version_is("0.27.1"):
+
+        def prepare_inputs(
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs_impl(scheduler_output, batch_desc)
+
+    else:
+        from vllm.v1.worker.gpu.model_runner import BatchReqState
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs_impl(scheduler_output, batch_desc)
 
     def postprocess_sampled(
         self,
