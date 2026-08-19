@@ -43,7 +43,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
     export NAME=vllm-ascend
 
     docker run --rm \
