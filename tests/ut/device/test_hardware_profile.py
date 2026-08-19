@@ -27,6 +27,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
+        HardwareCapability.MC2_HIERARCHY_COMM,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
