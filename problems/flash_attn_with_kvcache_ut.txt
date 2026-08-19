@@ -1,24 +1,25 @@
 python tests/standalone/fa3/test_fa3_graph_flashdecode_diverge.py 
-[W819 21:17:05.899596364 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[W819 21:31:19.202803677 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
 C13 flashDecodeFlag divergence  short=16  long=16384
 ========================================================================
-[W819 21:17:11.805625377 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[dump] batch=1 kv=16          maxKvSeqlen=16  batch=1  maxNumBlocksPerBatch=1  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=0  numSplits=1  splitLseTotalSize=0  splitOTotalSize=0  totalSplitNodeNum=0  needCoreNum=0
-[dump] batch=1 kv=1024        maxKvSeqlen=1024  batch=1  maxNumBlocksPerBatch=8  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=1  numSplits=1  splitLseTotalSize=256  splitOTotalSize=32768  totalSplitNodeNum=8  needCoreNum=16
+[W819 21:31:24.510961255 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[dump] batch=1 kv=16          maxKvSeqlen=16  batch=1  maxNumBlocksPerBatch=128  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=0  numSplits=1  splitLseTotalSize=0  splitOTotalSize=0  totalSplitNodeNum=0  needCoreNum=0
+[dump] batch=1 kv=1024        maxKvSeqlen=1024  batch=1  maxNumBlocksPerBatch=128  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=1  numSplits=1  splitLseTotalSize=256  splitOTotalSize=32768  totalSplitNodeNum=8  needCoreNum=16
 [dump] batch=1 kv=16384       maxKvSeqlen=16384  batch=1  maxNumBlocksPerBatch=128  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=1  numSplits=1  splitLseTotalSize=432  splitOTotalSize=55296  totalSplitNodeNum=8  needCoreNum=20
-Traceback (most recent call last):
-  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_flashdecode_diverge.py", line 252, in <module>
-    main()
-  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_flashdecode_diverge.py", line 205, in main
-    ref = manual_ref(q, k, v, torch.arange(num_blocks), kv_long)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/z00586359/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_flashdecode_diverge.py", line 175, in manual_ref
-    scores = torch.einsum("hd,thd->ht", q.float(), k_g) * SCALE
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/functional.py", line 373, in einsum
-    return _VF.einsum(equation, operands)  # type: ignore[attr-defined]
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-RuntimeError: einsum(): the number of subscripts in the equation (2) does not match the number of dimensions (3) for operand 0 and no ellipsis was given
-[ERROR] 2026-08-19-21:17:13 (PID:173393, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+------------------------------------------------------------------------
+[ok ] eager(long meta)   vs manual ref : 0.000121
+[x  ] eager(short meta)  vs manual ref : 0.000121
+[x  ] eager(1024 meta)   vs manual ref : 0.000121
+[x  ] graph(short meta)  vs manual ref : 0.000121
+------------------------------------------------------------------------
+Read:
+  flashDecodeFlag toggles 0->1 AND short/1024 cells LARGE (>~1e-1)
+      => CONFIRMED: graph bakes the wrong (or stale) split plan.
+  short cell LARGE but 1024 cell ~1e-1 => non-split path is broken;
+      force graph to split.
+  1024 cell LARGE but short cell ~1e-1 => split tiling staleness
+      (needCoreNum/launchBlockDim mismatch) is the bug.
+  all cells ~1e-1 => split == non-split numerically; look elsewhere.
+------------------------------------------------------------------------
