@@ -1,51 +1,22 @@
 python tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py 
-[W819 22:14:30.925403226 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[W819 22:24:00.980298889 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
 C14 block_table reorder / -1 sentinel   kv=2048  nblk=16
 ========================================================================
-[W819 22:14:36.451556313 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-Traceback (most recent call last):
-  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py", line 230, in <module>
-    main()
-  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py", line 183, in main
-    out_reorder = _run_fa3(q, k, v, seq, cu_q, page_reorder, meta)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py", line 109, in _run_fa3
-    return _fa3_kvcache(
-           ^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/flash_attn_npu_3/flash_attn_npu_interface.py", line 1091, in flash_attn_with_kvcache
-    out, softmax_lse, *rest = _flash_attn_forward(
-                              ^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 698, in __call__
-    return self._opoverload(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_ops.py", line 819, in __call__
-    return self._op(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/autograd.py", line 112, in autograd_impl
-    result = forward_no_grad(*args, Metadata(keyset, keyword_only_args))
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/autograd.py", line 41, in forward_no_grad
-    result = op.redispatch(keyset & _C._after_autograd_keyset, *args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_ops.py", line 826, in redispatch
-    return self._handle.redispatch_boxed(keyset, *args, **kwargs)  # type: ignore[return-value]
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 347, in backend_impl
-    result = self._backend_fns[device_type](*args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_compile.py", line 54, in inner
-    return disable_fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_dynamo/eval_frame.py", line 1181, in _fn
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 382, in wrapped_fn
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/python3.11.10/lib/python3.11/site-packages/flash_attn_npu_3/flash_attn_npu_interface.py", line 135, in _flash_attn_forward
-    out, softmax_lse, out_accum, softmax_lse_accum = flash_attn_npu_3.fwd(
-                                                     ^^^^^^^^^^^^^^^^^^^^^
-RuntimeError: page_table must have dtype int32
-[ERROR] 2026-08-19-22:14:37 (PID:173502, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+[W819 22:24:06.254307579 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+------------------------------------------------------------------------
+[ok ] identity table          vs manual ref : 0.179005
+[x  ] reordered table        vs manual ref : 0.000410
+[x  ] reordered + (-1) tail  vs manual ref : 0.000410
+[x  ] reordered + (-1) graph vs manual ref : 0.000410
+------------------------------------------------------------------------
+Read:
+  identity ~1e-4 but reordered cell LARGE
+      => CONFIRMED: block_table reordering / -1 is the bug.
+  reordered ~1e-4 but (-1) cell LARGE
+      => the -1 sentinel tail is read (stride still wrong).
+  graph cell LARGE while eager cells ~1e-4
+      => the graph refresh (bt_buf.copy_) is stale / not synced.
+  all cells ~1e-4 => block_table content is NOT the bug.
+------------------------------------------------------------------------

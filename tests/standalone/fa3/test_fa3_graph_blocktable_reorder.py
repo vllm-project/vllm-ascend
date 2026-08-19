@@ -176,7 +176,7 @@ def main():
     out_id = _run_fa3(q, k, v, seq, cu_q, page_id, meta)
 
     # ---- cell 2: reordered table, no -1 (permutation of valid ids) ----
-    perm = torch.randperm(num_blocks_pool).npu()  # deterministic? use a fixed seed
+    perm = torch.randperm(num_blocks_pool, dtype=torch.int32).npu()  # deterministic? use a fixed seed
     page_reorder = perm.unsqueeze(0)
     ref_reorder = manual_ref_blocktable(q, k, v, page_reorder[0], kv)
     torch.npu.synchronize()
