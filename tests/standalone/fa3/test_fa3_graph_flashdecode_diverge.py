@@ -15,39 +15,45 @@
 #   eager  -> _build_fa3_scheduler_metadata: cache_seqlens = ACTUAL batch seq_lens
 #   graph  -> _get_fa3_graph_params:        cache_seqlens = WARMUP batch seq_lens
 #
-# ComputeFAMetadata (fa_metadata.aicpu:59-119) bakes two fields FROM the
-# cache_seqlens it is given:
-#   - maxKvSeqlen       = max over cache_seqlens
-#   - flashDecodeFlag   = (batch*numHeadsK <= 0.8*blockDim) && (maxKvSeqlen >= 1024)
-#                         ... && (maxQ*group<=128) && (maxQ<=16) && (minQ>0)
-# and when flashDecodeFlag=1, it also calls splitBN2S1GS2() to bake a SPLIT
-# (flash-decode) tile plan whose coreInfo[]/splitInfo[] depend on those seq_lens.
+# ComputeFAMetadata (fa_metadata.aicpu:59-119) bakes two kinds of seq-dependent
+# fields FROM the cache_seqlens it is given:
+#   - maxKvSeqlen     = max over cache_seqlens
+#   - flashDecodeFlag = (batch*numHeadsK <= 0.8*blockDim) && (maxKvSeqlen >= 1024)
+#                       ... && (maxQ*group<=128) && (maxQ<=16) && (minQ>0)
+#   and, when flashDecodeFlag=1, splitBN2S1GS2() bakes a SPLIT tile plan whose
+#   coreInfo[]/splitInfo[]/needCoreNum depend on those seq_lens.
 #
-# For the FIRST decode token (batch=1, long prefill L>=1024):
-#   eager  -> numTasks=1*8=8<=16, maxKvSeqlen=L>=1024 -> flashDecodeFlag=1 (SPLIT)
-#   graph  -> if warmup seq_lens are short (<1024), bakes flashDecodeFlag=0 (non-split)
-#          -> if warmup seq_lens are long, bakes split with STALE warmup seq_lens
+# The eager path (flash_api.cpp:443-448) then uses needCoreNum as launchBlockDim;
+# the graph path (flash_api.cpp:310-329) hard-codes launchBlockDim = blockDim and
+# NEVER reads needCoreNum.  So the graph's split tiling is doubly stale: it is
+# baked from warmup seq_lens AND launched with a blockDim that ignores the
+# baked needCoreNum.
 #
 # Prior experiments (A..C12) never exercised this: their get_scheduler_metadata
-# always used batch_size == actual batch AND max_seqlen_k == the replay length,
+# always used batch_size == actual batch AND cache_seqlens == the replay length,
 # so they baked the SAME flashDecodeFlag as a fresh eager call would.
 #
 # ---------------------------------------------------------------------------
 # What it prints
 # ---------------------------------------------------------------------------
 #   [dump] tiling fields for meta built with cache_seqlens = short / 1024 / long
-#          -> shows flashDecodeFlag toggling 0 -> 1 across the 1024 threshold
-#   [ok ] eager(long meta)     vs manual ref   -> FA3 split path is CORRECT
-#   [x  ] eager(short meta)    vs manual ref   -> non-split (stale meta) is WRONG?
-#   [x  ] graph(short meta)    vs manual ref   -> same divergence via NPUGraph
+#          (max_seqlen_k held at KV_LONG so stride is NOT the variable)
+#          -> shows flashDecodeFlag toggling 0 -> 1 and needCoreNum shifting
+#   [ok ] eager(long meta)    vs manual ref  -> FA3 split path is CORRECT
+#   [x  ] eager(short meta)   vs manual ref  -> non-split (stale meta) WRONG?
+#   [x  ] eager(1024 meta)    vs manual ref  -> split w/ stale needCoreNum WRONG?
+#   [x  ] graph(short meta)   vs manual ref  -> same divergence via NPUGraph
 #
 # Read:
-#   flashDecodeFlag toggles 0->1, AND the short-meta cells show large diff
-#       => CONFIRMED: graph bakes the wrong flashDecodeFlag from warmup seq_lens.
-#   flashDecodeFlag toggles, but short-meta cells still match ref (~1e-1)
-#       => split vs non-split are numerically equivalent; the decode bug is
-#          elsewhere (e.g. the batch/padding of the capture size, or the CANN
-#          prefill-graph corruption from test_fa3_corrupts_cann.py).
+#   flashDecodeFlag toggles 0->1, AND the short/1024-meta cells show large diff
+#       => CONFIRMED: graph bakes the wrong (or stale) split plan from warmup.
+#   short-meta cell large but 1024-meta cell ~1e-1
+#       => non-split is the broken path; graph must be forced to split.
+#   1024-meta cell large but short-meta cell ~1e-1
+#       => split tiling staleness (needCoreNum/launchBlockDim) is the bug.
+#   all cells ~1e-1
+#       => split == non-split numerically; decode bug is elsewhere (batch
+#          padding of the capture size, or CANN prefill corruption).
 #
 # Usage:
 #   python test_fa3_graph_flashdecode_diverge.py
@@ -119,6 +125,10 @@ def _max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def _make_meta(batch: int, cache_seqlens: torch.Tensor, maxk: int):
+    # maxk controls ONLY the block-table row stride (maxNumBlocksPerBatch);
+    # cache_seqlens controls maxKvSeqlen -> flashDecodeFlag + split tiling.
+    # Production holds maxk = max_blocks_per_seq*block_size (stride==table width)
+    # and varies cache_seqlens with the warmup/actual batch.
     cu_q = torch.arange(batch + 1, dtype=torch.int32).npu()
     return _get_scheduler_metadata(
         batch_size=batch,
@@ -164,17 +174,21 @@ def _run_fa3(q, k, v, cache_seqlens, cu_q, page_table, meta):
     )
 
 
-def manual_ref(q, k, v, page_row, seq_len):
-    """float32 GQA attention over the first seq_len KVs (paged -> flat)."""
+def manual_ref(q, k, v, seq_len):
+    """float32 GQA attention over the first seq_len KVs (identity paged).
+
+    Decode has one query token at position seq_len-1, so causal == full
+    attention over all seq_len cached KVs.  Independent of CANN V1 and FA3.
+    """
     nblk = _ceil_div(seq_len, BLOCK_SIZE)
-    blocks = page_row[:nblk]
-    k_flat = k[blocks].reshape(-1, NUM_KV_HEADS, HEAD_SIZE)[:seq_len].float()
-    v_flat = v[blocks].reshape(-1, NUM_KV_HEADS, HEAD_SIZE)[:seq_len].float()
-    k_g = k_flat.repeat_interleave(GROUP, dim=1)
+    k_flat = k[:nblk].reshape(-1, NUM_KV_HEADS, HEAD_SIZE)[:seq_len].float()
+    v_flat = v[:nblk].reshape(-1, NUM_KV_HEADS, HEAD_SIZE)[:seq_len].float()
+    k_g = k_flat.repeat_interleave(GROUP, dim=1)  # (seq_len, H, D)
     v_g = v_flat.repeat_interleave(GROUP, dim=1)
-    scores = torch.einsum("hd,thd->ht", q.float(), k_g) * SCALE
+    q_f = q.float()  # (1, H, D)
+    scores = torch.einsum("bhd,thd->bht", q_f, k_g) * SCALE  # (1, H, seq_len)
     attn = torch.softmax(scores, dim=-1)
-    return torch.einsum("ht,thd->hd", attn, v_g)  # (H, D)
+    return torch.einsum("bht,thd->bhd", attn, v_g)  # (1, H, D)
 
 
 def main():
@@ -189,12 +203,14 @@ def main():
     print("=" * 72)
 
     # ---- Part 1: dump tiling fields across the flash-decode threshold --------
+    # maxk held at kv_long so maxNumBlocksPerBatch stays == 128 (stride fixed);
+    # only cache_seqlens moves, isolating its effect on flashDecodeFlag.
     for kv in (kv_short, 1024, kv_long):
         seq = torch.tensor([kv], dtype=torch.int32).npu()
-        meta = _make_meta(1, seq, kv)
+        meta = _make_meta(1, seq, kv_long)
         _dump_meta(meta, f"batch=1 kv={kv}")
 
-    # ---- Part 2: precision of short-meta vs long-meta on a long replay ------
+    # ---- Part 2: precision of short/1024/long meta on a long replay ----------
     num_blocks = _ceil_div(kv_long, BLOCK_SIZE)
     q = torch.randn(1, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
     k = torch.randn(num_blocks, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
@@ -202,21 +218,26 @@ def main():
     cu_q = torch.tensor([0, 1], dtype=torch.int32).npu()
     page_table = torch.arange(num_blocks, dtype=torch.int32).npu().unsqueeze(0)
 
-    ref = manual_ref(q, k, v, torch.arange(num_blocks), kv_long)
+    ref = manual_ref(q, k, v, kv_long)
+    torch.npu.synchronize()
 
     seq_short = torch.tensor([kv_short], dtype=torch.int32).npu()
+    seq_1024 = torch.tensor([1024], dtype=torch.int32).npu()
     seq_long = torch.tensor([kv_long], dtype=torch.int32).npu()
-    meta_short = _make_meta(1, seq_short, kv_short)
-    meta_long = _make_meta(1, seq_long, kv_long)
+
+    meta_short = _make_meta(1, seq_short, kv_long)  # flashDecodeFlag=0 (non-split)
+    meta_1024 = _make_meta(1, seq_1024, kv_long)    # split, needCoreNum=16
+    meta_long = _make_meta(1, seq_long, kv_long)    # split, needCoreNum=20
 
     # (a) eager with long meta -> SPLIT path (correct reference)
     out_eager_long = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_long)
-    # (b) eager call with short meta -> NON-SPLIT (stale-meta, what graph bakes)
+    # (b) eager with short meta -> NON-SPLIT (flashDecodeFlag=0 from short warmup)
     out_eager_short = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_short)
-
+    # (c) eager with 1024 meta -> SPLIT but needCoreNum baked from a different len
+    out_eager_1024 = _run_fa3(q, k, v, seq_long, cu_q, page_table, meta_1024)
     torch.npu.synchronize()
 
-    # (c) true NPUGraph path: capture with short meta, replay with long seq
+    # (d) true NPUGraph path: capture with short meta, replay with long seq
     seq_buf = torch.tensor([kv_short], dtype=torch.int32).npu()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
@@ -228,23 +249,24 @@ def main():
     out_graph_short = captured.clone()
 
     print("-" * 72)
-    print(f"[ok ] eager(long meta)  vs manual ref  : "
+    print(f"[ok ] eager(long meta)   vs manual ref : "
           f"{_max_abs_diff(out_eager_long, ref):.6f}")
-    print(f"[x  ] eager(short meta) vs manual ref  : "
+    print(f"[x  ] eager(short meta)  vs manual ref : "
           f"{_max_abs_diff(out_eager_short, ref):.6f}")
-    print(f"[x  ] graph(short meta) vs manual ref  : "
+    print(f"[x  ] eager(1024 meta)   vs manual ref : "
+          f"{_max_abs_diff(out_eager_1024, ref):.6f}")
+    print(f"[x  ] graph(short meta)  vs manual ref : "
           f"{_max_abs_diff(out_graph_short, ref):.6f}")
-    print(f"[dbg] eager(long) vs eager(short)      : "
-          f"{_max_abs_diff(out_eager_long, out_eager_short):.6f}")
 
     print("-" * 72)
     print("Read:")
-    print("  flashDecodeFlag 0->1 across kv=1024 AND short-meta cells LARGE (>~1e-1)")
-    print("      => CONFIRMED: graph bakes non-split from warmup; split is required.")
-    print("  flashDecodeFlag 0->1 but short-meta cells still ~1e-1")
-    print("      => split == non-split numerically; decode bug is elsewhere.")
-    print("  flashDecodeFlag does NOT toggle")
-    print("      => blockDim/head config differs from production; revisit the gate.")
+    print("  flashDecodeFlag toggles 0->1 AND short/1024 cells LARGE (>~1e-1)")
+    print("      => CONFIRMED: graph bakes the wrong (or stale) split plan.")
+    print("  short cell LARGE but 1024 cell ~1e-1 => non-split path is broken;")
+    print("      force graph to split.")
+    print("  1024 cell LARGE but short cell ~1e-1 => split tiling staleness")
+    print("      (needCoreNum/launchBlockDim mismatch) is the bug.")
+    print("  all cells ~1e-1 => split == non-split numerically; look elsewhere.")
     print("-" * 72)
 
 
