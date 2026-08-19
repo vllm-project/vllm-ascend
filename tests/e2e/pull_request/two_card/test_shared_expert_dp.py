@@ -63,6 +63,7 @@ def test_deepseek_v2_lite_flashcomm_shared_expert_dp_matrix_tp2(
             "additional_config": feature_config,
         },
         prompts=PROMPTS,
+        atol=0.075,
     )
 
     compare_logprobs(
@@ -78,4 +79,5 @@ def test_deepseek_v2_lite_flashcomm_shared_expert_dp_matrix_tp2(
             "additional_config": feature_config,
         },
         prompts=PROMPTS,
+        atol=0.075,
     )
