@@ -23,6 +23,7 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.logger import logger
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
@@ -71,6 +72,9 @@ _ATTN_KEYS_BUFFER = None
 # FA3 captured NPU tensors keyed by num_tokens, updated before each replay
 # with the current batch data (cache_seqlens, cu_seqlens_q).
 _FA3_GRAPH_TENSORS: dict = {}
+# num_tokens values for which we already warned about a decode-replay key
+# mismatch (S2 diagnostic); avoids spamming the log every decode step.
+_FA3_S2_LOGGED: set = set()
 
 
 def _no_fa3_graph_capture() -> bool:
@@ -606,6 +610,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         _FA3_GRAPH_TENSORS[num_tokens] = (
             cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf,
         )
+        # S2 diagnostic: expose the capture key and the block_table width so a
+        # decode-replay key mismatch (or a truncated block_table) is visible in
+        # the log.  num_tokens here is actual_seq_lengths_q[-1] == num_tokens_padded.
+        logger.warning(
+            "FA3 graph capture: cached tensors for num_tokens=%s "
+            "(max_seqlen_k=%s, max_batch_size=%s, block_table_cols=%s).",
+            num_tokens, max_seqlen_k, max_batch_size, max_blocks_per_seq,
+        )
         return fa3_graph
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
@@ -638,6 +650,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
             first_meta.attn_state == AscendAttentionState.DecodeOnly
         )
         fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens) if is_decode_replay else None
+        if is_decode_replay and fa3_tensors is None and _FA3_GRAPH_TENSORS:
+            # S2 diagnostic: decode replay could not find the captured FA3
+            # tensors for this num_tokens.  Capture keys by
+            # actual_seq_lengths_q[-1] (== num_tokens_padded at capture); replay
+            # keys by num_tokens_padded.  If these diverge, no refresh happens
+            # and the graph replays with STALE cache_seqlens/block_table ->
+            # decode precision bug.  Log the mismatch once per key.
+            global _FA3_S2_LOGGED
+            if num_tokens not in _FA3_S2_LOGGED:
+                _FA3_S2_LOGGED.add(num_tokens)
+                logger.warning(
+                    "FA3 decode replay: no captured graph tensors for "
+                    "num_tokens=%s (captured keys=%s). cache_seqlens/block_table "
+                    "will NOT be refreshed -> stale graph replay.",
+                    num_tokens, sorted(_FA3_GRAPH_TENSORS),
+                )
         if fa3_tensors is not None:
             cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
             for meta in forward_context.attn_metadata.values():
