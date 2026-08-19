@@ -53,7 +53,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return self.block_size // self.compress_ratio
 
     @property
-    def page_size_bytes(self) -> int:
+    def real_page_size_bytes(self) -> int:
         return (
             self.storage_block_size
             * self.num_kv_heads
@@ -92,18 +92,37 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(store_on_host_set) == 1, (
             "All attention layers in the same KV cache group must use the same host storage setting."
         )
+        non_causal_multi_token_decode_set = set(spec.non_causal_multi_token_decode for spec in specs)
+        assert len(non_causal_multi_token_decode_set) == 1, (
+            "Causal target layers and non-causal multi-token draft layers must use separate KV cache groups."
+        )
+        first_spec = specs[0]
         return cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            scale_dim=specs[0].scale_dim,
-            scale_dtype=specs[0].scale_dtype,
-            dtype=specs[0].dtype,
+            block_size=first_spec.block_size,
+            num_kv_heads=first_spec.num_kv_heads,
+            head_size=first_spec.head_size,
+            scale_dim=first_spec.scale_dim,
+            scale_dtype=first_spec.scale_dtype,
+            dtype=first_spec.dtype,
+            kv_quant_mode=first_spec.kv_quant_mode,
+            page_size_padded=first_spec.page_size_padded,
+            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
             cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=specs[0].compress_ratio,
-            cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
+            alignment=first_spec.alignment,
+            compress_ratio=first_spec.compress_ratio,
+            model_version=first_spec.model_version,
+            non_causal_multi_token_decode=non_causal_multi_token_decode_set.pop(),
+            cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=store_on_host_set.pop(),
         )
+
+    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+        if any(
+            getattr(spec, "non_causal_multi_token_decode", False) != self.non_causal_multi_token_decode
+            for spec in kv_cache_specs.values()
+        ):
+            return False
+        return super().is_uniform_with_collection(kv_cache_specs)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
