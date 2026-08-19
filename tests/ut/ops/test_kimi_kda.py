@@ -266,6 +266,9 @@ def test_full_checkpoint_reload_refreshes_packed_weight_in_place():
 
 def test_repack_waits_until_all_source_weights_are_materialized():
     attention = _make_conv_pack_attention()
+    source_convs = (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d)
+    for value, conv in enumerate(source_convs, start=1):
+        conv.weight.data.fill_(value)
     packed = attention._conv_weights_t()
     packed.data.fill_(-1)
     before = packed.clone()
