@@ -1,20 +1,14 @@
-python tests/standalone/fa3/test_fa3_graph_multiseq.py 
-[W819 10:14:14.395739184 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_multiseq_discrim.py 
+[W819 10:32:40.297463140 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-batch=3  capture_seqlens=[16, 16, 16]  replay_seqlens=[64, 128, 200]
+batch=3  capture=[16, 16, 16]  replay=[64, 64, 128]
+page_table=[[0], [1], [0]]
 ========================================================================
-[W819 10:14:19.507512436 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[ok ] replay seq0 (len=64) vs manual : 0.002276
-[ok ] replay seq1 (len=128) vs manual : 0.835923
-[ok ] replay seq2 (len=200) vs manual : 0.591563
-[seq ] replay seq0 vs seq1 (should differ)          : 0.851562
-[seq ] replay seq1 vs seq2 (should differ)          : 0.591797
-[grow] seq2 replay grown vs capture (should differ)  : 1.559082
+[W819 10:32:45.401145732 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[ok ] seq0 (len=64, blk=0)  vs manual : 0.002119
+[ok ] seq1 (len=64, blk=1)  vs manual : 0.002163
+[ok ] seq2 (len=128, blk=0) vs manual : 0.001268
 ------------------------------------------------------------------------
-Read:
-  [ok  ] ~1e-2 per sequence => multi-seq FA3 graph is CORRECT
-         large on ANY seq  => multi-seq FA3 graph is WRONG (bug found)
-  [seq ] LARGE => outputs actually differ per sequence (sanity)
-  [grow] LARGE => seq2 output changed after cache_seqlens grew
+VERDICT: none of H1/H2/H3 (all correct) — bug is elsewhere
 ------------------------------------------------------------------------
