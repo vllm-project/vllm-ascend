@@ -309,6 +309,9 @@ nav:
         - developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
         - developer_guide/Design_Documents/quantization.md
         - developer_guide/Design_Documents/npugraph_ex.md
+        - developer_guide/Design_Documents/ModelRunner_v2_310P_adaptation.md
+        - developer_guide/Design_Documents/ModelRunner_v2_310P_code_changes.md
+        - developer_guide/Design_Documents/ModelRunner_v2_310P_pr_notes.md
     - Evaluation:
         - developer_guide/evaluation/index.md
         - developer_guide/evaluation/using_evalscope.md

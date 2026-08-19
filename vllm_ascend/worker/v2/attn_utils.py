@@ -55,6 +55,24 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
 
 
+def _get_non_mla_kv_cache_shapes(
+    kv_cache_shape: tuple[int, ...],
+    kv_cache_spec: AttentionSpec,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return K/V shapes without corrupting backend-specific layouts.
+
+    Some backends encode the head dimension in more than one physical
+    dimension. For example, the 310P NZ layout uses a fixed trailing packing
+    dimension of 16. Replacing that dimension with ``head_size_v`` is only
+    valid when V has a genuinely different logical head size from K.
+    """
+    k_shape = kv_cache_shape[1:]
+    head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
+    if head_size_v == kv_cache_spec.head_size:
+        return k_shape, k_shape
+    return k_shape, (*kv_cache_shape[1:-1], head_size_v)
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -821,11 +839,7 @@ def _reshape_kv_cache_v2(
                     v_dim = 0
                 v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
             else:
-                k_shape = kv_cache_shape[1:]
-                v_shape = (
-                    *kv_cache_shape[1:-1],
-                    getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size),
-                )
+                k_shape, v_shape = _get_non_mla_kv_cache_shapes(kv_cache_shape, kv_cache_spec)
 
             k_dtype = v_dtype = kv_cache_spec.dtype
             if enable_fa_quant(vllm_config):

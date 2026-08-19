@@ -166,7 +166,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
-        self.req_states: AscendRequestState = AscendRequestState(
+        request_state_cls = getattr(self, "request_state_cls", AscendRequestState)
+        self.req_states: AscendRequestState = request_state_cls(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
@@ -283,6 +284,24 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
+    def _prepare_prefill_inputs(self, *args, **kwargs) -> None:
+        kwargs.pop("idx_mapping_np", None)
+        kwargs.pop("query_start_loc_np", None)
+        prepare_prefill_inputs(*args, **kwargs)
+
+    def _prepare_pos_seq_lens(self, *args, **kwargs) -> None:
+        kwargs.pop("idx_mapping_np", None)
+        kwargs.pop("query_start_loc_np", None)
+        kwargs.pop("num_scheduled_tokens", None)
+        prepare_pos_seq_lens(*args, **kwargs)
+
+    def _combine_sampled_and_draft_tokens(self, *args, **kwargs):
+        kwargs.pop("idx_mapping_np", None)
+        kwargs.pop("query_start_loc_np", None)
+        kwargs.pop("seq_lens_np", None)
+        kwargs.pop("prefill_len_np", None)
+        return combine_sampled_and_draft_tokens(*args, **kwargs)
+
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -390,7 +409,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Get prefill tokens if any.
         if batch_has_prefill:
-            prepare_prefill_inputs(
+            self._prepare_prefill_inputs(
                 self.input_buffers.input_ids,
                 self.req_states.next_prefill_tokens,
                 idx_mapping,
@@ -398,15 +417,20 @@ class NPUModelRunner(GPUModelRunner):
                 self.req_states.all_token_ids.gpu,
                 self.req_states.prefill_len.gpu,
                 self.req_states.num_computed_tokens.gpu,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
             )
 
         # Prepare positions and seq_lens.
-        prepare_pos_seq_lens(
+        self._prepare_pos_seq_lens(
             idx_mapping,
             query_start_loc,
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
+            idx_mapping_np=idx_mapping_np,
+            query_start_loc_np=query_start_loc_np,
+            num_scheduled_tokens=num_scheduled_tokens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -415,7 +439,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
-        logits_indices = combine_sampled_and_draft_tokens(
+        logits_indices = self._combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
             idx_mapping,
             self.req_states.last_sampled_tokens,
@@ -426,6 +450,10 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits,
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
+            idx_mapping_np=idx_mapping_np,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_np=self.input_buffers.seq_lens_np[:num_reqs],
+            prefill_len_np=prefill_len_np,
         )
 
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
@@ -611,7 +639,8 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
     ):
-        return ModelAclGraphManager(
+        manager_cls = getattr(model_runner, "aclgraph_manager_cls", ModelAclGraphManager)
+        return manager_cls(
             vllm_config,
             device,
             cudagraph_mode,

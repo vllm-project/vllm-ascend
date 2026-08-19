@@ -94,6 +94,25 @@ def _make_modelslim_moe_weight_loader(
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
+
+def _is_foreign_hf_quant_cfg(hf_quant_cfg: Mapping[str, Any]) -> bool:
+    """Return whether *hf_quant_cfg* is an MLX/JANG/affine dump, not ModelSlim.
+
+    ``override_quantization_method`` used to claim any ``quantization_config``
+    that omitted ``quant_method`` as Ascend ModelSlim. MLX/vMLX and JANG
+    checkpoints store ``bits``/``group_size`` (and sometimes ``mode: affine``)
+    under that key, which then crashes 310P looking up missing
+    ``quant_model_description.json`` entries.
+    """
+    method = str(hf_quant_cfg.get("method") or hf_quant_cfg.get("quant_method") or "").lower()
+    if "jang" in method or method in {"mlx", "affine"}:
+        return True
+    modelslim_markers = ("model_quant_type", "fa_quant_type", "kv_cache_type")
+    if any(key in hf_quant_cfg for key in modelslim_markers):
+        return False
+    return "bits" in hf_quant_cfg and "group_size" in hf_quant_cfg
+
+
 # key: model_type
 # value: dict of fused module name -> list of original module names
 _MINIMAX_M3_PACKED_MODULES = {
@@ -590,10 +609,18 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config: Any = None) -> str | None:
-        if hf_quant_cfg is not None:
-            quant_method = hf_quant_cfg.get("quant_method", None)
-            if not quant_method and torch.npu.is_available():
-                return ASCEND_QUANTIZATION_METHOD
+        if hf_quant_cfg is None:
+            return None
+        if _is_foreign_hf_quant_cfg(hf_quant_cfg):
+            # MLX / JANG / bits+group_size dumps are not ModelSlim. Claiming
+            # them as "ascend" makes 310P look up missing
+            # quant_model_description.json keys such as visual.merger.linear_fc1.
+            return None
+        quant_method = hf_quant_cfg.get("quant_method", None)
+        if not quant_method and torch.npu.is_available():
+            return ASCEND_QUANTIZATION_METHOD
+        if quant_method in (ASCEND_QUANTIZATION_METHOD, "modelslim"):
+            return ASCEND_QUANTIZATION_METHOD
         return None
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):

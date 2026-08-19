@@ -74,6 +74,18 @@ class TestAscendModelSlimConfig(TestBase):
         hf_quant_cfg = {"quant_method": ""}
         result = AscendModelSlimConfig.override_quantization_method(hf_quant_cfg, None)
         self.assertEqual(result, "ascend")
+        self.assertIsNone(
+            AscendModelSlimConfig.override_quantization_method(
+                {"group_size": 64, "bits": 8, "mode": "affine"},
+                None,
+            )
+        )
+        self.assertIsNone(
+            AscendModelSlimConfig.override_quantization_method(
+                {"group_size": 128, "bits": 3, "method": "jang-importance"},
+                None,
+            )
+        )
 
         # Test when NPU is not available
         mock_is_available.return_value = False

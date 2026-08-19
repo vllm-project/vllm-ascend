@@ -1024,12 +1024,16 @@
 #    Why:
 ##      vllm-ascend need to initialize slot mapping as torch.int32 dtype,
 #       but vllm default is torch.int64 dtype.
+#       On 310P there is a second reason: upstream staged writes, gather and
+#       slot mapping are Triton kernels, and 310P has no Triton runtime.
 #    How：
 #       replace BlockTables with AscendBlockTables which initialize slot mapping
-#       as torch.int32 dtype.
+#       as torch.int32 dtype, or with Ascend310PBlockTables on 310P, which owns
+#       block tables on CPU and computes slot mapping with NumPy.
 #    Future Plan:
 #       remove this patch when vLLM-ascend's BlockTables can initialize
-#       slot mapping as torch.int64 dtype.
+#       slot mapping as torch.int64 dtype. The 310P branch can be narrowed once
+#       vLLM offers a kernel dispatch mechanism for these paths.
 #
 # ** 24. File: worker/patch_v2/patch_dflash_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

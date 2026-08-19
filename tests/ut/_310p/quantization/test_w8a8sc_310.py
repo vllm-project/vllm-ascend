@@ -15,8 +15,6 @@
 
 import math
 from unittest.mock import MagicMock, patch
-
-import pytest
 import torch
 
 from tests.ut.base import TestBase
@@ -52,7 +50,6 @@ class TestAscendW8A8SCLinearMethod310(TestBase):
         self.assertEqual(params["quant_bias"].shape, (10,))
         self.assertEqual(params["deq_scale"].shape, (10,))
 
-    @pytest.mark.skip("Skip as npu_matmul_compress_dequant will be supported in PTA 26.0.0.")
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_matmul_compress_dequant")
     def test_apply_with_x_not_int8_310(self, mock_matmul_compress_dequant, mock_quantize):
@@ -83,7 +80,6 @@ class TestAscendW8A8SCLinearMethod310(TestBase):
         )
         self.assertTrue(torch.equal(output, expected_y_output))
 
-    @pytest.mark.skip("Skip as npu_matmul_compress_dequant will be supported in PTA 26.0.0.")
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_matmul_compress_dequant")
     def test_apply_with_x_is_int8_310(self, mock_matmul_compress_dequant, mock_quantize):
@@ -106,3 +102,33 @@ class TestAscendW8A8SCLinearMethod310(TestBase):
         mock_quantize.assert_not_called()
         mock_matmul_compress_dequant.assert_called_with(x, layer.weight, layer.index, layer.quant_bias, layer.deq_scale)
         self.assertTrue(torch.equal(output, expected_y_output))
+
+    def _make_loaded_layer(self, is_row_parallel: bool):
+        from vllm_ascend.ops.linear import AscendRowParallelLinear
+
+        spec = AscendRowParallelLinear if is_row_parallel else object
+        layer = MagicMock(spec=spec)
+        layer.input_scale = torch.nn.Parameter(torch.ones(1, dtype=torch.float32), requires_grad=False)
+        layer.input_offset = torch.nn.Parameter(torch.zeros(1, dtype=torch.int8), requires_grad=False)
+        layer.deq_scale = torch.nn.Parameter(torch.ones(4, dtype=torch.int64), requires_grad=False)
+        layer.quant_bias = torch.nn.Parameter(torch.ones(4, dtype=torch.int32), requires_grad=False)
+        self.method.input_size = 8
+        return layer
+
+    @patch("vllm_ascend._310p.quantization.methods.w8a8sc.get_tensor_model_parallel_rank", return_value=0)
+    def test_process_weights_keeps_quant_bias_on_tp_rank0(self, _mock_rank):
+        layer = self._make_loaded_layer(is_row_parallel=True)
+        self.method.process_weights_after_loading(layer)
+        self.assertFalse(torch.equal(layer.quant_bias.data, torch.zeros_like(layer.quant_bias.data)))
+
+    @patch("vllm_ascend._310p.quantization.methods.w8a8sc.get_tensor_model_parallel_rank", return_value=1)
+    def test_process_weights_zeros_quant_bias_on_tp_rank_gt_0(self, _mock_rank):
+        layer = self._make_loaded_layer(is_row_parallel=True)
+        self.method.process_weights_after_loading(layer)
+        self.assertTrue(torch.equal(layer.quant_bias.data, torch.zeros_like(layer.quant_bias.data)))
+
+    @patch("vllm_ascend._310p.quantization.methods.w8a8sc.get_tensor_model_parallel_rank", return_value=1)
+    def test_process_weights_keeps_quant_bias_for_non_row_parallel(self, _mock_rank):
+        layer = self._make_loaded_layer(is_row_parallel=False)
+        self.method.process_weights_after_loading(layer)
+        self.assertFalse(torch.equal(layer.quant_bias.data, torch.zeros_like(layer.quant_bias.data)))

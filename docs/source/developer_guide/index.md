@@ -13,7 +13,10 @@ This section is for developers who want to contribute to vLLM Ascend or understa
 
 ## Design Documents
 
-Explore the design documents covering patch architecture, CPU binding, model runner internals, disaggregated prefill, EPLB, ACL Graph, KV Cache Pool, custom operators, context parallel, quantization, and NPUGraph.
+Explore the design documents covering patch architecture, CPU binding, model runner internals, disaggregated prefill, EPLB, ACL Graph, KV Cache Pool, custom operators, context parallel, quantization, NPUGraph, and 310P Model Runner V2.
+
+- **[Design Documents Index](Design_Documents/index.md)** — Full list
+- **[310P Model Runner V2 First-Release PR Notes](Design_Documents/ModelRunner_v2_310P_pr_notes.md)** — Change map, support matrix, and tests for the 310P MRv2 first release
 
 ## Evaluation
 

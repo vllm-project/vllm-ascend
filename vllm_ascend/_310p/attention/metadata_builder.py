@@ -119,7 +119,21 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         splitfuse_states = (
             AscendAttentionState.SpecDecoding,
             AscendAttentionState.ChunkedPrefill,
+            AscendAttentionState.PrefillCacheHit,
         )
+
+        # PrefillNoCache passes seq_lens to the ATB self-attention encoder as
+        # host parameters. Paged and splitfuse attention consume device-side
+        # context lengths instead, and ACL graph capture must not record a
+        # pageable host-to-device copy in their forward paths.
+        device_metadata_states = (
+            AscendAttentionState.DecodeOnly,
+            *splitfuse_states,
+        )
+        if attn_metadata.attn_state in device_metadata_states:
+            attn_metadata.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            attn_metadata.query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+
         if attn_metadata.attn_state not in splitfuse_states:
             return attn_metadata
 
@@ -129,10 +143,6 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
             attn_metadata,
             self._fill_query_lens_cpu(num_reqs, query_start_loc_cpu, is_drafting),
         )
-
-        # Bind device-side views for in-place graph replay updates.
-        attn_metadata.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        attn_metadata.query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
 
         if is_compressed_mask_supported():
             attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)

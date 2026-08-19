@@ -231,6 +231,38 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
 
 class TestAscendAttentionMetadataBuilder310(TestBase):
+    def test_build_keeps_host_seq_lens_for_prefill(self):
+        builder = object.__new__(AscendMetadataBuilder310Direct)
+        common_attn_metadata = MagicMock()
+        common_attn_metadata.num_reqs = 2
+        common_attn_metadata.seq_lens = torch.tensor([3, 5, 0], dtype=torch.int32)
+
+        host_seq_lens = torch.tensor([3, 5], dtype=torch.int32)
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.seq_lens = host_seq_lens
+
+        with patch.object(AscendMetadataBuilder310Direct.__bases__[0], "build", return_value=metadata):
+            result = builder.build(0, common_attn_metadata)
+
+        assert result.seq_lens is host_seq_lens
+
+    def test_build_binds_device_metadata_for_decode(self):
+        builder = object.__new__(AscendMetadataBuilder310Direct)
+        common_attn_metadata = MagicMock()
+        common_attn_metadata.num_reqs = 2
+        common_attn_metadata.seq_lens = torch.tensor([3, 5, 0], dtype=torch.int32)
+        common_attn_metadata.query_start_loc = torch.tensor([0, 1, 2, 2], dtype=torch.int32)
+
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+
+        with patch.object(AscendMetadataBuilder310Direct.__bases__[0], "build", return_value=metadata):
+            result = builder.build(0, common_attn_metadata)
+
+        assert result.seq_lens.data_ptr() == common_attn_metadata.seq_lens[:2].data_ptr()
+        assert result.query_start_loc.data_ptr() == common_attn_metadata.query_start_loc[:3].data_ptr()
+
     def test_fill_query_lens_cpu_without_buffer(self):
         builder = AscendMetadataBuilder310Direct.__new__(AscendMetadataBuilder310Direct)
         builder._query_lens_cpu_buffer = None
