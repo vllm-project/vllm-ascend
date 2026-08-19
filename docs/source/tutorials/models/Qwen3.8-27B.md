@@ -226,7 +226,7 @@ Before starting the service:
 
     The following example is for Atlas 800 A3 / Atlas 800 A2. Quantized versions need `--quantization ascend`.
 
-    ```shell
+    ```bash
     #!/bin/sh
     # Load model from ModelScope to speed up download
     export VLLM_USE_MODELSCOPE=True
