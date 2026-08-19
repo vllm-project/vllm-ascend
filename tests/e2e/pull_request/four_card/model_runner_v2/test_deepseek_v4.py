@@ -127,5 +127,5 @@ def test_dspark_spec_decoding(
         Vector,
     )
     golden = [0.83, 0.74, 0.65, 0.59, 0.52]
-    match = all(abs(a - b) < 0.03 for a, b in zip(acceptance_per_pos, golden))
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
