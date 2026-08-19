@@ -140,15 +140,13 @@ python -m tools.bisect.auto_bisect \
 |---|---|---|---|
 | vLLM | `.github/vllm-release-tag.commit` | vLLM release tag | 是 |
 | torch-npu | `requirements.txt`(回退 `pyproject.toml`) | `torch-npu` 的版本约束 | 是 |
-| CANN | `csrc/version.info` | CANN 兼容版本 | 否,仅保留读取接口 |
 
 工具先比较 good 和 bad 两端的 vLLM、torch-npu 版本:
 
 - 两端版本相同:该包后续不再检查;
 - 两端版本不同:每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
-- CANN 只读取并记录版本,不会在运行中的容器内切换。
 
-vLLM 切换优先使用 `$VLLM_DIR`(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
+vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
 
 ---
 

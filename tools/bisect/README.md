@@ -39,13 +39,11 @@ trigger (case FAIL)
   of a misleading FAIL — like `git bisect skip`.
 * **Dependency adaptation**: the tool reads vLLM from
   `.github/vllm-release-tag.commit`, torch-npu from `requirements.txt` (with
-  `pyproject.toml` as fallback), and
-  CANN from `csrc/version.info`. If the good and bad endpoints declare the
-  same vLLM and torch-npu versions, no version checks run. If either endpoint
+  `pyproject.toml` as fallback). If the good and bad endpoints declare the same
+  vLLM and torch-npu versions, no version checks run. If either endpoint
   version differs, every candidate is adapted before pytest: vLLM is checked
-  out from `$VLLM_DIR` (default `/vllm-workspace/vllm`) and torch-npu is
-  reinstalled with pip. CANN is read for diagnostics only because changing it
-  requires a new container.
+  out from the configured vLLM source directory (default
+  `/vllm-workspace/vllm`) and torch-npu is reinstalled with pip.
 
 ## Status tables (good source, read-only)
 
