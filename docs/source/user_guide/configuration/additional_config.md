@@ -72,6 +72,9 @@ The following table lists additional configuration options available in vLLM Asc
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
+| `dfx_config_path` / `dfx-config`    | str  | `None`  | Path to DFX runtime JSON (`dump` / `ascend_log` / `report` / `detector` / `input_filter`). Default: `<cwd>/dfx/config/dfx_config.json`. Hot reload: per-DP leader read + in-DP broadcast, or local file poll. `report.save_sensitive_info` defaults to `false` (lengths only in anomaly reports). `report.print_sampling_meta` defaults to `false` (`[SamplingMeta]` log on anomaly arm when true). |
+| `dfx_config_reload_interval`        | float| `0`     | DFX JSON hot-reload period in seconds. Default `0` (disabled). Set `> 0` to enable periodic refresh. Also written into JSON as `reload_interval_seconds` for visibility; the startup value remains authoritative. **Required `> 0` for `dump.dump_once`.** |
+| `dfx_report_dir`                    | str  | `None`  | Directory for short anomaly reports. Default: sibling `dfx/report` next to the config dir. |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
@@ -169,6 +172,67 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
 
+**dfx_config_path / dfx-config**
+
+Path to the DFX runtime JSON controlling dump, `ascend_log`, report, and anomaly detectors
+(nested `detector.<name>.enabled`, shared `detector.stop_after_alert`,
+`detector.output_substring.match_prefix`, report `max_*` truncation, etc.).
+If omitted, vLLM-Ascend uses `<cwd>/dfx/config/dfx_config.json` (created with defaults on first start).
+
+**dfx_config_reload_interval**
+
+Hot-reload period in seconds for the DFX JSON. Default `0` (disabled; config
+loaded once at startup only). Set `> 0` to enable periodic refresh. The same
+value is persisted into the DFX JSON as `reload_interval_seconds` for visibility;
+changing only the JSON field does not override the startup setting.
+This startup setting is authoritative; it is not turned back on by fields inside the JSON
+after the process has started with `0`.
+
+On **API / EngineCore** (processes without `RANK`), the same interval also starts a daemon
+thread that file-polls the JSON and applies `ascend_log` (`level` + `debug`) via
+`apply_ascend_log_level` — it does **not** join the worker world broadcast and does not
+write the file. Initial levels are applied at AscendConfig construction; the thread
+re-applies after subsequent file changes. Workers keep step-driven sync only.
+
+Inside the DFX JSON, `dump.dump_once: true` is consumed by `ManualDumpDetector` on the next
+successful hot-reload (then persisted back to `false`). The alert arms one msprobe dump without
+consuming `max_times` or cooldown; it still requires `dump.enabled` and an initialized debugger.
+**Requires `dfx_config_reload_interval > 0`** — with interval `0`, editing `dump_once` in the
+JSON has no effect.
+
+Optional detect-time input filters via top-level `"input_filter": { "filters": [...] }`
+(empty = no filter). Owned by the process-wide `InputFilterManager` singleton; detectors
+call it before checking a request. Each entry has `type`, `mode` (`include`|`exclude`),
+and type-specific fields: `input_token_id_prefix` (`prefixes`), `prompt_length`
+(`op` + `value` / `min`/`max`), `prompt_contains_token_ids` (`token_ids`,
+`match`=`any`|`subsequence`). Detect only when all includes match and no exclude matches.
+Prefix matching is only via `type: input_token_id_prefix` (no separate prefixes field).
+Manual `dump_once` bypasses filters.
+
+To capture prompt token ids for writing filters, set
+`input_filter.print_input_token_ids_once: true` (requires reload interval `> 0`). On the
+next `execute_model` with requests, TP0 logs `[DFX print_input]` (`length=` + full ids +
+prefix hint) and clears the flag. Design: `docs/zh/design/dfx_design.md` §2.6; ops:
+`docs/zh/design/dfx_ops.md`. Annotated example:
+`vllm_ascend/dfx/templates/dfx_config.example.jsonc`.
+
+Default `sync_mode` is `broadcast`: **one JSON leader per EngineCore / DP** monitors the file and
+broadcasts **inside that DP only** (`inner_dp_world`). Multi-DP never uses the full EP world for
+config sync (avoids idle-DP deadlock). If `inner_dp_world` is unavailable, workers fall back to
+local file poll — place a readable `dfx_config_path` on each EngineCore (per-node copy is fine;
+DPs do not sync config to each other). Set `"sync_mode": "file"` for explicit per-process mtime
+polling on a shared path. See `docs/zh/design/dfx_design.md` and
+`docs/zh/design/dfx_ops.md` (ops / troubleshooting).
+
+Example:
+
+```json
+{
+  "dfx_config_path": "/data/dfx/config/dfx_config.json",
+  "dfx_config_reload_interval": 5
+}
+```
+
 **scheduler_config.short_request_first_config**
 
 ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It does not support batch-job-aware, profiling-chunk, or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
@@ -189,6 +253,7 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 | `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be reserved. |
 | `low_available_tokens_threshold` | int | `4096` | Threshold for prioritising long vs short decode jobs. When available tokens > threshold, long decode jobs are prioritised; when ≤ threshold, short decode jobs are prioritised. |
 | `short_decode_token_threshold` | int | `32` | Threshold for classifying a job as "short decode". |
+
 
 ### Example
 
