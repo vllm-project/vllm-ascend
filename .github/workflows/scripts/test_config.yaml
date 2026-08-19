@@ -303,6 +303,8 @@
   source_file_dependencies:
     - vllm_ascend/models
   tests:
+    - tests/ut/models/test_deepseek_v4_compressor.py
+    - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
@@ -499,7 +501,7 @@
   base: spec_decode_base
   source_file_dependencies:
     - vllm_ascend/spec_decode/dspark_proposer.py
-    - vllm_ascend/models/deepseek_v4_dspark.py
+    - vllm_ascend/models/deepseek_v4/dspark.py
   tests:
     - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
     - tests/e2e/pull_request/eight_card/test_glm5_2.py

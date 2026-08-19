@@ -172,11 +172,6 @@ msgstr "只有已合并的 PR 才能被回退。如果回退遇到合并冲突�
 msgid "### `/rerun`"
 msgstr "### `/rerun`"
 
-msgid ""
-"Re-run all failed workflow runs on the current PR commit. Useful when CI "
-"jobs failed due to infrastructure issues."
-msgstr "重新运行当前 PR 提交上所有失败的工作流运行。当 CI 作业因基础设施问题而失败时非常有用。"
-
 msgid "## Behavior"
 msgstr "## 行为"
 
@@ -277,3 +272,73 @@ msgstr "| `/revert` | PR 作者，或具有仓库 triage+ 权限的用户 |"
 
 msgid "| `/nightly` | Users with triage+ permission on the repository only |"
 msgstr "| `/nightly` | 仅限具有仓库 triage+ 权限的用户 |"
+
+msgid ""
+"Re-run failed CI workflows on the current PR commit. Useful when CI jobs "
+"failed or were cancelled due to infrastructure issues."
+msgstr "重新运行当前PR提交上失败的CI工作流。当CI任务因基础设施问题失败或被取消时非常有用。"
+
+msgid ""
+"Only jobs that did not complete successfully are re-run (failed, cancelled, "
+"timed out, or startup-failed). Jobs that already succeeded are left "
+"untouched. Runs with `cancelled` / `timed_out` / `startup_failure` "
+"conclusions are re-run per remaining job, and runs whose failure also "
+"contains cancelled jobs (e.g. a vLLM matrix leg cancelled by fail-fast) are "
+"handled the same way. Tests executed through reusable workflows (e.g. "
+"`Selected Tests`) are re-run via their caller job and are not duplicated."
+msgstr ""
+"仅重新运行未成功完成的任务（失败、取消、超时或启动失败）。已成功的任务保持不变。结论为`cancelled` / `timed_out` / "
+"`startup_failure`的运行将按剩余任务重新运行，失败中包含已取消任务（例如由fail-"
+"fast取消的vLLM矩阵分支）的运行也以相同方式处理。通过可复用工作流（例如`Selected "
+"Tests`）执行的测试将通过其调用方任务重新运行，不会重复执行。"
+
+msgid "### `/cancel`"
+msgstr "### `/cancel`"
+
+msgid ""
+"Force-cancel all workflow runs on the current PR commit. This cancels runs "
+"directly triggered on the PR head commit, such as the automatic E2E CI "
+"workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., "
+"`/e2e`, `/rerun`, `/nightly`) or downstream nightly/weekly workflows are "
+"**not** affected, as those run on the `main` branch."
+msgstr ""
+"强制取消当前PR提交上的所有工作流运行。这会取消直接在PR头提交上触发的运行，例如自动E2E "
+"CI工作流（`pr_test.yaml`）。由斜杠命令（例如`/e2e`、`/rerun`、`/nightly`）或下游夜间/每周工作流触发的工作流**不受**影响，因为这些运行在`main`分支上。"
+
+msgid "**Scope:**"
+msgstr "**范围：**"
+
+msgid "| Cancelled | Not cancelled |"
+msgstr "| 已取消 | 未取消 |"
+
+msgid "| `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |"
+msgstr "| `pr_test.yaml`（E2E）— 自动PR CI | `/e2e`命令运行 |"
+
+msgid "| `labeled_doctest.yaml` | `/rerun` command runs |"
+msgstr "| `labeled_doctest.yaml` | `/rerun`命令运行 |"
+
+msgid ""
+"| `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |"
+msgstr "| `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly`命令运行 |"
+
+msgid ""
+"| `schedule_image_build_and_push.yaml` (if labeled) | Downstream "
+"nightly/weekly test workflows |"
+msgstr "| `schedule_image_build_and_push.yaml`（如果已标记） | 下游夜间/每周测试工作流 |"
+
+msgid ""
+"| `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / "
+"`push` runs |"
+msgstr ""
+"| `labeled_download_model_dataset.yaml` | 定时 / `workflow_dispatch` / "
+"`push`运行 |"
+
+msgid ""
+"> Note: This uses the `force-cancel` API endpoint, which can cancel runs "
+"even when they are in a pending or queued state waiting for runners."
+msgstr "> 注意：这使用`force-cancel` API端点，即使运行处于等待运行器的待处理或排队状态，也可以取消它们。"
+
+msgid ""
+"| `/cancel` | PR author, or users with triage+ permission on the repository "
+"|"
+msgstr "| `/cancel` | PR作者，或对仓库具有triage+权限的用户 |"

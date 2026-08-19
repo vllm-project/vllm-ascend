@@ -19,7 +19,7 @@
 
 For each accuracy/performance benchmark entry:
   1. Read a preset JSON template
-  2. Patch nested testcase_info fields (preserve base_info)
+  2. Patch nested testcase_info fields (and base_info.test_version)
   3. Write a new JSON file
   4. Upload via tools/upload_to_openlibing.py
 
@@ -79,6 +79,11 @@ def resolve_testcase_name(config_yaml_path: str | None = None, fallback: str = "
     return name
 
 
+def resolve_test_version() -> str:
+    """Return nightly/weekly matrix branch (e.g. main, releases-v0.23.0)."""
+    return os.getenv("VLLM_ASCEND_BRANCH", "").strip()
+
+
 def _extract_dataset_name(case_config: dict[str, Any]) -> str:
     dataset_path = str(case_config.get("dataset_path", "") or "")
     if dataset_path.startswith(_DATASET_PREFIX):
@@ -112,6 +117,11 @@ def merge_postprocess_payload(
 ) -> dict[str, Any]:
     """Deep-copy preset and patch nested fields per the preset JSON schema."""
     payload = copy.deepcopy(preset)
+
+    test_version = resolve_test_version()
+    if test_version:
+        payload["base_info"]["test_version"] = test_version
+
     testcase_info = payload.setdefault("testcase_info", {})
     if not isinstance(testcase_info, dict):
         testcase_info = {}
