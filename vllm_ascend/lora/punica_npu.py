@@ -82,9 +82,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         token_count = self.indices_len[0]
         assert token_count is not None
-        token_indices = torch.narrow(self._token_lora_indices, 0, 0, token_count)
-        mask = torch.narrow(self._single_lora_mask, 0, 0, token_count)
-        mask.copy_(token_indices.eq(0).unsqueeze(1))
+        self._single_lora_mask[:token_count].copy_(self._token_lora_indices[:token_count].eq(0).unsqueeze(1))
 
     def update_metadata(
         self,
@@ -202,10 +200,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
-
-    def _get_single_lora_mask(self, x: torch.Tensor) -> torch.Tensor:
-        assert self._single_lora_mask is not None
-        return torch.narrow(self._single_lora_mask, 0, 0, x.size(0))
 
     def _apply_expand(
         self,
@@ -410,7 +404,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
-        adapter_mask = self._get_single_lora_mask(x)
+        assert self._single_lora_mask is not None
+        adapter_mask = self._single_lora_mask[: x.size(0)]
         deltas = []
         if packed_lora_a is not None and len(lora_a_stacked) > 1:
             rank = lora_b_stacked[0].size(-1)
