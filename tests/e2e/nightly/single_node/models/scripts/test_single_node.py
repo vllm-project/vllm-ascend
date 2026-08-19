@@ -42,36 +42,8 @@ async def run_image_test(config: SingleNodeConfig, server: "RemoteOpenAIServer |
     send_image_request(config, server)
 
 
-# async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
-#     from tools.send_request import send_v1_chat_completions
-#
-#     prompts = config.prompts if config.prompts else ["Hello!"]
-#     expected = config.expected_response or {}
-#
-#     max_model_len_str = _extract_server_cmd_value(config.server_cmd, "--max-model-len")
-#     max_model_len = int(max_model_len_str) if max_model_len_str else None
-#
-#     if isinstance(config.api_keyword_args, list):
-#         api_args_list = config.api_keyword_args
-#     else:
-#         api_args_list = [config.api_keyword_args] * len(prompts)
-#
-#     if isinstance(expected.get("per_prompt"), list):
-#         expected_list = expected["per_prompt"]
-#     else:
-#         expected_list = [expected] * len(prompts)
-#
-#     for prompt, api_args, exp in zip(prompts, api_args_list, expected_list):
-#         send_v1_chat_completions(
-#             prompt,
-#             model=config.model,
-#             server=server,
-#             request_args=api_args,
-#             expected=exp,
-#             max_model_len=max_model_len,
-#         )
 async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
-    from tools.send_request import send_v1_chat_completions
+    from tools.send_request import resolve_prompt, send_v1_chat_completions
 
     prompts = config.prompts if config.prompts else ["Hello!"]
     expected = config.expected_response or {}
@@ -89,7 +61,11 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
     else:
         expected_list = [expected] * len(prompts)
 
-    for prompt, api_args, exp in zip(prompts, api_args_list, expected_list):
+    for prompt_raw, api_args, exp in zip(prompts, api_args_list, expected_list):
+        prompt, actual_prompt_tokens = resolve_prompt(server, prompt_raw)
+        if actual_prompt_tokens is not None:
+            exp = dict(exp) if exp else {}
+            exp.setdefault("prompt_tokens", actual_prompt_tokens)
         send_v1_chat_completions(
             prompt,
             model=config.model,
@@ -98,6 +74,8 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
             expected=exp,
             max_model_len=max_model_len,
         )
+
+
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
     """General assertion engine for aisbench outcomes mapped directly from YAML."""
 
