@@ -38,15 +38,15 @@ tolerances must be approved by the team.
 """
 
 from tests.e2e.pull_request.four_card.qwen3_32b_v2_migration_common import (
+    _LC_ENV,
     BENCH_LC_ARGS,
     QWEN3_32B_W8A8_MODEL,
     _assert_lc_throughput_ratio,
     _benchmark_pair,
-    _lc_env,
     _lc_server_args,
 )
 
 
 def test_qwen3_32b_w8a8_lc_128k_v1_v2_throughput_within_3pct():
-    v1_result, v2_result = _benchmark_pair(QWEN3_32B_W8A8_MODEL, _lc_server_args, _lc_env, BENCH_LC_ARGS, "LC")
+    v1_result, v2_result = _benchmark_pair(QWEN3_32B_W8A8_MODEL, _lc_server_args, _LC_ENV, BENCH_LC_ARGS, "LC")
     _assert_lc_throughput_ratio(v1_result, v2_result, "LC")

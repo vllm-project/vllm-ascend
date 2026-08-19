@@ -36,6 +36,7 @@ import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -225,7 +226,7 @@ def _run_bench(port: int, model: str, bench_args: list[str]) -> dict[str, Any]:
 @wait_until_npu_memory_free()
 def _run_one_side(
     model: str,
-    server_args: list[str],
+    server_args_builder: Callable[[str], list[str]],
     env: dict[str, str],
     bench_args: list[str],
     use_v2: bool,
@@ -237,7 +238,7 @@ def _run_one_side(
     runner = "V2" if use_v2 else "V1"
     with RemoteOpenAIServer(
         model,
-        server_args + ["--port", str(port)],
+        server_args_builder(model) + ["--port", str(port)],
         server_port=port,
         env_dict=env_dict,
         auto_port=False,
@@ -250,14 +251,14 @@ def _run_one_side(
 
 def _benchmark_pair(
     model: str,
-    server_args: list[str],
+    server_args_builder: Callable[[str], list[str]],
     env: dict[str, str],
     bench_args: list[str],
     case: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run the same scenario on V1 then V2 and return both result dicts."""
-    v1_result = _run_one_side(model, server_args, env, bench_args, use_v2=False, case=case)
-    v2_result = _run_one_side(model, server_args, env, bench_args, use_v2=True, case=case)
+    v1_result = _run_one_side(model, server_args_builder, env, bench_args, use_v2=False, case=case)
+    v2_result = _run_one_side(model, server_args_builder, env, bench_args, use_v2=True, case=case)
     return v1_result, v2_result
 
 
