@@ -12,6 +12,7 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendEplbLayerState(_eplb_state.EplbLayerState):
@@ -158,14 +159,23 @@ class AscendEplbState(_eplb_state.EplbState):
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int,
     ) -> "AscendEplbState":
-        state = super().from_mapping(
-            model=model,
-            model_config=model_config,
-            device=device,
-            parallel_config=parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=num_valid_physical_experts,
-        )
+        if vllm_version_is("0.27.1"):
+            state = super().from_mapping(
+                model=model,
+                model_config=model_config,
+                device=device,
+                parallel_config=parallel_config,
+                expanded_physical_to_logical=expanded_physical_to_logical,
+                num_valid_physical_experts=num_valid_physical_experts,
+            )
+        else:
+            state = super().from_mapping(
+                model=model,
+                model_config=model_config,
+                device=device,
+                parallel_config=parallel_config,
+                expanded_physical_to_logical=expanded_physical_to_logical,
+            )
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
         return state

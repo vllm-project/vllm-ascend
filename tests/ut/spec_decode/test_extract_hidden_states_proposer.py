@@ -36,9 +36,27 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-        False,
+    # PIN_MEMORY moved from vllm.v1.spec_decode.extract_hidden_states to
+    # vllm.utils.torch_utils on main; patch the defining module per lane.
+    # CpuGpuBuffer.__init__ binds pin_memory as a def-time default (not the
+    # runtime module global), so also force it off at call time to avoid
+    # pinning against the NPU backend in the CPU UT process.
+    from vllm.v1.utils import CpuGpuBuffer
+
+    original_init = CpuGpuBuffer.__init__
+
+    def _init_without_pin_memory(self, *args, **kwargs):
+        kwargs["pin_memory"] = False
+        original_init(self, *args, **kwargs)
+
+    with (
+        patch(
+            "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
+            False,
+            create=True,
+        ),
+        patch("vllm.utils.torch_utils.PIN_MEMORY", False, create=True),
+        patch("vllm.v1.utils.CpuGpuBuffer.__init__", _init_without_pin_memory),
     ):
         yield
 
