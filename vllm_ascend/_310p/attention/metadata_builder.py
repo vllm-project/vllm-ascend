@@ -155,7 +155,12 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
             # copied into a stable-address buffer so replays see fresh values.
             q_list = get_query_lens_cpu(attn_metadata).tolist()
             num_tokens = int(sum(q_list))
-            c_list = common_attn_metadata.seq_lens_cpu[:num_reqs].tolist()
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            if seq_lens_cpu is None:
+                # Capture dummy_run path: build() runs before the captured region,
+                # so this D2H is legal; mask content is refreshed by real builds.
+                seq_lens_cpu = attn_metadata.seq_lens.cpu()
+            c_list = seq_lens_cpu[:num_reqs].tolist()
             mask_nz = AttentionMaskBuilder310.build_splitfuse_mask_nz_from_host(q_list, c_list, self.device)
             if num_tokens <= _MASK_PERSISTENT_MAX_TOKENS:
                 buf = self._splitfuse_mask_bufs.get(num_tokens)
