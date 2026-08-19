@@ -4,19 +4,41 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 import torch_npu  # noqa: F401 -- registers torch.npu
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.quant_moe import (
+    _apply_moe_activation,
     quant_apply_mlp_with_moe_lora,
     validate_quant_moe_lora_activation_input,
 )
+from vllm_ascend.ops.activation import AscendSituAndMul
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 QUANT_MOE = "vllm_ascend.lora.quant_moe"
+
+
+def test_quant_moe_lora_applies_situ_activation() -> None:
+    gate_up_out = torch.randn(2, 8, dtype=torch.bfloat16)
+
+    with set_current_vllm_config(VllmConfig()):
+        actual = _apply_moe_activation(
+            gate_up_out,
+            MoEActivation.SITU,
+            swiglu_limit=0.0,
+            swiglu_alpha=1.0,
+            swiglu_beta=0.0,
+            activation_situ_beta=4.0,
+            activation_situ_linear_beta=25.0,
+        )
+
+        expected = AscendSituAndMul(beta=4.0, linear_beta=25.0).forward_native(gate_up_out)
+    torch.testing.assert_close(actual, expected)
 
 
 def _make_input(**overrides) -> MoEMlpComputeInput:

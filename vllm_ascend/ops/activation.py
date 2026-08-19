@@ -21,9 +21,17 @@ from vllm.model_executor.layers.activation import (
     QuickGELU,
     SiluAndMul,
     SiluAndMulWithClamp,
+    SituAndMul,
     SwigluOAIAndMul,
     SwigluStepAndMul,
 )
+
+
+class AscendSituAndMul(SituAndMul):
+    """Use vLLM's SiTU contract with its native fallback on Ascend."""
+
+    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
 
 
 class AscendQuickGELU(QuickGELU):

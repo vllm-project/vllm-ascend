@@ -102,6 +102,24 @@ _MINIMAX_M3_PACKED_MODULES = {
     "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
 }
 
+_KIMI_K3_PACKED_MODULES = {
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+    # vLLM 0.27 packs every full-rank KDA input projection into one
+    # in_proj_qkvgfab module. ModelSlim checkpoints still describe the
+    # original checkpoint shards independently.
+    "in_proj_qkvgfab": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "g_proj",
+        "f_a_proj",
+        "b_proj",
+    ],
+    "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+}
+
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
     "minimax_m3": _MINIMAX_M3_PACKED_MODULES,
     "minimax_m3_vl": _MINIMAX_M3_PACKED_MODULES,
@@ -154,6 +172,10 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     },
+    "kimi_k3": _KIMI_K3_PACKED_MODULES,
+    # Quant methods are resolved while the nested text model is active, so
+    # the current vLLM config exposes the text config's model type here.
+    "kimi_linear": _KIMI_K3_PACKED_MODULES,
     "deepseek_v32": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],

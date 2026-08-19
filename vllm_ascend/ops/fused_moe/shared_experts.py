@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodB
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import has_lora
+from vllm_ascend.ops.activation import AscendSituAndMul
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -35,6 +36,9 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_experts_calculation_stream,
 )
+
+# CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
+SITU_MX_DST_TYPE_E4M3FN = 36
 
 
 @dataclass
@@ -73,10 +77,16 @@ class AscendSharedExperts:
         self.layer = layer
         self.moe_config = moe_config
         self.hidden_size = moe_config.hidden_dim
+        self.shared_expert_input_size = getattr(
+            layer.gate_up_proj,
+            "input_size",
+            self.hidden_size,
+        )
         self.in_dtype = moe_config.in_dtype
         self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
         self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
         self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
+        self.situ_activation = layer.act_fn if isinstance(layer.act_fn, AscendSituAndMul) else None
         self.quant_type = quant_type
         self.lora_context = None
         ascend_config = get_ascend_config()
@@ -109,7 +119,14 @@ class AscendSharedExperts:
     def validate_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
         test_input = (
-            torch.rand(10, self.hidden_size, device="npu", dtype=self.in_dtype) * 2 - 1
+            torch.rand(
+                10,
+                self.shared_expert_input_size,
+                device="npu",
+                dtype=self.in_dtype,
+            )
+            * 2
+            - 1
         )  # Random input for testing, scoped to [-1, 1]
 
         integrated_out = self.layer(test_input)
@@ -128,7 +145,7 @@ class AscendSharedExperts:
                 integrated_out.norm().item(),
                 split_out.sum().item(),
                 split_out.norm().item(),
-                self.hidden_size,
+                self.shared_expert_input_size,
                 self.in_dtype,
             )
             raise ValueError("FusedMoE shared experts split computation does not match the integrated computation.")
@@ -265,24 +282,39 @@ class AscendSharedExperts:
                 # Execute activation concurrently with gmm2.
 
                 maybe_wait_event(fused_moe_evts.before_gmm2)
-                quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
-                    x=hidden_states,
-                    weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
-                    activation_scale=pertoken_scale,
-                    bias=None,
-                    quant_scale=None,
-                    quant_offset=None,
-                    group_index=None,
-                    activate_left=True,
-                    quant_mode=1,
-                    swiglu_mode=1,
-                    clamp_limit=self.swiglu_limit,
-                    **(
-                        {}
-                        if get_ascend_device_type() == AscendDeviceType.A5
-                        else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
-                    ),
-                )
+                if self.situ_activation is not None:
+                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
+                        x=hidden_states,
+                        weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
+                        activation_scale=pertoken_scale,
+                        bias=None,
+                        quant_scale=None,
+                        quant_offset=None,
+                        group_index=None,
+                        beta=self.situ_activation.beta,
+                        linear_beta=self.situ_activation.linear_beta or 0.0,
+                        activate_left=True,
+                        quant_mode="dynamic",
+                    )
+                else:
+                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+                        x=hidden_states,
+                        weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
+                        activation_scale=pertoken_scale,
+                        bias=None,
+                        quant_scale=None,
+                        quant_offset=None,
+                        group_index=None,
+                        activate_left=True,
+                        quant_mode=1,
+                        swiglu_mode=1,
+                        clamp_limit=self.swiglu_limit,
+                        **(
+                            {}
+                            if get_ascend_device_type() == AscendDeviceType.A5
+                            else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
+                        ),
+                    )
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)
@@ -307,14 +339,23 @@ class AscendSharedExperts:
                 hidden_states = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
-                quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                    hidden_states,
-                    topk_weight=None,
-                    group_index=None,
-                    dst_type=torch.float8_e4m3fn,
-                    quant_mode=2,
-                    clamp_value=self.swiglu_limit,
-                )
+                if self.situ_activation is not None:
+                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
+                        x=hidden_states,
+                        beta=self.situ_activation.beta,
+                        linear_beta=self.situ_activation.linear_beta or 0.0,
+                        activate_left=True,
+                        dst_type=SITU_MX_DST_TYPE_E4M3FN,
+                    )
+                else:
+                    quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                        hidden_states,
+                        topk_weight=None,
+                        group_index=None,
+                        dst_type=torch.float8_e4m3fn,
+                        quant_mode=2,
+                        clamp_value=self.swiglu_limit,
+                    )
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)

@@ -36,7 +36,11 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w2,
     moe_lora_apply_w13,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
+from vllm_ascend.ops.activation import (
+    AscendSituAndMul,
+    AscendSwigluOAIAndMul,
+    AscendSwigluStepAndMul,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -105,12 +109,21 @@ def validate_quant_moe_lora_activation_input(
 
 def _apply_moe_activation(
     gate_up_out: torch.Tensor,
-    activation: str | None,
+    activation: str | MoEActivation | None,
     swiglu_limit: float,
     swiglu_alpha: float,
     swiglu_beta: float,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
 ) -> torch.Tensor:
     """Match the activation semantics of the common unquantized MoE path."""
+    if activation == MoEActivation.SITU:
+        if activation_situ_beta is None:
+            raise ValueError("SiTU requires activation_situ_beta from FusedMoEConfig.")
+        return AscendSituAndMul(
+            beta=activation_situ_beta,
+            linear_beta=activation_situ_linear_beta,
+        ).forward_native(gate_up_out)
     act_name = getattr(activation, "value", activation)
     if activation == MoEActivation.SWIGLUOAI:
         return AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out)
@@ -235,6 +248,8 @@ def _apply_dynamic_int8_moe_lora(
         mlp_compute_input.swiglu_limit,
         mlp_compute_input.swiglu_alpha,
         mlp_compute_input.swiglu_beta,
+        mlp_compute_input.activation_situ_beta,
+        mlp_compute_input.activation_situ_linear_beta,
     )
     if mlp_compute_input.topk_scales is not None:
         activated *= mlp_compute_input.topk_scales
