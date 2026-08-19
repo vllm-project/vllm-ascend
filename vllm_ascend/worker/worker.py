@@ -94,6 +94,16 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
+# These control buffers are created outside the weights mem-pool. Level-1
+# sleep only offloads weights-tagged allocations, so save them explicitly.
+_LEVEL_ONE_SLEEP_CONTROL_BUFFER_NAMES = frozenset(
+    {
+        "_dsa_cp_hadamard",
+        "_dsa_hadamard",
+        "expert_ids_per_ep_rank",
+    }
+)
+
 
 class NPUWorker(WorkerBase):
     def __init__(
@@ -220,10 +230,17 @@ class NPUWorker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Both level-1 and level-2 sleep need this CPU snapshot to restore
-        # registered control buffers after wake-up.
         model = self.model_runner.model
-        self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        buffers_to_save = model.named_buffers()
+        if level == 1:
+            # Preserve the existing level-2 behavior, but avoid restoring
+            # unrelated model buffers during level-1 sleep.
+            buffers_to_save = (
+                (name, buffer)
+                for name, buffer in buffers_to_save
+                if name.rsplit(".", maxsplit=1)[-1] in _LEVEL_ONE_SLEEP_CONTROL_BUFFER_NAMES
+            )
+        self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in buffers_to_save}
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
