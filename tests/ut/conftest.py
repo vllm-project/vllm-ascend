@@ -117,6 +117,7 @@ if not _npu_available:
     sys.modules["torch_npu"]._npu_reshape_and_cache = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_scatter_pa_kv_cache = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_gather_pa_kv_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_attention_update = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_fused_infer_attention_score = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_moe_gating_top_k_softmax = MagicMock()  # type: ignore[attr-defined]
