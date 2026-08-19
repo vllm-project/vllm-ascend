@@ -27,6 +27,8 @@ import contextlib
 
 import torch
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
     if self.is_identity:
@@ -52,7 +54,12 @@ def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
 def install_patch():
     from vllm.model_executor.models.vision import FusedInputNorm
 
-    FusedInputNorm.forward = _patched_fused_input_norm_forward
+    # Upstream main replaced FusedInputNorm's F.batch_norm with a direct
+    # broadcasted affine transform and dropped the running_mean/running_var
+    # buffers, so the eps=1e-5 workaround (and the patched forward that reads
+    # those buffers) only applies to the v0.27.1 release lane.
+    if vllm_version_is("0.27.1"):
+        FusedInputNorm.forward = _patched_fused_input_norm_forward
 
 
 with contextlib.suppress(ImportError):

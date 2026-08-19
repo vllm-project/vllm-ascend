@@ -66,3 +66,50 @@ def _apply_grammar_bitmask_kernel(
             -float("inf"),
             mask=bitmask & (block_offset < vocab_size),
         )
+
+
+# Main-branch variant: upstream keys the mapping by (request, position) and
+# resolves the per-request logit offsets from the device cu_num_logits, because
+# adaptive verification finalizes them on device. See
+# StructuredOutputsWorker.apply_grammar_bitmask (vllm-project/vllm#47808).
+@triton.jit
+def _apply_grammar_bitmask_kernel_v2(
+    logits_ptr,
+    logits_stride,
+    logits_indices_ptr,
+    cu_num_logits_ptr,
+    bitmask_ptr,
+    bitmask_stride,
+    vocab_size,
+    MASK_STRIDE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    BLOCK_SIZE_SUB: tl.constexpr = 1024
+    mapping_idx = tl.load(logits_indices_ptr + tl.program_id(0))
+    req_idx = mapping_idx // MASK_STRIDE
+    position_idx = mapping_idx % MASK_STRIDE
+    logits_idx = tl.load(cu_num_logits_ptr + req_idx)
+    num_req_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - logits_idx
+    logits_idx += position_idx
+    position_is_active = position_idx < num_req_logits
+
+    # Sub-block tiling loop: process BLOCK_SIZE_SUB tokens per iteration
+    for sub_offset in tl.range(0, BLOCK_SIZE, BLOCK_SIZE_SUB):
+        global_token_offset = tl.program_id(1) * BLOCK_SIZE + sub_offset
+        bitmask_word_start = global_token_offset // 32
+        bitmask_offset = bitmask_word_start + tl.arange(0, BLOCK_SIZE_SUB // 32)
+        packed_bitmask = tl.load(
+            bitmask_ptr + tl.program_id(0) * bitmask_stride + bitmask_offset,
+            mask=bitmask_offset < bitmask_stride,
+            other=0,
+        )
+        bitmask = ((packed_bitmask[:, None] >> (tl.arange(0, 32)[None, :])) & 1) == 0
+        bitmask = bitmask.reshape(BLOCK_SIZE_SUB)
+
+        # Apply: set blocked positions to -inf
+        block_offset = global_token_offset + tl.arange(0, BLOCK_SIZE_SUB)
+        tl.store(
+            logits_ptr + logits_idx * logits_stride + block_offset,
+            -float("inf"),
+            mask=position_is_active & bitmask & (block_offset < vocab_size),
+        )

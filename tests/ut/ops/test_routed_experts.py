@@ -81,6 +81,8 @@ def test_ascend_expert_map_follows_model_runner(use_v2_model_runner):
     routed_experts.ascend_expert_map = legacy_map
     object.__setattr__(routed_experts, "_expert_map", upstream_map)
     object.__setattr__(routed_experts, "rocm_aiter_fmoe_enabled", False)
+    # Upstream RoutedExperts.expert_map evaluates self.quant_method first.
+    object.__setattr__(routed_experts, "quant_method", SimpleNamespace(moe_kernel=None))
 
     expected = upstream_map if use_v2_model_runner else legacy_map
     assert routed_experts.ascend_expert_map is expected

@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -88,6 +89,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_in_flight_tokens: int | None = None,
         max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
+        num_prefill_lookahead: int = 0,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -97,6 +99,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # Multi-module MTP prefill lookahead is not supported on Ascend, so the
+        # re-prefillable window is always empty (matches the upstream default).
+        self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
@@ -401,6 +406,7 @@ def get_kv_cache_coordinator(
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
     max_num_batched_tokens: int | None = None,
+    num_prefill_lookahead: int = 0,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
@@ -421,6 +427,7 @@ def get_kv_cache_coordinator(
             max_in_flight_tokens=token_budget,
             max_num_batched_tokens=token_budget,
             scheduler_block_size=scheduler_block_size,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
@@ -437,7 +444,9 @@ def get_kv_cache_coordinator(
         )
         orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
-        return _orig_get_kv_cache_coordinator(**orig_kwargs)
+        if vllm_version_is("0.27.1"):
+            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+        return _orig_get_kv_cache_coordinator(**orig_kwargs, num_prefill_lookahead=num_prefill_lookahead)
 
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
@@ -453,6 +462,7 @@ def get_kv_cache_coordinator(
         max_in_flight_tokens=token_budget,
         max_num_batched_tokens=token_budget,
         scheduler_block_size=scheduler_block_size,
+        num_prefill_lookahead=num_prefill_lookahead,
     )
 
 
