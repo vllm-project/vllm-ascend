@@ -513,7 +513,10 @@ class DfxRuntimeConfig:
         # ``self._reload_interval`` only).
         merged["reload_interval_seconds"] = self._reload_interval
         # Seed visible msprobe path when JSON left it null / omitted.
-        self._apply_msprobe_path_seed(merged, loaded if self._explicit_config_path else None)
+        loaded_for_seed = loaded if self._explicit_config_path else None
+        self._apply_msprobe_path_seed(merged, loaded_for_seed)
+        # Legacy dump_config*: seed dump.enabled / manual_trigger from msprobe dump_enable.
+        self._apply_msprobe_dump_enable_compat(merged, loaded_for_seed)
         return _normalize_config_sections(merged)
 
     @staticmethod
@@ -552,6 +555,83 @@ class DfxRuntimeConfig:
         fallback = self._fallback_msprobe_config_path()
         if fallback:
             dump["msprobe_config_path"] = fallback
+
+    @staticmethod
+    def _dump_omits_key(data: dict[str, Any] | None, key: str) -> bool:
+        """True when ``dump.<key>`` is absent from user JSON (not explicitly set)."""
+        if not isinstance(data, dict):
+            return True
+        dump = data.get("dump")
+        if not isinstance(dump, dict):
+            return True
+        return key not in dump
+
+    @staticmethod
+    def _read_msprobe_dump_enable_effective(path: str | None) -> bool | None:
+        """Effective msprobe ``dump_enable``, or ``None`` if the file cannot be used.
+
+        Aligns with PrecisionDebugger (``None`` → on) and AclGraphDumper
+        (omitted key defaults true). Explicit false/0 is off. Unreadable path
+        returns ``None`` so DFX dump stays at defaults (off).
+        """
+        if not isinstance(path, str) or not path.strip():
+            return None
+        try:
+            with Path(path.strip()).open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if "dump_enable" not in data:
+            return True
+        raw = data.get("dump_enable")
+        if raw is None:
+            return True
+        if isinstance(raw, bool):
+            return raw
+        if raw in (0, 1):
+            return bool(raw)
+        if isinstance(raw, str):
+            s = raw.strip().lower()
+            if s in ("0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+        return True
+
+    def _apply_msprobe_dump_enable_compat(
+        self,
+        merged: dict[str, Any],
+        loaded: dict[str, Any] | None,
+    ) -> None:
+        """Seed DFX dump switches from msprobe ``dump_enable`` (bootstrap only).
+
+        When effective dump_enable is true (including omitted), set
+        ``dump.enabled`` and ``dump.manual_trigger`` unless the user JSON
+        already defined those keys. Does not enable detectors or change
+        ``max_times``.
+        """
+        dump = merged.setdefault("dump", {})
+        path = dump.get("msprobe_config_path")
+        if not (isinstance(path, str) and path.strip()):
+            path = self._startup_msprobe_config_path
+        effective = self._read_msprobe_dump_enable_effective(path if isinstance(path, str) else None)
+        if effective is not True:
+            return
+        seeded: list[str] = []
+        if self._dump_omits_key(loaded, "enabled"):
+            dump["enabled"] = True
+            seeded.append("dump.enabled=true")
+        if self._dump_omits_key(loaded, "manual_trigger"):
+            dump["manual_trigger"] = True
+            seeded.append("dump.manual_trigger=true")
+        if seeded:
+            logger.info(
+                "[DFX runtime_config] seeded from msprobe dump_enable path=%s [%s]",
+                path,
+                ", ".join(seeded),
+            )
 
     def _write_data_unlocked(self, data: dict[str, Any]) -> None:
         """Atomic write; caller must hold config lock / own the path."""
