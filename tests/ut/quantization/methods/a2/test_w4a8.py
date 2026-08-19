@@ -413,6 +413,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         expected_output = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
         mock_comm.fused_experts.return_value = expected_output
         mock_ctx.moe_comm_method = mock_comm
+        mock_ctx.use_mega_moe = False
 
         output = self.quant_method.apply(
             layer=layer,
