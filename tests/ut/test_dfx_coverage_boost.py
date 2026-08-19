@@ -76,8 +76,23 @@ def test_dumper_init_without_dump_config(tmp_path):
     assert "no detector" in (dumper.anomaly_check_skip_reason() or "")
 
 
-def test_dumper_init_precision_debugger(tmp_path):
+def test_dumper_skips_precision_debugger_when_dump_disabled(tmp_path):
+    """dump.enabled=false must not construct msprobe debugger at Dumper init."""
     cfg = make_dfx_config(tmp_path)
+    assert cfg.dump_enabled() is False
+    runner = _runner_for_dumper(dump_config_path="/tmp/msprobe.json")
+    fake_dbg = MagicMock()
+    fake_mod = SimpleNamespace(PrecisionDebugger=MagicMock(return_value=fake_dbg))
+    with patch.dict("sys.modules", {"msprobe": MagicMock(), "msprobe.pytorch": fake_mod}):
+        dumper = Dumper(runner, dfx_config=cfg)
+    assert dumper._debugger is None
+    assert dumper._uses_aclgraph_dumper is False
+    fake_mod.PrecisionDebugger.assert_not_called()
+
+
+def test_dumper_init_precision_debugger_when_dump_enabled(tmp_path):
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["dump"]["enabled"] = True
     runner = _runner_for_dumper(dump_config_path="/tmp/msprobe.json")
     fake_dbg = MagicMock()
     fake_mod = SimpleNamespace(PrecisionDebugger=MagicMock(return_value=fake_dbg))
@@ -85,6 +100,7 @@ def test_dumper_init_precision_debugger(tmp_path):
         dumper = Dumper(runner, dfx_config=cfg)
     assert dumper._debugger is fake_dbg
     assert dumper._uses_aclgraph_dumper is False
+    fake_mod.PrecisionDebugger.assert_called_once_with("/tmp/msprobe.json")
 
 
 def test_handle_anomaly_alert_rejects_bad_alerts(tmp_path):
