@@ -221,7 +221,6 @@ class NPUWorker(WorkerBase):
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         model = self.model_runner.model
-        buffers_to_save = model.named_buffers()
         if level == 1:
             # These control buffers are created outside the weights mem-pool,
             # so Level-1 sleep must save them explicitly.
@@ -229,12 +228,16 @@ class NPUWorker(WorkerBase):
                 "_dsa_cp_hadamard",
                 "_dsa_hadamard",
             )
-            buffers_to_save = (
-                (name, buffer)
-                for name, buffer in buffers_to_save
+            self._sleep_saved_buffers = {
+                name: buffer.cpu().clone()
+                for name, buffer in model.named_buffers()
                 if name.rsplit(".", maxsplit=1)[-1] in allowed_names
-            )
-        self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in buffers_to_save}
+            }
+        else:
+            self._sleep_saved_buffers = {
+                name: buffer.cpu().clone()
+                for name, buffer in model.named_buffers()
+            }
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
