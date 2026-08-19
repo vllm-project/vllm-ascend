@@ -251,6 +251,8 @@ class AscendConfig:
     )
     dump_config_path: str | None = None
     c8_enable_reshape_optim: bool = False
+    enable_vision_sp: bool = False
+    enable_vision_sp_fused: bool = False
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
