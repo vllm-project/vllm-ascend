@@ -13,7 +13,12 @@ as the baseline (no offloading).
 
 import pytest
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import (
+    DETERMINISTIC_TEST_SEED,
+    VllmRunner,
+    reset_deterministic_test_state,
+    wait_until_npu_memory_free,
+)
 from tests.e2e.pull_request import utils as e2e_utils
 from tests.e2e.pull_request.utils import PROMPTS_SHORT, compare_logprobs
 
@@ -44,11 +49,14 @@ def _compare_offload_logprobs(
     if decode_atol is None:
         decode_atol = 2 * atol
 
-    baseline_kwargs = {k: v for k, v in runner_kwargs.items() if k not in _OFFLOAD_KEYS}
+    comparison_kwargs = dict(runner_kwargs)
+    comparison_kwargs.setdefault("seed", DETERMINISTIC_TEST_SEED)
+    baseline_kwargs = {k: v for k, v in comparison_kwargs.items() if k not in _OFFLOAD_KEYS}
     baseline_kwargs.pop("cudagraph_capture_sizes", None)
     baseline_kwargs["enforce_eager"] = True
 
     # baseline(eager, no offload)
+    reset_deterministic_test_state()
     with VllmRunner(**baseline_kwargs) as runner:
         baseline_outputs = runner.model.generate(
             prompts=prompts,
@@ -56,7 +64,8 @@ def _compare_offload_logprobs(
         )
 
     # enabled offload
-    with VllmRunner(**runner_kwargs) as runner:
+    reset_deterministic_test_state()
+    with VllmRunner(**comparison_kwargs) as runner:
         offload_outputs = runner.model.generate(
             prompts=prompts,
             sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
@@ -85,7 +94,7 @@ def _compare_offload_logprobs(
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 @pytest.mark.parametrize("nz_mode", [0, 1], ids=["ND", "NZ"])
 @wait_until_npu_memory_free()
-def test_prefetch_offload_accuracy(enforce_eager, nz_mode):
+def test_prefetch_offload_accuracy(enforce_eager, nz_mode, deterministic_accuracy):
     """Test prefetch CPU offloading across eager/graph × ND/NZ.
 
     Compares outputs between:
@@ -112,7 +121,7 @@ def test_prefetch_offload_accuracy(enforce_eager, nz_mode):
 
 
 @wait_until_npu_memory_free()
-def test_prefetch_offload_selective_params():
+def test_prefetch_offload_selective_params(deterministic_accuracy):
     """Test selective parameter offloading (MLP weights only).
 
     Only offloads gate_up_proj and down_proj parameters, leaving

@@ -47,7 +47,7 @@ MODELS: list[str] = ["Qwen/Qwen3-0.6B"]
 )
 @pytest.mark.parametrize("model", MODELS)
 @wait_until_npu_memory_free()
-def test_models_with_xlite_decode_only(model: str):
+def test_models_with_xlite_decode_only(model: str, deterministic_accuracy):
     runner_kwargs = {
         "model_name": model,
         "max_model_len": 1024,
@@ -69,7 +69,7 @@ def test_models_with_xlite_decode_only(model: str):
 )
 @pytest.mark.parametrize("model", MODELS)
 @wait_until_npu_memory_free()
-def test_models_with_xlite_full_mode(model: str):
+def test_models_with_xlite_full_mode(model: str, deterministic_accuracy):
     runner_kwargs = {
         "model_name": model,
         "max_model_len": 1024,

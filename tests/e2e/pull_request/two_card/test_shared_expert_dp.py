@@ -46,6 +46,7 @@ def test_deepseek_v2_lite_flashcomm_shared_expert_dp_matrix_tp2(
     model: str,
     feature_config: dict[str, bool],
     monkeypatch,
+    deterministic_accuracy,
 ) -> None:
     # FlashComm v1 / shared-expert-DP require HCCL_OP_EXPANSION_MODE to be unset.
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)

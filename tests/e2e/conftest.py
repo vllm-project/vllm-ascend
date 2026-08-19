@@ -26,6 +26,7 @@ import json
 import logging
 import multiprocessing
 import os
+import random
 import shlex
 import signal
 import subprocess
@@ -91,6 +92,43 @@ logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
+DETERMINISTIC_TEST_SEED = 0
+_DETERMINISTIC_ALGORITHMS_ENV = "VLLM_ASCEND_ENABLE_DETERMINISTIC_ALGORITHMS"
+
+
+def reset_deterministic_test_state(seed: int = DETERMINISTIC_TEST_SEED) -> None:
+    """Reset every RNG used by deterministic accuracy tests."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def deterministic_accuracy_enabled() -> bool:
+    return os.getenv(_DETERMINISTIC_ALGORITHMS_ENV, "0") == "1"
+
+
+@pytest.fixture
+def deterministic_accuracy(monkeypatch: pytest.MonkeyPatch):
+    """Enable deterministic execution only for tests that request this fixture."""
+    algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only_enabled = torch.is_deterministic_algorithms_warn_only_enabled()
+    python_random_state = random.getstate()
+    numpy_random_state = np.random.get_state()
+    torch_random_state = torch.random.get_rng_state()
+
+    monkeypatch.setenv("HCCL_DETERMINISTIC", "true")
+    monkeypatch.setenv(_DETERMINISTIC_ALGORITHMS_ENV, "1")
+    monkeypatch.setenv("PYTHONHASHSEED", str(DETERMINISTIC_TEST_SEED))
+    torch.use_deterministic_algorithms(True)
+    reset_deterministic_test_state()
+
+    try:
+        yield DETERMINISTIC_TEST_SEED
+    finally:
+        torch.use_deterministic_algorithms(algorithms_enabled, warn_only=warn_only_enabled)
+        random.setstate(python_random_state)
+        np.random.set_state(numpy_random_state)
+        torch.random.set_rng_state(torch_random_state)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -980,6 +1018,10 @@ class VllmRunner:
         quantization: str | None = None,
         **kwargs,
     ) -> None:
+        if deterministic_accuracy_enabled():
+            kwargs.setdefault("seed", DETERMINISTIC_TEST_SEED)
+            reset_deterministic_test_state()
+
         data_parallel_size = int(kwargs.get("data_parallel_size", 1))
         if data_parallel_size > 1:
             raise ValueError("VllmRunner does not support `data_parallel_size > 1`; use `DPVllmRunner` instead.")
@@ -1107,7 +1149,8 @@ class VllmRunner:
         audios: PromptAudioInput | None = None,
         **kwargs: Any,
     ) -> list[tuple[list[int], str]]:
-        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        seed = DETERMINISTIC_TEST_SEED if deterministic_accuracy_enabled() else None
+        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens, seed=seed)
         outputs = self.generate(prompts, greedy_params, images=images, videos=videos, audios=audios, **kwargs)
         return [(output_ids[0], output_str[0]) for output_ids, output_str in outputs]
 
@@ -1127,6 +1170,7 @@ class VllmRunner:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
             max_tokens=max_tokens,
+            seed=DETERMINISTIC_TEST_SEED if deterministic_accuracy_enabled() else None,
             logprobs=num_logprobs,
             prompt_logprobs=num_prompt_logprobs,
             stop_token_ids=stop_token_ids,
@@ -1413,6 +1457,10 @@ class DPVllmRunner(VllmRunner):
         data_parallel_size: int = 2,
         **kwargs,
     ) -> None:
+        if deterministic_accuracy_enabled():
+            kwargs.setdefault("seed", DETERMINISTIC_TEST_SEED)
+            reset_deterministic_test_state()
+
         if data_parallel_size < 2:
             raise ValueError("DPVllmRunner requires `data_parallel_size >= 2`")
 

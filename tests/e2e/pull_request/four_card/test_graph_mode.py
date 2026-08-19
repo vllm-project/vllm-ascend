@@ -25,7 +25,12 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import cleanup_dist_env_and_memory, wait_until_npu_memory_free
+from tests.e2e.conftest import (
+    DETERMINISTIC_TEST_SEED,
+    cleanup_dist_env_and_memory,
+    reset_deterministic_test_state,
+    wait_until_npu_memory_free,
+)
 from tests.e2e.pull_request.utils import PROMPTS_LONG, PROMPTS_SHORT
 
 QWEN3 = "Qwen/Qwen3-0.6B"
@@ -380,6 +385,7 @@ _SAMPLING_PARAMS = SamplingParams(
     temperature=0.0,
     top_p=1.0,
     top_k=0,
+    seed=DETERMINISTIC_TEST_SEED,
     logprobs=20,
 )
 
@@ -489,6 +495,7 @@ def _run_worker_process(
     metrics: dict[str, Any] | None = None,
 ):
     """Main entry point for the worker process."""
+    reset_deterministic_test_state()
     os.environ.update(
         {
             "VLLM_DP_RANK": str(rank),
@@ -518,6 +525,7 @@ def _run_worker_process(
 
         llm = LLM(
             model=cur_case["model"],
+            seed=DETERMINISTIC_TEST_SEED,
             max_model_len=1024,
             compilation_config=cur_case["compilation_config"],
             quantization=cur_case["quantization"],
@@ -605,7 +613,7 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
 
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU])
-def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
+def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch, deterministic_accuracy):
     # Counter doesn't work in default "spawn" mode
     metrics = None
     if "DeepSeek-V2-Lite-W8A8" in cur_case["model"]:

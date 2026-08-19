@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import DETERMINISTIC_TEST_SEED, VllmRunner, reset_deterministic_test_state
 
 PROMPTS_SHORT = [
     "Hello, my name is",
@@ -66,6 +66,7 @@ _LOGPROB_SAMPLING_PARAMS = SamplingParams(
     temperature=0.0,
     top_p=1.0,
     top_k=0,
+    seed=DETERMINISTIC_TEST_SEED,
     logprobs=_DECODE_TOPK,
 )
 
@@ -166,13 +167,17 @@ def compare_logprobs(
     if decode_atol is None:
         decode_atol = 2 * atol
 
-    baseline_kwargs = {k: v for k, v in runner_kwargs.items() if k not in _COMPILATION_KEYS}
+    comparison_kwargs = dict(runner_kwargs)
+    comparison_kwargs.setdefault("seed", DETERMINISTIC_TEST_SEED)
+    baseline_kwargs = {k: v for k, v in comparison_kwargs.items() if k not in _COMPILATION_KEYS}
     baseline_kwargs["enforce_eager"] = True
 
+    reset_deterministic_test_state()
     with VllmRunner(**baseline_kwargs) as runner:
         baseline_outputs = runner.model.generate(prompts=prompts, sampling_params=_LOGPROB_SAMPLING_PARAMS)
 
-    with VllmRunner(**runner_kwargs) as runner:
+    reset_deterministic_test_state()
+    with VllmRunner(**comparison_kwargs) as runner:
         compiled_outputs = runner.model.generate(prompts=prompts, sampling_params=_LOGPROB_SAMPLING_PARAMS)
 
     for prompt_idx, (base_out, comp_out) in enumerate(zip(baseline_outputs, compiled_outputs)):

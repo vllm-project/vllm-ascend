@@ -95,6 +95,14 @@ torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFun
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
 
+def _enable_deterministic_algorithms_if_requested() -> None:
+    if not envs_ascend.VLLM_ASCEND_ENABLE_DETERMINISTIC_ALGORITHMS:
+        return
+
+    torch.use_deterministic_algorithms(True)
+    logger.info("Deterministic PyTorch algorithms enabled for this NPU worker.")
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -107,6 +115,8 @@ class NPUWorker(WorkerBase):
         **kwargs,
     ):
         """Initialize the worker for Ascend."""
+        _enable_deterministic_algorithms_if_requested()
+
         if not envs_ascend.COMPILE_CUSTOM_KERNELS:
             logger.warning(
                 "COMPILE_CUSTOM_KERNELS is set to False. "

@@ -80,7 +80,7 @@ def _run_dp2_tp2(*, enable_eplb: bool):
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.7, max_wait_seconds=180)
-def test_qwen3_moe_w8a8_dp2_tp2_sync_eplb_accuracy():
+def test_qwen3_moe_w8a8_dp2_tp2_sync_eplb_accuracy(deterministic_accuracy):
     baseline_outputs = _run_dp2_tp2(enable_eplb=False)
     eplb_outputs = _run_dp2_tp2(enable_eplb=True)
 

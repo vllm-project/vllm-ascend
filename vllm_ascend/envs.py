@@ -100,6 +100,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to force deterministic PyTorch algorithms in NPU workers.
+    # Valid values are 0 (disabled, default) and 1 (enabled). This is intended
+    # for reproducible accuracy validation and may reduce performance. It does
+    # not contain sensitive data.
+    "VLLM_ASCEND_ENABLE_DETERMINISTIC_ALGORITHMS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_DETERMINISTIC_ALGORITHMS", "0"))
+    ),
 }
 
 # end-env-vars-definition
