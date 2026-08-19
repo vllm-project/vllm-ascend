@@ -23,14 +23,13 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_dsa_cp
-
-from .deepseek_v4 import (
+from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
 )
+from vllm_ascend.utils import enable_dsa_cp
 
 
 class SharedHead(nn.Module):

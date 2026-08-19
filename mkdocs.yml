@@ -200,6 +200,8 @@ nav:
         - tutorials/models/Qwen3.5-Dense.md
         - tutorials/models/Qwen3.5-397B-A17B.md
         - tutorials/models/Qwen3.6-35B-A3B.md
+        - tutorials/models/Qwen3.8-2.4T-A95B.md
+        - tutorials/models/Qwen3.8-27B.md
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
@@ -296,7 +298,7 @@ nav:
         - developer_guide/Design_Documents/cpu_binding.md
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
-        - developer_guide/Design_Documents/sfa_remote_d2h_connector.md
+        - developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.md
         - developer_guide/Design_Documents/eplb_swift_balancer.md
         - developer_guide/Design_Documents/model_runner_v2_eplb.md
         - developer_guide/Design_Documents/ACL_Graph.md
