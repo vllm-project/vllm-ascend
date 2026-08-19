@@ -621,7 +621,6 @@ class TestEagleProposerDummyRun(TestBase):
 
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
             self.assertTrue(self.proposer._runnable.call_count == 1)
@@ -637,7 +636,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_context.return_value.__enter__.return_value = None
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
             self.assertTrue(self.proposer._runnable.call_count == 1)
 
@@ -659,7 +657,6 @@ class TestEagleProposerDummyRun(TestBase):
         self.proposer.use_cuda_graph = True
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=True, aclgraph_runtime_mode=CUDAGraphMode.FULL)
             self.assertTrue(self.proposer._runnable.call_count == 1)
             mock_update_full_graph_params.assert_not_called()
@@ -684,7 +681,6 @@ class TestEagleProposerDummyRun(TestBase):
         self.proposer.draft_attn_groups = [MagicMock()]
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=False, aclgraph_runtime_mode=CUDAGraphMode.FULL)
             self.assertTrue(self.proposer._runnable.call_count == 1)
             self.assertTrue(mock_update_full_graph_params.call_count == 1)
@@ -775,12 +771,10 @@ class TestEagleProposerMaybePadAndGather:
         method,
         *,
         is_multimodal_model=False,
-        enable_shared_expert_dp=False,
     ):
         proposer = object.__new__(AscendEagleProposer)
         proposer.method = method
         proposer.is_multimodal_model = is_multimodal_model
-        proposer.enable_shared_expert_dp = enable_shared_expert_dp
         return proposer
 
     def _extra_ctx(self, flash_comm_v1_enabled):
@@ -868,7 +862,7 @@ class TestEagleProposerMaybePadAndGather:
         assert reduced_positions is model_positions
 
     @pytest.mark.parametrize(
-        "enable_shared_expert_dp,hidden_states_is_none,expect_gather",
+        "flash_comm_v1_enabled,hidden_states_is_none,expect_gather",
         [
             (True, False, True),
             (True, True, True),
@@ -877,11 +871,11 @@ class TestEagleProposerMaybePadAndGather:
     )
     def test_mtp_maybe_all_gather_and_unpad(
         self,
-        enable_shared_expert_dp,
+        flash_comm_v1_enabled,
         hidden_states_is_none,
         expect_gather,
     ):
-        proposer = self._new_proposer("mtp", enable_shared_expert_dp=enable_shared_expert_dp)
+        proposer = self._new_proposer("mtp")
         last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
         positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
         hidden_states = None if hidden_states_is_none else last_hidden_states + 1000
@@ -890,11 +884,17 @@ class TestEagleProposerMaybePadAndGather:
             assert label is True
             return torch.cat((input_tensor, input_tensor + 100), dim=0)
 
-        with patch(
-            "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
-            side_effect=fake_all_gather_and_unpad,
-            create=True,
-        ) as mock_all_gather:
+        with (
+            patch(
+                "vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX",
+                new=self._extra_ctx(flash_comm_v1_enabled),
+            ),
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=fake_all_gather_and_unpad,
+                create=True,
+            ) as mock_all_gather,
+        ):
             gathered_last_hidden_states, gathered_positions, gathered_hidden_states = (
                 proposer.maybe_all_gather_and_unpad(last_hidden_states, positions, hidden_states)
             )
@@ -2352,10 +2352,6 @@ class TestRunMergedDraft(TestBase):
         self.mock_supports_multimodal_inputs.start()
         self.mock_enable_sp = patch("vllm_ascend.spec_decode.llm_base_proposer.enable_sp", return_value=False)
         self.mock_enable_sp.start()
-        self.mock_shared_expert_dp = patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.shared_expert_dp_enabled", return_value=False
-        )
-        self.mock_shared_expert_dp.start()
         self.mock_extra_ctx = patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=MagicMock())
         self.mock_extra_ctx.start()
         set_current_vllm_config(self.vllm_config)
@@ -2375,7 +2371,6 @@ class TestRunMergedDraft(TestBase):
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
         self.mock_enable_sp.stop()
-        self.mock_shared_expert_dp.stop()
         self.mock_extra_ctx.stop()
         set_current_vllm_config(None)
 
@@ -2509,7 +2504,6 @@ class TestRunMergedDraft(TestBase):
         for attr in (
             "AscendSpecDecodeBaseProposer",
             "enable_sp",
-            "shared_expert_dp_enabled",
             "lmhead_tp_enable",
             "get_forward_context",
             "_EXTRA_CTX",

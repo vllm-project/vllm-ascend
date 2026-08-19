@@ -110,17 +110,17 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             supports_dcp_with_varlen,
         )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
-        self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
-        self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
-        self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
+        self.dsa_cp_actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
+        self.dsa_cp_actual_seq_lengths_key = torch.empty_like(self.dsa_cp_actual_seq_lengths_query)
+        self.dsa_cp_spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
+        self.dsa_cp_spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
-            self.spec_actual_seq_lengths_query = [
+            self.dsa_cp_spec_actual_seq_lengths_query = [
                 torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
                 for _ in range(spec_token_num)
             ]
-            self.spec_actual_seq_lengths_key = [
+            self.dsa_cp_spec_actual_seq_lengths_key = [
                 torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
                 for _ in range(spec_token_num)
             ]
@@ -171,13 +171,13 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         assert slot_mapping.shape[0] == num_tokens_pad
 
         if draft_index is not None:
-            assert self.spec_actual_seq_lengths_query is not None
-            assert self.spec_actual_seq_lengths_key is not None
-            actual_seq_lengths_query = self.spec_actual_seq_lengths_query[draft_index - 1]
-            actual_seq_lengths_key = self.spec_actual_seq_lengths_key[draft_index - 1]
+            assert self.dsa_cp_spec_actual_seq_lengths_query is not None
+            assert self.dsa_cp_spec_actual_seq_lengths_key is not None
+            actual_seq_lengths_query = self.dsa_cp_spec_actual_seq_lengths_query[draft_index - 1]
+            actual_seq_lengths_key = self.dsa_cp_spec_actual_seq_lengths_key[draft_index - 1]
         else:
-            actual_seq_lengths_query = self.actual_seq_lengths_query
-            actual_seq_lengths_key = self.actual_seq_lengths_key
+            actual_seq_lengths_query = self.dsa_cp_actual_seq_lengths_query
+            actual_seq_lengths_key = self.dsa_cp_actual_seq_lengths_key
 
         num_segs = cum_query_lens.shape[0]
         global_start = common_attn_metadata.query_start_loc[:num_segs]

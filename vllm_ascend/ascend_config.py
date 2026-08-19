@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 import json
 import os
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,8 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 
 
 class AscendConfig:
@@ -108,9 +111,6 @@ class AscendConfig:
         )
         from vllm_ascend.utils import enable_sp
 
-        if self.enable_shared_expert_dp:
-            assert enable_sp(vllm_config=vllm_config, enable_shared_expert_dp=True)
-
         if vllm_config.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vllm_config):
             tp_pcp_size = (
                 vllm_config.parallel_config.tensor_parallel_size
@@ -172,6 +172,11 @@ class AscendConfig:
             logger.warning_once(
                 "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+            )
+        if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vllm_config):
+            self.enable_fused_mc2 = 0
+            logger.warning_once(
+                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
             )
         self.enable_mlapo = self._get_config_value(
             additional_config,
@@ -268,6 +273,7 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+        self._validate_mc2_hierarchy_comm()
 
         # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
         # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
@@ -319,6 +325,28 @@ class AscendConfig:
         )
         self._validate_sparse_c8_kv_offload_compatibility()
 
+    def _validate_mc2_hierarchy_comm(self) -> None:
+        if not self.enable_mc2_hierarchy_comm:
+            return
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        device_type = get_ascend_device_type()
+        if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+            raise NotImplementedError(
+                f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
+            )
+
+        num_logical_experts = self.vllm_config.model_config.get_num_experts()
+        num_redundant_experts = self.eplb_config.num_redundant_experts if self.eplb_config.dynamic_eplb else 0
+        num_experts = num_logical_experts + num_redundant_experts
+        if num_experts > 512:
+            raise ValueError(
+                "enable_mc2_hierarchy_comm supports at most 512 experts, "
+                f"but got {num_experts} experts "
+                f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
+            )
+
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
         if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
             raise NotImplementedError(
@@ -366,6 +394,52 @@ class AscendConfig:
             "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
             "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
         )
+
+    @staticmethod
+    def _is_megamoe_supported_by_config(vllm_config) -> bool:
+        hf_text_config = vllm_config.model_config.hf_text_config
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+            hidden_size = vllm_config.model_config.get_hidden_size()
+        if hidden_size is None:
+            return False
+        hidden_size = int(hidden_size)
+        # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
+        # the dispatch / FFN / combine cube tiles require hidden in the closed
+        # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
+        # outside this range (e.g. small Qwen variants with hidden=896, or any
+        # hidden=9216 LLaMA-style head) are silently routed back to MC2.
+        if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+            return False
+
+        # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
+        # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
+        # range [1024, 3072] and a multiple of 512. This constraint may be removed
+        # in CANN 9.2.0
+        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None:
+            return False
+        if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+            return False
+
+        quant_type = getattr(
+            vllm_config.model_config.hf_text_config,
+            "moe_quantize",
+            getattr(vllm_config.model_config.hf_text_config, "quantize", None),
+        )
+        if quant_type is None:
+            return True
+        quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+
+        _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
+            "w8a8",
+            "w4a8",
+            "w8a8_dynamic",
+            "w4a8_dynamic",
+            "quanttype.w8a8",
+            "quanttype.w4a8",
+        }
+        return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
     def _check_mix_placement(self):
         if self.mix_placement:
@@ -708,6 +782,12 @@ class ProfilingChunkConfig:
         # the start to skip online calibration entirely and rely solely on
         # the startup profiling model (avoids per-step sync overhead).
         self.need_timing: bool = config.get("need_timing", self.enabled)
+        if not self.enabled and self.need_timing:
+            logger.warning(
+                "profiling_chunk_config.need_timing=True is ignored because "
+                "profiling_chunk_config.enabled=False. Setting need_timing to False."
+            )
+            self.need_timing = False
         self.max_fit_chunk: int = int(config.get("max_fit_chunk", 30))
         self._validate()
 
