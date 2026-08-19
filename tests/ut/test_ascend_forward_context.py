@@ -321,6 +321,23 @@ def test_select_moe_comm_method_a5_reads_quant_type_from_model_instance(monkeypa
     assert not hasattr(vllm_config, "ascend_moe_quant_type")
 
 
+def test_select_moe_comm_method_a5_uses_mc2_for_draft_model(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        resolved_moe_quant_type=QuantType.W4A8MXFP,
+    )
+
+    assert afc.select_moe_comm_method(64, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(64, vllm_config, is_draft_model=True) == MoECommType.MC2
+
+
 def test_select_moe_comm_method_a5_honors_configured_mega_moe_capacity(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,

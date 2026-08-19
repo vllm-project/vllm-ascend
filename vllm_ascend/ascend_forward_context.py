@@ -502,6 +502,7 @@ def _select_a5_moe_comm_method(
     enable_fused_mc2: int,
     activation: str | None,
     group_size: int | None,
+    is_draft_model: bool,
 ) -> MoECommType:
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -521,6 +522,11 @@ def _select_a5_moe_comm_method(
     supported_activation = _is_a5_mega_moe_supported_activation(activation)
     supported_group_size = group_size in (None, _A5_MEGA_MOE_GROUP_SIZE)
     supported_eplb = not dynamic_eplb and num_redundant_experts == 0
+    # MTP proposals run after target-model DP coordination. An idle DP rank may
+    # not enter the draft model, while MegaMoE requires every EP rank to invoke
+    # its symmetric collective. Use the regular MC2 path until draft execution
+    # is coordinated across the complete EP group.
+    supported_execution_phase = not is_draft_model
     a5_mega_moe_enable = (
         fused_mc2_mode_1
         and has_expert_parallel_world
@@ -529,11 +535,13 @@ def _select_a5_moe_comm_method(
         and supported_activation
         and supported_group_size
         and supported_eplb
+        and supported_execution_phase
     )
     logger.debug(
         "A5 MegaMoE condition check: enabled=%s, fused_mc2_mode_1=%s, "
         "has_expert_parallel_world=%s, within_mega_moe_capacity=%s, supported_quant=%s, "
         "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, "
+        "supported_execution_phase=%s, is_draft_model=%s, "
         "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, activation=%s, "
         "group_size=%s, enable_fused_mc2=%s, "
         "mega_moe_max_tokens=%s, dynamic_eplb=%s, num_redundant_experts=%s, supported_quant_types=%s",
@@ -545,6 +553,8 @@ def _select_a5_moe_comm_method(
         supported_activation,
         supported_group_size,
         supported_eplb,
+        supported_execution_phase,
+        is_draft_model,
         num_tokens,
         world_size,
         num_experts_per_tok,
@@ -617,11 +627,12 @@ def select_moe_comm_method(
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, prefer the fused MoE backend for supported
-       MXFP quantization and SwiGLU semantics when fused MC2 mode 1 is enabled
-       and EPLB does not use dynamic or redundant experts. Otherwise use MC2
-       when tokens fit the MC2 capacity and the EP size is large enough, or
-       fall back to all-gather/all-to-all.
+    6. On A5 with expert parallel, prefer the fused MoE backend for target-model
+       forwards with supported MXFP quantization and SwiGLU semantics when fused
+       MC2 mode 1 is enabled and EPLB does not use dynamic or redundant experts.
+       Draft-model forwards use regular MC2 because speculative execution is
+       not coordinated across all DP/EP ranks. Other unsupported cases also use
+       MC2 when tokens fit its capacity, or fall back to all-gather/all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
@@ -663,6 +674,7 @@ def select_moe_comm_method(
             get_ascend_config().enable_fused_mc2,
             _get_a5_moe_activation(vllm_config, model_instance),
             _get_a5_moe_group_size(vllm_config),
+            is_draft_model,
         )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
