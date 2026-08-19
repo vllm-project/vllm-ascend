@@ -100,6 +100,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to enable sequence parallelism for vision transformer (TP+SP
+    # hybrid). When enabled, the VIT encoder splits the token sequence across
+    # TP ranks, reducing LayerNorm/residual computation to 1/tp_size and
+    # replacing AllReduce with AllGather/AllToAll/ReduceScatter.
+    # Default: 0 (disabled). Prerequisites: tp_size > 1, VIT not in DP mode.
+    "VLLM_ASCEND_ENABLE_VISION_SP": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_VISION_SP", "0"))),
+    # Whether to use fused communication ops for VIT SP (Phase 2 通算掩盖).
+    # Requires Phase 2 fused ops to be available.
+    # Default: 0 (Phase 1 naive strategy).
+    "VLLM_ASCEND_ENABLE_VISION_SP_FUSED": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_VISION_SP_FUSED", "0"))),
 }
 
 # end-env-vars-definition

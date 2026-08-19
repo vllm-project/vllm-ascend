@@ -74,6 +74,8 @@ _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
+_ENABLE_VISION_SP = None
+_ENABLE_VISION_SP_FUSED = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
@@ -137,11 +139,20 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
 
 def clear_enable_sp():
-    global _ENABLE_SP
+    global _ENABLE_SP, _ENABLE_VISION_SP, _ENABLE_VISION_SP_FUSED
     _ENABLE_SP = None
+    _ENABLE_VISION_SP = None
+    _ENABLE_VISION_SP_FUSED = None
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
     _libc_getenv.cache_clear()
+    # Reset the vision SP strategy singleton so that flag changes take effect
+    try:
+        from vllm_ascend.ops.vision_sp_strategy import clear_vision_sp_strategy
+
+        clear_vision_sp_strategy()
+    except ImportError:
+        pass
 
 
 _IS_RC_DEVICE: bool | None = None
@@ -834,6 +845,70 @@ def enable_sp(vllm_config=None) -> bool:
                 _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
     return bool(_ENABLE_SP)
+
+
+def enable_vision_sp(vllm_config=None) -> bool:
+    """Check if VIT sequence parallelism (TP+SP hybrid) is enabled.
+
+    Reads from additional_config first, then falls back to env var.
+    Result is cached globally; pass vllm_config with refresh=True to re-read.
+    """
+    global _ENABLE_VISION_SP
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
+    refresh = additional_config.get("refresh", False) if additional_config else False
+
+    if _ENABLE_VISION_SP is None or refresh:
+        if additional_config is not None and "enable_vision_sp" in additional_config:
+            _ENABLE_VISION_SP = bool(additional_config["enable_vision_sp"])
+        else:
+            try:
+                _ENABLE_VISION_SP = get_ascend_config().enable_vision_sp
+            except RuntimeError:
+                _ENABLE_VISION_SP = envs_ascend.VLLM_ASCEND_ENABLE_VISION_SP
+
+    if not bool(_ENABLE_VISION_SP):
+        return False
+
+    # SP requires tp_size > 1 (SP reuses the TP communication group)
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    if get_tensor_model_parallel_world_size() <= 1:
+        return False
+
+    # SP is incompatible with VIT data-parallel mode (disable_tp=True means
+    # weights are not sharded, so AllGather/AllToAll on the TP group would
+    # produce garbage). Auto-disable in that case.
+    try:
+        from vllm.model_executor.models.vision import is_vit_use_data_parallel
+
+        if is_vit_use_data_parallel():
+            return False
+    except Exception:
+        pass
+
+    return True
+
+
+def enable_vision_sp_fused() -> bool:
+    """Check if fused comm ops (Phase 2) are enabled for VIT SP.
+
+    Only meaningful when enable_vision_sp() is also True.
+    """
+    global _ENABLE_VISION_SP_FUSED
+    if _ENABLE_VISION_SP_FUSED is None:
+        try:
+            _ENABLE_VISION_SP_FUSED = get_ascend_config().enable_vision_sp_fused
+        except RuntimeError:
+            _ENABLE_VISION_SP_FUSED = envs_ascend.VLLM_ASCEND_ENABLE_VISION_SP_FUSED
+    return bool(_ENABLE_VISION_SP_FUSED)
 
 
 # TODO remove it after vllm has this func
