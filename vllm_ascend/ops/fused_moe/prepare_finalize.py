@@ -329,11 +329,28 @@ class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
     ) -> MoEPrepareOutput:
+        self.num_tokens = hidden_states.shape[0]
+        target_num_tokens = _EXTRA_CTX.max_tokens_across_dp
+        if target_num_tokens is None:
+            target_num_tokens = self.num_tokens
+        if target_num_tokens < self.num_tokens:
+            raise ValueError(
+                "MegaMoE target token count cannot be smaller than the local "
+                f"token count: target={target_num_tokens}, local={self.num_tokens}."
+            )
+
+        self.padded_num_tokens = target_num_tokens
+        pad_size = target_num_tokens - self.num_tokens
+        if pad_size > 0:
+            hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+            router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+        self._mega_moe_input_prepared = True
+
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
-            padded_hidden_states_shape=None,
+            padded_hidden_states_shape=hidden_states.shape,
             pertoken_scale=None,
         )
 
@@ -341,6 +358,11 @@ class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
         self,
         input_ids,
     ):
+        if not getattr(self, "_mega_moe_input_prepared", False):
+            return input_ids
+        pad_size = self.padded_num_tokens - self.num_tokens
+        if pad_size > 0:
+            input_ids = nn.functional.pad(input_ids, (0, pad_size))
         return input_ids
 
     def finalize(
@@ -349,7 +371,9 @@ class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
         reduce_results: bool,
         padded_hidden_states_shape: torch.Size | None = None,
     ) -> torch.Tensor:
-        return hidden_states
+        num_tokens = self.num_tokens
+        self._mega_moe_input_prepared = False
+        return hidden_states[:num_tokens]
 
 
 class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):

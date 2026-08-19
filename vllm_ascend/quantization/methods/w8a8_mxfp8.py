@@ -297,6 +297,16 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         if topk_weights is None or topk_ids is None:
             raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
+        if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            routing_pad_size = x.shape[0] - topk_ids.shape[0]
+            if routing_pad_size < 0:
+                raise ValueError(
+                    "MegaMoE routing token count exceeds its input token count: "
+                    f"routing_tokens={topk_ids.shape[0]}, input_tokens={x.shape[0]}."
+                )
+            if routing_pad_size > 0:
+                topk_weights = F.pad(topk_weights, (0, 0, 0, routing_pad_size))
+                topk_ids = F.pad(topk_ids, (0, 0, 0, routing_pad_size))
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.

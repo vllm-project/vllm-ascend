@@ -20,11 +20,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from vllm.distributed import get_ep_group
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import compute_mega_moe_buffer_tokens_per_rank, get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_mega_moe_group
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEFusedExpertsInput
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -36,6 +36,7 @@ _MEGA_MOE_SUPPORTED_QUANTS = {
 _FP4_PACK_FACTOR = 2
 _MXFP_SCALE_BLOCK_SIZE = 64
 _MXFP_SCALE_MULTIPLIER = 2
+_A5_DYNAMIC_NUM_MAX_TOKENS_PER_RANK = 0
 # Tensor.view requires a torch.dtype; torch_npu's operator dtype enum is interpreted as a shape.
 _TORCH_FLOAT8_E8M0FNU_DTYPE = getattr(torch, "float8_e8m0fnu", None)
 
@@ -84,7 +85,7 @@ def _get_mega_moe_ops():
 @dataclass(frozen=True, slots=True)
 class _MegaMoEBufferKey:
     num_experts: int
-    max_tokens_per_rank: int
+    buffer_tokens_per_rank: int
     top_k: int
     hidden_size: int
     intermediate_hidden: int
@@ -92,13 +93,20 @@ class _MegaMoEBufferKey:
     dispatch_quant_out_dtype: torch.dtype
 
 
+@dataclass(frozen=True, slots=True)
+class _MegaMoESymmetricBufferState:
+    key: _MegaMoEBufferKey
+    buffer: Any
+
+
+_MEGA_MOE_BUFFER_STATE_ATTR = "_mega_moe_symmetric_buffer_state"
+
+
 class MegaMoEBackend:
     """A5 MegaMoE wrapper for the logical FUSED_MC2 MoE path."""
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
-        self._sym_buffer = None
-        self._sym_buffer_key: _MegaMoEBufferKey | None = None
 
     @staticmethod
     def _validate_stacked_mxfp_layout(
@@ -190,6 +198,8 @@ class MegaMoEBackend:
         self,
         fused_experts_input: MoEFusedExpertsInput,
         projected_hidden: int | None = None,
+        *,
+        buffer_tokens_per_rank: int,
     ) -> _MegaMoEBufferKey:
         hidden_size = int(fused_experts_input.hidden_states.shape[-1])
         if projected_hidden is None:
@@ -204,19 +214,18 @@ class MegaMoEBackend:
                 w1_scale,
                 w2_scale,
             )
-        max_tokens_per_rank = get_ascend_config().mega_moe_max_tokens
-        if fused_experts_input.hidden_states.shape[0] > max_tokens_per_rank:
+        if fused_experts_input.hidden_states.shape[0] > buffer_tokens_per_rank:
             raise ValueError(
                 "A5 MegaMoE input exceeds the configured capacity: "
                 f"num_tokens={fused_experts_input.hidden_states.shape[0]}, "
-                f"mega_moe_max_tokens={max_tokens_per_rank}."
+                f"mega_moe_buffer_tokens_per_rank={buffer_tokens_per_rank}."
             )
         act_dtype = torch.float8_e4m3fn
         if fused_experts_input.quant.mxfp is not None and fused_experts_input.quant.mxfp.act_quant_type is not None:
             act_dtype = fused_experts_input.quant.mxfp.act_quant_type
         return _MegaMoEBufferKey(
             num_experts=self.moe_config.num_experts,
-            max_tokens_per_rank=max_tokens_per_rank,
+            buffer_tokens_per_rank=buffer_tokens_per_rank,
             top_k=self.moe_config.experts_per_token,
             hidden_size=hidden_size,
             intermediate_hidden=projected_hidden,
@@ -225,30 +234,54 @@ class MegaMoEBackend:
         )
 
     def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput, projected_hidden: int):
-        key = self._make_buffer_key(fused_experts_input, projected_hidden)
-        if self._sym_buffer is not None:
-            if self._sym_buffer_key != key:
+        mega_moe_group = get_mega_moe_group()
+        ascend_config = get_ascend_config()
+        buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
+            ascend_config.mega_moe_max_tokens,
+            ascend_config.vllm_config.scheduler_config.max_num_batched_tokens,
+            mega_moe_group.world_size,
+        )
+        key = self._make_buffer_key(
+            fused_experts_input,
+            projected_hidden,
+            buffer_tokens_per_rank=buffer_tokens_per_rank,
+        )
+        state: _MegaMoESymmetricBufferState | None = getattr(
+            mega_moe_group,
+            _MEGA_MOE_BUFFER_STATE_ATTR,
+            None,
+        )
+        if state is not None:
+            if state.key != key:
                 raise RuntimeError(
-                    "A5 MegaMoE sym buffer is initialized once and cannot be replaced during inference: "
-                    f"initialized={self._sym_buffer_key}, requested={key}."
+                    "A5 MegaMoE symmetric buffer is shared by the main and draft models and cannot be replaced "
+                    f"during inference: initialized={state.key}, requested={key}."
                 )
-            logger.debug("A5 MegaMoE reuses sym buffer: %s", key)
-            return self._sym_buffer
+            logger.debug("A5 MegaMoE reuses the process-wide symmetric buffer: %s", key)
+            return state.buffer
 
         get_symm_buffer_for_mega_moe, _ = _get_mega_moe_ops()
-        logger.info("A5 MegaMoE creates sym buffer: %s", key)
-        self._sym_buffer = get_symm_buffer_for_mega_moe(
-            get_ep_group().device_group,
+        logger.info("A5 MegaMoE creates the process-wide symmetric buffer: %s", key)
+        buffer = get_symm_buffer_for_mega_moe(
+            mega_moe_group.device_group,
             num_experts=key.num_experts,
-            num_max_tokens_per_rank=key.max_tokens_per_rank,
+            num_max_tokens_per_rank=key.buffer_tokens_per_rank,
             num_topk=key.top_k,
             hidden=key.hidden_size,
             intermediate_hidden=key.intermediate_hidden,
             dispatch_quant_mode=key.dispatch_quant_mode,
             dispatch_quant_out_dtype=key.dispatch_quant_out_dtype,
         )
-        self._sym_buffer_key = key
-        return self._sym_buffer
+        # The positive value above sizes the communication buffer. A5 runtime
+        # requires a nonzero num_max_tokens_per_rank to match x.shape[0], so use
+        # its zero-valued auto mode for dynamic vLLM batches.
+        buffer.num_max_tokens_per_rank = _A5_DYNAMIC_NUM_MAX_TOKENS_PER_RANK
+        setattr(
+            mega_moe_group,
+            _MEGA_MOE_BUFFER_STATE_ATTR,
+            _MegaMoESymmetricBufferState(key=key, buffer=buffer),
+        )
+        return buffer
 
     @staticmethod
     def _normalize_activation(activation: Any) -> str:

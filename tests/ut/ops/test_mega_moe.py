@@ -8,6 +8,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend, _view_mxfp_scales_as_e8m0
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithMegaMoE
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -22,6 +23,22 @@ def _make_moe_config():
     moe_config.num_experts = 8
     moe_config.experts_per_token = 2
     return moe_config
+
+
+def _make_ascend_config(mega_moe_max_tokens=65536, max_num_batched_tokens=8192):
+    return SimpleNamespace(
+        mega_moe_max_tokens=mega_moe_max_tokens,
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens),
+        ),
+    )
+
+
+def _make_mega_moe_group(device_group=None, world_size=4):
+    return SimpleNamespace(
+        device_group=object() if device_group is None else device_group,
+        world_size=world_size,
+    )
 
 
 def _make_fused_input(
@@ -57,24 +74,31 @@ def _make_fused_input(
 
 def test_mega_moe_backend_builds_buffer_and_operator_args():
     fused_input = _make_fused_input(log2phy=torch.tensor([3, 2, 1, 0]))
-    get_symm_buffer = MagicMock(return_value=object())
+    mega_moe_device_group = object()
+    sym_buffer = SimpleNamespace(num_max_tokens_per_rank=None)
+    get_symm_buffer = MagicMock(return_value=sym_buffer)
     mega_moe = MagicMock(return_value=(torch.randn(4, 8), torch.tensor([1, 3], dtype=torch.int32)))
 
     with (
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
-            return_value=SimpleNamespace(mega_moe_max_tokens=65536),
+            return_value=_make_ascend_config(),
         ),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.get_ep_group", return_value=SimpleNamespace(device_group=object())),
+        patch(
+            "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
+            return_value=_make_mega_moe_group(mega_moe_device_group),
+        ),
     ):
         backend = MegaMoEBackend(_make_moe_config())
         backend.fused_experts(fused_input)
 
     get_symm_buffer.assert_called_once()
+    assert get_symm_buffer.call_args.args[0] is mega_moe_device_group
     assert get_symm_buffer.call_args.kwargs["intermediate_hidden"] == 16
-    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 65536
+    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 2048
     assert get_symm_buffer.call_args.kwargs["dispatch_quant_mode"] == 4
+    assert sym_buffer.num_max_tokens_per_rank == 0
 
     mega_moe.assert_called_once()
     mega_moe_kwargs = mega_moe.call_args.kwargs
@@ -88,9 +112,57 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     assert mega_moe_kwargs["l2_weights_sf"][0].dtype == torch.float8_e8m0fnu
 
 
-def test_mega_moe_backend_reuses_single_buffer():
+def test_mega_moe_prepare_pads_to_common_token_count_and_crops_output():
+    prepare_finalize = object.__new__(PrepareAndFinalizeWithMegaMoE)
+    hidden_states = torch.randn(4, 8)
+    router_logits = torch.randn(4, 2)
+    input_ids = torch.tensor([1, 2, 3, 4])
+
+    # Gate multistream overlap can select experts before prepare().
+    torch.testing.assert_close(prepare_finalize.pad_and_split_input_ids(input_ids), input_ids)
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+        SimpleNamespace(max_tokens_across_dp=6),
+    ):
+        prepare_output = prepare_finalize.prepare(hidden_states, router_logits)
+
+    assert prepare_output.hidden_states.shape == (6, 8)
+    assert prepare_output.router_logits.shape == (6, 2)
+    torch.testing.assert_close(prepare_output.hidden_states[:4], hidden_states)
+    torch.testing.assert_close(prepare_output.router_logits[:4], router_logits)
+    assert torch.count_nonzero(prepare_output.hidden_states[4:]) == 0
+    assert torch.count_nonzero(prepare_output.router_logits[4:]) == 0
+
+    torch.testing.assert_close(
+        prepare_finalize.pad_and_split_input_ids(input_ids),
+        torch.tensor([1, 2, 3, 4, 0, 0]),
+    )
+
+    padded_output = torch.randn(6, 8)
+    torch.testing.assert_close(
+        prepare_finalize.finalize(padded_output, reduce_results=False),
+        padded_output[:4],
+    )
+    torch.testing.assert_close(prepare_finalize.pad_and_split_input_ids(input_ids), input_ids)
+
+
+def test_mega_moe_prepare_rejects_target_smaller_than_local_tokens():
+    prepare_finalize = object.__new__(PrepareAndFinalizeWithMegaMoE)
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+            SimpleNamespace(max_tokens_across_dp=3),
+        ),
+        pytest.raises(ValueError, match="cannot be smaller than the local token count"),
+    ):
+        prepare_finalize.prepare(torch.randn(4, 8), torch.randn(4, 2))
+
+
+def test_main_and_draft_mega_moe_backends_share_single_buffer():
     fused_input = _make_fused_input()
-    sym_buffer = object()
+    sym_buffer = SimpleNamespace(num_max_tokens_per_rank=None)
     get_symm_buffer = MagicMock(return_value=sym_buffer)
     mega_moe = MagicMock(return_value=(torch.randn(4, 8), torch.tensor([1, 3], dtype=torch.int32)))
 
@@ -98,37 +170,46 @@ def test_mega_moe_backend_reuses_single_buffer():
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
-            return_value=SimpleNamespace(mega_moe_max_tokens=512),
+            return_value=_make_ascend_config(mega_moe_max_tokens=512),
         ),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.get_ep_group", return_value=SimpleNamespace(device_group=object())),
+        patch(
+            "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
+            return_value=_make_mega_moe_group(),
+        ),
     ):
-        backend = MegaMoEBackend(_make_moe_config())
-        backend.fused_experts(fused_input)
-        backend.fused_experts(fused_input)
+        main_backend = MegaMoEBackend(_make_moe_config())
+        draft_backend = MegaMoEBackend(_make_moe_config())
+        main_backend.fused_experts(fused_input)
+        draft_backend.fused_experts(fused_input)
 
     get_symm_buffer.assert_called_once()
+    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 128
+    assert sym_buffer.num_max_tokens_per_rank == 0
     assert mega_moe.call_count == 2
     assert all(call.kwargs["sym_buffer"] is sym_buffer for call in mega_moe.call_args_list)
 
 
 def test_mega_moe_backend_rejects_buffer_reinitialization():
     fused_input = _make_fused_input()
-    get_symm_buffer = MagicMock(return_value=object())
+    get_symm_buffer = MagicMock(return_value=SimpleNamespace(num_max_tokens_per_rank=None))
 
     with (
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, MagicMock())),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
             side_effect=(
-                SimpleNamespace(mega_moe_max_tokens=512),
-                SimpleNamespace(mega_moe_max_tokens=1024),
+                _make_ascend_config(mega_moe_max_tokens=512),
+                _make_ascend_config(mega_moe_max_tokens=1024),
             ),
         ),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.get_ep_group", return_value=SimpleNamespace(device_group=object())),
+        patch(
+            "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
+            return_value=_make_mega_moe_group(),
+        ),
     ):
         backend = MegaMoEBackend(_make_moe_config())
         backend._get_sym_buffer(fused_input, projected_hidden=16)
-        with pytest.raises(RuntimeError, match="initialized once and cannot be replaced"):
+        with pytest.raises(RuntimeError, match="shared by the main and draft models"):
             backend._get_sym_buffer(fused_input, projected_hidden=16)
 
     get_symm_buffer.assert_called_once()
@@ -158,16 +239,19 @@ def test_view_mxfp_scales_as_e8m0_requires_native_torch_dtype():
 
 def test_mega_moe_backend_passes_positive_swiglu_limit_as_clamp():
     fused_input = _make_fused_input(swiglu_limit=7.0)
-    get_symm_buffer = MagicMock(return_value=object())
+    get_symm_buffer = MagicMock(return_value=SimpleNamespace(num_max_tokens_per_rank=None))
     mega_moe = MagicMock(return_value=(torch.randn(4, 8), torch.tensor([1, 3], dtype=torch.int32)))
 
     with (
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
-            return_value=SimpleNamespace(mega_moe_max_tokens=512),
+            return_value=_make_ascend_config(mega_moe_max_tokens=512),
         ),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.get_ep_group", return_value=SimpleNamespace(device_group=object())),
+        patch(
+            "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
+            return_value=_make_mega_moe_group(),
+        ),
     ):
         backend = MegaMoEBackend(_make_moe_config())
         backend.fused_experts(fused_input)
@@ -224,11 +308,7 @@ def test_mega_moe_backend_validates_fp4_packed_dimensions():
         w2_scale=torch.ones(2, 128, 1, 2, dtype=torch.uint8),
     )
 
-    with patch(
-        "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
-        return_value=SimpleNamespace(mega_moe_max_tokens=512),
-    ):
-        key = MegaMoEBackend(_make_moe_config())._make_buffer_key(fused_input)
+    key = MegaMoEBackend(_make_moe_config())._make_buffer_key(fused_input, buffer_tokens_per_rank=512)
 
     assert key.hidden_size == 128
     assert key.intermediate_hidden == 128
@@ -236,13 +316,9 @@ def test_mega_moe_backend_validates_fp4_packed_dimensions():
 
 def test_mega_moe_backend_rejects_input_over_configured_capacity():
     fused_input = _make_fused_input()
-    with patch(
-        "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
-        return_value=SimpleNamespace(mega_moe_max_tokens=3),
-    ):
-        backend = MegaMoEBackend(_make_moe_config())
-        with pytest.raises(ValueError, match="exceeds the configured capacity"):
-            backend._make_buffer_key(fused_input)
+    backend = MegaMoEBackend(_make_moe_config())
+    with pytest.raises(ValueError, match="exceeds the configured capacity"):
+        backend._make_buffer_key(fused_input, buffer_tokens_per_rank=3)
 
 
 def test_mega_moe_backend_rejects_packed_uint64_scales():

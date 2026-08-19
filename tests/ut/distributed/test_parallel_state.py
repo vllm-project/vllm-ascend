@@ -9,6 +9,7 @@ from vllm_ascend.distributed.parallel_state import (
     _FLASHCOMM2_OTP,
     _LMTP,
     _MC2,
+    _MEGA_MOE,
     _OTP,
     _P_TP,
     destroy_ascend_model_parallel,
@@ -17,10 +18,12 @@ from vllm_ascend.distributed.parallel_state import (
     get_global_rank,
     get_lmhead_tp_group,
     get_mc2_group,
+    get_mega_moe_group,
     get_otp_group,
     get_p_tp_group,
     init_ascend_model_parallel,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 @pytest.fixture
@@ -47,7 +50,11 @@ def mock_distributed():
         yield
 
 
-def test_init_ascend_model_parallel(mock_distributed, parallel_config):
+@pytest.mark.parametrize(
+    ("device_type", "expect_mega_moe_group"),
+    [(AscendDeviceType.A5, True), (AscendDeviceType.A3, False)],
+)
+def test_init_ascend_model_parallel(mock_distributed, parallel_config, device_type, expect_mega_moe_group):
     mock_ascend_config = MagicMock()
     mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
@@ -58,14 +65,16 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config.num_head_replica = 0
     mock_ascend_config.pd_head_ratio = 2
     mock_ascend_config.enable_flashcomm2_parallel_size = 2
+    mock_ascend_config.enable_fused_mc2 = 1
     mock_ascend_config.enable_context_parallel = False
     mock_vllm_config = MagicMock()
     mock_vllm_config.kv_transfer_config.is_kv_producer = True
     with (
         patch("vllm_ascend.distributed.parallel_state.model_parallel_initialized", return_value=False),
-        patch("vllm_ascend.distributed.parallel_state.init_model_parallel_group"),
+        patch("vllm_ascend.distributed.parallel_state.init_model_parallel_group") as mock_init_group,
         patch("vllm_ascend.distributed.parallel_state.get_current_vllm_config", return_value=mock_vllm_config),
         patch("vllm_ascend.distributed.parallel_state.get_ascend_config", return_value=mock_ascend_config),
+        patch("vllm_ascend.distributed.parallel_state.get_ascend_device_type", return_value=device_type),
         patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config),
     ):
         init_ascend_model_parallel(parallel_config)
@@ -82,9 +91,19 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
         assert flashcomm2_odp_group is not None
         assert lmheadtp_group is not None
         assert p_tp_group is not None
+        mega_moe_group_created = any(
+            call.kwargs.get("group_name") == "mega_moe" for call in mock_init_group.call_args_list
+        )
+        assert mega_moe_group_created is expect_mega_moe_group
+        if expect_mega_moe_group:
+            assert get_mega_moe_group() is not None
+        else:
+            with pytest.raises(AssertionError, match="MegaMoE group is not initialized"):
+                get_mega_moe_group()
 
         destroy_ascend_model_parallel()
         assert _MC2 is None
+        assert _MEGA_MOE is None
         assert _LMTP is None
         assert _OTP is None
         assert _FLASHCOMM2_OTP is None
