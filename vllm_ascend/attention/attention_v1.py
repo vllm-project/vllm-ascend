@@ -723,6 +723,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             )
                             if n_bt_r < block_table_buf.shape[0]:
                                 block_table_buf[n_bt_r:].zero_()
+                            # FA3's baked max-config plan reads all
+                            # max_blocks_per_seq columns and masks by
+                            # cache_seqlens.  Zero the UNUSED columns within
+                            # each request row (beyond ceil(cache_seqlens[i] /
+                            # block_size)) so they dereference block 0 instead
+                            # of a stale/freed block id left over from a
+                            # previous batch (-> MTE page fault on over-cover).
+                            block_size = AscendAttentionBackend.get_supported_kernel_block_sizes()[0]
+                            n_rows = min(cache_seqlens.numel(), n_bt_r)
+                            seq = cache_seqlens[:n_rows]
+                            cols = torch.arange(
+                                block_table_buf.shape[1], dtype=torch.int32,
+                                device=block_table_buf.device,
+                            )
+                            needed = ((seq + block_size - 1) // block_size).unsqueeze(1)
+                            block_table_buf[:n_rows].masked_fill_(
+                                cols.unsqueeze(0) >= needed, 0
+                            )
                 break
 
         # FA3 decode graph: it is invisible to the CANN task-group mechanism, so
