@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 import torch
+
 from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     AscendECSharedRegion,
 )

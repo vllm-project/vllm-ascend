@@ -14,7 +14,8 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.ec_shared_region impor
 
 
 def _temporary_mmap(size: int):
-    backing_file = tempfile.TemporaryFile()
+    # Ownership is transferred to the caller, which closes both resources.
+    backing_file = tempfile.TemporaryFile()  # noqa: SIM115
     backing_file.truncate(size)
     mmap_obj = mmap.mmap(
         backing_file.fileno(),
@@ -30,7 +31,7 @@ def test_fallback_populate_write_preserves_bytes():
     backing_file, mmap_obj = _temporary_mmap(size)
 
     try:
-        expected = bytes((index % 251 for index in range(size)))
+        expected = bytes(index % 251 for index in range(size))
         mmap_obj[:] = expected
         region_mod._fallback_populate_write(mmap_obj, 0, size)
         assert mmap_obj[:] == expected
