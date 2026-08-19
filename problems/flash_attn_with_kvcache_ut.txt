@@ -1,18 +1,20 @@
-python tests/standalone/fa3/test_fa3_graph_page_table.py 
-[W819 09:47:22.228419115 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_multiseq.py 
+[W819 10:14:14.395739184 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-blocks=8  block_size=128  seq=16  blk_a=0  blk_b=5
+batch=3  capture_seqlens=[16, 16, 16]  replay_seqlens=[64, 128, 200]
 ========================================================================
-[W819 09:47:27.484522586 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[ref  ] manual blk0 vs blk5          : 1.872067
-[block] replay blk0 vs blk5          : 1.871094
-[ok   ] out(blk0) vs ref(blk0)       : 0.003616
-[ok   ] out(blk5) vs ref(blk5)       : 0.003674
+[W819 10:14:19.507512436 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[ok ] replay seq0 (len=64) vs manual : 0.002276
+[ok ] replay seq1 (len=128) vs manual : 0.835923
+[ok ] replay seq2 (len=200) vs manual : 0.591563
+[seq ] replay seq0 vs seq1 (should differ)          : 0.851562
+[seq ] replay seq1 vs seq2 (should differ)          : 0.591797
+[grow] seq2 replay grown vs capture (should differ)  : 1.559082
 ------------------------------------------------------------------------
 Read:
-  [ref  ] LARGE  => the two blocks genuinely differ (sanity)
-  [block] LARGE  => graph re-reads page_table (GOOD, block refresh OK)
-          ~0    => graph BAKES page_table (production bug FOUND)
-  [ok   ] ~1e-2 => output matches the intended block (bf16 vs fp32)
+  [ok  ] ~1e-2 per sequence => multi-seq FA3 graph is CORRECT
+         large on ANY seq  => multi-seq FA3 graph is WRONG (bug found)
+  [seq ] LARGE => outputs actually differ per sequence (sanity)
+  [grow] LARGE => seq2 output changed after cache_seqlens grew
 ------------------------------------------------------------------------
