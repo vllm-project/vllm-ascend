@@ -16,8 +16,6 @@ Refer to [supported features](../../user_guide/support_matrix/supported_features
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-> **Note**: The support matrix records the maximum verified capability for this model. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
-
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
@@ -181,14 +179,10 @@ Before starting the service:
     #!/bin/sh
     # Load model from ModelScope to speed up download
     export VLLM_USE_MODELSCOPE=True
-    # To reduce memory fragmentation and avoid out of memory
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     export HCCL_BUFFSIZE=512
-    # Whether OpenMP threads are bound to specific CPU cores
-    export OMP_PROC_BIND=false
-    # Number of OpenMP threads available for parallel regions
-    export OMP_NUM_THREADS=1
+    # To reduce memory fragmentation and avoid out of memory
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
     export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
@@ -236,14 +230,10 @@ Before starting the service:
     #!/bin/sh
     # Load model from ModelScope to speed up download
     export VLLM_USE_MODELSCOPE=True
-    # To reduce memory fragmentation and avoid out of memory
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     export HCCL_BUFFSIZE=512
-    # Whether OpenMP threads are bound to specific CPU cores
-    export OMP_PROC_BIND=false
-    # Number of OpenMP threads available for parallel regions
-    export OMP_NUM_THREADS=1
+    # To reduce memory fragmentation and avoid out of memory
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) or a local directory path
     export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
