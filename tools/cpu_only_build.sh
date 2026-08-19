@@ -13,11 +13,23 @@ cd "${REPO_ROOT}"
 PYTORCH_CPU_INDEX_URL="${PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu/}"
 ASCEND_EXTRA_INDEX_URL="${ASCEND_EXTRA_INDEX_URL:-https://mirrors.huaweicloud.com/ascend/repos/pypi}"
 SOC_VERSION="${SOC_VERSION:-ascend910b1}"
+ARCTIC_INFERENCE_REQUIREMENT="arctic-inference==0.1.1"
 
 export COMPILE_CUSTOM_KERNELS=0
 export SOC_VERSION
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export PIP_DISABLE_PIP_VERSION_CHECK=1
+
+write_cpu_only_requirements() {
+    local destination="$1"
+
+    if ! grep -Fqx "${ARCTIC_INFERENCE_REQUIREMENT}" requirements.txt; then
+        echo "${ARCTIC_INFERENCE_REQUIREMENT} is missing from requirements.txt." >&2
+        return 1
+    fi
+
+    grep -Fvx "${ARCTIC_INFERENCE_REQUIREMENT}" requirements.txt > "${destination}"
+}
 
 install_deps() {
     python3 -m pip install --upgrade \
@@ -63,20 +75,39 @@ PY
         --extra-index-url "${ASCEND_EXTRA_INDEX_URL}" \
         torch-npu==2.10.0.post4 triton-ascend==3.2.2
 
-    # This is deliberately a normal requirements install.  Do not filter or
-    # otherwise special-case individual packages: a new un-installable
-    # dependency must fail this verification.
-    python3 -m pip install \
-        --extra-index-url "${ASCEND_EXTRA_INDEX_URL}" \
-        -r requirements.txt
+    # Arctic Inference remains a normal vLLM Ascend dependency for suffix
+    # speculative decoding. Its source distribution is incompatible with this
+    # CPU-only verification environment, so exclude only its exact pin here.
+    (
+        cpu_requirements="$(mktemp)"
+        trap 'rm -f "${cpu_requirements}"' EXIT
+        write_cpu_only_requirements "${cpu_requirements}"
+        python3 -m pip install \
+            --extra-index-url "${ASCEND_EXTRA_INDEX_URL}" \
+            -r "${cpu_requirements}"
+    )
 }
 
-build_package() {
+build_package() (
+    requirements_backup_dir="$(mktemp -d)"
+    requirements_backup="${requirements_backup_dir}/requirements.txt"
+    cpu_requirements="$(mktemp)"
+    cp requirements.txt "${requirements_backup}"
+
+    restore_requirements() {
+        mv -f "${requirements_backup}" requirements.txt
+        rm -f "${cpu_requirements}"
+        rmdir "${requirements_backup_dir}"
+    }
+    trap restore_requirements EXIT
+
+    write_cpu_only_requirements "${cpu_requirements}"
+    mv -f "${cpu_requirements}" requirements.txt
     python3 -m pip install \
         --no-build-isolation \
         --no-deps \
         -e .
-}
+)
 
 verify_cpu_only() {
     if ls /dev/davinci* >/dev/null 2>&1 || [[ -e /dev/davinci_manager ]]; then
@@ -96,6 +127,12 @@ print("torch:", torch.__version__)
 print("cuda available:", torch.cuda.is_available())
 assert not torch.cuda.is_available(), "a CUDA device is visible in CPU-only CI"
 print("vllm-ascend:", importlib.metadata.version("vllm-ascend"))
+try:
+    importlib.metadata.version("arctic-inference")
+except importlib.metadata.PackageNotFoundError:
+    print("arctic-inference: not installed (expected for CPU-only verification)")
+else:
+    raise AssertionError("arctic-inference is installed in CPU-only verification")
 PY
     python3 -m pip check
 }

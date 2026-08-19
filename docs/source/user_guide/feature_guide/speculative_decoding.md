@@ -331,9 +331,9 @@ Like n-gram, Suffix Decoding can generate draft tokens by pattern-matching using
 Suffix Decoding can achieve better performance for tasks with high repetition, such as code-editing, agentic loops (e.g. self-reflection, self-consistency), and RL rollouts.
 
 > [!NOTE]
-> Suffix Decoding requires the optional Arctic Inference plugin. Install a
-> version compatible with your vLLM and PyTorch stack, for example with
-> `pip install "arctic-inference>=0.2.0"`.
+> Suffix Decoding requires Arctic Inference. Normal vLLM Ascend NPU
+> installations include `arctic-inference==0.1.1`; install that exact version
+> if it is absent from a custom environment.
 
 - Offline inference
 

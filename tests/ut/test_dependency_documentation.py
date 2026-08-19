@@ -14,6 +14,7 @@ CPU_BUILD_DEPENDENCIES = (
     "torchaudio",
     "triton-ascend",
 )
+ARCTIC_INFERENCE_REQUIREMENT = "arctic-inference==0.1.1"
 
 
 def _read(path: str) -> str:
@@ -73,6 +74,7 @@ class DependencyDocumentationTest(unittest.TestCase):
 
     def test_cpu_only_build_contract_is_documented(self):
         installation = _read("docs/source/installation.md")
+        cpu_only_script = _read("tools/cpu_only_build.sh")
         section_start = installation.index("### CPU-only build verification")
         section_end = installation.index("\n!!! note", section_start)
         cpu_section = installation[section_start:section_end]
@@ -91,6 +93,9 @@ class DependencyDocumentationTest(unittest.TestCase):
             "wheel",
             "ninja",
             "python -m pip check",
+            ARCTIC_INFERENCE_REQUIREMENT,
+            "part of the normal vLLM Ascend dependency",
+            "bash tools/cpu_only_build.sh all",
         )
         for text in required_text:
             with self.subTest(text=text):
@@ -100,6 +105,21 @@ class DependencyDocumentationTest(unittest.TestCase):
         for package in CPU_BUILD_DEPENDENCIES:
             with self.subTest(package=package):
                 self.assertIn(f"{package}=={requirements[package]}", cpu_section)
+
+        self.assertIn(ARCTIC_INFERENCE_REQUIREMENT, _read("requirements.txt"))
+        self.assertIn("write_cpu_only_requirements", cpu_only_script)
+        self.assertIn('grep -Fvx "${ARCTIC_INFERENCE_REQUIREMENT}"', cpu_only_script)
+        self.assertIn("trap restore_requirements EXIT", cpu_only_script)
+
+    def test_arctic_inference_contract_is_documented_for_suffix_decoding(self):
+        for path in (
+            "docs/source/tutorials/features/suffix_speculative_decoding.md",
+            "docs/source/user_guide/feature_guide/speculative_decoding.md",
+        ):
+            with self.subTest(path=path):
+                documentation = _read(path)
+                self.assertIn(ARCTIC_INFERENCE_REQUIREMENT, documentation)
+                self.assertNotIn('arctic-inference>=0.2.0', documentation)
 
     def test_ascend_toolkit_home_is_set_before_nnal_installation(self):
         installation = _read("docs/source/installation.md")

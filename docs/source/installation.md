@@ -267,17 +267,28 @@ python -m pip install \
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     torch-npu==2.10.0.post4 triton-ascend==3.2.2
+grep -Fxv 'arctic-inference==0.1.1' requirements.txt \
+    > /tmp/vllm-ascend-cpu-only-requirements.txt
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    -r requirements.txt
+    -r /tmp/vllm-ascend-cpu-only-requirements.txt
 ```
 
-`arctic-inference` is intentionally not part of the universal requirements.
-It is an optional plugin for suffix speculative decoding; install a version
-compatible with the selected vLLM stack separately when that feature is used,
-for example `python -m pip install "arctic-inference>=0.2.0"`. The old
-`arctic-inference==0.1.1` source distribution requires a PyTorch 2.7 build
-environment and is not a requirement of the CPU-only package build.
+`arctic-inference==0.1.1` remains part of the normal vLLM Ascend dependency
+contract and is required for suffix speculative decoding. CPU-only
+verification excludes only this exact requirement in its temporary
+requirements file because its source distribution is incompatible with the
+CPU-only build environment. This local CI exception does not affect normal NPU
+installations or suffix speculative decoding.
+
+Use `tools/cpu_only_build.sh` for CPU-only verification. In addition to the
+temporary requirements file above, it temporarily replaces `requirements.txt`
+during the editable `--no-deps` install so the generated package metadata also
+excludes Arctic Inference, then restores the original file with a shell trap:
+
+```bash
+bash tools/cpu_only_build.sh all
+```
 
 Set the build target explicitly and disable device backend auto-loading before
 building vLLM Ascend:
