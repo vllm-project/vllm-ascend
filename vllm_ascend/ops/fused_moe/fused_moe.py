@@ -201,6 +201,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
+            # Upstream model files now pass ``router_logits=hidden_states`` and
+            # expect the runner to apply the gate. Models that apply the gate
+            # themselves (e.g. MiniMax-M3) pass a distinct tensor, detected via
+            # identity; DeepSeek-V4 uses the fp32 gate path below.
+            if router_logits is hidden_states and self.gate is not None and not self.is_internal_router:
+                router_logits, _ = self.gate(hidden_states)
+
             if self.ascend_shared_experts is None:
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,

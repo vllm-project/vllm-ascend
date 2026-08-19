@@ -12,8 +12,22 @@ from vllm.v1.structured_output import StructuredOutputManager, backend_guidance,
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
+
+
+def _xgrammar_reject(message: str) -> Exception:
+    """Exception the current lane's "auto" backend flow catches to fall back.
+
+    Upstream main's ``SamplingParams._validate_structured_outputs`` falls back
+    to guidance on ``except VLLMValidationError``; the 0.27.1 lane catches
+    ``ValueError`` instead. Raise whichever the active lane catches so the
+    xgrammar rejection is observed as a fallback rather than an escape.
+    """
+    if vllm_version_is("0.27.1"):
+        return ValueError(message)
+    return VLLMValidationError(message)
 
 
 class FakeBackend:
@@ -22,7 +36,7 @@ class FakeBackend:
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
 
-    def compile_grammar(self, request_type, grammar_spec):
+    def compile_grammar(self, request_type, grammar_spec, stop_token_ids=None):
         return (type(self).__name__, request_type, grammar_spec)
 
 
@@ -45,7 +59,10 @@ def make_manager() -> StructuredOutputManager:
 
 def make_request(backend: str):
     return SimpleNamespace(
-        sampling_params=SimpleNamespace(structured_outputs=SimpleNamespace(_backend=backend)),
+        sampling_params=SimpleNamespace(
+            structured_outputs=SimpleNamespace(_backend=backend),
+            all_stop_token_ids=[],
+        ),
         structured_output_request=SimpleNamespace(
             structured_output_key=(StructuredOutputOptions.JSON, "{}"),
             grammar=None,
@@ -68,7 +85,7 @@ def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
     def fake_validate_xgrammar(sampling_params):
         schema = sampling_params.structured_outputs.json
         if schema.get("force_guidance"):
-            raise ValueError("xgrammar unsupported")
+            raise _xgrammar_reject("xgrammar unsupported")
 
     monkeypatch.setattr(
         backend_xgrammar,
@@ -123,7 +140,7 @@ def test_failed_first_validation_does_not_lock_config(monkeypatch):
     monkeypatch.setattr(
         backend_xgrammar,
         "validate_xgrammar_grammar",
-        lambda sampling_params: (_ for _ in ()).throw(ValueError("xgrammar error")),
+        lambda sampling_params: (_ for _ in ()).throw(_xgrammar_reject("xgrammar error")),
     )
     monkeypatch.setattr(
         backend_guidance,
