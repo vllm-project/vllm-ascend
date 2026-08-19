@@ -33,6 +33,16 @@ _P_TP: GroupCoordinator | None = None
 _DYNAMIC_EPLB: GroupCoordinator | None = None
 
 
+def _initialize_mega_moe_communicator(group: GroupCoordinator) -> None:
+    """Eagerly initialize the HCCL communicator required by SymmBuffer."""
+    device_group = group.device_group
+    rank_in_group = torch.distributed.get_rank(group=device_group)
+    backend = device_group._get_backend(torch.device("npu"))
+    group_name = backend.get_hccl_comm_name(rank_in_group)
+    if not group_name:
+        raise RuntimeError("Failed to initialize the MegaMoE HCCL communicator")
+
+
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
 ):
@@ -107,6 +117,7 @@ def init_ascend_model_parallel(
             backend,
             group_name="mega_moe",
         )
+        _initialize_mega_moe_communicator(_MEGA_MOE)
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB

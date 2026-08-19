@@ -12,6 +12,7 @@ from vllm_ascend.distributed.parallel_state import (
     _MEGA_MOE,
     _OTP,
     _P_TP,
+    _initialize_mega_moe_communicator,
     destroy_ascend_model_parallel,
     get_flashcomm2_odp_group,
     get_flashcomm2_otp_group,
@@ -75,6 +76,7 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, device_ty
         patch("vllm_ascend.distributed.parallel_state.get_current_vllm_config", return_value=mock_vllm_config),
         patch("vllm_ascend.distributed.parallel_state.get_ascend_config", return_value=mock_ascend_config),
         patch("vllm_ascend.distributed.parallel_state.get_ascend_device_type", return_value=device_type),
+        patch("vllm_ascend.distributed.parallel_state._initialize_mega_moe_communicator") as mock_init_communicator,
         patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config),
     ):
         init_ascend_model_parallel(parallel_config)
@@ -96,8 +98,11 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, device_ty
         )
         assert mega_moe_group_created is expect_mega_moe_group
         if expect_mega_moe_group:
-            assert get_mega_moe_group() is not None
+            mega_moe_group = get_mega_moe_group()
+            assert mega_moe_group is not None
+            mock_init_communicator.assert_called_once_with(mega_moe_group)
         else:
+            mock_init_communicator.assert_not_called()
             with pytest.raises(AssertionError, match="MegaMoE group is not initialized"):
                 get_mega_moe_group()
 
@@ -109,6 +114,30 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, device_ty
         assert _FLASHCOMM2_OTP is None
         assert _FLASHCOMM2_ODP is None
         assert _P_TP is None
+
+
+def test_initialize_mega_moe_communicator():
+    group = MagicMock()
+    backend = group.device_group._get_backend.return_value
+    backend.get_hccl_comm_name.return_value = "mega-moe-hccl-group"
+
+    with patch("torch.distributed.get_rank", return_value=2) as mock_get_rank:
+        _initialize_mega_moe_communicator(group)
+
+    mock_get_rank.assert_called_once_with(group=group.device_group)
+    backend.get_hccl_comm_name.assert_called_once_with(2)
+
+
+def test_initialize_mega_moe_communicator_rejects_empty_group_name():
+    group = MagicMock()
+    backend = group.device_group._get_backend.return_value
+    backend.get_hccl_comm_name.return_value = ""
+
+    with (
+        patch("torch.distributed.get_rank", return_value=0),
+        pytest.raises(RuntimeError, match="Failed to initialize the MegaMoE HCCL communicator"),
+    ):
+        _initialize_mega_moe_communicator(group)
 
 
 def _build_parallel_config(
