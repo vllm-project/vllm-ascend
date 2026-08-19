@@ -1,13 +1,14 @@
-python tests/standalone/fa3/test_fa3_graph_multiseq_meta.py 
-[W819 10:55:27.422576381 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_multiseq_overcover.py 
+[W819 11:09:39.918145442 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
 batch=3  page_table=[[0, 1], [2, 3], [4, 5]]  replay=[64, 128, 200]
 ========================================================================
-[W819 10:55:32.516524474 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[stale-meta] seq0/seq1/seq2 = 0.002684  0.711651  0.703196  -> BROKEN
-[fresh-meta] seq0/seq1/seq2 = 0.002406  0.001607  0.001137  -> OK
-[fresh-all ] seq0/seq1/seq2 = 0.002065  0.001618  0.001131  -> OK
+[W819 11:09:45.170324869 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[under-cover ] seq0/seq1/seq2 = 0.002058  0.863505  0.598518  -> BROKEN
+[over-cover  ] seq0/seq1/seq2 = 0.002338  0.001402  0.001352  -> OK
+[over-cover-2k] seq0/seq1/seq2 = 0.002375  0.726923  0.724456  -> BROKEN
 ------------------------------------------------------------------------
-VERDICT: stale-meta already OK -> cannot reproduce C; check setup
+VERDICT: over-cover OK but over-cover-2k BROKEN -> size-dependent;
+         plan must cover replay but not overshoot too far
 ------------------------------------------------------------------------
