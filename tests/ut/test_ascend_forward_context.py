@@ -32,7 +32,7 @@ def _make_vllm_config(
     num_experts_per_tok: int | None = None,
     cudagraph_capture_sizes: list[int] | None = None,
     max_cudagraph_capture_size: int = 0,
-    max_num_batched_tokens: int = 0,
+    max_num_batched_tokens: int = 65536,
     resolved_moe_quant_type: QuantType | None = None,
     hidden_act: str | None = None,
 ):
@@ -100,6 +100,7 @@ def _patch_select_moe_comm_method_deps(
     mega_moe_max_tokens: int = 65536,
     dynamic_eplb: bool = False,
     num_redundant_experts: int = 0,
+    mix_placement: bool = False,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
@@ -111,6 +112,7 @@ def _patch_select_moe_comm_method_deps(
         lambda: SimpleNamespace(
             enable_fused_mc2=enable_fused_mc2,
             mega_moe_max_tokens=mega_moe_max_tokens,
+            mix_placement=mix_placement,
             eplb_config=SimpleNamespace(
                 dynamic_eplb=dynamic_eplb,
                 num_redundant_experts=num_redundant_experts,
@@ -321,7 +323,7 @@ def test_select_moe_comm_method_a5_reads_quant_type_from_model_instance(monkeypa
     assert not hasattr(vllm_config, "ascend_moe_quant_type")
 
 
-def test_select_moe_comm_method_a5_uses_mc2_for_draft_model(monkeypatch):
+def test_select_moe_comm_method_a5_uses_mega_moe_for_draft_model(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A5,
@@ -335,7 +337,7 @@ def test_select_moe_comm_method_a5_uses_mc2_for_draft_model(monkeypatch):
     )
 
     assert afc.select_moe_comm_method(64, vllm_config) == MoECommType.FUSED_MC2
-    assert afc.select_moe_comm_method(64, vllm_config, is_draft_model=True) == MoECommType.MC2
+    assert afc.select_moe_comm_method(64, vllm_config, is_draft_model=True) == MoECommType.FUSED_MC2
 
 
 def test_select_moe_comm_method_a5_honors_configured_mega_moe_capacity(monkeypatch):
@@ -352,8 +354,26 @@ def test_select_moe_comm_method_a5_honors_configured_mega_moe_capacity(monkeypat
         resolved_moe_quant_type=QuantType.W4A8MXFP,
     )
 
-    assert afc.select_moe_comm_method(512, vllm_config) == MoECommType.FUSED_MC2
-    assert afc.select_moe_comm_method(513, vllm_config) == MoECommType.ALLTOALL
+    assert afc.select_moe_comm_method(64, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(65, vllm_config) == MoECommType.MC2
+
+
+def test_select_moe_comm_method_a5_clamps_capacity_to_scheduler_limit(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=2048,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=4,
+        top_k_experts=4,
+        max_num_batched_tokens=8192,
+        resolved_moe_quant_type=QuantType.W4A8MXFP,
+    )
+
+    assert afc.select_moe_comm_method(2048, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(2049, vllm_config) == MoECommType.ALLGATHER
 
 
 @pytest.mark.parametrize(
@@ -380,6 +400,31 @@ def test_select_moe_comm_method_a5_falls_back_for_unsupported_eplb(
     )
 
     assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected_comm_type"),
+    [(64, MoECommType.MC2), (129, MoECommType.ALLTOALL)],
+)
+def test_select_moe_comm_method_a5_falls_back_for_mix_placement(
+    monkeypatch,
+    num_tokens,
+    expected_comm_type,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+        mix_placement=True,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        resolved_moe_quant_type=QuantType.W4A8MXFP,
+    )
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected_comm_type
 
 
 @pytest.mark.parametrize("hidden_act", ["swigluoai", "swiglustep", "situglu"])
