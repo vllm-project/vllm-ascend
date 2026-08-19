@@ -218,6 +218,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.req_states,
                 self.block_tables,
             )
+        if self.model_config.enable_return_routed_experts:
+            self.init_routed_experts_capturer()
 
     @torch.inference_mode()
     def execute_model(
@@ -570,7 +572,10 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        ):
             num_reqs_padded = num_reqs
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
