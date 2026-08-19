@@ -44,10 +44,6 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 
-# Probe the optional future dispatcher only when the 310P V2 runner is loaded.
-# Model Runner V1 never imports this module.
-register_310p_kernels()
-
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
@@ -61,10 +57,27 @@ class NPUModelRunner310V2(NPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self._validate_first_release_config(vllm_config)
         super().__init__(vllm_config, device)
+        # Register optional pluggable kernels only when the 310P V2 runner is
+        # actually used. This keeps the codebase compatible with vLLM
+        # deployments where vLLM PR #43048 is not merged yet.
+        register_310p_kernels()
         self.sampler = Ascend310PGreedySampler()
         self.input_ids_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cpu")
         self.positions_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int64, device="cpu")
         self.next_prefill_tokens_cpu = torch.zeros(1, self.max_num_reqs, dtype=torch.int32, device="cpu")
+
+    def _update_states(self, scheduler_output) -> Any:
+        """Drain NPU stream on layout-change steps to prevent 310P ACLGraph precision regressions.
+
+        Mirrors vLLM-Ascend PR #9727: `condense()` rewrites `block_table.np`
+        (move_row). For 310P MRv2, the previous step's ACLGraph replay may
+        still be in-flight when the condensed CPU layout is uploaded and
+        consumed by paged/splitfuse attention metadata.
+        """
+        deferred = super()._update_states(scheduler_output)
+        if scheduler_output.finished_req_ids:
+            torch.npu.current_stream().synchronize()
+        return deferred
 
     @property
     def supports_prefix_caching(self) -> bool:

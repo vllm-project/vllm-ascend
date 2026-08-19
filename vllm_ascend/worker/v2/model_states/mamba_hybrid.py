@@ -41,6 +41,15 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     base so cooperative ``super()`` calls retain the Ascend model-state MRO.
     """
 
+    def __init__(self, vllm_config, model, encoder_cache, device) -> None:
+        super().__init__(vllm_config, model, encoder_cache, device)
+        # Avoid using upstream Triton scatter kernels on 310P by making the
+        # accepted-token counter tensor device-resident and updating it via
+        # NPU indexing in our postprocess_state().
+        self.num_accepted_tokens_gpu = torch.ones(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -104,3 +113,28 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             for_cudagraph_capture=for_capture,
         )
         return self.attn_metadata
+
+    def postprocess_state(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+    ) -> None:
+        # Upstream implementation uses Triton scatter kernels:
+        # `_scatter_num_accepted_kernel[(...)](...)`.
+        # On 310P runtimes Triton may be absent, so the decorated kernel
+        # becomes a plain python function and crashes. Use device-native
+        # indexing instead to keep the op on device and Triton-free.
+        del num_computed_tokens
+
+        if isinstance(num_sampled, int):
+            self.num_accepted_tokens_gpu.index_fill_(0, idx_mapping, max(num_sampled, 1))
+            return
+
+        valid = idx_mapping >= 0
+        valid_indices = idx_mapping.masked_select(valid)
+        accepted = (
+            torch.clamp(num_sampled.masked_select(valid), min=1)
+            .to(self.num_accepted_tokens_gpu.dtype)
+        )
+        self.num_accepted_tokens_gpu.index_copy_(0, valid_indices, accepted)
