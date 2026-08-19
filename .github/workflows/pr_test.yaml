@@ -42,7 +42,6 @@ concurrency:
 
 jobs:
   pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready-precise' || github.event.label.name == 'ready-a5' || github.event.label.name == 'ready-all' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -191,7 +190,6 @@ jobs:
 
   select-tests:
     needs:
-      - pre-commit
       - recommend-tests-from-coverage
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # It always runs after pre-commit (even when recommend-tests-from-coverage
@@ -199,7 +197,6 @@ jobs:
     #   recommended - recommend job succeeded with coverage paths
     #   diff        - ready-all forced, or recommend job failed/skipped (fallback)
     #   none        - recommend job succeeded but produced no paths (no tests)
-    if: ${{ always() && needs.pre-commit.result == 'success' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -659,7 +656,7 @@ jobs:
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
-              echo "::error::Selected tests are required; add the ready or ready-all label"
+              echo "::error::Selected tests are required; add the ready-precise or ready-all label"
               exit 1
             fi
             if [ "${TESTS_RESULT}" != "success" ]; then
