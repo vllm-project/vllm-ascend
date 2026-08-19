@@ -1269,14 +1269,23 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     from vllm_ascend.ascend_forward_context import select_moe_comm_method
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
-    def needs_mc2(n: int) -> bool:
-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+    def get_comm_method(n: int):
+        return select_moe_comm_method(n, vllm_config, is_draft_model=is_draft_model)
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    decode_must_use_mc2 = needs_mc2(get_potential_max_tokens())
+    decode_comm_method = get_comm_method(get_potential_max_tokens())
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
-    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    prefill_comm_method = get_comm_method(scheduler_config.max_num_batched_tokens)
+    # MegaMoE uses a symmetric collective across the complete EP-like group.
+    # Every rank must therefore make the same backend decision and enter the
+    # operator with the same token shape. Keep DP metadata synchronization
+    # enabled whenever either execution shape can select MegaMoE.
+    if MoECommType.FUSED_MC2 in {decode_comm_method, prefill_comm_method}:
+        return False
+
+    decode_must_use_mc2 = decode_comm_method == MoECommType.MC2
+    prefill_must_use_mc2 = prefill_comm_method == MoECommType.MC2
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
     return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
