@@ -706,7 +706,7 @@
     - tests/ut/tools/bisect
 
 - name: _tools
-  optional: false
+  optional: true
   source_file_dependencies:
     - tools/
   tests:
