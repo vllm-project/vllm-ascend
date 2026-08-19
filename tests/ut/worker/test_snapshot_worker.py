@@ -61,10 +61,10 @@ def test_get_acl_rt_lib_uses_cached_instance(npu_worker_cls):
 @pytest.mark.parametrize(
     ("method_name", "api_name"),
     [
-        pytest.param("aclrt_snapshot_process_lock", "aclrtSnapShotProcessLock", id="lock"),
-        pytest.param("aclrt_snapshot_process_backup", "aclrtSnapShotProcessBackup", id="backup"),
-        pytest.param("aclrt_snapshot_process_restore", "aclrtSnapShotProcessRestore", id="restore"),
-        pytest.param("aclrt_snapshot_process_unlock", "aclrtSnapShotProcessUnlock", id="unlock"),
+        pytest.param("snapshot_process_lock", "aclrtSnapShotProcessLock", id="lock"),
+        pytest.param("snapshot_process_backup", "aclrtSnapShotProcessBackup", id="backup"),
+        pytest.param("snapshot_process_restore", "aclrtSnapShotProcessRestore", id="restore"),
+        pytest.param("snapshot_process_unlock", "aclrtSnapShotProcessUnlock", id="unlock"),
     ],
 )
 def test_aclrt_snapshot_wrappers_call_expected_api(worker, method_name, api_name):
@@ -97,12 +97,12 @@ def test_re_load_weights_delegates_to_model_runner(worker):
     worker.model_runner.restore_model.assert_called_once_with(path="/tmp/model")
 
 
-def test_clean_up_destroys_parallel_and_dist_env(worker):
+def test_parallel_group_clean_up_destroys_parallel_and_dist_env(worker):
     with (
         patch("vllm_ascend.worker.worker.destroy_ascend_model_parallel") as mock_destroy,
-        patch("vllm.distributed.cleanup_dist_env_for_snapshot") as mock_cleanup,
+        patch("vllm_ascend.worker.worker.cleanup_dist_env_for_snapshot") as mock_cleanup,
     ):
-        worker.clean_up()
+        worker.parallel_group_clean_up()
 
     mock_destroy.assert_called_once()
     mock_cleanup.assert_called_once()

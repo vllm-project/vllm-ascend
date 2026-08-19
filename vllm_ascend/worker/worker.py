@@ -32,13 +32,10 @@ import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-
-from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
-
 from vllm.distributed import (
     ensure_model_parallel_initialized,
+    get_pcp_group,
     init_distributed_environment,
-    cleanup_dist_env_for_snapshot,
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
@@ -71,8 +68,11 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
-from vllm_ascend.distributed.parallel_state import destroy_ascend_model_parallel, init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import (
+    destroy_ascend_model_parallel,
+    init_ascend_model_parallel,
+)
+from vllm_ascend.distributed.snapshot import cleanup_dist_env_for_snapshot
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -718,16 +718,16 @@ class NPUWorker(WorkerBase):
         else:
             logger.error("[snapshot] [worker] [rank:%s] %s failed %s.", self.rank, api_name, result)
 
-    def aclrt_snapshot_process_lock(self) -> None:
+    def snapshot_process_lock(self) -> None:
         self._call_aclrt_snapshot_api("aclrtSnapShotProcessLock")
 
-    def aclrt_snapshot_process_backup(self) -> None:
+    def snapshot_process_backup(self) -> None:
         self._call_aclrt_snapshot_api("aclrtSnapShotProcessBackup")
 
-    def aclrt_snapshot_process_restore(self) -> None:
+    def snapshot_process_restore(self) -> None:
         self._call_aclrt_snapshot_api("aclrtSnapShotProcessRestore")
 
-    def aclrt_snapshot_process_unlock(self) -> None:
+    def snapshot_process_unlock(self) -> None:
         self._call_aclrt_snapshot_api("aclrtSnapShotProcessUnlock")
 
     def dump_model(self, model_save_path=None) -> None:
@@ -750,11 +750,18 @@ class NPUWorker(WorkerBase):
         dist.set_debug_level(dist.DebugLevel.INFO)
 
         rebuild_time_start = time.time()
-        logger.info("[snapshot] [parallel] rank %s: destroying HCCL and model-parallel groups", self.rank,)
+        logger.info(
+            "[snapshot] [parallel] rank %s: destroying HCCL and model-parallel groups",
+            self.rank,
+        )
         self.parallel_group_clean_up()
 
-        logger.info("[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups", self.rank,)
+        logger.info(
+            "[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups",
+            self.rank,
+        )
         import urllib.parse
+
         # distributed_init_method must point to the Pod where DP rank 0 runs.
         init_method = self.distributed_init_method
         parsed = urllib.parse.urlparse(init_method)
@@ -769,7 +776,9 @@ class NPUWorker(WorkerBase):
 
         logger.info(
             "[snapshot] [parallel] rank %s: distributed_init_method %s -> %s (port+1)",
-            self.rank, init_method, new_method,
+            self.rank,
+            init_method,
+            new_method,
         )
         self.distributed_init_method = new_method
 
@@ -802,7 +811,8 @@ class NPUWorker(WorkerBase):
 
         logger.info(
             "[snapshot] [parallel] rank %s: rebuild_parallel_group cost %.2fs",
-            self.rank, time.time() - rebuild_time_start,
+            self.rank,
+            time.time() - rebuild_time_start,
         )
 
     def update_worker_info_after_resume(self, local_ip: str, data_parallel_master_ip: str) -> None:
@@ -811,19 +821,17 @@ class NPUWorker(WorkerBase):
         self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
         logger.info(
             "[snapshot] [worker] rank %s: HCCL_IF_IP=%s data_parallel_master_ip=%s",
-            self.rank, local_ip, data_parallel_master_ip,
+            self.rank,
+            local_ip,
+            data_parallel_master_ip,
         )
 
-    def rebuild_kv_transfer_engine_after_resume(
-        self, local_ip: str, new_engine_id: str | None = None
-    ) -> None:
+    def rebuild_kv_transfer_engine_after_resume(self, local_ip: str, new_engine_id: str | None = None) -> None:
         """[snapshot] Rebuild KV transfer endpoints after container resume."""
         kv_cfg = self.vllm_config.kv_transfer_config
         if kv_cfg is None:
             return
-        if not (
-            getattr(kv_cfg, "is_kv_producer", False) or getattr(kv_cfg, "is_kv_consumer", False)
-        ):
+        if not (getattr(kv_cfg, "is_kv_producer", False) or getattr(kv_cfg, "is_kv_consumer", False)):
             return
         if not has_kv_transfer_group():
             return
