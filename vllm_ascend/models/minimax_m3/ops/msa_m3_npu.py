@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import torch
 
-import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_custom_op,
@@ -39,6 +38,10 @@ def _npu_k2q_csr(
     q_global_offset: int | bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert MiniMax-M3 q2k indices to k2q CSR on NPU."""
+    # A5 disables the generic custom-op loader, so register the in-tree
+    # MiniMax M3 operators lazily after the NPU runtime has been initialized.
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+
     enable_custom_op()
     if total_rows < 0 or max_kv < 0:
         derived_total_rows, derived_max_kv = _k2q_csr_block_stats(cu_block_lens)
