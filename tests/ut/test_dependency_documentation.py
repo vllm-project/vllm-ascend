@@ -229,6 +229,28 @@ class DependencyDocumentationTest(unittest.TestCase):
         self.assertIn("Ascend-cann-nnal_", install_cann)
         self.assertIn("$CANN_NNAL_RUN", install_cann)
 
+    def test_docs_do_not_link_to_moved_getting_started_pages(self):
+        source_root = REPO_ROOT / "docs/source"
+        moved_pages = {
+            (source_root / "getting_started.md").resolve(),
+            (source_root / "installation.md").resolve(),
+            (source_root / "quick_start.md").resolve(),
+        }
+
+        for path in sorted(source_root.rglob("*.md")):
+            if path.is_relative_to(source_root / "zh"):
+                continue
+            content = path.read_text(encoding="utf-8")
+            for target in re.findall(r"\]\(([^)]+)\)", content):
+                target = target.split(maxsplit=1)[0].strip("<>")
+                if target.startswith(("#", "http://", "https://", "mailto:")):
+                    continue
+                linked_path = target.partition("#")[0]
+                if not linked_path:
+                    continue
+                with self.subTest(source=path.relative_to(source_root), target=target):
+                    self.assertNotIn((path.parent / linked_path).resolve(), moved_pages)
+
     def test_installation_has_three_end_to_end_paths(self):
         installation = _read("docs/source/getting_started/installation.md")
         prebuilt = _read("docs/source/getting_started/installation/prebuilt_image.inc.md")

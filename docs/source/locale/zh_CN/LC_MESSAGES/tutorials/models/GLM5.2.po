@@ -68,7 +68,8 @@ msgid ""
 "communication according to [verify multi-node communication "
 "environment](../../getting_started/installation.md#multi-node-deployment)."
 msgstr ""
-"如需部署多节点环境，需按照[验证多节点通信环境](../../getting_started/installation.md#multi-node-deployment)验证多节点通信。"
+"如需部署多节点环境，需按照[验证多节点通信环境](../../getting_started/installation.md#multi-node-"
+"deployment)验证多节点通信。"
 
 msgid "=== \"A3 series\""
 msgstr "=== \"A3系列\""
@@ -293,8 +294,8 @@ msgstr "如果您不想使用上述docker镜像，也可以从源码构建所有
 
 msgid ""
 "- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装`vllm-ascend`，请参考[安装](../../installation.md)。"
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装`vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
 
 msgid "## 5 Deployment"
 msgstr "## 5 部署"
