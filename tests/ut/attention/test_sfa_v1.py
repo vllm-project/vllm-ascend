@@ -375,6 +375,45 @@ class TestAscendSFACacheComposition(TestBase):
         self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
     @patch(
+        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer",
+        create=True,
+        side_effect=AssertionError("non-quantized indexer must use torch_npu"),
+    )
+    @patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
+        create=True,
+    )
+    def test_li_indexer_uses_torch_npu_operator(self, mock_indexer, _mock_custom_indexer):
+        expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
+        mock_indexer.return_value = expected_topk, torch.empty(0)
+        q_li = torch.zeros(2, 1, 128, dtype=torch.bfloat16)
+        weights = torch.ones(2, 1, dtype=torch.bfloat16)
+        indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.bfloat16)
+        kv_cache = (indexer_k_cache,)
+        attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
+
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            q_li,
+            None,
+            None,
+            weights,
+            kv_cache,
+            0,
+            1,
+            attn_metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([2], dtype=torch.int32),
+            False,
+            False,
+        )
+
+        self.assertIs(result, expected_topk)
+        call_kwargs = mock_indexer.call_args.kwargs
+        self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(call_kwargs["layout_query"], "TND")
+        self.assertEqual(call_kwargs["layout_key"], "PA_BSND")
+
+    @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
     )
