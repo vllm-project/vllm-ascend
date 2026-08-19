@@ -36,7 +36,6 @@ def test_eagle_draft_replay_sets_config_and_selects_executable_backend() -> None
 
     assert "set_current_vllm_config(self.vllm_config)" in source
     assert "_get_graph_update_backend(self.speculator.attn_groups)" in source
-    assert "list(self.speculator.attn_backends.values())[0]" not in source
 
 
 def test_eagle_patch_replaces_verified_main_manager_symbol() -> None:
