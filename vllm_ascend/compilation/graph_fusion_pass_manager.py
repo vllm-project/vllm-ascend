@@ -61,6 +61,14 @@ class GraphFusionPassManager:
 
             self.passes.append(QKNormRopeFusionPass(config))
 
+        if self.ascend_compilation_config.get("fuse_tp_qknorm_rope", True):
+            from vllm.triton_utils import HAS_TRITON
+
+            if HAS_TRITON:
+                from .passes.tp_qknorm_rope_fusion_pass import TPQKNormRopeFusionPass
+
+                self.passes.append(TPQKNormRopeFusionPass(config))
+
         if self.ascend_compilation_config.get("fuse_muls_add", True) and not is_310p():
             from .passes.muls_add_pass import MulsAddFusionPass
 

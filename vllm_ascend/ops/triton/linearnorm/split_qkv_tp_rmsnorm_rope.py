@@ -374,3 +374,87 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
+
+
+def qkv_tp_rmsnorm_rope_impl(
+    input: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_hidden_size: int,
+    kv_hidden_size: int,
+    head_dim: int,
+    rotary_dim: int,
+    eps: float,
+    tp_world: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Graph-friendly entry of ``split_qkv_tp_rmsnorm_rope``.
+
+    Reads the per-step cos/sin slices maintained by the model runner
+    (``update_cos_sin`` in ``vllm_ascend.ops.rotary_embedding``) at op
+    execution time. The slices are refreshed in place once per step, so
+    eager calls always see the current rows and aclgraph replays read the
+    up-to-date buffer contents without any per-layer gather.
+    """
+    from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
+
+    cos, sin = get_cos_and_sin_slice()
+    if cos is None or sin is None:
+        raise RuntimeError(
+            "qkv_tp_rmsnorm_rope requires the runner-maintained cos/sin buffers; "
+            "they are initialized by set_cos_and_sin() during model runner init."
+        )
+    return split_qkv_tp_rmsnorm_rope_impl(
+        input,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        rotary_dim,
+        eps,
+        tp_world,
+        cos,
+        sin,
+    )
+
+
+def qkv_tp_rmsnorm_rope_impl_fake(
+    input: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_hidden_size: int,
+    kv_hidden_size: int,
+    head_dim: int,
+    rotary_dim: int,
+    eps: float,
+    tp_world: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens = input.shape[0]
+    q_out = torch.empty(
+        num_tokens,
+        q_hidden_size,
+        device=input.device,
+        dtype=input.dtype,
+    )
+    k_out = torch.empty(
+        num_tokens,
+        kv_hidden_size,
+        device=input.device,
+        dtype=input.dtype,
+    )
+    v_out = torch.empty(
+        num_tokens,
+        kv_hidden_size,
+        device=input.device,
+        dtype=input.dtype,
+    )
+    return q_out, k_out, v_out
+
+
+direct_register_custom_op(
+    op_name="qkv_tp_rmsnorm_rope",
+    op_func=qkv_tp_rmsnorm_rope_impl,
+    fake_impl=qkv_tp_rmsnorm_rope_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
