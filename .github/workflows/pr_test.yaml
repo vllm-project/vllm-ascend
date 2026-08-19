@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' || github.event.label.name == 'ready-all' }}
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready-precise' || github.event.label.name == 'ready-a5' || github.event.label.name == 'ready-all' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -395,7 +395,7 @@ jobs:
         always() &&
         needs.select-tests.result == 'success' &&
         (
-          contains(github.event.pull_request.labels.*.name, 'ready') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
@@ -420,7 +420,7 @@ jobs:
         needs.pre-commit.result == 'success' &&
         needs.ensure-csrc-cache.result == 'success' &&
         (
-          contains(github.event.pull_request.labels.*.name, 'ready') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         ) &&
         needs.select-tests.outputs.has_tests == 'true'
@@ -451,7 +451,7 @@ jobs:
         always() &&
         needs.pre-commit.result == 'success' &&
         needs.ensure-csrc-cache.result == 'success' &&
-        contains(github.event.pull_request.labels.*.name, 'ready') &&
+        contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
       }}
     strategy:
@@ -616,7 +616,7 @@ jobs:
     steps:
       - name: Check all required jobs
         env:
-          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
