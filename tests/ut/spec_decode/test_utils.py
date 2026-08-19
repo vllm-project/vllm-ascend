@@ -8,10 +8,14 @@ path on Ascend.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import torch
 
 from vllm_ascend.spec_decode.utils import (
+    SlidingWindowAdapter,
+    build_parallel_draft_seq_lens_cpu,
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
 )
@@ -184,3 +188,47 @@ def test_cpu_and_gpu_corrections_agree():
     gpu_seq_lens = num_computed_gpu.numpy() + num_scheduled_step_n
 
     np.testing.assert_array_equal(optimistic, gpu_seq_lens)
+
+
+def test_build_parallel_draft_seq_lens_preserves_source_and_tail():
+    seq_lens = torch.tensor([100, 200, 999, 999], dtype=torch.int32)
+
+    optimistic = build_parallel_draft_seq_lens_cpu(
+        seq_lens,
+        num_reqs=2,
+        query_len=8,
+    )
+
+    torch.testing.assert_close(
+        optimistic,
+        torch.tensor([108, 208, 999, 999], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        seq_lens,
+        torch.tensor([100, 200, 999, 999], dtype=torch.int32),
+    )
+
+
+def test_sliding_window_updates_parallel_draft_host_lengths():
+    adapter = SlidingWindowAdapter(
+        window_size=128,
+        block_size=64,
+        max_num_reqs=1,
+        future_offset=0,
+        device=torch.device("cpu"),
+    )
+    metadata = SimpleNamespace(
+        block_table_tensor=torch.arange(10, dtype=torch.int32).view(1, 10),
+        seq_lens=torch.tensor([300], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([300], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([300], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([300], dtype=torch.int32),
+        parallel_draft_seq_lens_cpu=torch.tensor([308], dtype=torch.int32),
+    )
+
+    adapter.apply(metadata)
+
+    torch.testing.assert_close(
+        metadata.parallel_draft_seq_lens_cpu,
+        torch.tensor([180], dtype=torch.int32),
+    )

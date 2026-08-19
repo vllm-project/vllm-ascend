@@ -81,6 +81,22 @@ def correct_optimistic_seq_lens_cpu(
     optimistic_seq_lens_cpu_np[:num_reqs] -= correction.astype(optimistic_seq_lens_cpu_np.dtype, copy=False)
 
 
+def build_parallel_draft_seq_lens_cpu(
+    seq_lens_cpu: torch.Tensor,
+    num_reqs: int,
+    query_len: int,
+) -> torch.Tensor:
+    """Build optimistic host KV lengths for one parallel-draft pass.
+
+    DSpark updates device sequence lengths directly. Add its draft query width
+    to a cloned host mirror; the current reject count is finalized at the MLA
+    FIA boundary after the side-stream D2H copy completes.
+    """
+    out = seq_lens_cpu.clone()
+    out[:num_reqs].add_(query_len)
+    return out
+
+
 class SlidingWindowAdapter:
     """
     Sliding-window draft attention for the draft model (EAGLE3 and DFlash).
@@ -166,7 +182,12 @@ class SlidingWindowAdapter:
 
         # update CPU mirrors: recompute from each one's own CPU tensor -> stays on CPU,
         # no D2H sync. numerically identical to the NPU
-        for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
+        for name in (
+            "seq_lens_cpu",
+            "_seq_lens_cpu",
+            "seq_lens_cpu_upper_bound",
+            "parallel_draft_seq_lens_cpu",
+        ):
             src = getattr(common_attn_metadata, name, None)
             if src is not None:
                 _windowed_cpu = src - ((src + k_future - w).clamp(min=0) // b) * b
