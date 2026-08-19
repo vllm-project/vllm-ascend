@@ -17,7 +17,7 @@
 """Native multimodal Kimi K3 model for vLLM-Ascend."""
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Annotated, Any, Literal, cast
 
@@ -101,6 +101,7 @@ from vllm.multimodal.processing import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_get_image_processor
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -109,7 +110,19 @@ from vllm_ascend.ops.kimi_kda import uses_kimi_k3_global_inputs_embeds
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3Config, KimiK3TextConfig, KimiK3VisionConfig
 from vllm_ascend.transformers_utils.processors.kimi_k3 import KimiK3Processor
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
+
+apply_attn_res: (
+    Callable[
+        [torch.Tensor, torch.Tensor, nn.Module, nn.Module],
+        torch.Tensor,
+    ]
+    | None
+) = None
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.kimi_k3.attention_residual import apply_attn_res as triton_apply_attn_res
+
+    apply_attn_res = triton_apply_attn_res
 
 
 def _routed_latent_quant_config(
@@ -590,12 +603,21 @@ class AscendKimiK3ForConditionalGeneration(
         return AscendKimiK3ForCausalLM.get_mamba_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The ModelSlim rotation is only needed for A3 FP4-to-INT4 conversion.
-        # Other SoCs retain the original projector graph and ignore the extra
-        # checkpoint tensor.
-        skip_prefixes = [] if self.mm_projector.rot_proj is not None else ["mm_projector.rot_proj."]
+        # ModelSlim checkpoints may include an explicit projector rotation.
+        # Build the optional layer before loading so streaming checkpoint
+        # iterators can populate it, then release it when the weight is absent.
+        rot_proj = getattr(self.mm_projector, "rot_proj", None)
+        skip_prefixes = [] if rot_proj is not None else ["mm_projector.rot_proj."]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        rot_proj_weight_names = (
+            {name for name, _ in rot_proj.named_parameters(prefix="mm_projector.rot_proj")}
+            if rot_proj is not None
+            else set()
+        )
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if rot_proj is not None and rot_proj_weight_names.isdisjoint(loaded_weights):
+            del self.mm_projector.rot_proj
+        return loaded_weights
 
 
 class KimiK3MLP(nn.Module):
@@ -884,16 +906,19 @@ def _apply_attention_residual(
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply K3's learned normalized mixture over residual block starts."""
-    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
-    values_fp32 = values.float()
-    normalized, _ = torch_npu.npu_rms_norm(
-        values_fp32,
-        norm.weight.float(),
-        norm.variance_epsilon,
-    )
-    scores = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1)
-    probabilities = scores.softmax(-1).unsqueeze(1)
-    mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+    if apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
+        mixed = apply_attn_res(prefix_sum, block_residual, projection, norm)
+    else:
+        values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
+        values_fp32 = values.float()
+        normalized, _ = torch_npu.npu_rms_norm(
+            values_fp32,
+            norm.weight.float(),
+            norm.variance_epsilon,
+        )
+        scores = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1)
+        probabilities = scores.softmax(-1).unsqueeze(1)
+        mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
     if _EXTRA_CTX.flash_comm_v1_enabled:
         # FlashComm changes the first decoder layer from the global token
         # layout to a TP-local layout.  The learned-residual arithmetic above
@@ -1154,6 +1179,9 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
         weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
     ) -> set[str]:
         stacked_params_mapping = [
+            (".fused_qkv", ".q_proj", "q"),
+            (".fused_qkv", ".k_proj", "k"),
+            (".fused_qkv", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
             (".fused_qkv_a_proj", ".q_a_proj", 0),
@@ -1223,6 +1251,7 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
 
 class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
     packed_modules_mapping = {
+        "fused_qkv": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.w1", "experts.0.w3", "experts.0.w2"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
@@ -1654,15 +1683,13 @@ class KimiK3MultiModalProjector(nn.Module):
         # ModelSlim rotates K3's FP4 activations before INT4 inference. Text
         # embeddings fold this matrix into their input projection, but the
         # vision path ends in RMSNorm, so the rotation must remain explicit.
-        self.rot_proj: ReplicatedLinear | None = None
-        if get_ascend_device_type() == AscendDeviceType.A3:
-            self.rot_proj = ReplicatedLinear(
-                config.text_hidden_size,
-                config.text_hidden_size,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.rot_proj",
-            )
+        self.rot_proj: ReplicatedLinear | None = ReplicatedLinear(
+            config.text_hidden_size,
+            config.text_hidden_size,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.rot_proj",
+        )
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = image_features.reshape(-1, self.input_size)
@@ -1670,8 +1697,9 @@ class KimiK3MultiModalProjector(nn.Module):
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)[0]
         hidden_states = self.post_norm(hidden_states)
-        if self.rot_proj is not None:
-            hidden_states = self.rot_proj(hidden_states)[0]
+        rot_proj = getattr(self, "rot_proj", None)
+        if rot_proj is not None:
+            hidden_states = rot_proj(hidden_states)[0]
         return hidden_states
 
 

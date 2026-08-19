@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reasoning parser for the Kimi K3 (XTML) chat format.
 
-Vendored from vLLM commit f5a7cce9b6a61f4d995629a7418c7ea822e34a64.
+Vendored from vLLM commit adbf08d977fb3fa26c4f19826745a02abd6dd7ca.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -20,14 +20,33 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
+def _match_at(haystack: Sequence[int], index: int, needle: Sequence[int]) -> bool:
+    return all(haystack[index + offset] == token for offset, token in enumerate(needle))
+
+
 def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
     """Return start index of the last occurrence of needle in haystack, or -1."""
     n = len(needle)
     if n == 0:
         return -1
+    first = needle[0]
     for i in range(len(haystack) - n, -1, -1):
-        if list(haystack[i : i + n]) == list(needle):
+        if haystack[i] == first and _match_at(haystack, i, needle):
             return i
+    return -1
+
+
+def _newest_marker(haystack: Sequence[int], first: Sequence[int], second: Sequence[int]) -> int:
+    """Return 0 or 1 for the newest marker, or -1 if neither occurs."""
+    if not first or not second:
+        return -1
+    first_head, second_head = first[0], second[0]
+    for index in range(len(haystack) - min(len(first), len(second)), -1, -1):
+        token = haystack[index]
+        if token == first_head and index + len(first) <= len(haystack) and _match_at(haystack, index, first):
+            return 0
+        if token == second_head and index + len(second) <= len(haystack) and _match_at(haystack, index, second):
+            return 1
     return -1
 
 
@@ -88,11 +107,22 @@ class KimiK3ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if not self._thinking_enabled:
             return True
-        last_close = _subseq_index(input_ids, self._think_close_ids)
-        last_open = _subseq_index(input_ids, self._think_open_ids)
-        if last_open == -1:
-            return last_close != -1
-        return last_close > last_open
+        return _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
+
+    def is_reasoning_end_streaming(
+        self,
+        input_ids: Sequence[int],
+        delta_ids: Iterable[int],
+    ) -> bool:
+        if not self._thinking_enabled:
+            return True
+        delta = list(delta_ids)
+        if not delta:
+            return False
+        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        delta_start = len(input_ids) - len(delta)
+        window = list(input_ids[max(0, delta_start - carry) : delta_start]) + delta
+        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:

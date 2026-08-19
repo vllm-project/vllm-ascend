@@ -339,6 +339,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        num_draft_tokens_cpu: list[int] | None = None,
     ) -> torch.Tensor:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()

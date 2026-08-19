@@ -39,6 +39,11 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    OFFLOAD_K_CACHE_NPU_INDEX,
+    OFFLOAD_KV_CACHE_TUPLE_LEN,
+    OFFLOAD_V_CACHE_NPU_INDEX,
+)
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import (
     record_attention_compute_start,
@@ -121,6 +126,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
+
+            return AscendSFAKVOffloadMetadataBuilder
         if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 
@@ -139,6 +148,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+            return AscendSFAKVOffloadImpl
         if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
@@ -202,6 +215,10 @@ class AscendSFAMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
+    # Request identity for the Sparse KV offload resident LRU; only populated
+    # by AscendSFAKVOffloadMetadataBuilder.
+    req_ids_tensor: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -1490,7 +1507,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
-        record_attention_compute_start()
         return DeviceOperator.indexer_select_post_process(
             self,
             q_li,
@@ -1530,7 +1546,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         return self.enable_sparse_li_c8 and get_ascend_config().c8_enable_reshape_optim
 
     def _execute_sparse_flash_attention_process(
-        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        block_table=None,
     ):
         return DeviceOperator.execute_sparse_flash_attention_process(
             self,
@@ -1541,6 +1565,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_metadata,
             actual_seq_lengths_query,
             actual_seq_lengths_key,
+            block_table=block_table,
         )
 
     def _record_query_gather_context(
@@ -1763,6 +1788,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         if main_cache is None or not self.has_indexer:
             return main_cache
 
+        # Sparse KV offload registers the main MLA cache as a 6-tuple
+        # (k_npu, v_npu, k_cpu, v_cpu, topk_buffer_k, topk_buffer_v); the
+        # attention kernels only consume the leading NPU pair.
+        if len(main_cache) == OFFLOAD_KV_CACHE_TUPLE_LEN:
+            main_cache = (main_cache[OFFLOAD_K_CACHE_NPU_INDEX], main_cache[OFFLOAD_V_CACHE_NPU_INDEX])
+
         indexer_cache = self.indexer.k_cache.kv_cache
         if indexer_cache is None:
             raise RuntimeError(f"SFA indexer cache is not initialized or bound. layer_name={self.layer_name}.")
@@ -1944,9 +1975,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_li is not None
                 k_li = self._get_full_kv(k_li, attn_metadata)
 
-        if kv_cache is not None and self.is_kv_producer:
-            attn_metadata.reshape_cache_event = torch.npu.Event()
-
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
             use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
@@ -1986,12 +2014,22 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
+        # Notify for every layer that wrote the cache, not just indexer layers:
+        # by this point all of the layer's KV (main + indexer) has been
+        # scattered, so the connector can dispatch the PD pull immediately.
+        if kv_cache is not None:
             notify_kv_cache_written(self.layer_name or "")
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
         else:
             topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+
+        # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
+        # reuse cached top-k indices and have no indexer, so recording this
+        # inside indexer_select_post_process would leave their gate closed.
+        record_attention_compute_start()
+
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:
