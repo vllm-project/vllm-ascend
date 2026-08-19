@@ -266,9 +266,6 @@ a5:
       - name: Qwen3_5_35B_A3B_FP8_A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_5_35B_A3B_FP8_A5.yaml
-      - name: Qwen3_5_35B_A3B_FP8_A5
-        os: linux-aarch64-a5-8
-        config_file_path: Qwen3_5_35B_A3B_FP8_A5.yaml
       - name: KimiK26_w4a4c8_A5
         os: linux-aarch64-a5-8
         config_file_path: KimiK26_w4a4c8_A5.yaml
