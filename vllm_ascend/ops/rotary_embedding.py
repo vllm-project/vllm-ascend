@@ -87,19 +87,26 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
         _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
 
 
-def get_cos_and_sin_mla(positions, use_cache=False):
-    global _cos_cache
-    global _sin_cache
-    cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
-    sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
-    if not use_cache:
-        return cos, sin
+def get_cos_and_sin_mla(positions, use_cache=False, apply_rope=True):
     global _cos_mla
     global _sin_mla
+    if _cos_mla is None or _sin_mla is None:
+        raise RuntimeError("MLA rotary buffers have not been initialized")
     num_tokens = positions.size(0)
-    _cos_mla[:num_tokens, ...] = cos
-    _sin_mla[:num_tokens, ...] = sin
-    return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
+    cos = _cos_mla[:num_tokens, ...]
+    sin = _sin_mla[:num_tokens, ...]
+    if apply_rope:
+        global _cos_cache
+        global _sin_cache
+        rotary_cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
+        rotary_sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
+        if not use_cache:
+            return rotary_cos, rotary_sin
+        cos.copy_(rotary_cos)
+        sin.copy_(rotary_sin)
+    # No-RoPE callers only require stable-shape metadata. The attention
+    # implementation does not consume the values in these buffers.
+    return cos, sin
 
 
 def _record_cos_sin_cache(cos_sin_cache):
