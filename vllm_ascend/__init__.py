@@ -26,29 +26,32 @@ _triton_available = importlib.util.find_spec("triton") is not None
 # module-import time (vllm.platforms plugin discovery resolves the
 # plugin's `register()` before any `from triton.experimental import gluon`
 # import, including in `python -m vllm.model_executor.models.registry`).
+#
+# The empty stubs must shadow gluon on BOTH architectures:
+# - x86_64: triton-ascend pins triton==3.2.0, which ships no `experimental/`
+#   at all; the parent package must exist in sys.modules (with __path__ so it
+#   is treated as a package) or `from triton.experimental import gluon` raises
+#   ModuleNotFoundError: No module named 'triton.experimental' (#13508).
+# - aarch64: triton-ascend pins triton==3.5.0, whose leftover `experimental/`
+#   ships a *real* gluon — but its `language/_layouts.py` imports
+#   `constexpr_type` from triton.language.core, a symbol added in triton 3.4.0
+#   that triton-ascend's 3.2.0-based core lacks. Loading the real gluon raises
+#   ImportError, so it must be shadowed, not used. Pre-registering the leaves
+#   in sys.modules short-circuits the disk load (importlib `_find_and_load`:
+#   `if name in sys.modules: return`) without executing the real __init__.py.
 if os.getenv("VLLM_VERSION", "") != "0.26.0":
     from types import ModuleType
 
-    # Only stub when gluon is genuinely absent; on aarch64 triton-ascend's
-    # triton==3.5.0 dep leaves a real experimental/ on disk that we must not
-    # shadow. find_spec must probe the parent `triton.experimental`, not the
-    # leaf: a dotted name whose parent is missing raises ModuleNotFoundError
-    # instead of returning None.
-    if importlib.util.find_spec("triton.experimental") is None:
-        # `from triton.experimental import gluon` resolves the parent package
-        # before the leaf, so the parent must exist in sys.modules (with
-        # __path__ so it is treated as a package) or the import raises
-        # ModuleNotFoundError: No module named 'triton.experimental' (#13508).
-        if "triton.experimental" not in sys.modules:
-            _experimental = ModuleType("triton.experimental")
-            _experimental.__path__ = []
-            sys.modules["triton.experimental"] = _experimental
-        for _gluon_stub in (
-            "triton.experimental.gluon",
-            "triton.experimental.gluon.language",
-        ):
-            if _gluon_stub not in sys.modules:
-                sys.modules[_gluon_stub] = ModuleType(_gluon_stub)
+    if "triton.experimental" not in sys.modules:
+        _experimental = ModuleType("triton.experimental")
+        _experimental.__path__ = []
+        sys.modules["triton.experimental"] = _experimental
+    for _gluon_stub in (
+        "triton.experimental.gluon",
+        "triton.experimental.gluon.language",
+    ):
+        if _gluon_stub not in sys.modules:
+            sys.modules[_gluon_stub] = ModuleType(_gluon_stub)
 
     # main2main compat: `_aggregate` was added to triton.language.core in
     # vllm main post-0.26.0. Stub it here so vllm.triton_utils can import it
