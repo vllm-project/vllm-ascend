@@ -17,13 +17,8 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'csrc/**'
-      - 'vllm_ascend/**'
-      - 'tests/ut/test_dependency_documentation.py'
-      - '.github/workflows/scripts/test_config.yaml'
-      - '.github/workflows/scripts/select_tests.py'
-      - 'docs/source/installation.md'
-      - 'docs/source/tutorials/features/suffix_speculative_decoding.md'
-      - 'docs/source/user_guide/feature_guide/speculative_decoding.md'
+      - 'vllm_ascend/envs.py'
+      - 'vllm_ascend/device/hardware.py'
       - '.github/workflows/cpu_only_build.yaml'
   push:
     branches:
@@ -37,10 +32,8 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'csrc/**'
-      - 'vllm_ascend/**'
-      - 'tests/ut/test_dependency_documentation.py'
-      - '.github/workflows/scripts/test_config.yaml'
-      - '.github/workflows/scripts/select_tests.py'
+      - 'vllm_ascend/envs.py'
+      - 'vllm_ascend/device/hardware.py'
       - '.github/workflows/cpu_only_build.yaml'
 
 permissions:
