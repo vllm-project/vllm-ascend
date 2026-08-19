@@ -238,6 +238,8 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        if is_prefilling is not None and "is_prefilling" not in common_attn_metadata_extra_kwargs:
+            common_attn_metadata_extra_kwargs["is_prefilling"] = is_prefilling
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -253,7 +255,6 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
-            is_prefilling=is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,
@@ -301,13 +302,17 @@ def build_attn_state(
 ):
     """Build attention state for npu's attention backend."""
     if vllm_config.model_config.runner_type == "pooling":
+        kv_cache_config = getattr(vllm_config, "kv_cache_config", None)
+        if kv_cache_config is None or not kv_cache_config.kv_cache_groups:
+            return AscendAttentionState.PrefillNoCache
         if isinstance(
-            vllm_config.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):
             attn_state = AscendAttentionState.PrefillNoCache
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
+        return attn_state
     elif np.array_equal(seq_lens_np[:num_reqs], num_scheduled_tokens):
         attn_state = AscendAttentionState.PrefillNoCache
     # We assume it is the decode stage, where prefill occurs

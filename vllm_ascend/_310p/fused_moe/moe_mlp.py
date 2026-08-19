@@ -17,8 +17,59 @@
 
 import torch
 import torch_npu
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+
+
+def _quant_grouped_matmul_dequant_310_impl(
+    x: torch.Tensor,
+    quantized_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_list: torch.Tensor,
+) -> torch.Tensor:
+    """Run 310P W8A8-Dynamic grouped matmul with FRACTAL_NZ weights.
+
+    ModelSlim stores ND ``[E, N, K]``. 310P WeightNZ accepts FRACTAL_NZ of
+    that layout. torch.compile/GE strips format-29 from 3D Parameters, so
+    the cast happens inside this opaque custom op.
+    """
+    weight_nz = torch_npu.npu_format_cast(quantized_weight.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+    return torch_npu.npu_quant_grouped_matmul_dequant(
+        x=x,
+        quantized_weight=weight_nz,
+        weight_scale=weight_scale,
+        group_list=group_list,
+        quant_mode="pertoken",
+    )
+
+
+def _quant_grouped_matmul_dequant_310_fake(
+    x: torch.Tensor,
+    quantized_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_list: torch.Tensor,
+) -> torch.Tensor:
+    return x.new_empty(x.shape[0], quantized_weight.shape[1])
+
+
+direct_register_custom_op(
+    op_name="npu_quant_grouped_matmul_dequant_310",
+    op_func=_quant_grouped_matmul_dequant_310_impl,
+    fake_impl=_quant_grouped_matmul_dequant_310_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+def quant_gmm_310(
+    x: torch.Tensor,
+    quantized_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_list: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops.vllm.npu_quant_grouped_matmul_dequant_310(x, quantized_weight, weight_scale, group_list)
 
 
 def quant_apply_mlp(
@@ -34,13 +85,9 @@ def quant_apply_mlp(
         # Convert group_list to cumulative sum format if group_list is count format
         group_list = torch.cumsum(group_list, dim=0)
 
-    hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
-        x=hidden_states, quantized_weight=w1, weight_scale=w1_scale, group_list=group_list, quant_mode="pertoken"
-    )
+    hidden_states = quant_gmm_310(hidden_states, w1, w1_scale, group_list)
     hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
-        x=hidden_states, quantized_weight=w2, weight_scale=w2_scale, group_list=group_list, quant_mode="pertoken"
-    )
+    hidden_states = quant_gmm_310(hidden_states, w2, w2_scale, group_list)
     return hidden_states
 
 

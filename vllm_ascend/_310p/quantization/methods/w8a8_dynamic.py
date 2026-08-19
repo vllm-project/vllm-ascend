@@ -25,7 +25,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
-from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
@@ -35,6 +34,8 @@ from .w8a8_base import AscendW8A8Linear310pScheme
 # Eager NZ works; compiled Qwen3.5-2B TP2 does not (fused qkv KV shard N=256
 # and MLP). Linear layers keep ND [N, K] and dequant to fp16. MoE experts
 # still use grouped-matmul NZ.
+# keep ND [E, N, K] for npu_quant_grouped_matmul_dequant (WeightNZ 3D
+# parameters lose FRACTAL_NZ under GE and fail tiling).
 _MIN_NZ_QUANT_MATMUL_N = 512
 
 
@@ -127,11 +128,11 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         return final_hidden_states
 
     def process_weights_after_loading(self, layer):
-        # The grouped matmul consumes [E, K, N]. ModelSlim checkpoints store
-        # expert weights as [E, N, K], so move the output dimension last before
-        # converting to FRACTAL_NZ.
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data.transpose(1, 2).contiguous())
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data.transpose(1, 2).contiguous())
+        # Keep ModelSlim [E, N, K] as ND. FRACTAL_NZ is applied inside the
+        # grouped-matmul path at runtime so torch.compile/GE cannot strip
+        # format-29 from 3D Parameters (Qwen3-30B-A3B-W8A8 MRv2).
+        layer.w13_weight.data = layer.w13_weight.data.contiguous()
+        layer.w2_weight.data = layer.w2_weight.data.contiguous()
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
