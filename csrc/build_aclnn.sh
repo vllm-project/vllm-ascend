@@ -31,7 +31,7 @@ setup_catlass_dependency() {
     export CPATH="${absolute_catlass_path}${CPATH:+:${CPATH}}"
     log "catlass include=${absolute_catlass_path}"
 }
-
+#
 resolve_op_dir() {
     local op_name=$1
     local candidate_dir
