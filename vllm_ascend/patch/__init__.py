@@ -338,6 +338,18 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       MiniMax-M2 incremental tool-call streaming fix.
 #
+# ** 12b. File: platform/patch_deepseek_v4_thinking_defaults.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.deepseek_v4.DeepseekV4Renderer`
+#    Why:
+#       Apply thinking defaults at the renderer level.
+#    How:
+#       Default missing `reasoning_effort` to `"high"` and enable thinking.
+#    Related PR (if no, explain why):
+#       No; this is a deployment-specific default.
+#    Future Plan:
+#       Remove when vLLM supports renderer defaults.
+#
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`
