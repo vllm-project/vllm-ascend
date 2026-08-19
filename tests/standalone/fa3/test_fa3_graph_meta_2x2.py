@@ -54,7 +54,10 @@ MAXK_SMALL = 16
 SEQLEN_LARGE = MAXK_LARGE
 SEQLEN_SMALL = MAXK_SMALL
 
-REPLAY_SEQLENS = [64, 128, 200]  # seq0:1 block, seq1:1 block, seq2:2 blocks
+def _replay_seqlens(batch: int) -> list[int]:
+    # lengths spanning 1-2 blocks, cycling so batch > 3 is well-defined
+    # (64, 132, 200, 64, 132, 200, ...)  -> seq2/seq5/... span 2 blocks
+    return [64 + (i % 3) * 68 for i in range(batch)]
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -130,8 +133,9 @@ def run_case(batch: int, plan_mode: str, maxk_mode: str) -> int:
         causal=True,
     )
 
+    replay_seqlens = _replay_seqlens(batch)
     refs = [
-        manual_ref(q[i], k, v, page_table[i], REPLAY_SEQLENS[i])
+        manual_ref(q[i], k, v, page_table[i], replay_seqlens[i])
         for i in range(batch)
     ]
 
@@ -156,7 +160,7 @@ def run_case(batch: int, plan_mode: str, maxk_mode: str) -> int:
     torch.npu.synchronize()
 
     cache_seqlens_buf.copy_(
-        torch.tensor(REPLAY_SEQLENS, dtype=torch.int32).npu()
+        torch.tensor(replay_seqlens, dtype=torch.int32).npu()
     )
     graph.replay()
     torch.npu.synchronize()
@@ -195,7 +199,7 @@ def main():
         sys.exit(run_case(args.batch, plan_mode, maxk_mode))
 
     print("=" * 78)
-    print(f"C7 2x2 (batch={args.batch}, replay={REPLAY_SEQLENS})")
+    print(f"C7 2x2 (batch={args.batch}, replay={_replay_seqlens(args.batch)})")
     print("=" * 78)
     for i, (plan_mode, maxk_mode) in enumerate(CASES):
         cmd = [sys.executable, __file__, "--batch", str(args.batch), "--case", str(i)]
