@@ -80,6 +80,41 @@ class TestCommonCP(unittest.TestCase):
         self.assertEqual(builder.dcp_rank, 2)
         mock_get_dcp_group.assert_called_once_with()
 
+    def test_metadata_builder_prefers_mrv2_dcp_local_seq_lens(self):
+        builder = DCPMetadataBuilderMixin.__new__(DCPMetadataBuilderMixin)
+        builder.dcp_size = 2
+        builder.dcp_rank = 1
+        local_lens = torch.tensor([7, 3], dtype=torch.int32)
+        common = MagicMock(dcp_local_seq_lens=local_lens)
+
+        actual = builder._get_dcp_rank_context_lens(common, end=2)
+
+        torch.testing.assert_close(actual, local_lens)
+
+    @patch("vllm_ascend.attention.context_parallel.common_cp._npu_attention_update")
+    def test_replicated_head_merge_gathers_without_all_to_all(self, mock_update):
+        impl = DCPImplMixin.__new__(DCPImplMixin)
+        impl.dcp_size = 2
+        local_out = torch.randn(2, 3, 4, dtype=torch.float16)
+        local_lse = torch.randn(2, 3, 1, dtype=torch.float16)
+        gathered = torch.cat(
+            [
+                torch.cat((local_out.float(), local_lse.float()), dim=-1),
+                torch.cat((local_out.float() + 10, local_lse.float() + 10), dim=-1),
+            ],
+            dim=1,
+        )
+        impl._dcp_all_gather = MagicMock(return_value=gathered)
+        expected = torch.randn(2, 3, 4)
+        mock_update.return_value = expected
+
+        actual = impl._merge_dcp_replicated_attention_output(local_out, local_lse, 4)
+
+        assert actual is expected
+        impl._dcp_all_gather.assert_called_once()
+        assert impl._dcp_all_gather.call_args.kwargs["dim"] == 1
+        mock_update.assert_called_once_with(4, gathered, dcp_size=2)
+
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
     def test_impl_mixin_reuses_the_initialized_dcp_group(
         self,

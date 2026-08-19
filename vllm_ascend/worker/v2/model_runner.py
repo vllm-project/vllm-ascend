@@ -28,6 +28,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -40,6 +41,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
     sort_batch_req_ids,
 )
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -56,7 +58,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.sp_utils import (
     _all_gather_hidden_states_and_aux,
     _flashcomm_enabled,
@@ -113,9 +115,15 @@ def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
 
 
 class NPUModelRunner(GPUModelRunner):
+    pcp_manager: PCPManager | None
+
     """Model runner for Ascend NPUs."""
 
     execute_model_state: ExecuteModelState | None
+
+    @property
+    def pcp_manager_cls(self) -> type[AscendPCPManager]:
+        return AscendPCPManager
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -123,11 +131,7 @@ class NPUModelRunner(GPUModelRunner):
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
-        # The following features are not yet supported in Ascend NPU model runner v2:
-        # - Context parallelism (prefill or decode)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -208,18 +212,38 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
-
-            # GPUModelRunner constructs the community PCP manager while initializing
-            # the KV cache. Replace it with the Ascend subclass.
-            self.pcp_manager = maybe_build_ascend_pcp_manager(
-                self.vllm_config,
-                self.device,
-                self.supports_mm_inputs,
-                self.req_states,
-                self.block_tables,
-            )
+            self._ensure_ascend_pcp_manager()
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def _ensure_ascend_pcp_manager(self) -> None:
+        """Use the Ascend manager with both released and main vLLM APIs."""
+        manager = self.pcp_manager
+        if manager is None:
+            return
+
+        if not isinstance(manager, AscendPCPManager):
+            # vLLM v0.27.1 predates the ``pcp_manager_cls`` factory hook.
+            # Replace its freshly-created base manager before it can partition
+            # a batch. Main builds take the property path above and skip this
+            # compatibility branch.
+            AscendPCPManager.validate_config(self.vllm_config, self.supports_mm_inputs)
+            manager = AscendPCPManager(
+                pcp_world_size=manager.pcp_world_size,
+                pcp_rank=manager.pcp_rank,
+                device=self.device,
+                vllm_config=self.vllm_config,
+                req_states=self.req_states,
+                max_num_reqs=self.max_num_reqs,
+                max_num_tokens=self.max_num_tokens,
+                block_tables=self.block_tables,
+                dcp_world_size=manager.dcp_world_size,
+                dcp_rank=manager.dcp_rank,
+                cp_interleave=manager.cp_interleave,
+            )
+            self.pcp_manager = manager
+
+        manager.vllm_config = self.vllm_config
 
     @torch.inference_mode()
     def execute_model(
@@ -410,6 +434,21 @@ class NPUModelRunner(GPUModelRunner):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
+        dcp_local_seq_lens = None
+        if self.use_dcp:
+            # PCPManager recomputes this field from the rank-local virtual
+            # rows after partitioning. Preparing it here keeps the standalone
+            # DCP path aligned with upstream MRV2.
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                self.input_buffers.seq_lens,
+                num_reqs,
+                self.dcp_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
+            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
+
         # Pad for full CUDA graph mode.
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
@@ -466,7 +505,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
+            dcp_local_seq_lens=dcp_local_seq_lens,
             is_prefilling_np=is_prefilling_np,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=prefill_len_np,

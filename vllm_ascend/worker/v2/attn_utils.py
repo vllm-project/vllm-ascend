@@ -171,6 +171,7 @@ def build_attn_metadata(
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
+    is_prefilling: torch.Tensor | None = None,
     # extra attributes for ascend npus.
     seq_lens_np: np.ndarray | None = None,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
@@ -220,18 +221,21 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
+            dcp_local_seq_lens=(dcp_local_seq_lens[:num_reqs] if dcp_local_seq_lens is not None else None),
             num_reqs=num_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
             positions=positions,
+            is_prefilling=is_prefilling,
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,

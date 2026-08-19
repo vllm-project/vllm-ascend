@@ -2,7 +2,7 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -11,6 +11,8 @@ from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
     AscendMlaDCPMetadataBuilder,
+    AscendMlaPCPDCPImpl,
+    AscendMlaPCPDCPMetadataBuilder,
     DCPChunkedContextMetadata,
 )
 from vllm_ascend.attention.mla_v1 import (
@@ -18,12 +20,15 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
+    AscendMLAPCPImpl,
+    AscendMLAPCPMetadataBuilder,
     AscendMLAPrefillMetadata,
 )
 
 
 def test_mla_dcp_extends_v1_backend() -> None:
     assert issubclass(AscendMlaDCPImpl, AscendMLAImpl)
+    assert AscendMlaDCPImpl.can_return_lse_for_decode
     assert issubclass(
         AscendMlaDCPMetadataBuilder,
         AscendMLAMetadataBuilder,
@@ -33,6 +38,73 @@ def test_mla_dcp_extends_v1_backend() -> None:
     dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
     assert {"cp_seq_len", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
+    assert issubclass(AscendMlaPCPDCPImpl, AscendMLAPCPImpl)
+    assert issubclass(AscendMlaPCPDCPImpl, AscendMlaDCPImpl)
+    assert issubclass(AscendMlaPCPDCPMetadataBuilder, AscendMLAPCPMetadataBuilder)
+    assert issubclass(AscendMlaPCPDCPMetadataBuilder, AscendMlaDCPMetadataBuilder)
+
+
+def test_mla_pcp_dcp_equal_axis_keeps_decode_query_local() -> None:
+    impl = AscendMlaPCPDCPImpl.__new__(AscendMlaPCPDCPImpl)
+    impl.dcp_size = 2
+    impl.pcp_size = 2
+    impl.tp_group = SimpleNamespace(all_gather=MagicMock())
+    q_nope = torch.randn(1, 2, 3)
+    q_pe = torch.randn(1, 2, 2)
+
+    actual_nope, actual_pe = impl.reorg_decode_q(q_nope, q_pe)
+
+    assert actual_nope is q_nope
+    assert actual_pe is q_pe
+
+
+def test_mla_pcp_dcp_full_axis_gathers_decode_query_on_tp_only() -> None:
+    impl = AscendMlaPCPDCPImpl.__new__(AscendMlaPCPDCPImpl)
+    impl.dcp_size = 4
+    impl.pcp_size = 2
+    q_nope = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+    q_pe = torch.arange(4, dtype=torch.float32).reshape(1, 2, 2)
+    tp_group = SimpleNamespace(
+        all_gather=lambda tensor, dim: torch.cat((tensor, tensor + 100), dim=dim),
+    )
+    impl.tp_group = tp_group
+    impl.dcp_group = SimpleNamespace(all_gather=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError))
+
+    gathered_nope, gathered_pe = impl.reorg_decode_q(q_nope, q_pe)
+
+    assert gathered_nope.shape == (1, 4, 3)
+    assert gathered_pe.shape == (1, 4, 2)
+    torch.testing.assert_close(gathered_nope[:, 2:], q_nope + 100)
+    torch.testing.assert_close(gathered_pe[:, 2:], q_pe + 100)
+
+
+def test_mla_pcp_dcp_full_axis_selects_tp_local_heads() -> None:
+    impl = AscendMlaPCPDCPImpl.__new__(AscendMlaPCPDCPImpl)
+    impl.dcp_size = 4
+    impl.pcp_size = 2
+    impl.num_heads = 2
+    impl.tp_group = SimpleNamespace(rank_in_group=1)
+    merged = torch.arange(16, dtype=torch.float32).reshape(1, 4, 4)
+    impl._merge_dcp_replicated_attention_output = MagicMock(return_value=merged)
+
+    actual = impl._merge_dcp_attention_output(
+        torch.empty(1, 4, 4),
+        torch.empty(1, 4, 1),
+        4,
+    )
+
+    torch.testing.assert_close(actual, merged[:, 2:4])
+
+
+def test_mla_dcp_derives_decode_lengths_from_cpu_without_device_sync() -> None:
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.seq_lens = torch.tensor([9, 4], dtype=torch.int32)
+    builder.num_decodes = 2
+    builder.dcp_size = 2
+    builder.dcp_rank = 1
+    builder.cp_local_block_size = 2
+
+    assert builder._get_mrv2_dcp_rank_seq_lens() == [4, 2]
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:

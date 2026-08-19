@@ -16,20 +16,22 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import (
-    AscendPCPManager,
-    maybe_build_ascend_pcp_manager,
-)
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -191,54 +193,151 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
 
 
-def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
-    )
+def test_npu_model_runner_uses_ascend_pcp_manager():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
 
-    assert (
-        maybe_build_ascend_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=MagicMock(),
-            block_tables=MagicMock(),
-        )
-        is None
-    )
+    assert runner.pcp_manager_cls is AscendPCPManager
 
 
-def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=4,
-        ),
-        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
+def test_npu_model_runner_upgrades_vllm_027_base_pcp_manager():
+    """Keep compatibility until the released vLLM factory accepts ``cls``."""
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = object()
+    runner.supports_mm_inputs = False
+    runner.device = torch.device("cpu")
+    runner.req_states = MagicMock()
+    runner.max_num_reqs = 8
+    runner.max_num_tokens = 32
+    runner.block_tables = None
+    runner.pcp_manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=1,
+        device=runner.device,
+        dcp_world_size=1,
+        dcp_rank=0,
+        cp_interleave=4,
     )
-    pcp_group = SimpleNamespace(rank_in_group=1)
-    dcp_group = SimpleNamespace(rank_in_group=0)
-    req_states = MagicMock()
+
+    with patch.object(AscendPCPManager, "validate_config") as validate_config:
+        runner._ensure_ascend_pcp_manager()
+
+    assert isinstance(runner.pcp_manager, AscendPCPManager)
+    assert runner.pcp_manager.vllm_config is runner.vllm_config
+    assert runner.pcp_manager.pcp_world_size == 2
+    assert runner.pcp_manager.pcp_rank == 1
+    assert runner.pcp_manager.cp_interleave == 4
+    validate_config.assert_called_once_with(runner.vllm_config, False)
+
+
+def test_initialize_kv_cache_preserves_pcp_and_routed_experts_initialization():
+    """Keep both initialization hooks when their upstream changes overlap."""
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
+    runner._ensure_ascend_pcp_manager = MagicMock()
+    runner.init_routed_experts_capturer = MagicMock()
+    kv_cache_config = MagicMock()
+    events = []
+
+    runner._ensure_ascend_pcp_manager.side_effect = lambda: events.append("pcp")
+    runner.init_routed_experts_capturer.side_effect = lambda: events.append("routed_experts")
 
     with (
-        patch.object(PCPManager, "validate_config") as validate_config,
-        patch.object(pcp_manager_module, "get_pcp_group", return_value=pcp_group),
-        patch.object(pcp_manager_module, "get_dcp_group", return_value=dcp_group),
+        patch.object(
+            GPUModelRunner,
+            "initialize_kv_cache",
+            side_effect=lambda _: events.append("base"),
+        ) as base_initialize,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.graph_manager_wrapper",
+            return_value=nullcontext(),
+        ),
     ):
-        manager = maybe_build_ascend_pcp_manager(
-            vllm_config,
-            torch.device("cpu"),
-            supports_mm_inputs=False,
-            req_states=req_states,
-            block_tables=None,
-        )
+        runner.initialize_kv_cache(kv_cache_config)
 
-    assert isinstance(manager, AscendPCPManager)
-    assert manager.vllm_config is vllm_config
-    assert manager.pcp_world_size == 2
-    assert manager.pcp_rank == 1
-    assert manager.dcp_world_size == 2
-    assert manager.dcp_rank == 0
-    assert manager.cp_interleave == 4
-    validate_config.assert_called_once_with(vllm_config, False)
+    base_initialize.assert_called_once_with(kv_cache_config)
+    assert events == ["base", "pcp", "routed_experts"]
+
+
+def _make_pcp_config(
+    *,
+    speculative_config=None,
+    cudagraph_mode=CUDAGraphMode.NONE,
+    sparse_mla: bool = False,
+    tp_size: int = 1,
+    dcp_size: int = 1,
+    use_mla: bool = True,
+    dcp_comm_backend: str = "ag_rs",
+):
+    hf_text_config = SimpleNamespace()
+    if sparse_mla:
+        hf_text_config.index_topk = 2048
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+            tensor_parallel_size=tp_size,
+            pipeline_parallel_size=1,
+            dcp_comm_backend=dcp_comm_backend,
+        ),
+        model_config=SimpleNamespace(
+            is_encoder_decoder=False,
+            hf_text_config=hf_text_config,
+            use_mla=use_mla,
+        ),
+        lora_config=None,
+        speculative_config=speculative_config,
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+    )
+
+
+def test_ascend_pcp_validation_accepts_dense_eager_mode():
+    AscendPCPManager.validate_config(_make_pcp_config(), supports_mm_inputs=False)
+
+
+@pytest.mark.parametrize(("tp_size", "dcp_size"), [(1, 2), (2, 4)])
+def test_ascend_pcp_validation_accepts_dense_eager_combined_topologies(tp_size, dcp_size):
+    AscendPCPManager.validate_config(
+        _make_pcp_config(tp_size=tp_size, dcp_size=dcp_size),
+        supports_mm_inputs=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            _make_pcp_config(speculative_config=SimpleNamespace()),
+            "does not support speculative decoding",
+        ),
+        (
+            _make_pcp_config(cudagraph_mode=CUDAGraphMode.FULL),
+            "supports PIECEWISE",
+        ),
+        (
+            _make_pcp_config(
+                sparse_mla=True,
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            ),
+            "sparse MLA PCP does not support",
+        ),
+        (
+            _make_pcp_config(tp_size=2, dcp_size=3),
+            r"requires DCP to equal PCP or TP \* PCP",
+        ),
+        (
+            _make_pcp_config(dcp_size=2, sparse_mla=True),
+            "supports dense MLA only",
+        ),
+        (
+            _make_pcp_config(dcp_size=2, cudagraph_mode=CUDAGraphMode.PIECEWISE),
+            "supports eager mode only",
+        ),
+        (
+            _make_pcp_config(dcp_size=2, dcp_comm_backend="a2a"),
+            "does not support the A2A DCP backend",
+        ),
+    ],
+)
+def test_ascend_pcp_validation_rejects_unsupported_runtime_modes(config, message):
+    with pytest.raises(NotImplementedError, match=message):
+        AscendPCPManager.validate_config(config, supports_mm_inputs=False)
