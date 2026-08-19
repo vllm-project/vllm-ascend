@@ -1,14 +1,13 @@
-python tests/standalone/fa3/test_fa3_graph_multiseq_discrim.py 
-[W819 10:32:40.297463140 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_multiseq_meta.py 
+[W819 10:55:27.422576381 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-batch=3  capture=[16, 16, 16]  replay=[64, 64, 128]
-page_table=[[0], [1], [0]]
+batch=3  page_table=[[0, 1], [2, 3], [4, 5]]  replay=[64, 128, 200]
 ========================================================================
-[W819 10:32:45.401145732 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[ok ] seq0 (len=64, blk=0)  vs manual : 0.002119
-[ok ] seq1 (len=64, blk=1)  vs manual : 0.002163
-[ok ] seq2 (len=128, blk=0) vs manual : 0.001268
+[W819 10:55:32.516524474 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[stale-meta] seq0/seq1/seq2 = 0.002684  0.711651  0.703196  -> BROKEN
+[fresh-meta] seq0/seq1/seq2 = 0.002406  0.001607  0.001137  -> OK
+[fresh-all ] seq0/seq1/seq2 = 0.002065  0.001618  0.001131  -> OK
 ------------------------------------------------------------------------
-VERDICT: none of H1/H2/H3 (all correct) — bug is elsewhere
+VERDICT: stale-meta already OK -> cannot reproduce C; check setup
 ------------------------------------------------------------------------
