@@ -1,12 +1,15 @@
-python tests/standalone/fa3/test_fa3_graph_split_crash.py 
-[W819 16:56:11.104697199 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_split_smallbatch.py 
+[W819 17:27:39.037329753 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 ========================================================================
-C9 split-kernel crash sweep  batch=256  maxk=32768
+C10 flash-decode split workspace sweep  maxk=32768
 ========================================================================
-  replay=   128 (  1 seg) -> OK
-  replay=  1024 (  8 seg) -> OK
-  replay=  4096 ( 32 seg) -> OK
-  replay= 16384 (128 seg) -> OK
-  replay= 32768 (256 seg) -> OK
+         b1   b2   b3   b4   b8   b16  
+kv=1     OK    OK    OK    OK    OK    OK    
+kv=2     OK    OK    OK    OK    OK    OK    
+kv=4     OK    OK    OK    OK    OK    OK    
+kv=8     OK    OK    OK    OK    OK    OK    
 ========================================================================
+Predicted crash region (workspace overflow 2048*B > 4160, gate B*kv<=16):
+  kv=1: B>=3 (gate B<=16)   kv=2: B>=3 (B<=8)
+  kv=4: B=3,4 (B<=4)        kv=8: none (4096 fits; B>=3 gate off)
 If a CRASH leaves the device in a bad state, reset it before re-running.
