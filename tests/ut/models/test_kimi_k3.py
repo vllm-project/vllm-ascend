@@ -166,7 +166,9 @@ def test_kimi_k3_skips_projector_rotation_on_non_vision_pp_stage(
             return set()
 
     monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
-    wrapper = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
+    wrapper = AscendKimiK3ForConditionalGeneration.__new__(
+        AscendKimiK3ForConditionalGeneration
+    )
     nn.Module.__init__(wrapper)
     wrapper.mm_projector = kimi_k3.PPMissingLayer()
 
