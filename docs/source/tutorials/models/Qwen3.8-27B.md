@@ -336,9 +336,9 @@ Use the deployment in Section 5 as the baseline. Change the following values on 
 
 | Parameter | Standard deployment | Performance test |
 | --- | ---: | ---: |
-| `--max-model-len` | 131072 | 250000 |
+| `--max-model-len` | 256000 | 250000 |
 | `--max-num-batched-tokens` | 16384 | 8192 |
-| `--gpu-memory-utilization` | 0.85 | 0.95 |
+| `--gpu-memory-utilization` | 0.9 | 0.95 |
 
 ### 8.3 Run the Tests
 
