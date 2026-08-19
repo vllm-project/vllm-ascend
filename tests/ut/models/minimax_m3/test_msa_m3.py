@@ -21,7 +21,10 @@ from vllm_ascend.models.minimax_m3.minimax_m3 import _scatter_index_cache
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3IndexerCache,
+    AscendMiniMaxM3IndexerDecodeMetadata,
+    AscendMiniMaxM3IndexerImpl,
     AscendMiniMaxM3IndexerLinear,
+    AscendMiniMaxM3IndexerMetadata,
     AscendMiniMaxM3IndexerMetadataBuilder,
     AscendMiniMaxM3SparseBackend,
     AscendMiniMaxM3SparseDecodeMetadata,
@@ -34,6 +37,9 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _sparse_proj_quant_type,
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
+)
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    _index_score_topk_candidates,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
@@ -565,6 +571,110 @@ def test_indexer_linear_weight_loader_uses_first_index_k_shard_for_all_ranks() -
     layer.weight_loader(param, loaded_weight, "index_k")
 
     assert torch.equal(param.data[2:3], loaded_weight[:1])
+
+
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
+def test_indexer_speculative_decode_uses_ascendc_tp_sharded_path(
+    mock_get_forward_context: MagicMock,
+    mock_get_tp_group: MagicMock,
+) -> None:
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.num_index_heads = 1
+    impl.index_head_dim = 4
+    impl.index_cache = SimpleNamespace(
+        prefix="layer.attn.index_cache",
+        kv_cache=torch.zeros(4, 128, 4),
+    )
+
+    decode = AscendMiniMaxM3IndexerDecodeMetadata(
+        cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([258], dtype=torch.int32),
+        context_lens=torch.tensor([256], dtype=torch.int32),
+        block_table=torch.tensor([[0, 1, 2]], dtype=torch.int32),
+        max_seq_len=258,
+        decode_query_len=2,
+    )
+    metadata = AscendMiniMaxM3IndexerMetadata(
+        seq_lens=decode.seq_lens,
+        max_seq_len=decode.max_seq_len,
+        slot_mapping=torch.arange(2, dtype=torch.int64),
+        num_actual_tokens=2,
+        num_decodes=1,
+        num_decode_tokens=2,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    mock_get_forward_context.return_value = SimpleNamespace(
+        attn_metadata={impl.index_cache.prefix: metadata},
+    )
+    mock_get_tp_group.return_value = SimpleNamespace(
+        world_size=4,
+        rank_in_group=0,
+    )
+    expected = torch.zeros((1, 2, 2), dtype=torch.int32)
+
+    with patch.object(
+        impl,
+        "_decode_topk_tp_sharded",
+        return_value=expected,
+    ) as mock_tp_sharded:
+        actual, prefill = impl.forward(torch.zeros(2, 4))
+
+    assert actual is expected
+    assert prefill is None
+    mock_tp_sharded.assert_called_once()
+    assert mock_tp_sharded.call_args.args[7] == 2
+
+
+def test_speculative_decode_candidates_use_per_token_visibility() -> None:
+    score = torch.tensor([[[5.0], [7.0]]])
+
+    indices, scores = _index_score_topk_candidates(
+        score,
+        context_lens=torch.tensor([-1], dtype=torch.int32),
+        decode_query_len=2,
+        topk=2,
+        block_offset=1,
+    )
+
+    assert torch.equal(indices, torch.tensor([[[-1, -1], [1, -1]]], dtype=torch.int32))
+    assert torch.isneginf(scores[0, 0]).all()
+    assert scores[0, 1, 0] == 7.0
+    assert torch.isneginf(scores[0, 1, 1])
+
+
+def test_speculative_decode_candidates_move_local_mask_per_token() -> None:
+    score = torch.tensor([[[9.0, 1.0], [9.0, 1.0]]])
+
+    indices, scores = _index_score_topk_candidates(
+        score,
+        context_lens=torch.tensor([127], dtype=torch.int32),
+        decode_query_len=2,
+        topk=1,
+        local_blocks=1,
+    )
+
+    assert torch.equal(indices, torch.tensor([[[0], [1]]], dtype=torch.int32))
+    assert torch.equal(scores, torch.full((1, 2, 1), 1.0e29))
+
+
+def test_speculative_decode_candidates_do_not_overforce_earlier_tp_shard() -> None:
+    score = torch.tensor([[[9.0, 8.0], [9.0, 8.0]]])
+
+    indices, scores = _index_score_topk_candidates(
+        score,
+        context_lens=torch.tensor([510], dtype=torch.int32),
+        decode_query_len=2,
+        topk=1,
+        block_offset=0,
+        local_blocks=2,
+    )
+
+    assert torch.equal(indices, torch.tensor([[[0], [0]]], dtype=torch.int32))
+    assert torch.equal(scores, torch.tensor([[[9.0], [9.0]]]))
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn")
