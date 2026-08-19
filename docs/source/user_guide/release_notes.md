@@ -98,9 +98,9 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 - **Upstream vLLM**: v0.23.0.
 - **Python**: >= 3.10, < 3.13.
-- **CANN**: 9.0.1 for A2, A3, and Ascend 950; refer to the Atlas 300I DUO installation guide for its platform-specific CANN package.
-- **PyTorch / torch_npu**: 2.10.0 / 2.10.0.post2.
-- **Triton Ascend**: 3.2.1.
+- **CANN**: 9.1.0 for A2, A3, and Ascend 950; refer to the Atlas 300I DUO installation guide for its platform-specific CANN package.
+- **PyTorch / TorchNPU**: 2.10.0 / 2.10.0.post4.
+- **Triton Ascend**: 3.2.2.
 - **Mooncake**: 0.3.11.post1 in the release images.
 
 ### Deprecation and Configuration Changes
