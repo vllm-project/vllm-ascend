@@ -348,56 +348,52 @@ Here is an accuracy evaluation method.
 
 ## 8 Performance Evaluation
 
-### 8.1 Install AISBench
+### Using AISBench
 
-Run AISBench in a separate environment or container so that the load generator does not affect the serving processes. Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### 8.2 Performance Service Configuration
+### Using vLLM Benchmark
 
-Use the deployment in Section 5 as the baseline. Change the following values on the node:
+Run performance evaluation of `Qwen3.8-27B-w8a8` as an example.
 
-| Parameter | Standard deployment | Performance test |
-| --- | ---: | ---: |
-| `--max-model-len` | 131072 | 250000 |
-| `--max-num-batched-tokens` | 16384 | 8192 |
-| `--gpu-memory-utilization` | 0.85 | 0.95 |
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-### 8.3 Run the Tests
+There are three `vllm bench` subcommands:
 
-Run performance evaluation of `Qwen3.8-27B` as an example. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
 
-```shell
-vllm bench serve \
-  --model Qwen/Qwen3.8-27B \
-  --served-model-name qwen3.8 \
-  --base-url http://<server_ip>:8000 \
-  --dataset-name random \
-  --random-input-len 8192 \
-  --random-output-len 1024 \
-  --num-prompts 16 \
-  --max-concurrency 4 \
-  --save-result \
-  --result-dir ./
+Take the `serve` as an example. Run the code as follows.
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+# For Qwen3.8-27B-w8a8:
+vllm bench serve --model Eco-Tech/Qwen3.8-27B-w8a8 --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-Record the node count, DP/TP topology, context length, concurrency, reasoning effort, and weight revision together with the result.
-
-### 8.4 Enabled Optimizations
-
-| Feature | Description |
-| --- | --- |
-| Chunked Prefill | Splits long prefill inputs into chunks to reduce per-step memory peaks. |
-| W8A8 | Uses Ascend quantization for the validated checkpoint. |
-| Lazy Safetensors | Avoids prefetching the complete NFS checkpoint. |
-| MTP | Uses three speculative tokens with the `qwen3_5_mtp` method. |
-| ACL Graph | Uses `FULL_DECODE_ONLY` replay. |
-| CPU Binding | Reduces cross-core scheduling overhead. |
+After about several minutes, you can get the performance evaluation result.
 
 ## 9 Performance Tuning
 
-Use the deployment values above as a baseline. Adjust `max-model-len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together for the target workload.
+### 9.1 Recommended Configurations
 
-Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md) and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for additional guidance.
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Model-Specific Optimizations
+
+| Optimization | Enablement | Benefit | Notes |
+| --- | --- | --- | --- |
+| Chunked Prefill | Enabled by the vLLM V1 scheduler | Splits long prefill inputs to reduce per-step memory peaks. | Tune with `--max-num-batched-tokens`. |
+| Prefix Cache | `--enable-prefix-caching` | Reuses KV state for repeated prefixes. | The benefit depends on the prefix cache hit rate. |
+| Qwen3.5 MTP speculative decoding | `--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}'` | Improves decode throughput when the acceptance rate is good. | Tune the speculative token count for the target workload. |
+| Full decode ACL Graph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead during decode. | Used by the validated configuration. |
+| CPU binding | `--additional-config '{"enable_cpu_binding":true}'` | Reduces CPU scheduling jitter. | Explicitly enabled in the deployment commands. |
 
 ## 10 FAQ
 
