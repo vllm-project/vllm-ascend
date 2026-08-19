@@ -606,7 +606,14 @@ class AscendKimiK3ForConditionalGeneration(
         # ModelSlim checkpoints may include an explicit projector rotation.
         # Build the optional layer before loading so streaming checkpoint
         # iterators can populate it, then release it when the weight is absent.
-        rot_proj = getattr(self.mm_projector, "rot_proj", None)
+        # PPMissingLayer forwards arbitrary attribute access to another
+        # StageMissingLayer sentinel. Treat the whole projector as absent
+        # explicitly; otherwise ``rot_proj`` looks present and the cleanup
+        # below attempts to delete an attribute that was never registered.
+        projector_is_missing = isinstance(self.mm_projector, PPMissingLayer)
+        rot_proj = (
+            None if projector_is_missing else getattr(self.mm_projector, "rot_proj", None)
+        )
         skip_prefixes = [] if rot_proj is not None else ["mm_projector.rot_proj."]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         rot_proj_weight_names = (
