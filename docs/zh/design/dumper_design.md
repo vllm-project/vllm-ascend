@@ -27,7 +27,7 @@ Detect 输入过滤见 [dfx_design.md](./dfx_design.md) §2.6 / [dfx_ops.md](./d
    - `apply_dfx_config()`：同步 `dump.max_times` / cooldown、调用 `apply_ascend_log_level`（`InputFilterManager` 由 `DfxProcessor` 刷新）
 
 2. **debugger 生命周期**
-   - `_init_debugger()`：按 `CUDAGraphMode` 选择 `PrecisionDebugger` 或 `AclGraphDumper`；**软失败**（缺 msprobe / 构造失败 → `_debugger=None`，不杀进程）
+   - `_init_debugger()`：仅当 DFX `dump.enabled=true` 时构造；按 `CUDAGraphMode` 选择 `PrecisionDebugger` 或 `AclGraphDumper`。`dump.enabled=false` 即使有 `dump_config_path` 也不建对象（避免 msprobe 在 `dump_enable` 缺省当开时挂 API wrap）。**软失败**（缺 msprobe / 构造失败 → `_debugger=None`，不杀进程）。热更打开 dump 时由 `_enforce_dump_requires_debugger` lazy 再 init。
    - `_enforce_dump_requires_debugger()`：`dump.enabled=true` 但 debugger 不可用时 ERROR 并强制 `dump.enabled=false`（可热更重试：reload 时 lazy 再 `_init_debugger`；ACLGraph 下启动后 lazy 成功会 WARNING，图已 capture 时建议重启）
    - `start_dump_data()` / `finalize_dump_data()`：按 `dump_enable` 门控的 start→forward→step
 
