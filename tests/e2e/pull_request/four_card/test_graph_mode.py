@@ -606,7 +606,6 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU])
 def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
-
     # Counter doesn't work in default "spawn" mode
     metrics = None
     if "DeepSeek-V2-Lite-W8A8" in cur_case["model"]:
