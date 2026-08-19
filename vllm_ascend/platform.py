@@ -34,6 +34,12 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.device.hardware_profile import (
+    AttentionBackendFamily,
+    HardwareCapability,
+    QuantizationBackendFamily,
+    get_current_hardware_profile,
+)
 
 # isort: off
 from vllm_ascend.utils import (
@@ -41,16 +47,13 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
-    AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
-    get_ascend_device_type,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
-    is_310p,
     enable_sp,
 )
 
@@ -72,7 +75,7 @@ else:
 
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
-MAX_CAPTURE_SIZES_FOR_950 = 4
+MAX_REDUCED_CAPTURE_SIZES = 4
 
 
 class NPUPlatform(Platform):
@@ -226,7 +229,7 @@ class NPUPlatform(Platform):
             (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
             (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
         }
-        backend_map_310 = {
+        compatibility_backend_map = {
             (
                 False,
                 False,
@@ -236,8 +239,8 @@ class NPUPlatform(Platform):
             # (True, True):  "...AscendSFABackend310",
         }
 
-        if is_310p():
-            return backend_map_310.get(key, backend_map_310[(False, False)])
+        if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
+            return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
         return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
 
@@ -273,10 +276,10 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
-        if is_310p():
-            from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
-        else:
+        if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
+        else:
+            from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
 
         _config_deprecated_logging()
 
@@ -1097,8 +1100,8 @@ def _setup_compile_backend(vllm_config: VllmConfig, compile_backend: str) -> Non
             ]
         )
         # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            _prune_capture_sizes_for_950(vllm_config)
+        if get_current_hardware_profile().supports(HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES):
+            _prune_reduced_capture_sizes(vllm_config)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
     elif compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -1132,18 +1135,19 @@ def _setup_worker_and_scheduler(
         # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
         if not vllm_config.compilation_config.pass_config.enable_sp:
             parallel_config.all2all_backend = "flashinfer_all2allv"
-        if is_310p():
-            parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
-        elif ascend_config.xlite_graph_config.enabled:
+        hardware_profile = get_current_hardware_profile()
+        if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(
+            HardwareCapability.STANDARD_WORKER_PATCHES
+        ):
             logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
             parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
         else:
-            parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+            parallel_config.worker_cls = hardware_profile.default_worker_cls
 
     refresh_block_size(vllm_config)
 
-    # Activate custom ops, except on 310P
-    if get_ascend_device_type() != AscendDeviceType._310P:
+    # Automatically activate all custom ops on profiles using the standard path.
+    if get_current_hardware_profile().supports(HardwareCapability.AUTO_ENABLE_CUSTOM_OPS):
         vllm_config.compilation_config.custom_ops = ["all"]
 
     # Select specialized scheduler class
@@ -1329,14 +1333,14 @@ def _config_deprecated_logging():
     warnings_logger.propagate = False
 
 
-def _prune_capture_sizes_for_950(vllm_config):
+def _prune_reduced_capture_sizes(vllm_config):
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
         return
-    if len(original_sizes) <= MAX_CAPTURE_SIZES_FOR_950:
+    if len(original_sizes) <= MAX_REDUCED_CAPTURE_SIZES:
         return
-    step = (len(original_sizes) - 1) / (MAX_CAPTURE_SIZES_FOR_950 - 1)
-    indices = [round(i * step) for i in range(MAX_CAPTURE_SIZES_FOR_950)]
+    step = (len(original_sizes) - 1) / (MAX_REDUCED_CAPTURE_SIZES - 1)
+    indices = [round(i * step) for i in range(MAX_REDUCED_CAPTURE_SIZES)]
     indices[0], indices[-1] = 0, len(original_sizes) - 1
     sampled_sizes = [original_sizes[i] for i in indices]
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
@@ -1344,7 +1348,7 @@ def _prune_capture_sizes_for_950(vllm_config):
         "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
         "and this warning will be cleared soon.",
         len(original_sizes),
-        MAX_CAPTURE_SIZES_FOR_950,
+        MAX_REDUCED_CAPTURE_SIZES,
     )
 
 
@@ -1384,8 +1388,10 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                 f"== tp_size({parallel_config.tensor_parallel_size})."
             )
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            raise NotImplementedError("SFA DCP with replicated indexer is not supported on A5 yet.")
+        if not get_current_hardware_profile().supports(HardwareCapability.SFA_DCP_REPLICATED_INDEXER):
+            raise NotImplementedError(
+                "SFA DCP with replicated indexer is not supported by the current hardware profile."
+            )
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:

@@ -329,13 +329,10 @@ class AscendConfig:
         if not self.enable_mc2_hierarchy_comm:
             return
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-        device_type = get_ascend_device_type()
-        if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
-            raise NotImplementedError(
-                f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
-            )
+        if not get_current_hardware_profile().supports(HardwareCapability.MC2_HIERARCHY_COMM):
+            raise NotImplementedError("enable_mc2_hierarchy_comm is not supported by the current hardware profile.")
 
         num_logical_experts = self.vllm_config.model_config.get_num_experts()
         num_redundant_experts = self.eplb_config.num_redundant_experts if self.eplb_config.dynamic_eplb else 0
@@ -691,14 +688,15 @@ class AscendCompilationConfig:
                 Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-        if is_310p():
+        if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if enable_npugraph_ex:
-                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+                logger.warning("npugraph_ex is not supported by the current hardware profile. Disabling it.")
             if enable_static_kernel:
                 logger.warning(
-                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                    "static kernel requires npugraph_ex, which is not supported by the current hardware profile. "
+                    "Disabling it."
                 )
             enable_npugraph_ex = False
             enable_static_kernel = False

@@ -32,7 +32,9 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_sp, shared_expert_dp_enabled
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
 class TestAscendConfig(TestBase):
@@ -139,22 +141,31 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig({"load_collection_phase": "prompt"})
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_mc2_hierarchy_comm_rejects_a5(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_mc2_hierarchy_comm_rejects_a5(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(512)
 
-        with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
+        with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
             AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(513)
 
         with self.assertRaisesRegex(ValueError, "at most 512 experts"):
             AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    def test_mc2_hierarchy_comm_counts_dynamic_eplb_redundancy(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_hierarchy_comm_counts_dynamic_eplb_redundancy(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(
             480,
             dynamic_eplb=True,
@@ -170,17 +181,20 @@ class TestAscendConfig(TestBase):
         ):
             AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    def test_mc2_hierarchy_comm_ignores_redundancy_when_dynamic_eplb_is_disabled(self, _mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_hierarchy_comm_ignores_redundancy_when_dynamic_eplb_is_disabled(self, _mock_profile):
         vllm_config = self._make_mc2_hierarchy_vllm_config(480, num_redundant_experts=33)
 
         AscendConfig(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type")
-    def test_mc2_hierarchy_comm_accepts_512_experts_on_a2_and_a3(self, mock_device_type):
+    @patch("vllm_ascend.device.hardware_profile.get_current_hardware_profile")
+    def test_mc2_hierarchy_comm_accepts_512_experts_on_a2_and_a3(self, mock_profile):
         for device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
             with self.subTest(device_type=device_type):
-                mock_device_type.return_value = device_type
+                mock_profile.return_value = get_hardware_profile(device_type)
                 vllm_config = self._make_mc2_hierarchy_vllm_config(512)
 
                 AscendConfig(vllm_config)
@@ -376,7 +390,10 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
-    @patch("vllm_ascend.utils.is_310p", return_value=True)
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType._310P),
+    )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_disable_npugraph_ex_on_310p(
         self, mock_fix_incompatible_config, mock_is_310p, mock_warning
@@ -392,9 +409,9 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn("npugraph_ex is not supported on Ascend 310P. Disabling it.", warning_messages)
+        self.assertIn("npugraph_ex is not supported by the current hardware profile. Disabling it.", warning_messages)
         self.assertIn(
-            "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it.",
+            "static kernel requires npugraph_ex, which is not supported by the current hardware profile. Disabling it.",
             warning_messages,
         )
 
