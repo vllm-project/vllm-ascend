@@ -119,7 +119,7 @@ class DependencyDocumentationTest(unittest.TestCase):
             with self.subTest(path=path):
                 documentation = _read(path)
                 self.assertIn(ARCTIC_INFERENCE_REQUIREMENT, documentation)
-                self.assertNotIn('arctic-inference>=0.2.0', documentation)
+                self.assertNotIn("arctic-inference>=0.2.0", documentation)
 
     def test_ascend_toolkit_home_is_set_before_nnal_installation(self):
         installation = _read("docs/source/installation.md")
