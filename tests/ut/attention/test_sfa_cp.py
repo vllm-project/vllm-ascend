@@ -17,6 +17,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADSADCPImpl,
     AscendSFADSADCPMetadata,
     AscendSFADSADCPMetadataBuilder,
+    AscendSFAPCPImpl,
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
 )
@@ -65,6 +66,86 @@ def test_sfa_cp_four_mode_resolution() -> None:
         ):
             assert resolve_sfa_metadata_builder() is classes[0]
             assert resolve_sfa_impl() is classes[1]
+
+
+def test_sfa_pcp_resolution_for_mrv2_config() -> None:
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2),
+    )
+    with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
+            return_value=False,
+        ),
+    ):
+        assert resolve_sfa_impl(vllm_config) is AscendSFAPCPImpl
+
+
+def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    attn_metadata = SimpleNamespace(num_decode_tokens=1)
+    kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
+    cos = torch.arange(2, dtype=torch.float32).view(2, 1)
+    sin = cos + 10
+    slots = torch.tensor([4, 5], dtype=torch.int64)
+    gathered_kv = torch.arange(12, dtype=torch.float32).view(4, 3)
+    gathered_cos = torch.arange(4, dtype=torch.float32).view(4, 1)
+    gathered_sin = gathered_cos + 10
+    gathered_slots = torch.tensor([0, 1, 4, 5], dtype=torch.int64)
+    kv_cache = (torch.empty(1), torch.empty(1))
+
+    with (
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs",
+            return_value=((gathered_kv, gathered_cos, gathered_sin), gathered_slots),
+        ) as gather,
+        patch.object(AscendSFAImpl, "exec_kv", autospec=True, return_value="written") as base_exec_kv,
+    ):
+        result = impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
+    assert result == "written"
+    gather.assert_called_once_with((kv_no_split, cos, sin), slots, 1)
+    base_exec_kv.assert_called_once_with(
+        impl,
+        gathered_kv,
+        gathered_cos,
+        gathered_sin,
+        kv_cache,
+        gathered_slots,
+        attn_metadata,
+    )
+
+
+def test_sfa_pcp_gathers_indexer_kv_with_its_slot_mapping() -> None:
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    attn_metadata = SimpleNamespace(num_decode_tokens=1)
+    k_li = torch.arange(8, dtype=torch.float32).view(2, 4)
+    k_li_scale = torch.ones(2, 1, dtype=torch.float32)
+    slots = torch.tensor([7, 8], dtype=torch.int64)
+    gathered_k_li = torch.arange(16, dtype=torch.float32).view(4, 4)
+    gathered_scale = torch.full((4, 1), 2.0)
+    gathered_slots = torch.tensor([1, 2, 7, 8], dtype=torch.int64)
+    kv_cache = (torch.empty(1), torch.empty(1), torch.empty(1))
+
+    with (
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs",
+            return_value=((gathered_k_li, gathered_scale), gathered_slots),
+        ) as gather,
+        patch.object(AscendSFAImpl, "_write_indexer_cache", autospec=True) as base_write,
+    ):
+        impl._write_indexer_cache(k_li, k_li_scale, slots, kv_cache, attn_metadata)
+
+    gather.assert_called_once_with((k_li, k_li_scale), slots, 1)
+    base_write.assert_called_once_with(
+        impl,
+        gathered_k_li,
+        gathered_scale,
+        gathered_slots,
+        kv_cache,
+        attn_metadata,
+    )
 
 
 def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:

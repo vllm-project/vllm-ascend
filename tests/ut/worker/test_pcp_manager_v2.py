@@ -24,6 +24,7 @@ import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
@@ -173,3 +174,8 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     expected_seq_lens = np.array([18, 5], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
     assert result.attn_state == "global-attn-state"
+
+
+def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    assert runner.pcp_manager_cls is AscendPCPManager
