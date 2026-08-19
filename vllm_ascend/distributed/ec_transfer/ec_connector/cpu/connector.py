@@ -53,6 +53,13 @@ class AscendECCPUConnector(ECCPUConnector):
 
         return AscendECCPUWorker(vllm_config)
 
+    def _make_scheduler(self, vllm_config: "VllmConfig"):
+        from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.scheduler import (
+            AscendECCPUScheduler,
+        )
+
+        return AscendECCPUScheduler(vllm_config)
+
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> ECCPUConnectorMetadata:
         metadata = super().build_connector_meta(scheduler_output)
 

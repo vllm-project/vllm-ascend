@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
-    create_ec_shared_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker import ECCPUWorker
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker.descriptor_buffers import (
@@ -23,6 +22,10 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 from vllm.platforms import current_platform
+
+from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+    create_ascend_ec_shared_region,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -94,7 +97,7 @@ class AscendECCPUWorker(ECCPUWorker):
         # Do not call ECCPUWorker.__init__: it optionally invokes the CUDA-only
         # ECSharedRegion.pin_memory(). The fields below deliberately mirror the
         # small upstream initialization seam while replacing pinning/streams.
-        self._region = create_ec_shared_region(vllm_config)
+        self._region = create_ascend_ec_shared_region(vllm_config)
         self._dtype = vllm_config.model_config.dtype
         self._is_save_rank = get_tensor_model_parallel_rank() == 0 and get_pcp_group().rank_in_group == 0
         self._buf_pool = DescriptorBufferPool()

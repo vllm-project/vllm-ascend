@@ -7,10 +7,9 @@ import uuid
 
 import pytest
 import torch
-from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
-    ECSharedRegion,
+from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+    AscendECSharedRegion,
 )
-
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -22,7 +21,7 @@ def test_pinned_mmap_bf16_round_trip():
 
     block_size = 64
     block_ids = [7, 2, 5, 1]
-    region = ECSharedRegion(
+    region = AscendECSharedRegion(
         engine_id=f"ut_{os.getpid()}_{uuid.uuid4().hex}",
         num_blocks=8,
         block_size_bytes=block_size,
