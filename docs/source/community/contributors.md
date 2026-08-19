@@ -21,14 +21,20 @@
 | LinFeng Yuan| [@linfeng-yuan](https://github.com/linfeng-yuan) | 2026/05 |
 
 ## Contributors
-<!-- last_commit: 1471b7702767ac351c8955fa286b4913b631bdd7 -->
+<!-- last_commit: 5cb98caaadeff42b5b62b996e34bb2aaa29d20fd -->
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2026-07-31:
+Updated on 2026-08-16:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
+| 518 | [@DavidJiang9](https://github.com/DavidJiang9) | 2026/08/13 | [c10e1c0](https://github.com/vllm-project/vllm-ascend/commit/c10e1c01d51c533021ae4bc5eeebf784ae36dafc) |
+| 517 | [@hw-zhoutianyang](https://github.com/hw-zhoutianyang) | 2026/08/12 | [6c47fb9](https://github.com/vllm-project/vllm-ascend/commit/6c47fb9e3ac8af04c873fce79318bc2afabf9188) |
+| 516 | [@lrf-vm](https://github.com/lrf-vm) | 2026/08/08 | [462154e](https://github.com/vllm-project/vllm-ascend/commit/462154e6cd99084d81b94fcfdf26b4aed2cac914) |
+| 515 | [@voidvelocity](https://github.com/voidvelocity) | 2026/08/07 | [60eacbe](https://github.com/vllm-project/vllm-ascend/commit/60eacbe8bd20ad9dcd7615896184110e556c0584) |
+| 514 | [@xqchen7](https://github.com/xqchen7) | 2026/08/07 | [7c0f6e6](https://github.com/vllm-project/vllm-ascend/commit/7c0f6e6d8cc3134019ea6ebd71a3dad6733492e5) |
+| 513 | [@Karryking3](https://github.com/Karryking3) | 2026/08/06 | [bb630a6](https://github.com/vllm-project/vllm-ascend/commit/bb630a62a210059ba04041bdb952e3fca22f94df) |
 | 512 | [@ella1107](https://github.com/ella1107) | 2026/07/30 | [71d136c](https://github.com/vllm-project/vllm-ascend/commit/71d136ca26c4692db6b1e5bd07f507b73f09887b) |
 | 511 | [@axx-ty911](https://github.com/axx-ty911) | 2026/07/30 | [7890de8](https://github.com/vllm-project/vllm-ascend/commit/7890de8eb72ff669c4962ff379090a14dc19b21a) |
 | 510 | [@ffggs](https://github.com/ffggs) | 2026/07/29 | [5cf0420](https://github.com/vllm-project/vllm-ascend/commit/5cf0420ab3a4ca5f8ba2a707e4e5c31eef1cc968) |
