@@ -1062,9 +1062,33 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    def _should_force_eager_dummy_run(self, num_tokens: int) -> bool:
+        from vllm_ascend.ascend_forward_context import select_moe_comm_method
+        from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+        return (
+            select_moe_comm_method(
+                num_tokens,
+                self.vllm_config,
+                model_instance=self.model_runner.model,
+            )
+            == MoECommType.FUSED_MC2
+        )
+
     def execute_dummy_batch(self) -> None:
         self.profile_memory()
-        self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
+        num_tokens = self.model_runner.decode_token_per_req
+        if self._should_force_eager_dummy_run(num_tokens):
+            # A uniform-decode graph can pad an idle rank beyond the MegaMoE
+            # buffer capacity. Eager mode participates in the existing DP mode
+            # synchronization without inflating the dummy token shape.
+            self.model_runner._dummy_run(
+                num_tokens=num_tokens,
+                uniform_decode=True,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            )
+            return
+        self.model_runner._dummy_run(num_tokens=num_tokens, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
