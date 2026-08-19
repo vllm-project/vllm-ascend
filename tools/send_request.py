@@ -126,3 +126,33 @@ def send_v1_chat_completions(prompt, model, server, request_args=None, expected:
     print(f"Response: {response_text}")
     assert response_text, "empty response"
     validate_response(response_json, expected, max_model_len)
+
+# test_cases:
+#   - name: "MyModel-Test"
+#     model: "/path/to/model"
+#     envs:
+#       SERVER_PORT: "DEFAULT_PORT"
+#     server_cmd:
+#       - "--tensor-parallel-size"
+#       - "8"
+#       - "--port"
+#       - "$SERVER_PORT"
+#       - "--max-model-len"
+#       - "8192"
+#       - "--trust-remote-code"
+#     test_content:
+#       - chat_completion
+#     prompts:
+#       - seed: "Hello, how are you?"
+#         target_tokens: 512
+#       - seed: "请解释什么是大语言模型"
+#         target_tokens: 1024
+#       - "普通字符串也还可以用"
+#     api_keyword_args:
+#       max_tokens: 128
+#     expected_response:
+#       per_prompt:
+#         - completion_tokens: 80
+#         - completion_tokens: 120
+#         - prompt_tokens: 8
+#           completion_tokens: 30
