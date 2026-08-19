@@ -64,7 +64,7 @@ def test_npugraph_ex_handles_triton_value_pack_arguments() -> None:
         {"keyword": value_pack},
     )
     npu_args, npu_kwargs = _NpuGraphConverter._unpack_npu(
-        object(),
+        MagicMock(),
         ({"input": value_pack},),
         {"keyword": value_pack},
     )
