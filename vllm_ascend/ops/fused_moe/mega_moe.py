@@ -36,7 +36,6 @@ _MEGA_MOE_SUPPORTED_QUANTS = {
 _FP4_PACK_FACTOR = 2
 _MXFP_SCALE_BLOCK_SIZE = 64
 _MXFP_SCALE_MULTIPLIER = 2
-_A5_DYNAMIC_NUM_MAX_TOKENS_PER_RANK = 0
 # Tensor.view requires a torch.dtype; torch_npu's operator dtype enum is interpreted as a shape.
 _TORCH_FLOAT8_E8M0FNU_DTYPE = getattr(torch, "float8_e8m0fnu", None)
 
@@ -214,9 +213,9 @@ class MegaMoEBackend:
                 w1_scale,
                 w2_scale,
             )
-        if fused_experts_input.hidden_states.shape[0] > buffer_tokens_per_rank:
+        if fused_experts_input.hidden_states.shape[0] != buffer_tokens_per_rank:
             raise ValueError(
-                "A5 MegaMoE input exceeds the configured capacity: "
+                "A5 MegaMoE input must match the symmetric buffer token capacity: "
                 f"num_tokens={fused_experts_input.hidden_states.shape[0]}, "
                 f"mega_moe_buffer_tokens_per_rank={buffer_tokens_per_rank}."
             )
@@ -272,10 +271,6 @@ class MegaMoEBackend:
             dispatch_quant_mode=key.dispatch_quant_mode,
             dispatch_quant_out_dtype=key.dispatch_quant_out_dtype,
         )
-        # The positive value above sizes the communication buffer. A5 runtime
-        # requires a nonzero num_max_tokens_per_rank to match x.shape[0], so use
-        # its zero-valued auto mode for dynamic vLLM batches.
-        buffer.num_max_tokens_per_rank = _A5_DYNAMIC_NUM_MAX_TOKENS_PER_RANK
         setattr(
             mega_moe_group,
             _MEGA_MOE_BUFFER_STATE_ATTR,
