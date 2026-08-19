@@ -521,7 +521,10 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(NPUWorker, "_should_force_eager_dummy_run", return_value=False),
+        ):
             worker = NPUWorker()
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
@@ -536,6 +539,52 @@ class TestNPUWorker(TestBase):
             mock_model_runner._dummy_run.assert_called_once_with(
                 num_tokens=mock_decode_token_per_req, uniform_decode=True
             )
+
+    def test_execute_dummy_batch_forces_eager_when_mega_moe_is_selected(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(NPUWorker, "_should_force_eager_dummy_run", return_value=True),
+        ):
+            worker = NPUWorker()
+            mock_model_runner = MagicMock()
+            worker.model_runner = mock_model_runner
+
+            worker.execute_dummy_batch()
+
+            mock_model_runner._dummy_run.assert_called_once_with(
+                num_tokens=mock_model_runner.decode_token_per_req,
+                uniform_decode=True,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            )
+
+    def test_should_force_eager_dummy_run_only_for_mega_moe(self):
+        from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.vllm_config = MagicMock()
+            worker.model_runner = MagicMock()
+
+            for comm_type, expected in (
+                (MoECommType.FUSED_MC2, True),
+                (MoECommType.MC2, False),
+            ):
+                with (
+                    self.subTest(comm_type=comm_type),
+                    patch(
+                        "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+                        return_value=comm_type,
+                    ) as mock_select,
+                ):
+                    self.assertEqual(worker._should_force_eager_dummy_run(7), expected)
+                    mock_select.assert_called_once_with(
+                        7,
+                        worker.vllm_config,
+                        model_instance=worker.model_runner.model,
+                    )
 
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")
