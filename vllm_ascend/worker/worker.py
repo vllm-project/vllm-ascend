@@ -72,9 +72,9 @@ from vllm_ascend.distributed.parallel_state import (
     destroy_ascend_model_parallel,
     init_ascend_model_parallel,
 )
-from vllm_ascend.distributed.snapshot import cleanup_dist_env_for_snapshot
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+from vllm_ascend.snapshot.distributed import cleanup_dist_env_for_snapshot
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
@@ -729,6 +729,37 @@ class NPUWorker(WorkerBase):
 
     def snapshot_process_unlock(self) -> None:
         self._call_aclrt_snapshot_api("aclrtSnapShotProcessUnlock")
+
+    def snapshot_prepare_suspend(self, model_save_path: str | None = None) -> None:
+        self.dump_model(model_save_path)
+
+    def snapshot_suspend(self) -> None:
+        self.snapshot_process_lock()
+        self.snapshot_process_backup()
+
+    def snapshot_unlock(self) -> None:
+        self.snapshot_process_unlock()
+
+    def snapshot_prepare_resume(
+        self,
+        local_ip: str,
+        data_parallel_master_ip: str,
+    ) -> None:
+        self.snapshot_process_restore()
+        self.snapshot_process_unlock()
+        self.update_worker_info_after_resume(local_ip, data_parallel_master_ip)
+        self.rebuild_parallel_group_after_resume()
+
+    def snapshot_restore_model(self, model_path: str | None = None) -> None:
+        self.re_load_weights(model_path)
+        self.recapture_graph()
+
+    def snapshot_rebuild_kv_transfer(
+        self,
+        local_ip: str,
+        new_engine_id: str | None = None,
+    ) -> None:
+        self.rebuild_kv_transfer_engine_after_resume(local_ip, new_engine_id)
 
     def dump_model(self, model_save_path=None) -> None:
         self.model_runner.dump_model(path=model_save_path)
