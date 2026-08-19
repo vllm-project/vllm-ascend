@@ -21,8 +21,9 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -61,11 +62,78 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.device.mxfp_kv_cache import (
+    scatter_mxfp_k_scale_cache,
+)
 from vllm_ascend.utils import is_950, weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+
+MXFP8_QUERY_QUANT_MODE = 6
+MXFP8_KEY_QUANT_MODE = 6
+MXFP8_VALUE_QUANT_MODE = 8
+
+
+@dataclass
+class C8MXFPGraphAttentionParams:
+    query: torch.Tensor
+    key: torch.Tensor
+    value: torch.Tensor
+    query_scale: torch.Tensor
+    key_scale: torch.Tensor
+    value_scale: torch.Tensor
+    block_size: int
+    num_kv_heads: int
+    num_heads: int
+    scale: float
+    actual_seq_qlen: list[int]
+    attn_output: torch.Tensor
+    softmax_lse: torch.Tensor
+
+
+def _build_c8_mxfp_fia_v2_kwargs(
+    *,
+    block_table: torch.Tensor | None,
+    actual_seq_qlen: list[int] | torch.Tensor,
+    actual_seq_kvlen: list[int] | torch.Tensor,
+    query_scale: torch.Tensor,
+    key_scale: torch.Tensor,
+    value_scale: torch.Tensor,
+    block_size: int,
+    num_query_heads: int,
+    num_key_value_heads: int,
+    softmax_scale: float,
+    sparse_mode: int,
+    atten_mask: torch.Tensor | None = None,
+) -> dict:
+    kwargs = {
+        "block_table": block_table,
+        "input_layout": "TND",
+        "block_size": block_size,
+        "actual_seq_qlen": actual_seq_qlen,
+        "actual_seq_kvlen": actual_seq_kvlen,
+        "num_query_heads": num_query_heads,
+        "num_key_value_heads": num_key_value_heads,
+        "softmax_scale": softmax_scale,
+        "sparse_mode": sparse_mode,
+        "dequant_scale_query": query_scale,
+        "dequant_scale_key": key_scale,
+        "dequant_scale_value": value_scale,
+        "query_quant_mode": MXFP8_QUERY_QUANT_MODE,
+        "key_quant_mode": MXFP8_KEY_QUANT_MODE,
+        "value_quant_mode": MXFP8_VALUE_QUANT_MODE,
+        "query_dtype": torch.float8_e4m3fn,
+        "key_dtype": torch.float8_e4m3fn,
+        "value_dtype": torch.float8_e4m3fn,
+        "dequant_scale_query_dtype": torch_npu.float8_e8m0fnu,
+        "dequant_scale_key_dtype": torch_npu.float8_e8m0fnu,
+        "dequant_scale_value_dtype": torch_npu.float8_e8m0fnu,
+    }
+    if atten_mask is not None:
+        kwargs["atten_mask"] = atten_mask
+    return kwargs
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -108,13 +176,11 @@ class AscendAttentionBackend(AttentionBackend):
         dst_kv_cache: list[torch.Tensor],
         src_to_dst: torch.Tensor,
     ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
         src_indices = src_to_dst[:, 0]
         dst_indices = src_to_dst[:, 1]
 
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_key_cache.device)
+        for src_cache, dst_cache in zip(src_kv_cache, dst_kv_cache):
+            dst_cache[dst_indices] = src_cache[src_indices].to(dst_cache.device)
 
     @staticmethod
     def copy_blocks(
@@ -125,14 +191,29 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dists[:, 1]
 
         for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
-            key_caches[dst_indices] = key_caches[src_indices]
-            value_caches[dst_indices] = value_caches[src_indices]
+            for cache in kv_cache:
+                cache[dst_indices] = cache[src_indices]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendC8MXFPAttentionBackend(AscendAttentionBackend):
+    """Backend for C8-MXFP KV cache layers.
+
+    C8-MXFP FIA requires 512-token pages. This must not be advertised by the
+    generic backend because hybrid BF16 models use its 128-token logical block
+    layout when reshaping their KV cache.
+    """
+
+    @staticmethod
+    def get_impl_cls() -> type["AscendC8MXFPAttentionBackendImpl"]:
+        return AscendC8MXFPAttentionBackendImpl
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [512]
 
 
 class AscendAttentionState(Enum):
@@ -752,6 +833,52 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             block_table,
                             seq_lens,
                         )
+                        continue
+                    if isinstance(param, C8MXFPGraphAttentionParams):
+                        if _EXTRA_CTX.is_draft_model:
+                            draft_step = attn_count // num_layers
+                            current_attn_metadata = attn_metadata[draft_step][key]
+                            attn_count += 1
+                        else:
+                            current_attn_metadata = attn_metadata[key]
+
+                        # Query has the fixed graph-capture shape. Keep its
+                        # captured cumulative lengths and only refresh KV
+                        # lengths. Runtime metadata can contain fewer real
+                        # requests than the capture bucket, so pad KV lengths
+                        # to the same fixed number of sequences.
+                        actual_seq_qlen = param.actual_seq_qlen
+                        num_graph_seqs = len(actual_seq_qlen)
+                        actual_seq_kvlen = current_attn_metadata.seq_lens_list[:num_graph_seqs]
+                        actual_seq_kvlen = actual_seq_kvlen + [0] * (
+                            num_graph_seqs - len(actual_seq_kvlen)
+                        )
+                        block_tables = current_attn_metadata.block_tables[:num_graph_seqs]
+                        fia_kwargs = _build_c8_mxfp_fia_v2_kwargs(
+                            block_table=block_tables,
+                            actual_seq_qlen=actual_seq_qlen,
+                            actual_seq_kvlen=actual_seq_kvlen,
+                            query_scale=param.query_scale,
+                            key_scale=param.key_scale,
+                            value_scale=param.value_scale,
+                            block_size=param.block_size,
+                            num_query_heads=param.num_heads,
+                            num_key_value_heads=param.num_kv_heads,
+                            softmax_scale=param.scale,
+                            sparse_mode=0,
+                        )
+
+                        torch.npu.graph_task_update_begin(update_stream, handle)
+                        torch_npu.npu_fused_infer_attention_score_v2.out(
+                            query=param.query,
+                            key=param.key,
+                            value=param.value,
+                            **fia_kwargs,
+                            workspace=graph_params.workspaces.get(num_tokens),
+                            out=[param.attn_output, param.softmax_lse],
+                        )
+                        torch.npu.graph_task_update_end(update_stream)
+                        event.record(update_stream)
                         continue
                     (
                         query,
@@ -2113,3 +2240,402 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
             notify_kv_cache_written()
         return query, key, value, output
+
+
+class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
+    """MXFP8 KV cache backend.
+
+    In forward(), Q and K/V are quantized to FP8 E4M3 (with E8M0 scales) before
+    cache write; reshape_and_cache only scatters quantized K/V and scales into
+    paged cache, and FIA consumes them from the transposed cache layout.
+    """
+
+    # This backend is installed by assigning layer.impl.__class__, which does
+    # not call this subclass's constructor. A class-level default is therefore
+    # required for objects that predate the class swap.
+    enable_hamming_sparse: bool = False
+
+    def _transpose_kv_cache(
+        self, kv_cache: tuple[torch.Tensor]
+    ) -> tuple[torch.Tensor]:
+        """Swap block_size (dim 1) and num_kv_heads (dim 2) on paged K/V for FIA.
+
+        [num_blocks, block_size, num_kv_heads, head_dim]
+        -> [num_blocks, num_kv_heads, block_size, head_dim]
+        """
+        key = kv_cache[0].transpose(1, 2).contiguous()
+        value = kv_cache[1].transpose(1, 2).contiguous()
+        return (key, value, kv_cache[2], kv_cache[3])
+
+    def _run_mxfp8_fia_v2(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_scale: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        *,
+        block_size: int,
+        block_table: torch.Tensor | None,
+        actual_seq_qlen: list[int] | torch.Tensor,
+        actual_seq_lengths_kv: list[int] | torch.Tensor,
+        num_tokens: int,
+        output: torch.Tensor,
+        token_offset: int = 0,
+        sparse_mode: int = 3,
+        use_attn_mask: bool = True,
+    ) -> torch.Tensor:
+        query_slice = quant_query[token_offset : token_offset + num_tokens]
+        query_scale_slice = query_scale[token_offset : token_offset + num_tokens]
+        fia_kwargs = _build_c8_mxfp_fia_v2_kwargs(
+            block_table=block_table,
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_lengths_kv,
+            query_scale=query_scale_slice,
+            key_scale=key_scale,
+            value_scale=value_scale,
+            block_size=block_size,
+            num_query_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            softmax_scale=self.scale,
+            sparse_mode=sparse_mode,
+            atten_mask=attn_metadata.attn_mask if use_attn_mask else None,
+        )
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+            query_slice,
+            key,
+            value,
+            **fia_kwargs,
+        )
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[token_offset : token_offset + num_tokens] = attn_output
+        return output
+
+    def _full_graph_mxfp8_decode(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Capture MXFP8 FIA V2 with a task handle for FULL graph replay."""
+        key, value, key_scale, value_scale = kv_cache
+        block_size = key.shape[2]
+        num_tokens = quant_query.shape[0]
+        num_decodes = attn_metadata.num_decodes
+        block_tables = attn_metadata.block_tables[:num_decodes]
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q[:num_decodes]
+        actual_seq_kvlen = attn_metadata.seq_lens_list[:num_decodes]
+        query = quant_query[:num_tokens]
+        dequant_scale_query = query_scale[:num_tokens]
+        if len(actual_seq_qlen) != num_tokens:
+            raise ValueError(
+                "C8_MXFP FULL graph capture requires one decode sequence per "
+                f"graph token, got q_seqs={len(actual_seq_qlen)}, tokens={num_tokens}."
+            )
+
+        if _EXTRA_CTX.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+        assert graph_params is not None
+
+        fia_kwargs = _build_c8_mxfp_fia_v2_kwargs(
+            block_table=block_tables,
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_kvlen,
+            query_scale=dequant_scale_query,
+            key_scale=key_scale,
+            value_scale=value_scale,
+            block_size=block_size,
+            num_query_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            softmax_scale=self.scale,
+            sparse_mode=0,
+        )
+        workspace = graph_params.workspaces.get(num_tokens)
+        if workspace is None:
+            workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                query=query,
+                key=key,
+                value=value,
+                **fia_kwargs,
+            )
+            if _EXTRA_CTX.is_draft_model:
+                update_draft_graph_params_workspaces(num_tokens, workspace)
+            else:
+                update_graph_params_workspaces(num_tokens, workspace)
+
+        stream = torch_npu.npu.current_stream()
+        event = torch.npu.ExternalEvent()
+        event.wait(stream)
+        event.reset(stream)
+        graph_params.events[num_tokens].append(event)
+
+        softmax_lse = torch.empty(1, dtype=torch.float32, device=output.device)
+        graph_params.attn_params[num_tokens].append(
+            C8MXFPGraphAttentionParams(
+                query=weak_ref_tensors(query),
+                key=weak_ref_tensors(key),
+                value=weak_ref_tensors(value),
+                query_scale=weak_ref_tensors(dequant_scale_query),
+                key_scale=weak_ref_tensors(key_scale),
+                value_scale=weak_ref_tensors(value_scale),
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                actual_seq_qlen=actual_seq_qlen,
+                attn_output=weak_ref_tensors(output),
+                softmax_lse=weak_ref_tensors(softmax_lse),
+            )
+        )
+
+        torch.npu.graph_task_group_begin(stream)
+        torch_npu.npu_fused_infer_attention_score_v2.out(
+            query=query,
+            key=key,
+            value=value,
+            **fia_kwargs,
+            workspace=workspace,
+            out=[output, softmax_lse],
+        )
+        handle = torch.npu.graph_task_group_end(stream)
+        graph_params.handles[num_tokens].append(handle)
+        return output
+
+    def _forward_mxfp8_decode(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        key, value, key_scale, value_scale = kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[3]
+        # kv_cache K/V are transposed to [num_blocks, num_kv_heads, block_size, head_dim].
+        block_size = key.shape[2]
+        num_decodes = attn_metadata.num_decodes
+
+        return self._run_mxfp8_fia_v2(
+            quant_query,
+            query_scale,
+            key,
+            value,
+            key_scale,
+            value_scale,
+            attn_metadata,
+            block_size=block_size,
+            block_table=attn_metadata.block_tables[:num_decodes],
+            actual_seq_qlen=attn_metadata.actual_seq_lengths_q[:num_decodes],
+            actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+            num_tokens=attn_metadata.num_decode_tokens,
+            output=output,
+            token_offset=0,
+            sparse_mode=0,
+            use_attn_mask=False,
+        )
+
+    def _forward_mxfp8_prefill(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        *,
+        token_offset: int,
+    ) -> torch.Tensor:
+        """Prefill path: paged FP8 KV + scale cache (K/V read from fia_kv_cache)."""
+        actual_seq_qlen_full = attn_metadata.actual_seq_lengths_q
+        num_tokens = int(actual_seq_qlen_full[-1])  # type: ignore[index]
+        num_prefill_tokens = num_tokens - token_offset
+
+        num_decodes = attn_metadata.num_decodes
+        prefill_seq_qlen = [
+            actual_seq_qlen_full[i] - token_offset for i in range(num_decodes, len(actual_seq_qlen_full))
+        ]
+
+        quant_key, quant_value, key_scale, value_scale = kv_cache
+        block_size = quant_key.shape[2]
+        block_table = attn_metadata.block_tables[num_decodes:]
+        prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
+        # actual_seq_lengths_kv = torch.tensor(
+        #     prefill_sl, dtype=torch.int32, device=quant_query.device
+        # ).cumsum(dim=0)
+        actual_seq_lengths_kv = prefill_sl
+
+        return self._run_mxfp8_fia_v2(
+            quant_query,
+            query_scale,
+            quant_key,
+            quant_value,
+            key_scale,
+            value_scale,
+            attn_metadata,
+            block_size=block_size,
+            block_table=block_table,
+            actual_seq_qlen=prefill_seq_qlen,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_tokens=num_prefill_tokens,
+            output=output,
+            token_offset=token_offset,
+        )
+
+    def _forward_mxfp8_chunked_prefill(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """ChunkedPrefill: decode requests first, then prefill (same batch ordering as MLA)."""
+        self._forward_mxfp8_decode(quant_query, query_scale, kv_cache, attn_metadata, output)
+        self._forward_mxfp8_prefill(
+            quant_query,
+            query_scale,
+            kv_cache,
+            attn_metadata,
+            output,
+            token_offset=attn_metadata.num_decode_tokens,
+        )
+        return output
+
+    def _forward_mxfp8_attention(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if not attn_metadata.causal:
+            raise NotImplementedError("C8_MXFP attention does not support non-causal attention yet.")
+        if self.sliding_window is not None:
+            raise NotImplementedError("C8_MXFP attention does not support sliding window attention yet.")
+
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            return self._forward_mxfp8_decode(quant_query, query_scale, kv_cache, attn_metadata, output)
+        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            return self._forward_mxfp8_chunked_prefill(
+                quant_query, query_scale, kv_cache, attn_metadata, output
+            )
+        return self._forward_mxfp8_prefill(
+            quant_query, query_scale, kv_cache, attn_metadata, output, token_offset=0
+        )
+
+    # KV cache writes for C8_MXFP happen in reshape_and_cache(), invoked from forward()
+    # when key/value are present. This hook is only reached when attention is split from
+    # cache update, e.g. Attention.forward with forward_includes_kv_cache_update=False
+    # (unified_kv_cache_update -> do_kv_cache_update), or explicit callers such as
+    # patch_qwen3_dflash.precompute_and_store_context_kv. AscendAttentionBackend keeps
+    # forward_includes_kv_cache_update=True, so normal inference never calls this.
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: list[torch.Tensor],
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError(
+            "C8_MXFP KV cache update is only supported via reshape_and_cache in forward()."
+        )
+
+    def reshape_and_cache(
+        self,
+        quant_key: torch.Tensor,
+        quant_value: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        num_actual_tokens = quant_key.shape[0]
+        slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
+        DeviceOperator.reshape_and_cache(
+            key=quant_key,
+            value=quant_value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+        )
+
+        # reshape_and_cache mxfp8 scales
+        key_scale_cache, value_scale_cache = kv_cache[2], kv_cache[3]
+        scatter_mxfp_k_scale_cache(
+            key_scale,
+            key_scale_cache,
+            slot_mapping,
+            key_cache.shape[1],
+        )
+        if not self.save_v_scale_flag:
+            # (hidden_size) -> (num_kv_heads, head_size) -> broadcast -> (num_blocks, num_kv_heads, block_size // 64, head_size, 2)
+            value_scale_cache.copy_(value_scale.view(1, self.num_kv_heads, 1, self.head_size, 1))
+            self.save_v_scale_flag = True
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError("fused output quantization is not yet supported for AscendC8MXFPAttentionBackendImpl")
+        if attn_metadata is None:
+            return output.fill_(0)
+        if getattr(self, "enable_hamming_sparse", False):
+            raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
+
+        query_mxfp8, query_scale = torch_npu.npu_dynamic_mx_quant(
+            query[:attn_metadata.num_actual_tokens],
+            dst_type=torch.float8_e4m3fn,
+        )
+        key_mxfp8, key_scale = torch_npu.npu_dynamic_mx_quant(
+            key[:attn_metadata.num_actual_tokens],
+            dst_type=torch.float8_e4m3fn,
+        )
+
+        original_value_shape = value.shape
+        value = value.view(original_value_shape[0], -1)
+        value_mxfp8 = torch_npu.npu_quantize(value[:attn_metadata.num_actual_tokens], layer.v_cache_scale_float_reciprocal, None, torch.float8_e4m3fn, -1, False)
+        value_mxfp8 = value_mxfp8.view((attn_metadata.num_actual_tokens, *original_value_shape[1:]))
+
+        self.reshape_and_cache(
+            key_mxfp8, value_mxfp8, key_scale, layer.v_cache_scale, kv_cache, attn_metadata
+        )
+
+        fia_kv_cache = self._transpose_kv_cache(kv_cache)
+        # PIECEWISE captures the regular FIA call inside its compiled region.
+        # Only FULL capture needs a task handle whose list arguments are
+        # rebound before every replay.
+        if (
+            _EXTRA_CTX.capturing
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+        ):
+            if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+                raise NotImplementedError(
+                    "C8_MXFP FULL graph capture only supports DecodeOnly attention."
+                )
+            return self._full_graph_mxfp8_decode(
+                query_mxfp8,
+                query_scale,
+                fia_kv_cache,
+                attn_metadata,
+                output,
+            )
+        return self._forward_mxfp8_attention(
+            query_mxfp8, query_scale, fia_kv_cache, attn_metadata, output
+        )

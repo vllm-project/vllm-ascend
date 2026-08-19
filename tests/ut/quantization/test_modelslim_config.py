@@ -432,6 +432,27 @@ class TestGetCacheScaleMapper(TestBase):
             "model.layers.0.attn.v_cache_offset",
         )
 
+    def test_mxfp_c8_maps_qwen3_moe_static_v_cache_scale(self):
+        config = AscendModelSlimConfig(
+            {"kv_cache_type": "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"}
+        )
+        mapper = config.get_cache_scale_mapper()
+
+        self.assertEqual(
+            mapper._map_name(
+                "model.layers.0.self_attn.v_proj.kv_cache_scale"
+            ),
+            "model.layers.0.self_attn.attn.v_cache_scale",
+        )
+        # K is dynamically quantized for this scheme and has no static
+        # parameter registered by the attention method.
+        self.assertEqual(
+            mapper._map_name(
+                "model.layers.0.self_attn.k_proj.kv_cache_scale"
+            ),
+            "model.layers.0.self_attn.k_proj.kv_cache_scale",
+        )
+
     def test_fa_quant_returns_mapper(self):
         config = AscendModelSlimConfig(
             {

@@ -26,6 +26,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import QUANT_DTYPES
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -239,6 +240,8 @@ def quant_apply_mlp(
                     {
                         "scale_dtype": torch_npu.float8_e8m0fnu,
                         "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
+                        "x_dtype": act_quant_type if act_quant_type in QUANT_DTYPES else None,
+                        "weight_dtype": weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
                     }
                 )
             hidden_states = torch_npu.npu_grouped_matmul(**gmm1_kwargs)[0]
@@ -426,6 +429,8 @@ def quant_apply_mlp(
                     {
                         "scale_dtype": torch_npu.float8_e8m0fnu,
                         "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
+                        "x_dtype": act_quant_type if act_quant_type in QUANT_DTYPES else None,
+                        "weight_dtype": weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
                         "output_dtype": torch.bfloat16,
                     }
                 )
