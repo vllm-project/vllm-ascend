@@ -98,6 +98,58 @@ def test_msprobe_config_path_seeded_and_reload_flag(tmp_path: Path):
     assert cfg.dump_reload_msprobe() is False
 
 
+def test_msprobe_dump_enable_omitted_seeds_enabled_and_manual_trigger(tmp_path: Path):
+    msprobe = tmp_path / "msprobe.json"
+    msprobe.write_text(json.dumps({"task": "statistics", "dump_path": str(tmp_path / "out")}), encoding="utf-8")
+    cfg = DfxRuntimeConfig(
+        tmp_path / "dfx_config.json",
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        msprobe_config_path=str(msprobe),
+    )
+    assert cfg.dump_enabled() is True
+    assert cfg.manual_trigger() is True
+
+
+def test_msprobe_dump_enable_false_does_not_seed(tmp_path: Path):
+    msprobe = tmp_path / "msprobe.json"
+    msprobe.write_text(json.dumps({"dump_enable": False, "dump_path": str(tmp_path / "out")}), encoding="utf-8")
+    cfg = DfxRuntimeConfig(
+        tmp_path / "dfx_config.json",
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        msprobe_config_path=str(msprobe),
+    )
+    assert cfg.dump_enabled() is False
+    assert cfg.manual_trigger() is False
+
+
+def test_msprobe_dump_enable_respects_user_dump_enabled(tmp_path: Path):
+    msprobe = tmp_path / "msprobe.json"
+    msprobe.write_text(json.dumps({"dump_enable": True, "dump_path": str(tmp_path / "out")}), encoding="utf-8")
+    cfg_path = tmp_path / "dfx_config.json"
+    cfg_path.write_text(json.dumps({"dump": {"enabled": False, "manual_trigger": False}}), encoding="utf-8")
+    cfg = DfxRuntimeConfig(
+        cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        msprobe_config_path=str(msprobe),
+    )
+    assert cfg.dump_enabled() is False
+    assert cfg.manual_trigger() is False
+
+
+def test_msprobe_dump_enable_unreadable_path_does_not_seed(tmp_path: Path):
+    cfg = DfxRuntimeConfig(
+        tmp_path / "dfx_config.json",
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        msprobe_config_path=str(tmp_path / "missing_msprobe.json"),
+    )
+    assert cfg.dump_enabled() is False
+    assert cfg.manual_trigger() is False
+
+
 def test_reload_omitted_msprobe_config_path_keeps_seed(tmp_path: Path):
     """JSON omitting dump.msprobe_config_path must not wipe a bootstrap seed."""
     cfg_path = tmp_path / "dfx_config.json"

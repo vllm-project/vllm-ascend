@@ -16,7 +16,7 @@ vllm serve <model> --additional-config '{
 | 项 | 说明 |
 |----|------|
 | `dfx_config_reload_interval > 0` | **必须**，否则改 JSON / `manual_trigger` 不生效 |
-| `dump_config_path` | msprobe 配置；无则无法落 dump。默认各 DP **共享**同一路径；仅当显式 `dump_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，`ascend_config` 会物化为 `<source_dir>/dp<rank>/...` 副本（热更请改副本）。多 DP 同写一份 `dump_path` 可能互相干扰，建议隔离或分 `dump_path`。启动写入 DFX JSON 的 `dump.msprobe_config_path`（可见/可热改）。 |
+| `dump_config_path` | msprobe 配置；无则无法落 dump。默认各 DP **共享**同一路径；仅当显式 `dump_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，`ascend_config` 会物化为 `<source_dir>/dp<rank>/...` 副本（热更请改副本）。多 DP 同写一份 `dump_path` 可能互相干扰，建议隔离或分 `dump_path`。启动写入 DFX JSON 的 `dump.msprobe_config_path`（可见/可热改）。若 DFX 未显式写 `dump.enabled` / `dump.manual_trigger`，且 msprobe JSON `dump_enable` 为 true 或缺省（当开），还会 seed `dump.enabled=true` + `dump.manual_trigger=true`；显式 DFX 键不覆盖；`dump_enable=false` 不 seed。 |
 | 每 EngineCore 可读 JSON | 多 DP **不**用满编 world 做 config sync。默认共享同一 `dfx_config` 路径；仅当显式 `dfx_config_isolate_by_dp=true` 且有 `VLLM_DP_RANK` 时，路径拆成 `dp<rank>` 副本（`ascend_config` 物化，与 sync 机制正交）。热更同步：有 `inner_dp_world` 则本 DP 内 broadcast，否则各 rank **file poll**（见 [dfx_design.md](./dfx_design.md) §2.2）。 |
 | **同 EngineCore 内配置一致** | 各 TP/PP 须读**同一份** `dfx_config`（同路径）。尤其 `dump.enabled` / detector：pending-OR idle fast-path 下 TP 间不一致会挂死（见 §3） |
 
@@ -31,6 +31,7 @@ vllm serve <model> --additional-config '{
 | 字段 | 作用 |
 |------|------|
 | `dump.msprobe_config_path` | 当前生效的 msprobe JSON；bootstrap 从 `dump_config_path`/`dump_config` 写入。改路径 → 下一拍热更 **重建 debugger** |
+| `dump.enabled` / `dump.manual_trigger`（bootstrap seed） | **path seed 之外**：若用户 JSON **未写**这两键，且 msprobe `dump_enable` 为 true 或缺省（当开），bootstrap 会 seed `enabled=true` + `manual_trigger=true`。显式 DFX 键不覆盖；文件不可读或 `dump_enable=false` 不 seed。不自动开 detector。 |
 | `dump.reload_msprobe` | 一次性：`true` → 用当前路径重建 debugger，然后清回 `false`（同路径改算子名单时用） |
 
 ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只改磁盘 msprobe 文件、两个字段都不变 → **不会**自动重建。
