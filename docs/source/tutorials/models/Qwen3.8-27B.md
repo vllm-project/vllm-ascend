@@ -45,7 +45,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.23.0rc1
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -342,7 +342,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
+Here is an accuracy evaluation method.
 
 ### Using AISBench
 
