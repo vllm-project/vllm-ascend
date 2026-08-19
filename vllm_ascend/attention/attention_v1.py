@@ -506,10 +506,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if cu_seqlens_q.device != query.device:
             cu_seqlens_q = cu_seqlens_q.to(device=query.device)
 
+        # Decode graph capture bakes this metadata's max_seqlen_k into the FA3
+        # workspace size; it must match _get_fa3_graph_params (max_model_len) so
+        # the eager warmup pre-allocates the workspace and the capture hits the
+        # cached workspace instead of at::empty'ing inside torch.npu.graph().
+        is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        max_seqlen_k = (
+            self.vllm_config.model_config.max_model_len
+            if is_decode
+            else max(attn_metadata.seq_lens_list)
+        )
+
         return get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
             max_seqlen_q=attn_metadata.max_query_len,
-            max_seqlen_k=max(attn_metadata.seq_lens_list),
+            max_seqlen_k=max_seqlen_k,
             num_heads_q=self.num_heads,
             num_heads_kv=self.num_kv_heads,
             headdim=self.head_size,
@@ -565,8 +576,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # capture seq_lens are only max_query_len (1..16), far too small, and
         # decode grows to max_model_len.  block_table's width already equals
         # ceil(max_model_len / block_size), so the plan tile count matches it.
-        # This is built AFTER the KV cache is sized (in_profile_run skips the
-        # eager warmup build), so it does not corrupt the memory profile.
+        # The workspace sized by this max_seqlen_k is pre-allocated during the
+        # eager warmup (which builds the SAME max_model_len metadata — see
+        # _build_fa3_scheduler_metadata), so graph capture hits the cached
+        # workspace instead of at::empty'ing inside torch.npu.graph().
         max_batch_size = num_tokens
         max_seqlen_q = 1
         max_seqlen_k = self.vllm_config.model_config.max_model_len
