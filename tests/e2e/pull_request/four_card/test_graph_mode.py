@@ -484,6 +484,24 @@ def _check_decode_token(baseline, comp_ids, comp_logprobs, token_idx: int, promp
     )
 
 
+def _extract_outputs(outputs):
+    extracted = []
+    for out in outputs:
+        gen = out.outputs[0]
+        extracted.append(
+            {
+                "text": gen.text,
+                "token_ids": list(gen.token_ids),
+                "logprobs": [
+                    {token_id: lp.logprob for token_id, lp in step_logprobs.items()} for step_logprobs in gen.logprobs
+                ]
+                if gen.logprobs
+                else None,
+            }
+        )
+    return extracted
+
+
 def _run_worker_process(
     rank: int,
     local_rank: int,
@@ -495,6 +513,8 @@ def _run_worker_process(
     metrics: dict[str, Any] | None = None,
 ):
     """Main entry point for the worker process."""
+    import gc
+
     reset_deterministic_test_state()
     os.environ.update(
         {
@@ -509,58 +529,52 @@ def _run_worker_process(
     for key, value in cur_case.get("env_vars", {}).items():
         os.environ[key] = str(value)
 
-    # Apply hooks and run inference
+    short_prompts = cur_case["prompts"]["short"]
+    chunk_size = len(short_prompts) // world_size
+    short_start_idx = rank * chunk_size
+    short_end_idx = short_start_idx + chunk_size if rank < world_size - 1 else len(short_prompts)
+    local_short_prompts = short_prompts[short_start_idx:short_end_idx]
+
+    long_prompts = cur_case["prompts"]["long"]
+    chunk_size = len(long_prompts) // world_size
+    long_start_idx = rank * chunk_size
+    long_end_idx = long_start_idx + chunk_size if rank < world_size - 1 else len(long_prompts)
+    local_long_prompts = long_prompts[long_start_idx:long_end_idx]
+
+    llm_kwargs = dict(
+        model=cur_case["model"],
+        seed=DETERMINISTIC_TEST_SEED,
+        max_model_len=1024,
+        quantization=cur_case["quantization"],
+        tensor_parallel_size=cur_case["tensor_parallel_size"],
+        enable_expert_parallel=cur_case["enable_expert_parallel"],
+        trust_remote_code=True,
+    )
+
+    baseline_llm = LLM(**llm_kwargs)
+    baseline_short = _extract_outputs(baseline_llm.generate(local_short_prompts, _SAMPLING_PARAMS))
+    baseline_long = _extract_outputs(baseline_llm.generate(local_long_prompts, _SAMPLING_PARAMS))
+    del baseline_llm
+    cleanup_dist_env_and_memory()
+    gc.collect()
+    if torch.npu.is_available():
+        torch.npu.empty_cache()
+
     with _install_spies(metrics):
-        short_prompts = cur_case["prompts"]["short"]
-        chunk_size = len(short_prompts) // world_size
-        short_start_idx = rank * chunk_size
-        short_end_idx = short_start_idx + chunk_size if rank < world_size - 1 else len(short_prompts)
-        local_short_prompts = short_prompts[short_start_idx:short_end_idx]
+        compiled_llm = LLM(compilation_config=cur_case["compilation_config"], **llm_kwargs)
+        compiled_short = _extract_outputs(compiled_llm.generate(local_short_prompts, _SAMPLING_PARAMS))
+        compiled_long = _extract_outputs(compiled_llm.generate(local_long_prompts, _SAMPLING_PARAMS))
+        del compiled_llm
+        cleanup_dist_env_and_memory()
 
-        long_prompts = cur_case["prompts"]["long"]
-        chunk_size = len(long_prompts) // world_size
-        long_start_idx = rank * chunk_size
-        long_end_idx = long_start_idx + chunk_size if rank < world_size - 1 else len(long_prompts)
-        local_long_prompts = long_prompts[long_start_idx:long_end_idx]
-
-        llm = LLM(
-            model=cur_case["model"],
-            seed=DETERMINISTIC_TEST_SEED,
-            max_model_len=1024,
-            compilation_config=cur_case["compilation_config"],
-            quantization=cur_case["quantization"],
-            tensor_parallel_size=cur_case["tensor_parallel_size"],
-            enable_expert_parallel=cur_case["enable_expert_parallel"],
-            trust_remote_code=True,
-        )
-
-        compiled_outputs_short = llm.generate(local_short_prompts, _SAMPLING_PARAMS)
-        compiled_outputs_long = llm.generate(local_long_prompts, _SAMPLING_PARAMS)
-
-        def extract_outputs(outputs):
-            extracted = []
-            for out in outputs:
-                gen = out.outputs[0]
-                extracted.append(
-                    {
-                        "text": gen.text,
-                        "token_ids": list(gen.token_ids),
-                        "logprobs": [
-                            {token_id: lp.logprob for token_id, lp in step_logprobs.items()}
-                            for step_logprobs in gen.logprobs
-                        ]
-                        if gen.logprobs
-                        else None,
-                    }
-                )
-            return extracted
-
-        result_data = {
-            "rank": rank,
-            "short": {"prompt_idx": short_start_idx, "outputs": extract_outputs(compiled_outputs_short)},
-            "long": {"prompt_idx": long_start_idx, "outputs": extract_outputs(compiled_outputs_long)},
-        }
-        result_queue.put(result_data)
+    result_data = {
+        "rank": rank,
+        "baseline_short": {"prompt_idx": short_start_idx, "outputs": baseline_short},
+        "baseline_long": {"prompt_idx": long_start_idx, "outputs": baseline_long},
+        "compiled_short": {"prompt_idx": short_start_idx, "outputs": compiled_short},
+        "compiled_long": {"prompt_idx": long_start_idx, "outputs": compiled_long},
+    }
+    result_queue.put(result_data)
 
 
 def _exit():
@@ -570,10 +584,10 @@ def _exit():
     cleanup_dist_env_and_memory()
 
 
-def check_accuracy(baselines, result, atol, decode_atol):
-    for idx, comp_out in enumerate(result["outputs"]):
-        prompt_idx = result["prompt_idx"] + idx
-        baseline = baselines[prompt_idx]
+def check_accuracy(baseline_result, compiled_result, atol, decode_atol):
+    for idx, comp_out in enumerate(compiled_result["outputs"]):
+        prompt_idx = compiled_result["prompt_idx"] + idx
+        baseline = baseline_result["outputs"][idx]
         comp_ids = comp_out["token_ids"]
         comp_logprobs = comp_out["logprobs"]
 
@@ -652,7 +666,7 @@ def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch, deterministic
     # get results
     for _ in range(cur_case["data_parallel_size"]):
         try:
-            result = result_queue.get(timeout=180)
+            result = result_queue.get(timeout=360)
             all_dp_results.append(result)
         except queue.Empty:
             print("Error: Timeout waiting for worker results. A worker might have crashed.")
@@ -674,8 +688,8 @@ def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch, deterministic
     if metrics is not None:
         check_capture_mem(metrics["capture_mem"], cur_case["baseline_capture_mem"], cur_case["capture_mem_tolerance"])
 
-    # check accuracy
+    # check accuracy: compare baseline (eager) vs compiled on the same hardware
     decode_atol = 2 * ATOL
     for result in all_dp_results:
-        check_accuracy(cur_case["golden_answers"]["short"], result["short"], ATOL, decode_atol)
-        check_accuracy(cur_case["golden_answers"]["long"], result["long"], ATOL, decode_atol)
+        check_accuracy(result["baseline_short"], result["compiled_short"], ATOL, decode_atol)
+        check_accuracy(result["baseline_long"], result["compiled_long"], ATOL, decode_atol)

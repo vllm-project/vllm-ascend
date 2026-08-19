@@ -23,7 +23,7 @@
         "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
         "csrc_cache_target": "a3-arm64-ubuntu"
     },
-    "linux-aarch64-a3-4-cn12-001": {
+    "liqo-test": {
         "chip": "a3",
         "npu_num": 4,
         "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
