@@ -12,6 +12,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import (
+    simple_cpu_offload_connector as connector_module,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import worker as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector import (
     AscendSimpleCPUOffloadConnector,
@@ -76,7 +79,8 @@ def test_connector_only_replaces_enabled_worker(
 
     monkeypatch.setattr(SimpleCPUOffloadConnector, "__init__", fake_upstream_init)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector.SimpleCPUOffloadNPUWorker",
+        connector_module,
+        "SimpleCPUOffloadNPUWorker",
         fake_npu_worker,
     )
 

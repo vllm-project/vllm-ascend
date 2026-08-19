@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.kv_offload.base import CanonicalKVCaches
 from vllm.v1.kv_offload.config import (
@@ -69,7 +70,11 @@ def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
 
 def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     bytes_per_chunk = 64 * 2 * 2
-    spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * bytes_per_chunk}))
+    aligned_bytes_per_chunk = round_up(
+        bytes_per_chunk,
+        NPUOffloadingSpec.BLOCK_SIZE_ALIGNMENT,
+    )
+    spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
 
     assert spec.num_blocks == 10
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
@@ -78,9 +83,13 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
 def test_npu_offloading_spec_supports_legacy_num_cpu_blocks() -> None:
     extra_config: dict[str, object] = {"num_cpu_blocks": 10}
     spec = NPUOffloadingSpec(_make_config(extra_config))
+    aligned_bytes_per_chunk = round_up(
+        64 * 2 * 2,
+        NPUOffloadingSpec.BLOCK_SIZE_ALIGNMENT,
+    )
 
     assert spec.num_blocks == 10
-    assert spec.extra_config["cpu_bytes_to_use"] == 10 * 64 * 2 * 2
+    assert spec.extra_config["cpu_bytes_to_use"] == 10 * aligned_bytes_per_chunk
     assert "cpu_bytes_to_use" not in extra_config
 
 
