@@ -556,15 +556,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         device = query.device
         # Decode config: num_tokens requests, each with exactly 1 query token.
-        # max_seqlen_k uses the ACTUAL max KV length of the batch (not
-        # max_model_len) — get_scheduler_metadata allocates buffers sized by
-        # max_seqlen_k; using max_model_len allocates huge buffers that corrupt
-        # the memory profile and break prefill (CANN V1) accuracy.
+        # max_seqlen_k (and the cache_seqlens used to build the plan) must cover
+        # the MAXIMUM decode KV length, not the capture batch's seq_lens.
+        # get_scheduler_metadata bakes a per-sequence KV tile count from these;
+        # multi-seq decode uses that baked count (NOT the re-read cache_seqlens)
+        # to fetch blocks, so a replay length exceeding the baked bound breaks
+        # the whole batch (see test_fa3_graph_multiseq_meta / _overcover).  The
+        # capture seq_lens are only max_query_len (1..16), far too small, and
+        # decode grows to max_model_len.  block_table's width already equals
+        # ceil(max_model_len / block_size), so the plan tile count matches it.
+        # This is built AFTER the KV cache is sized (in_profile_run skips the
+        # eager warmup build), so it does not corrupt the memory profile.
         max_batch_size = num_tokens
         max_seqlen_q = 1
-        max_seqlen_k = max(
-            attn_metadata.seq_lens_list if attn_metadata.seq_lens_list else [num_tokens]
-        )
+        max_seqlen_k = self.vllm_config.model_config.max_model_len
         # Match the buffer's block-table width to the actual block table so
         # the pre-replay .copy_() shapes align.
         if attn_metadata.block_tables is not None:
@@ -584,9 +589,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         cu_seqlens_q_buf.copy_(
             torch.arange(max_batch_size + 1, dtype=torch.int32, device=device)
         )
-        # cache_seqlens: warmup batch's real KV lengths.
-        n = min(attn_metadata.seq_lens.numel(), max_batch_size)
-        cache_seqlens_buf[:n].copy_(attn_metadata.seq_lens[:n].to(device=device))
+        # cache_seqlens: build the plan at the MAX config (every request at its
+        # max KV length) so the baked tile count covers every replay length.
+        # update_graph_params refreshes the actual lengths before each replay.
+        cache_seqlens_buf.fill_(max_seqlen_k)
 
         # Scheduler metadata for the decode max config — valid for any decode
         # batch padded to num_tokens requests.
