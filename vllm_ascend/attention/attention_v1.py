@@ -506,10 +506,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if cu_seqlens_q.device != query.device:
             cu_seqlens_q = cu_seqlens_q.to(device=query.device)
 
+        # get_scheduler_metadata bakes the block-table ROW STRIDE
+        # (maxNumBlocksPerBatch) as ceil(max_seqlen_k / block_size).  The kernel
+        # walks the paged block table as
+        #   blockTable[BIdx * maxNumBlocksPerBatch + col]
+        # so the stride MUST equal the block-table width (page_table.shape[1]).
+        # Passing the batch's current max KV length makes the stride smaller than
+        # the width -> the kernel reads across rows into a previous request's
+        # unallocated (-1) slots -> invalid K/V address -> MTE fault (507011).
+        if attn_metadata.block_tables is not None:
+            max_blocks_per_seq = attn_metadata.block_tables.shape[1]
+        else:
+            max_blocks_per_seq = (
+                max(attn_metadata.seq_lens_list) + block_size - 1
+            ) // block_size
+
         return get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
             max_seqlen_q=attn_metadata.max_query_len,
-            max_seqlen_k=max(attn_metadata.seq_lens_list),
+            max_seqlen_k=max_blocks_per_seq * block_size,
             num_heads_q=self.num_heads,
             num_heads_kv=self.num_kv_heads,
             headdim=self.head_size,
@@ -556,10 +571,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         device = query.device
         # Decode config: num_tokens requests, each with exactly 1 query token.
-        # max_seqlen_k uses the ACTUAL max KV length of the batch (not
-        # max_model_len) — get_scheduler_metadata / mha_fwd allocate workspace
-        # sized by batch_size * max_seqlen_k / block_size; max_model_len makes
-        # that GB-scale for a full decode batch and faults.
+        # max_seqlen_k is NOT the batch's actual max KV length for the bake
+        # below — we pass max_blocks_per_seq * block_size so the baked
+        # block-table row stride (maxNumBlocksPerBatch = ceil(max_seqlen_k /
+        # block_size)) equals the block-table width.  A smaller stride (from the
+        # warmup batch's short max KV length) makes the kernel read across rows
+        # into a previous request's unallocated (-1) slots -> MTE fault (507011).
+        # The actual max KV length is kept only as the fallback for the
+        # non-paged (no block table) case.
         max_batch_size = num_tokens
         max_seqlen_q = 1
         max_seqlen_k = max(
@@ -593,7 +612,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         meta = get_scheduler_metadata(
             batch_size=max_batch_size,
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
+            max_seqlen_k=max_blocks_per_seq * block_size,
             num_heads_q=self.num_heads,
             num_heads_kv=self.num_kv_heads,
             headdim=self.head_size,
