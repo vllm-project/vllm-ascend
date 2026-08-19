@@ -54,6 +54,23 @@ def _stub_device_properties(monkeypatch):
     monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_VECTORCORE", 8)
 
 
+@pytest.fixture(autouse=True)
+def _stub_ascend_config(monkeypatch):
+    """``AscendDSparkProposer.__init__`` reads ``get_ascend_config()``.
+
+    The tests build the proposer directly instead of through a worker that
+    calls ``init_ascend_config``, so stub the config with the default
+    dynamic-spec settings (``method=None`` disables the dynamic scheduler).
+    """
+    stub_config = SimpleNamespace(
+        dynamic_spec_config=SimpleNamespace(method=None, method_params={}),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+        lambda: stub_config,
+    )
+
+
 class _DSparkProposerTestBase:
     """Shared helpers for ``AscendDSparkProposer`` tests."""
 

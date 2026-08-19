@@ -51,7 +51,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp, set_potential_max_tokens
+from vllm_ascend.utils import enable_sp, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -90,10 +90,22 @@ def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
         uniform_token_count,
         dp_size,
         dp_rank,
+        max_query_len=None,
         need_eager=False,
         num_active_loras=0,
     ):
         num_tokens = (num_tokens + tp_size - 1) // tp_size * tp_size
+        if vllm_version_is("0.27.1"):
+            return original_dispatch(
+                cudagraph_manager,
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                dp_size,
+                dp_rank,
+                need_eager=need_eager,
+                num_active_loras=num_active_loras,
+            )
         return original_dispatch(
             cudagraph_manager,
             num_reqs,
@@ -101,6 +113,7 @@ def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
             uniform_token_count,
             dp_size,
             dp_rank,
+            max_query_len=max_query_len,
             need_eager=need_eager,
             num_active_loras=num_active_loras,
         )
@@ -225,15 +238,26 @@ class NPUModelRunner(GPUModelRunner):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
+        context_len: int = 0,
     ):
         with flashcomm_dispatch_wrapper(self.vllm_config):
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-            )
+            if vllm_version_is("0.27.1"):
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                )
+            else:
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                    context_len=context_len,
+                )
 
         state = self.execute_model_state
         if (
@@ -279,7 +303,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
-    def prepare_inputs(
+    def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
         batch_desc: BatchExecutionDescriptor,
@@ -294,7 +318,13 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        if vllm_version_is("0.27.1"):
+            req_ids = sort_batch_req_ids(  # type: ignore[call-arg]
+                num_tokens_per_req, self.decode_query_len
+            )
+        else:
+            req_ids = sort_batch_req_ids(num_tokens_per_req, draft_tokens, self.decode_query_len)
 
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
@@ -322,7 +352,6 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping = async_copy_to_gpu(idx_mapping_cpu, device=self.device)
 
         # Get the number of draft tokens for each request.
-        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
         if not draft_tokens:
             # No draft token scheduled (common case).
@@ -445,6 +474,9 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        # `has_prefill` was added to upstream InputBatch on main; the release
+        # dataclass does not have the field.
+        has_prefill_kwargs = {} if vllm_version_is("0.27.1") else {"has_prefill": batch_has_prefill}
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -480,6 +512,7 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
+            **has_prefill_kwargs,
         )
 
         input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
@@ -488,6 +521,26 @@ class NPUModelRunner(GPUModelRunner):
         update_cos_sin(input_batch.positions)
 
         return input_batch
+
+    if vllm_version_is("0.27.1"):
+
+        def prepare_inputs(
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs_impl(scheduler_output, batch_desc)
+
+    else:
+        from vllm.v1.worker.gpu.model_runner import BatchReqState  # type: ignore[import-not-found]
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs_impl(scheduler_output, batch_desc)
 
     def postprocess_sampled(
         self,
@@ -606,6 +659,7 @@ def graph_manager_wrapper(model_runner):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
         return ModelAclGraphManager(
             vllm_config,
@@ -614,6 +668,7 @@ def graph_manager_wrapper(model_runner):
             decode_query_len,
             model_runner,
             lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
         )
 
     try:
