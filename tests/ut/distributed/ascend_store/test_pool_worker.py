@@ -134,7 +134,6 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 result = cls.find_all_discontinuous_hit_positions(exists, positions, 6, token_len, 16)
                 self.assertEqual(result, expected)
 
-
     def test_find_all_continuous_hit_positions_all_one(self):
         cls = self._make_worker_class()
         arr = [[1, 1, 1], [1, 1, 1]]
@@ -855,8 +854,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 32)
-
-
 
 
 class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
