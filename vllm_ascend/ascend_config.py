@@ -354,6 +354,41 @@ class AscendConfig:
                 f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
             )
 
+    def validate_kv_offload_device_support(self, device_type: Any) -> None:
+        """Reject KV offload features that are unavailable on the device."""
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+            get_gva_layerwise_config,
+        )
+        from vllm_ascend.utils import AscendDeviceType
+
+        if device_type == AscendDeviceType.A3:
+            return
+
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        unsupported_features = []
+        if get_gva_layerwise_config(kv_transfer_config) is not None:
+            unsupported_features.append("Layerwise Prefill KV Cache Offload")
+        if self.sparse_kv_offload_config.enabled:
+            unsupported_features.append("Sparse KV Cache Offload")
+
+        connector_name = getattr(kv_transfer_config, "kv_connector", None)
+        connector_extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
+        uses_sfa_remote_d2h = connector_name == "SfaRemoteD2HConnector"
+        if connector_name == "MultiConnector":
+            uses_sfa_remote_d2h = any(
+                isinstance(connector, dict) and connector.get("kv_connector") == "SfaRemoteD2HConnector"
+                for connector in connector_extra_config.get("connectors", []) or []
+            )
+        if uses_sfa_remote_d2h:
+            unsupported_features.append("SfaRemoteD2HConnector")
+
+        if unsupported_features:
+            raise NotImplementedError(
+                "The following KV offload features are supported only on Ascend A3: "
+                + ", ".join(unsupported_features)
+                + "."
+            )
+
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
         if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
             raise NotImplementedError(
