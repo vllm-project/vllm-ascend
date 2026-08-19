@@ -73,9 +73,7 @@ class AscendECSharedRegion(ECSharedRegion):
 
         # File descriptor for the shared memory backing file.
         try:
-            self._fd: int | None = os.open(
-                self._mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-            )
+            self._fd: int | None = os.open(self._mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
             os.ftruncate(self._fd, total_size_bytes)
             self._is_creator = True
             logger.info(
@@ -116,9 +114,9 @@ class AscendECSharedRegion(ECSharedRegion):
                 _fallback_populate_write(self._mmap_obj, 0, total_size_bytes)
 
         # (num_blocks, block_size_bytes) int8 tensor over the mmap buffer.
-        self.blocks: torch.Tensor = torch.frombuffer(
-            memoryview(self._mmap_obj), dtype=torch.int8
-        ).view(num_blocks, block_size_bytes)
+        self.blocks: torch.Tensor = torch.frombuffer(memoryview(self._mmap_obj), dtype=torch.int8).view(
+            num_blocks, block_size_bytes
+        )
         # Cached for cudaHostRegister/Unregister and pointer math.
         self._blocks_ptr: int = self.blocks.data_ptr()
         self._blocks_nbytes: int = self.blocks.nbytes
