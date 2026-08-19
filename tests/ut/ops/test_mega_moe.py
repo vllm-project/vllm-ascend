@@ -88,6 +88,52 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     assert mega_moe_kwargs["l2_weights_sf"][0].dtype == torch.float8_e8m0fnu
 
 
+def test_mega_moe_backend_reuses_single_buffer():
+    fused_input = _make_fused_input()
+    sym_buffer = object()
+    get_symm_buffer = MagicMock(return_value=sym_buffer)
+    mega_moe = MagicMock(return_value=(torch.randn(4, 8), torch.tensor([1, 3], dtype=torch.int32)))
+
+    with (
+        patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
+        patch(
+            "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
+            return_value=SimpleNamespace(mega_moe_max_tokens=512),
+        ),
+        patch("vllm_ascend.ops.fused_moe.mega_moe.get_ep_group", return_value=SimpleNamespace(device_group=object())),
+    ):
+        backend = MegaMoEBackend(_make_moe_config())
+        backend.fused_experts(fused_input)
+        backend.fused_experts(fused_input)
+
+    get_symm_buffer.assert_called_once()
+    assert mega_moe.call_count == 2
+    assert all(call.kwargs["sym_buffer"] is sym_buffer for call in mega_moe.call_args_list)
+
+
+def test_mega_moe_backend_rejects_buffer_reinitialization():
+    fused_input = _make_fused_input()
+    get_symm_buffer = MagicMock(return_value=object())
+
+    with (
+        patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, MagicMock())),
+        patch(
+            "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
+            side_effect=(
+                SimpleNamespace(mega_moe_max_tokens=512),
+                SimpleNamespace(mega_moe_max_tokens=1024),
+            ),
+        ),
+        patch("vllm_ascend.ops.fused_moe.mega_moe.get_ep_group", return_value=SimpleNamespace(device_group=object())),
+    ):
+        backend = MegaMoEBackend(_make_moe_config())
+        backend._get_sym_buffer(fused_input, projected_hidden=16)
+        with pytest.raises(RuntimeError, match="initialized once and cannot be replaced"):
+            backend._get_sym_buffer(fused_input, projected_hidden=16)
+
+    get_symm_buffer.assert_called_once()
+
+
 def test_view_mxfp_scales_as_e8m0_reinterprets_uint8_storage():
     scale = torch.arange(64, dtype=torch.uint8).reshape(2, 16, 1, 2)
 

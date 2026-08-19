@@ -28,7 +28,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEFusedExpertsInput
 from vllm_ascend.quantization.quant_type import QuantType
 
-
 _MEGA_MOE_SUPPORTED_QUANTS = {
     QuantType.MXFP8,
     QuantType.MXFP4,
@@ -227,7 +226,12 @@ class MegaMoEBackend:
 
     def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput, projected_hidden: int):
         key = self._make_buffer_key(fused_experts_input, projected_hidden)
-        if self._sym_buffer is not None and self._sym_buffer_key == key:
+        if self._sym_buffer is not None:
+            if self._sym_buffer_key != key:
+                raise RuntimeError(
+                    "A5 MegaMoE sym buffer is initialized once and cannot be replaced during inference: "
+                    f"initialized={self._sym_buffer_key}, requested={key}."
+                )
             logger.debug("A5 MegaMoE reuses sym buffer: %s", key)
             return self._sym_buffer
 
