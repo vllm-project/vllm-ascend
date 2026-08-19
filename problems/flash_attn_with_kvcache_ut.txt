@@ -1,119 +1,66 @@
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:10.506.519 [runtime.cc:5155]152454 ReportPageFaultProc:Page fault count exceeds the limit, drv devId=0, current page fault count=7246.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:10.506.532 [runtime.cc:5169]152454 ProcPageFault:ProcPageFault start, drv devId=0, get WatchDogDevStatus, ret=0.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:10.506.535 [runtime.cc:5172]152454 ProcPageFault:PageFault occurred, drv devId=0, current page fault count=7246.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:10.540.651 [stars_engine.cc:1557]152455 ProcLogicCqReport:Task run failed, device_id=0, stream_id=47, task_id=2515, sqe_type=7(notify wait), errType=0x20(sq sw status error), sqSwStatus=0x1027002d
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:10.547.585 [device_error_core_proc.cc:1077]152455 AddExceptionRegInfo:add error register: core_id=3, stream_id=79, task_id=45
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:10.547.599 [device_error_core_proc.cc:1117]152455 PrintCoreInfo:The error from device(chipId:0, dieId:0), serial number is 3, there is an exception of fftsplus aicore error, core id is 3, error code = 0x800000, dump info: pc start: 0x124001e0beec, current: 0x124001e0f058, vec error info: 0, mte error info: 0x39030000c8, ifu error info: 0x1000000000000, ccu error info: 0x864c6d00000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c1448dd080, aic cond: 0.
-The extend info: errcode:(0x800000, 0, 0) errorStr: MTE accesses an invalid GM address or the cross-device memory access times out. fixp_error0 info: 0x30000c8, fixp_error1 info: 0x39, fsmId:0, tslot:4, thread:0, ctxid:0, blk:6, sublk:0, subErrType:4.
-For details, see the troubleshooting document on the Ascend official website. Search for the keyword "AI Core Error".
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:11.754.317 [device_error_core_proc.cc:775]152455 CheckSmmuFault:Get isSmmuFault is 1.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:11.754.321 [device_error_core_proc.cc:1454]152455 ProcessStarsCoreErrorInfo:devId=0, streamId=79, taskId=45, MTE errorCode=0.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:11.754.334 [device_error_core_proc.cc:1077]152455 AddExceptionRegInfo:add error register: core_id=14, stream_id=79, task_id=45
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:11.754.350 [device_error_core_proc.cc:1117]152455 PrintCoreInfo:The error from device(chipId:0, dieId:0), serial number is 4, there is an exception of fftsplus aivector error, core id is 14, error code = 0x800000, dump info: pc start: 0x124001e70044, current: 0x124001e87288, vec error info: 0x770733812c, mte error info: 0x1f060000cd, ifu error info: 0x212c4b6630380, ccu error info: 0xfb09913100000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c1448dd080, aic cond: 0.
-The extend info: errcode:(0x800000, 0, 0) errorStr: MTE accesses an invalid GM address or the cross-device memory access times out. fixp_error0 info: 0x60000cd, fixp_error1 info: 0x1f, fsmId:0, tslot:4, thread:0, ctxid:0, blk:5, sublk:0, subErrType:4.
-For details, see the troubleshooting document on the Ascend official website. Search for the keyword "AI Core Error".
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.960.966 [device_error_core_proc.cc:775]152455 CheckSmmuFault:Get isSmmuFault is 1.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.960.970 [device_error_core_proc.cc:1454]152455 ProcessStarsCoreErrorInfo:devId=0, streamId=79, taskId=45, MTE errorCode=0.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.960.995 [model_execute_task.cc:522]152455 ReportErrorInfoForModelExecuteTask:model execute error, retCode=0x91, [the model stream execute failed].
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.034 [model_execute_task.cc:487]152455 PrintErrorInfoForModelExecuteTask:stream_id=47, task_id=2514, sqVirtualAddr=0, head equal tail flag=0.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.038 [model_execute_task.cc:450]152455 PrintErrorModelExecuteTaskFuncCall:funcCallSvmMem=0x124001da7000, funCallMemSize=480.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.071 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 00000113 000000db 092010db 01da71c0 0000025b 0000125b 00000002 000002db
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.075 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 000012db 00000006 00329073 004177e3 00311193 00308233 00023183 0000025b
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.078 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 0003125b a0004880 000000db 000090db 00000001 0000b073 00322027 0000025b
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.081 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 0003125b a0004880 00023203 000000db 000090db 00000001 0000a073 00020093
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.084 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 7ff0f093 0030c0b3 000002db 000012db 00000000 00329073 226087fb 02025213
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.087 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 00f27213 000000db 000010db 00000000 00309073 226207fb 000000db 000010db
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.089 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 00000006 00309073 00021763 00319293 0000025b 0960125b 40000000 00520233
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.092 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 00023203 000002db 000012db 00000006 00329073 00020263 01023083 01f09093
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.095 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 03f0d093 000002db 000012db 00000005 00329073 000081e3 01023283 03029293
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.098 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 0302d293 00823083 03009093 0300d093 0050c0b3 000002db 000012db 00000006
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.101 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 00329073 000094e3 00022a27 0001c22b 00311293 00110113 0000025b 0920125b
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.104 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 01da71d0 005202b3 0002b203 00023283 00128293 00521027 0001d2ab 0000025b
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.106 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 0000125b 00000000 00321073 000000e3 000002db 096012db 40287000 0042a027
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.109 [model_execute_task.cc:467]152455 PrintErrorModelExecuteTaskFuncCall:FuncCall data : 00000000 000002db 096012db 40287000 0012a427 00000000 00000000 00000013
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.112 [model_execute_task.cc:495]152455 PrintErrorInfoForModelExecuteTask:model execute task failed, device_id=0, model stream_id=47, model task_id=2514, flip_num=0, model_id=32, first_task_id=0
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.116 [context_manage.cc:306]152455 SetGlobalFailureErr:SetGlobalFailureErr start, device_id=0, errcode=0X7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.125 [context_manage.cc:317]152455 SetGlobalFailureErr:SetGlobalFailureErr end
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.130 [model_execute_task.cc:538]152455 ReportErrorInfoForModelExecuteTask:Real fault task, device_id=0, sub_model_id=4294967295, stream_id=79, task_id=45, type=0[KERNEL_AICORE].
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.136 [stream.cc:1856]154030 SynchronizeExecutedTask:context is abort, status=0x7150026.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.145 [stream.cc:1912]154030 SynchronizeImpl:failed, stream_id=45, error=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.149 [api_impl.cc:2130]154030 EventSynchronize:Synchronize event failed.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.180 [api_c.cc:755]154030 rtEventSynchronize:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.180 [context.cc:2342]152320 CheckStatus:device_id=0 status=118816806 is abnormal.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.186 [error_message_manage.cc:69]154030 FuncErrorReason:rtEventSynchronize execution failed, reason=aicore exception
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.188 [stream.cc:1856]152320 SynchronizeExecutedTask:context is abort, status=0x7150026.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.191 [davinci_kernel_task.cc:1076]152455 GetArgsInfo:[AIC_INFO] args(0 to 11) after execute:0xfee00000000, 0x131880003e00, 0x12d6da4ac000, 0x12d6f4380000, 0x12e4f3fcc000, 0x12f6000f2000, 0x12f60010fa00, 0x12f600110400, 0x12f600001a00, 0x12f600001800, 0x12e4c0c0c000, 0x12e4f43cc000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.192 [stream.cc:1912]152320 SynchronizeImpl:failed, stream_id=47, error=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.197 [davinci_kernel_task.cc:1080]152455 GetArgsInfo:tilingKey = 0, print 1 Times totalLen=(12*8), argsSize=96, schemMode=0, blockDim=20
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.200 [api_error.cc:1098]152320 StreamSynchronize:Stream synchronize failed, stream_id=47, timeout=-1ms.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.210 [davinci_kernel_task.cc:1180]152455 PrintErrorInfoForDavinciTask:[AIC_INFO] after execute:args print end
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.211 [api_c_stream.cc:180]152320 rtStreamSynchronizeWithTimeout:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.441 [error_message_manage.cc:69]152320 FuncErrorReason:rtStreamSynchronizeWithTimeout execution failed, reason=aicore exception
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.456 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[0]=0x00000006.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.460 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[1]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.463 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[2]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.643 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[3]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.548 [api_impl.cc:6042]154030 GetDevErrMsg:device_id=0, status=0x7150026 is abnormal.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.648 [api_impl.cc:6121]154030 GetDevMsg:Failed to GetDeviceErrMsg, retCode=0x7150026.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.646 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[4]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.651 [api_error.cc:4287]154030 GetDevMsg:GetDeviceMsg failed, getMsgType=0.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.653 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[5]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.656 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[6]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.659 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[7]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.658 [api_c_device.cc:578]154030 rtGetDevMsg:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.661 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[8]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.663 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[9]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.667 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[10]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.663 [error_message_manage.cc:69]154030 FuncErrorReason:rtGetDevMsg execution failed, reason=aicore exception
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.669 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[11]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.672 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[12]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.674 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[13]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.677 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[14]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.679 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[15]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.680 [api_impl.cc:6042]152320 GetDevErrMsg:device_id=0, status=0x7150026 is abnormal.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.681 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[16]=0x00000840.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.831 [api_impl.cc:6121]152320 GetDevMsg:Failed to GetDeviceErrMsg, retCode=0x7150026.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.833 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[17]=0x02020004.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.834 [api_error.cc:4287]152320 GetDevMsg:GetDeviceMsg failed, getMsgType=0.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.836 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[18]=0x00010000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.838 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[19]=0x00140014.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.841 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[20]=0x448dd080.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.840 [api_c_device.cc:578]152320 rtGetDevMsg:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.844 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[21]=0x006012c1.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.845 [error_message_manage.cc:69]152320 FuncErrorReason:rtGetDevMsg execution failed, reason=aicore exception
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.846 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[22]=0x448dd080.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.849 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[23]=0x006012c1.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.851 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[24]=0x01e0beec.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.854 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[25]=0x12401240.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.856 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[26]=0x01e0beec.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.954 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[27]=0x01e70044.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.957 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[28]=0x12401240.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.959 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[29]=0x01e70044.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.961 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[30]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.963 [davinci_kernel_task.cc:1040]152455 GetMixCtxInfo:The DavinciTask Mix context-buf[31]=0000000000.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.961.970 [davinci_kernel_task.cc:1185]152455 PrintErrorInfoForDavinciTask:[AIC_INFO] after execute:mixCtx print end
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.963.191 [davinci_kernel_task.cc:1210]152455 PrintErrorInfoForDavinciTask:[DFX_INFO]AI Core kernel execution failed, device_id=0, stream_id=79, report_stream_id=47, task_id=45, flip_num=0, fault kernel_name=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8_, fault kernel info ext=none, program id=18, hash=397175458629999829.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.963.197 [context_manage.cc:306]152455 SetGlobalFailureErr:SetGlobalFailureErr start, device_id=0, errcode=0X7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.963.204 [context_manage.cc:317]152455 SetGlobalFailureErr:SetGlobalFailureErr end
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.267 [exception_dumper.cpp:203][tid:152455] [Dump][Exception] Begin to dump exception. dumpScene=aic_err_brief_dump, deviceId=0, streamId=79, taskId=45, exceptionType=2(aicore), kernelName=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8_.
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.923 [kernel_symbol_locator.cpp:583][tid:152455] [Dump][Exception] Error register information. coreId=3, coreType=0, AIC_ERR_0=0x800000 AIC_ERR_1=0x0 AIC_ERR_2=0x0 AIC_ERR_3=0x0 AIC_ERR_4=0x0 AIC_ERR_5=0x0 BIU_ERR_0=0x0 BIU_ERR_1=0x0 CCU_ERR_0=0x0 CCU_ERR_1=0x864c6d CUBE_ERR_0=0x0 CUBE_ERR_1=0x0 IFU_ERR_0=0x0 IFU_ERR_1=0x10000 MTE_ERR_0=0x30000c8 MTE_ERR_1=0x39 VEC_ERR_0=0x0 VEC_ERR_1=0x0 FIXP_ERR_0=0x30000c8 FIXP_ERR_1=0x39 AIC_COND_0=0x0 AIC_COND_1=0x0 
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.929 [kernel_pc_fixer.cpp:97][tid:152455] [Dump][Exception] Fix PC with module=MTE, originalPC=0x124001e0f058, fixedPC=0x124001e0e720.
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.932 [kernel_symbol_locator.cpp:602][tid:152455] [Dump][Exception] Error PC information. coreId=3, coreType=0, originalStartPC=0x124001e0beec, fixedStartPC=0x124001e00000, originalCurrentPC=0x124001e0f058, fixedCurrentPC=0x124001e0e720, fixedPCOffset=0xe720.
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.935 [kernel_symbol_locator.cpp:608][tid:152455] [Dump][Exception] Error symbol information. coreId=3, coreType=0, symbol=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8__mix_aic+0x2834.
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.942 [kernel_symbol_locator.cpp:583][tid:152455] [Dump][Exception] Error register information. coreId=14, coreType=1, AIC_ERR_0=0x800000 AIC_ERR_1=0x0 AIC_ERR_2=0x0 AIC_ERR_3=0x0 AIC_ERR_4=0x0 AIC_ERR_5=0x0 BIU_ERR_0=0x0 BIU_ERR_1=0x0 CCU_ERR_0=0x0 CCU_ERR_1=0xfb099131 CUBE_ERR_0=0x0 CUBE_ERR_1=0x0 IFU_ERR_0=0xb6630380 IFU_ERR_1=0x212c4 MTE_ERR_0=0x60000cd MTE_ERR_1=0x1f VEC_ERR_0=0x733812c VEC_ERR_1=0x77 FIXP_ERR_0=0x60000cd FIXP_ERR_1=0x1f AIC_COND_0=0x0 AIC_COND_1=0x0 
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.945 [kernel_pc_fixer.cpp:97][tid:152455] [Dump][Exception] Fix PC with module=MTE, originalPC=0x124001e87288, fixedPC=0x124001e87f34.
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.948 [kernel_symbol_locator.cpp:602][tid:152455] [Dump][Exception] Error PC information. coreId=14, coreType=1, originalStartPC=0x124001e70044, fixedStartPC=0x124001e00000, originalCurrentPC=0x124001e87288, fixedCurrentPC=0x124001e87f34, fixedPCOffset=0x87f34.
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.951 [kernel_symbol_locator.cpp:608][tid:152455] [Dump][Exception] Error symbol information. coreId=14, coreType=1, symbol=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8__mix_aiv+0x17ef0.
-[ERROR] IDEDD(152320,):2026-08-19-11:34:12.963.994 [dump_args.cpp:129][tid:152455] No exception dfx info, dfxAddr[(nil)]|dfxSize[0].
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.966.352 [stream.cc:4156]152455 EnterFailureAbort:stream_id=47 enter failure abort.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.966.380 [stars_engine.cc:1447]152455 StarsResumeRtsq:Failed to resume RTSQ. Reason: stop scheduling in abort failure mode, stream_id=47, sq_id=2, sq_head=467, task_id=2515, taskType=14.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.394 [context.cc:2342]152320 CheckStatus:device_id=0 status=118816806 is abnormal.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.401 [context.cc:763]152320 Synchronize:context is abort, status=0x7150026.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.411 [api_error.cc:2795]152320 DeviceSynchronize:Device synchronize failed.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.420 [api_c_device.cc:236]152320 rtDeviceSynchronizeWithTimeout:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.425 [error_message_manage.cc:69]152320 FuncErrorReason:rtDeviceSynchronizeWithTimeout execution failed, reason=aicore exception
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.660 [api_impl.cc:6042]152320 GetDevErrMsg:device_id=0, status=0x7150026 is abnormal.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.664 [api_impl.cc:6121]152320 GetDevMsg:Failed to GetDeviceErrMsg, retCode=0x7150026.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.667 [api_error.cc:4287]152320 GetDevMsg:GetDeviceMsg failed, getMsgType=0.
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.672 [api_c_device.cc:578]152320 rtGetDevMsg:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(152320,):2026-08-19-11:34:12.974.676 [error_message_manage.cc:69]152320 FuncErrorReason:rtGetDevMsg execution failed, reason=aicore exception
+python tests/standalone/fa3/test_fa3_graph_workspace_scale.py --predict
+[W819 15:08:44.133337893 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+predicted FA3 workspace (MB) = 33024 * batch * ceil(maxk/128) / 1e6
+ batch     maxk  blocks/s  ws_pred(MB)
+    16     1024         8          4.2
+    32     1024         8          8.5
+    64     1024         8         16.9
+   128     1024         8         33.8
+   256     1024         8         67.6
+    16     2048        16          8.5
+    32     2048        16         16.9
+    64     2048        16         33.8
+   128     2048        16         67.6
+   256     2048        16        135.3
+    16     4096        32         16.9
+    32     4096        32         33.8
+    64     4096        32         67.6
+   128     4096        32        135.3
+   256     4096        32        270.5
+    16     8192        64         33.8
+    32     8192        64         67.6
+    64     8192        64        135.3
+   128     8192        64        270.5
+   256     8192        64        541.1
+    16    16384       128         67.6
+    32    16384       128        135.3
+    64    16384       128        270.5
+   128    16384       128        541.1
+   256    16384       128       1082.1
+    16    32768       256        135.3
+    32    32768       256        270.5
+    64    32768       256        541.1
+   128    32768       256       1082.1
+   256    32768       256       2164.3
+python tests/standalone/fa3/test_fa3_graph_workspace_scale.py 
+[W819 15:09:19.644490471 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+======================================================================================
+ batch     maxk  blocks/s  ws_pred(MB)     result  ws_meas(MB)
+======================================================================================
+    16     2048        16          8.5         OK  55.4
+    32     2048        16         16.9         OK  55.5
+    16     4096        32         16.9         OK  55.5
+    64     2048        16         33.8         OK  55.8
+    32     4096        32         33.8         OK  55.6
+    16     8192        64         33.8         OK  55.7
+   128     2048        16         67.6         OK  56.3
+    64     4096        32         67.6         OK  55.9
+    32     8192        64         67.6         OK  55.9
+    16    16384       128         67.6         OK  56.3
+   256     2048        16        135.3         OK  57.3
+   128     4096        32        135.3         OK  56.4
+    64     8192        64        135.3         OK  56.1
+    32    16384       128        135.3         OK  56.4
+    16    32768       256        135.3         OK  57.3
+   256     4096        32        270.5         OK  57.5
+   128     8192        64        270.5         OK  56.7
+    64    16384       128        270.5         OK  56.7
+    32    32768       256        270.5         OK  57.5
+   256     8192        64        541.1         OK  57.7
+   128    16384       128        541.1         OK  57.2
+    64    32768       256        541.1         OK  57.7
+   256    16384       128       1082.1         OK  58.3
+   128    32768       256       1082.1         OK  58.3
+   256    32768       256       2164.3         OK  59.3
+======================================================================================
+If a CRASH leaves the device in a bad state, reset it before re-running.
