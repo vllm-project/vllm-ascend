@@ -366,16 +366,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             attn_metadata.spec_query_start_loc[1 : spec_num_rows + 1]
             - attn_metadata.spec_query_start_loc[:spec_num_rows]
         ).to(attn_metadata.num_accepted_tokens.dtype)
-        clamped_num_accepted = torch.clamp(
+        torch.clamp(
             attn_metadata.num_accepted_tokens[:spec_num_rows],
             max=spec_query_lens,
+            out=attn_metadata.num_accepted_tokens[:spec_num_rows],
         )
 
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                 query_start_loc=attn_metadata.spec_query_start_loc,
                 cache_indices=attn_metadata.spec_state_indices_tensor[:spec_num_rows],
-                num_accepted_tokens=clamped_num_accepted,
+                num_accepted_tokens=attn_metadata.num_accepted_tokens[:spec_num_rows],
             ),
             actual_seq_lengths=_build_actual_seq_lengths(
                 attn_metadata.spec_query_start_loc,
