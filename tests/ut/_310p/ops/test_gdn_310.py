@@ -99,3 +99,43 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
     assert spec_meta.cache_indices.data_ptr() == attn_metadata.spec_state_indices_tensor.data_ptr()
     assert spec_meta.num_accepted_tokens.data_ptr() == attn_metadata.num_accepted_tokens.data_ptr()
     assert attn_metadata.spec_decode_metadata.actual_seq_lengths.tolist() == [0, 4, 4, 0, 0]
+
+
+def test_builder310_refreshes_non_spec_decode_graph_metadata():
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
+    builder.non_spec_state_indices_tensor = torch.full((4,), 77, dtype=torch.int32)
+    builder.non_spec_query_start_loc = torch.full((5,), 77, dtype=torch.int32)
+    builder.non_spec_actual_seq_lengths = torch.full((5,), 77, dtype=torch.int32)
+    builder.use_full_cuda_graph = True
+    attn_metadata = SimpleNamespace(
+        num_prefills=0,
+        num_decodes=4,
+        num_decode_tokens=2,
+        num_spec_decodes=0,
+        non_spec_state_indices_tensor=torch.tensor(
+            [10, 11, 98, 99],
+            dtype=torch.int32,
+        ),
+        non_spec_query_start_loc=torch.tensor(
+            [0, 1, 2, 2, 2],
+            dtype=torch.int32,
+        ),
+    )
+
+    builder._pad_decode_metadata(attn_metadata, graph_batch_size=4)
+
+    assert attn_metadata.non_spec_state_indices_tensor.tolist() == [
+        10,
+        11,
+        NULL_BLOCK_ID,
+        NULL_BLOCK_ID,
+    ]
+    assert attn_metadata.non_spec_query_start_loc.tolist() == [0, 1, 2, 2, 2]
+    assert attn_metadata.non_spec_state_indices_tensor.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
+    assert attn_metadata.non_spec_query_start_loc.data_ptr() == builder.non_spec_query_start_loc.data_ptr()
+    decode_meta = attn_metadata.non_spec_decode_metadata
+    conv_meta = decode_meta.causal_conv1d
+    assert conv_meta.query_start_loc.data_ptr() == attn_metadata.non_spec_query_start_loc.data_ptr()
+    assert conv_meta.cache_indices.data_ptr() == attn_metadata.non_spec_state_indices_tensor.data_ptr()
+    assert decode_meta.actual_seq_lengths.data_ptr() == builder.non_spec_actual_seq_lengths.data_ptr()
+    assert decode_meta.actual_seq_lengths.tolist() == [0, 1, 1, 0, 0]

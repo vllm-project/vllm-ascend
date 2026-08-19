@@ -22,6 +22,14 @@ from vllm_ascend.utils import (
 SFA_QSFA_TILE_SIZE = 128
 
 
+def build_valid_topk_mask(
+    topk_indices: torch.Tensor,
+    seq_len_thresholds: torch.Tensor,
+) -> torch.Tensor:
+    """Mask padding and unwritten tail-block positions in SFA top-k rows."""
+    return (topk_indices >= 0) & (topk_indices < seq_len_thresholds)
+
+
 def get_sfa_qsfa_packed_head_dim(
     kv_lora_rank: int,
     qk_rope_head_dim: int,
@@ -209,6 +217,26 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
+    # Optimistic host-side sequence lengths for the current parallel-draft
+    # pass: target optimistic lengths + the draft query block. Async scheduling
+    # keeps the regular CPU mirrors optimistic, and the post-rejection
+    # correction is deferred to the FIA forward entry so the reject-counts D2H
+    # can overlap with build + early draft forward. The exact lengths are
+    # reconstructed by subtracting ``parallel_draft_num_reject_cpu`` from the
+    # per-layer ``seq_lens_list`` at FIA time (see ``pending_reject_*`` on the
+    # backend metadata).
+    parallel_draft_seq_lens_cpu: torch.Tensor = None
+
+    # Pending reject-counts for the deferred parallel-draft finalize. The
+    # proposer publishes the host mirror of ``num_rejected_tokens_gpu`` (copied
+    # on a side stream) plus its event and the request count; the backend
+    # metadata builder copies these into per-layer metadata, and the FIA forward
+    # entry synchronizes the event and subtracts the per-request reject count
+    # from ``seq_lens_list`` exactly once.
+    parallel_draft_num_reject_cpu: torch.Tensor = None
+    parallel_draft_num_reject_event: Any = None
+    parallel_draft_num_reject_num_reqs: int = 0
+
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
@@ -240,6 +268,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     group_len: torch.Tensor = None
     group_key_idx: torch.Tensor = None
     group_key_cache_idx: torch.Tensor = None
+    # Per-request / per-token request identity used by the Sparse KV offload
+    # resident LRU (adler32-hashed request ids and token->request mapping).
+    req_ids_tensor: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -295,6 +327,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             group_len=self.group_len,
             group_key_idx=self.group_key_idx,
             group_key_cache_idx=self.group_key_cache_idx,
+            req_ids_tensor=_slice_reqs(self.req_ids_tensor),
+            token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )
 
 
@@ -452,9 +486,9 @@ def notify_kv_cache_written(layer_name: str = ""):
     The attention layer calls this unconditionally; each connector decides whether
     it needs to record a synchronization primitive (e.g. a compute-stream event
     later waited on by the resharding stream to overlap the outgoing KV copy).
-    Connectors that don't need it -- such as the AscendStore pool connector, which
-    records its own sync event at save time -- simply do not implement
-    ``on_kv_cache_written`` and this becomes a no-op.
+    The AscendStore pool and SFA-PD connectors implement
+    ``on_kv_cache_written`` to dispatch a layerwise save or PD-pull
+    notification at scatter time. Other connectors can omit the hook.
     """
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return

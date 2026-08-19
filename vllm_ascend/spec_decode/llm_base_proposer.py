@@ -47,8 +47,12 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    prepare_sparse_kv_offload_mtp_dummy_metadata,
+)
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.kimi_k3_dspark import K3DSparkForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -56,6 +60,7 @@ from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _disable_flash_comm_v1_context,
     _maybe_eager_context,
+    build_parallel_draft_seq_lens_cpu,
     patch_tensor_parallel_group,
 )
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable
@@ -258,6 +263,175 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _maybe_anti_rotate_fc(self) -> None:
+        """Align the draft hidden-state projection with a QuaRot target."""
+        if self.method not in ("dflash", "dspark"):
+            return
+        # Qwen3 DSpark aligns fc.* in its model-specific weight loader and owns
+        # separate embedding/lm_head weights, so no generic alignment is needed.
+        if isinstance(self.model, Qwen3DSparkForCausalLM):
+            return
+        target_model_path = self.vllm_config.model_config.model
+        rotation = self._load_quarot_rotation(target_model_path)
+        if rotation is None:
+            return
+
+        # Keep the full-precision rotation alive until the shared embedding and
+        # lm_head boundaries are fixed below. A draft without its own boundary
+        # modules must not directly consume rotated target tensors.
+        rotation = rotation.to(self.device, dtype=torch.float32)
+        self._quarot_rotation = rotation
+        draft_model = getattr(self.model, "model", None)
+        projection_name = "fc"
+        projection = getattr(draft_model, projection_name, None) if draft_model is not None else None
+        if projection is None:
+            # K3 MLA DSpark names the projection used by
+            # combine_hidden_states() context_proj instead of fc. Its input is
+            # the same concatenation of target auxiliary hidden states, so
+            # each target-width block needs the same QuaRot basis alignment.
+            projection_name = "context_proj"
+            projection = getattr(draft_model, projection_name, None) if draft_model is not None else None
+        if projection is None:
+            return
+
+        projection_weight = projection.weight
+        out_features, in_features = projection_weight.shape
+        hidden_size = rotation.shape[0]
+        if in_features % hidden_size != 0:
+            logger.warning(
+                "[spec_decode/quarot] %s in_features=%d is not divisible by rotation dim=%d; "
+                "skipping hidden-state projection alignment.",
+                projection_name,
+                in_features,
+                hidden_size,
+            )
+            return
+        num_features = in_features // hidden_size
+        projection_blocks = projection_weight.data.to(torch.float32).reshape(
+            out_features,
+            num_features,
+            hidden_size,
+        )
+        aligned = torch.matmul(projection_blocks, rotation)
+        projection_weight.data.copy_(aligned.reshape(out_features, in_features).to(projection_weight.dtype))
+        logger.info(
+            "[spec_decode/quarot] Aligned draft %s.weight with target rotation (num_features=%d, projection=%s).",
+            projection_name,
+            num_features,
+            tuple(projection_weight.shape),
+        )
+
+    def _copy_unrotated_shared_weight(
+        self,
+        draft_layer: nn.Module,
+        target_layer: nn.Module,
+        label: str,
+    ) -> bool:
+        """Copy a rotated target weight into an unrotated draft-owned layer."""
+        rotation = getattr(self, "_quarot_rotation", None)
+        if rotation is None:
+            return False
+        draft_weight = getattr(draft_layer, "weight", None)
+        target_weight = getattr(target_layer, "weight", None)
+        if not isinstance(draft_weight, torch.Tensor) or not isinstance(target_weight, torch.Tensor):
+            logger.warning(
+                "[spec_decode/quarot] Cannot align shared %s: weight tensor missing.",
+                label,
+            )
+            return False
+        if draft_weight.shape != target_weight.shape or target_weight.shape[-1] != rotation.shape[0]:
+            logger.warning(
+                "[spec_decode/quarot] Cannot align shared %s: draft=%s, target=%s, rotation=%s.",
+                label,
+                tuple(draft_weight.shape),
+                tuple(target_weight.shape),
+                tuple(rotation.shape),
+            )
+            return False
+
+        unrotated = torch.matmul(target_weight.data.to(torch.float32), rotation.T)
+        draft_weight.data.copy_(unrotated.to(draft_weight.dtype))
+        logger.info(
+            "[spec_decode/quarot] Copied and aligned shared %s (weight=%s).",
+            label,
+            tuple(draft_weight.shape),
+        )
+        return True
+
+    def _prepare_unrotated_shared_layer(
+        self,
+        draft_layer: nn.Module | None,
+        target_layer: nn.Module,
+        label: str,
+    ) -> nn.Module | None:
+        """Return a draft-owned unrotated layer for a QuaRot target."""
+        if getattr(self, "_quarot_rotation", None) is None:
+            return None
+        if draft_layer is None:
+            # AscendVocabParallelEmbedding owns a GroupCoordinator whose
+            # device/cpu groups are torch.distributed.ProcessGroup objects.
+            # Those groups cannot be pickled by deepcopy, and they should not
+            # be cloned for a draft-owned copy anyway. Preserve the
+            # coordinator while independently cloning the module parameters.
+            comm_group = getattr(target_layer, "comm_group", None)
+            memo = {id(comm_group): comm_group} if comm_group is not None else None
+            draft_layer = copy.deepcopy(target_layer, memo)
+        if not self._copy_unrotated_shared_weight(draft_layer, target_layer, label):
+            raise ValueError(
+                f"QuaRot requires a compatible draft-owned {label}; refusing to alias the rotated target layer."
+            )
+        return draft_layer
+
+    @staticmethod
+    def _load_quarot_rotation(target_model_path: str) -> torch.Tensor | None:
+        """Load the global rotation when the target has a QuaRot descriptor."""
+        import json
+        from pathlib import Path
+
+        from safetensors.torch import load_file
+
+        descriptor_path = Path(target_model_path) / "quant_model_description.json"
+        if not descriptor_path.exists():
+            logger.info(
+                "[spec_decode/quarot] No descriptor found at %s; treating the target as non-QuaRot.",
+                descriptor_path,
+            )
+            return None
+        try:
+            with open(descriptor_path) as descriptor_file:
+                descriptor = json.load(descriptor_file)
+            relative_path = (
+                descriptor.get("optional", {})
+                .get("quarot", {})
+                .get("rotation_map", {})
+                .get("global_rotation", "optional/quarot.safetensors")
+            )
+        except (ValueError, OSError) as error:
+            logger.warning(
+                "[spec_decode/quarot] Failed to read %s (%s); skipping draft alignment.",
+                descriptor_path,
+                error,
+            )
+            return None
+
+        rotation_path = Path(target_model_path) / relative_path
+        if not rotation_path.exists():
+            logger.warning(
+                "[spec_decode/quarot] Rotation file %s is missing; skipping draft alignment.",
+                rotation_path,
+            )
+            return None
+        logger.info("[spec_decode/quarot] Loading global rotation from %s.", rotation_path)
+        try:
+            return load_file(rotation_path)["global_rotation"]
+        except Exception as error:
+            logger.warning(
+                "[spec_decode/quarot] Failed to load rotation %s: %s",
+                rotation_path,
+                error,
+            )
+            return None
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -288,6 +462,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         with self.maybe_eager_context:
             self.model = self._get_model()
+
+        self._maybe_anti_rotate_fc()
 
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
@@ -359,6 +535,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(model)
+        # The draft FC, embedding, and lm_head boundaries are now aligned.
+        # Release the temporary full-precision rotation before graph capture.
+        self._quarot_rotation = None
 
         if (
             self.parallel_drafting
@@ -443,9 +622,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
 
             if share_embeddings:
-                if hasattr(self.model.model, "embed_tokens"):
-                    del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+                draft_embed_tokens = getattr(self.model.model, "embed_tokens", None)
+                unrotated_embed_tokens = self._prepare_unrotated_shared_layer(
+                    draft_embed_tokens,
+                    target_embed_tokens,
+                    "draft embed_tokens.weight",
+                )
+                if unrotated_embed_tokens is not None:
+                    self.model.model.embed_tokens = unrotated_embed_tokens
+                    logger.info(
+                        "[spec_decode/quarot] Keeping a draft-owned aligned embedding instead of aliasing the target."
+                    )
+                else:
+                    if hasattr(self.model.model, "embed_tokens"):
+                        del self.model.model.embed_tokens
+                    self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
                 "[spec_decode/base] PP>1: draft model loaded its own vocab embedding"
@@ -480,17 +671,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
+                target_lm_head = None
                 if hasattr(model, "lm_head"):
-                    self.model.lm_head = model.lm_head
+                    target_lm_head = model.lm_head
                 elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                    self.model.lm_head = model.get_language_model().lm_head
-                else:
+                    target_lm_head = model.get_language_model().lm_head
+                if target_lm_head is None:
                     logger.warning(
                         "[spec_decode/base] Target model has no accessible lm_head"
                         " for sharing. Draft model will use its own lm_head."
                         " This may cause incorrect logits if the draft lm_head"
                         " is not trained."
                     )
+                else:
+                    unrotated_lm_head = self._prepare_unrotated_shared_layer(
+                        getattr(self.model, "lm_head", None),
+                        target_lm_head,
+                        "draft lm_head.weight",
+                    )
+                    if unrotated_lm_head is None:
+                        self.model.lm_head = target_lm_head
+                    else:
+                        self.model.lm_head = unrotated_lm_head
+                        logger.info(
+                            "[spec_decode/quarot] Keeping a draft-owned aligned lm_head instead of aliasing the target."
+                        )
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -588,6 +793,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # num_reqs is already the padded version
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
+                req_ids_tensor, token_to_req = prepare_sparse_kv_offload_mtp_dummy_metadata(
+                    num_tokens,
+                    num_reqs,
+                    self.query_start_loc.cpu,
+                    self.runner._offload_req_ids_tensor,
+                    self.runner._offload_token_to_req,
+                )
 
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -616,6 +828,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     group_len=self.runner.group_len.gpu[:num_reqs],
                     group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                     group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                    req_ids_tensor=req_ids_tensor,
+                    token_to_req=token_to_req,
                 )
                 if dcp_manager is not None:
                     # update long_seq related params and flatten block_table
@@ -730,6 +944,57 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _prepare_parallel_draft_seq_lens_cpu(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_size: int,
+        num_draft_tokens_cpu: list[int] | None,
+    ) -> None:
+        """Publish optimistic host KV lengths for Ascend parallel-draft FIA.
+
+        Async scheduling intentionally leaves the normal CPU sequence-length
+        mirrors optimistic. Rather than synchronizing the reject-counts D2H
+        here (on the draft critical path), publish the optimistic lengths plus
+        the draft query block and, for the padded+async path, stash the
+        side-stream reject-counts mirror + event. The per-layer attention
+        metadata copies them and the FIA forward entry synchronizes the event
+        and subtracts the per-request reject count from ``seq_lens_list`` --
+        by then the D2H has overlapped with metadata build and the early draft
+        forward.
+
+        Three cases (preserving prior behavior except for the padded+async
+        deferral): non-padded (``num_draft_tokens_cpu is None``) publishes
+        optimistic+query with no reject; padded+async publishes optimistic+query
+        plus the deferred reject fields; padded+non-async leaves
+        ``parallel_draft_seq_lens_cpu`` unset so the builder falls back to the
+        (already-exact) device ``seq_lens``.
+        """
+        if not self.parallel_drafting or not hasattr(self, "num_query_per_req"):
+            return
+
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        if seq_lens_cpu is None:
+            return
+
+        reject_event = getattr(self.runner, "num_rejected_tokens_event", None)
+        async_padded = num_draft_tokens_cpu is not None and reject_event is not None
+
+        if num_draft_tokens_cpu is None or async_padded:
+            common_attn_metadata.parallel_draft_seq_lens_cpu = build_parallel_draft_seq_lens_cpu(
+                seq_lens_cpu,
+                batch_size,
+                self.num_query_per_req,
+            )
+            if async_padded:
+                common_attn_metadata.parallel_draft_num_reject_cpu = self.runner.num_rejected_tokens_cpu
+                common_attn_metadata.parallel_draft_num_reject_event = reject_event
+                common_attn_metadata.parallel_draft_num_reject_num_reqs = batch_size
+        # else: padded + non-async -> leave unset; builder falls back to device seq_lens.
+
     def _propose(
         self,
         # [num_tokens]
@@ -752,6 +1017,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        num_draft_tokens_cpu: list[int] | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -768,6 +1034,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     Eagle3VwnLlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                     DSparkDeepseekV4ForCausalLM,
+                    K3DSparkForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
@@ -870,6 +1137,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
+
+        self._prepare_parallel_draft_seq_lens_cpu(
+            common_attn_metadata,
+            batch_size,
+            num_draft_tokens_cpu,
+        )
 
         if self.draft_window_size is not None:
             self.sliding_window.apply(common_attn_metadata)
@@ -1547,6 +1820,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
+            if getattr(self.runner, "sparse_kv_offload_enabled", False):
+                # Draft steps run exactly one token per request, while the
+                # inherited token_to_req still describes the verify-step
+                # layout (num_spec + 1 tokens per request). Rebuild it to the
+                # one-token-per-request layout so the Sparse KV offload path
+                # routes every decode row to its own request's CPU-pool
+                # blocks/seq_len; otherwise rows of requests >= 1 are mapped
+                # onto request 0 and attend another request's KV.
+                num_draft_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+                common_attn_metadata.token_to_req = self.arange[:num_draft_reqs]
+
         # The loop part
         used_update_positions += 1
 
@@ -1850,6 +2134,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.slot_mapping[token_indices]
         )
         common_attn_metadata.slot_mapping[token_indices.shape[0] :].fill_(-1)
+        token_to_req = (
+            common_attn_metadata.token_to_req[token_indices] if common_attn_metadata.token_to_req is not None else None
+        )
 
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
@@ -1884,6 +2171,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=token_to_req,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -1979,6 +2268,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=common_attn_metadata.token_to_req,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu

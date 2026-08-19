@@ -292,6 +292,7 @@ class TestAscendMLAMetadata(TestBase):
         self.assertEqual(metadata.head_dim, head_dim)
         self.assertEqual(metadata.attn_mask, attn_mask)
         self.assertEqual(metadata.attn_state, attn_state)
+        self.assertTrue(metadata.causal)
         self.assertEqual(metadata.decode, decode)
         self.assertEqual(metadata.prefill, prefill)
 
@@ -395,6 +396,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.positions = torch.Tensor([1, 2, 3, 4, 5, 6]).int()
+        common_metadata.causal = False
         block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
         common_metadata.block_table_tensor = block_table
         mock_get_cos_and_sin_mla.return_value = (torch.tensor([6, 6]), torch.Tensor([6, 6]))
@@ -402,6 +404,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
         self.assertEqual(metadata.decode.block_table.shape[0], 8)
+        self.assertFalse(metadata.causal)
 
     def test_reorder_batch(self):
         ascend_config = MagicMock()
@@ -1069,10 +1072,8 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_kimi_k3_no_rope_disables_c8_and_mlapo_on_a2(
+    def test_kimi_k3_no_rope_keeps_a5_fused_preprocess(
         self,
-        mock_get_device_type,
         mock_get_current_vllm_config,
         mock_enabling_mlapo,
         mock_enable_fa_quant,
@@ -1096,108 +1097,58 @@ class TestAscendMLAImpl(TestBase):
             "use_mla_rope": False,
         }
 
-        impl = AscendMLAImpl(
-            num_heads=12,
-            head_size=96,
-            scale=0.1,
-            num_kv_heads=1,
-            alibi_slopes=None,
-            sliding_window=None,
-            kv_cache_dtype="auto",
-            blocksparse_params=None,
-            logits_soft_cap=None,
-            attn_type=None,
-            kv_sharing_target_layer_name=None,
-            **kwargs,
-        )
+        from vllm_ascend.attention.mla_v1 import AscendDeviceType
 
-        self.assertFalse(impl.fa_quant_layer)
-        self.assertFalse(impl.enable_mlapo)
-        self.assertEqual(impl.dtype, self.impl.vllm_config.model_config.dtype)
-
-    @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=True)
-    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=False)
-    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_kimi_k3_no_rope_keeps_a5_c8_enabled(
-        self,
-        mock_get_device_type,
-        mock_get_current_vllm_config,
-        mock_enabling_mlapo,
-        mock_enable_fa_quant,
-    ):
-        mock_get_current_vllm_config.return_value = self.impl.vllm_config
-        kwargs = {
-            "kv_lora_rank": 32,
-            "qk_nope_head_dim": 64,
-            "qk_rope_head_dim": 32,
-            "qk_head_dim": 96,
-            "v_head_dim": 128,
-            "q_lora_rank": 64,
-            "q_proj": MagicMock(),
-            "q_b_proj": MagicMock(),
-            "kv_b_proj": MagicMock(),
-            "o_proj": MagicMock(),
-            "kv_a_proj_with_mqa": MagicMock(),
-            "fused_qkv_a_proj": MagicMock(),
-            "kv_a_layernorm": MagicMock(),
-            "rotary_emb": None,
-            "use_mla_rope": False,
-        }
-
-        impl = AscendMLAImpl(
-            num_heads=12,
-            head_size=96,
-            scale=0.1,
-            num_kv_heads=1,
-            alibi_slopes=None,
-            sliding_window=None,
-            kv_cache_dtype="auto",
-            blocksparse_params=None,
-            logits_soft_cap=None,
-            attn_type=None,
-            kv_sharing_target_layer_name=None,
-            **kwargs,
-        )
+        with patch(
+            "vllm_ascend.attention.mla_v1.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ):
+            impl = AscendMLAImpl(
+                num_heads=12,
+                head_size=96,
+                scale=0.1,
+                num_kv_heads=1,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="auto",
+                blocksparse_params=None,
+                logits_soft_cap=None,
+                attn_type=None,
+                kv_sharing_target_layer_name=None,
+                **kwargs,
+            )
 
         self.assertTrue(impl.fa_quant_layer)
-        self.assertEqual(impl.dtype, torch.float8_e4m3fn)
+        self.assertTrue(impl.enable_mlapo)
 
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
-    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method", return_value=MagicMock())
-    @patch(
-        "vllm_ascend.attention.mla_v1.DeviceOperator.mla_preprocess_only_decode",
-        side_effect=AssertionError("fused rotary prolog used"),
-    )
-    def test_kimi_k3_no_rope_c8_uses_explicit_preprocess(
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", side_effect=lambda value, enabled: value)
+    @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
+    def test_kimi_k3_forwards_no_rope_to_fused_decode_preprocess(
         self,
-        mock_fused_preprocess,
-        mock_get_weight_prefetch_method,
+        mock_device_operator,
+        mock_gather_unpad,
         mock_save_kv,
     ):
         num_tokens = 2
-        hidden_size = 16
+        self.impl.enable_mlapo = True
+        self.impl.fa_quant_layer = False
         self.impl.use_mla_rope = False
-        self.impl.fa_quant_layer = True
-        self.impl.enable_mlapo = False
-        self.impl.use_output_gate = False
         self.impl.num_heads = 2
         self.impl.v_head_dim = 4
-        hidden_states = torch.randn(num_tokens, hidden_size)
+        hidden_states = torch.randn(num_tokens, 16)
+        attention_output = torch.randn(num_tokens, self.impl.num_heads * self.impl.v_head_dim)
+        projected = torch.randn_like(hidden_states)
         decode_result = DecodeMLAPreprocessResult(
             ql_nope=MagicMock(),
             q_pe=MagicMock(),
             k_nope=MagicMock(),
             k_pe=MagicMock(),
-            dequant_scale_q_nope=MagicMock(),
         )
-        self.impl._mla_preprocess = MagicMock(return_value=(decode_result, None))
-        attention_output = torch.randn(num_tokens, self.impl.num_heads * self.impl.v_head_dim)
+        mock_device_operator.mla_preprocess_only_decode.return_value = (decode_result, None)
         self.impl._forward_decode = MagicMock(return_value=attention_output)
-        projected = torch.randn(num_tokens, hidden_size)
         self.impl.o_proj = MagicMock(return_value=(projected,))
-        self.impl.o_proj.weight = MagicMock()
-        attn_metadata = MagicMock(
+        attn_metadata = SimpleNamespace(
             num_actual_tokens=num_tokens,
             num_decodes=num_tokens,
             num_prefills=0,
@@ -1207,7 +1158,7 @@ class TestAscendMLAImpl(TestBase):
         output = torch.empty_like(projected)
 
         with patch("vllm_ascend.attention.mla_v1._EXTRA_CTX", SimpleNamespace(num_tokens=num_tokens)):
-            result = self.impl.forward(
+            self.impl.forward(
                 "model.layers.3.self_attn.attn",
                 hidden_states,
                 kv_cache,
@@ -1215,9 +1166,13 @@ class TestAscendMLAImpl(TestBase):
                 output=output,
             )
 
-        self.assertIs(result, output)
-        self.impl._mla_preprocess.assert_called_once()
-        mock_fused_preprocess.assert_not_called()
+        mock_device_operator.mla_preprocess_only_decode.assert_called_once_with(
+            self.impl,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            use_mla_rope=False,
+        )
         torch.testing.assert_close(output, projected)
 
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
@@ -1752,6 +1707,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.weight.data = torch.randn(128, 128)
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
         self.impl.q_lora_rank = 32
+        self.impl._mlapo_quant_type = object
 
         self.impl._process_weights_for_fused_mlapo_a5(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_dq"))
@@ -1759,6 +1715,65 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
         self.assertTrue(hasattr(self.impl, "weight_dq_scale"))
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr_scale"))
+        self.assertEqual(self.impl.mlapo_weight_quant_mode, 3)
+
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, _: weight)
+    def test_process_weights_for_fused_mlapo_a5_native_bf16(self, mock_format_cast):
+        hidden_size = 128
+        q_lora_rank = 32
+        kv_lora_rank = 24
+        rope_dim = 8
+        num_heads = 12
+        num_heads_padded = 16
+        q_head_dim = 16
+
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(
+            q_lora_rank + kv_lora_rank + rope_dim,
+            hidden_size,
+            dtype=torch.bfloat16,
+        )
+        self.impl.q_proj = MagicMock()
+        self.impl.q_proj.weight.data = torch.randn(
+            num_heads * q_head_dim,
+            q_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        self.impl.q_lora_rank = q_lora_rank
+        self.impl.qk_head_dim = q_head_dim
+        self.impl.qk_rope_head_dim = rope_dim
+        self.impl.num_heads = num_heads
+        self.impl.num_heads_padded = num_heads_padded
+        self.impl.head_padding = num_heads_padded - num_heads
+        self.impl.W_UK_T = torch.randn(num_heads, 10, kv_lora_rank, dtype=torch.bfloat16)
+        self.impl.use_mla_rope = False
+        self.impl._mlapo_quant_type = None
+
+        self.impl._process_weights_for_fused_mlapo_a5(torch.bfloat16)
+
+        self.assertEqual(self.impl.weight_dq.shape, (hidden_size, q_lora_rank))
+        self.assertEqual(self.impl.weight_dkv_kr.shape, (hidden_size, kv_lora_rank + rope_dim))
+        self.assertEqual(self.impl.weight_uq_qr.shape, (q_lora_rank, num_heads_padded * q_head_dim))
+        self.assertEqual(self.impl.mlapo_W_UK_T.shape, (num_heads_padded, 10, kv_lora_rank))
+        self.assertEqual(self.impl.mlapo_num_heads, num_heads_padded)
+        self.assertEqual(self.impl.mlapo_weight_quant_mode, 0)
+        self.assertFalse(hasattr(self.impl, "weight_dq_scale"))
+        self.assertFalse(hasattr(self.impl, "weight_dkv_kr_scale"))
+        self.assertFalse(hasattr(self.impl, "weight_uq_qr_scale"))
+        self.assertEqual(mock_format_cast.call_count, 3)
+
+    def test_reorg_decode_q_removes_prolog_head_padding(self):
+        self.impl.num_heads = 12
+        self.impl.mlapo_num_heads = 16
+        q_nope = torch.randn(2, 16, 32)
+        q_pe = torch.randn(2, 16, 8)
+
+        q_nope_reorg, q_pe_reorg = self.impl.reorg_decode_q(q_nope, q_pe)
+
+        self.assertEqual(q_nope_reorg.shape, (2, 12, 32))
+        self.assertEqual(q_pe_reorg.shape, (2, 12, 8))
+        torch.testing.assert_close(q_nope_reorg, q_nope[:, :12])
+        torch.testing.assert_close(q_pe_reorg, q_pe[:, :12])
 
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
     @patch("torch_npu.npu_fused_infer_attention_score")
@@ -1967,6 +1982,34 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_native_mlapo_on_a5(
+        self, mock_format_cast, mock_get_ascend_device_type
+    ):
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size_per_partition = 10
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
+        layer.weight = torch.randn(shape_0, self.impl.kv_lora_rank)
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+
+        self.impl.enable_mlapo = True
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+
+        from vllm_ascend.attention.mla_v1 import AscendDeviceType
+
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
+        self.impl._process_weights_for_fused_mlapo_a5 = MagicMock()
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertTrue(self.impl.enable_mlapo)
+        self.assertIsNone(self.impl._mlapo_quant_type)
+        self.impl._process_weights_for_fused_mlapo_a5.assert_called_once_with(torch.bfloat16)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
     @patch("torch_npu.npu_format_cast")

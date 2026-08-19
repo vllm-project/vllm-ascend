@@ -148,7 +148,7 @@ jobs:
             --network host
             --platform ${{ matrix.arch.platform }}
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
-            --build-arg CANN_VERSION="9.0.1"
+            --build-arg CANN_VERSION="9.1.0"
             --build-arg UBUNTU_VERSION="22.04"
             --build-arg PYTHON_VERSION="3.12"
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}"

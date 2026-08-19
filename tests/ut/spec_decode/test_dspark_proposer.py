@@ -62,6 +62,7 @@ class _DSparkProposerTestBase:
         num_reqs: int,
         block_size: int,
         hf_config: SimpleNamespace | None = None,
+        draft_attn_causal: bool | None = None,
     ):
         device = torch.device("cpu")
         vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace())
@@ -82,10 +83,14 @@ class _DSparkProposerTestBase:
             proposer.hidden_size = _HIDDEN_SIZE
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
+            proposer.model = (
+                SimpleNamespace(get_draft_attn_causal=lambda: [draft_attn_causal])
+                if draft_attn_causal is not None
+                else SimpleNamespace()
+            )
 
         with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
             proposer = AscendDSparkProposer(vllm_config, device)
-
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer.positions[:num_query_total] = torch.arange(num_query_total, dtype=torch.int32)
@@ -377,7 +382,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
         [
             pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
-            pytest.param(SimpleNamespace(dspark_bonus_anchor=True), False, 1 + _NUM_SPECULATIVE_TOKENS),
+            pytest.param(SimpleNamespace(sample_from_anchor=False), False, 1 + _NUM_SPECULATIVE_TOKENS),
         ],
     )
     def test_configures_anchor_sampling(
@@ -386,7 +391,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         expected_sample_from_anchor: bool,
         expected_num_query_per_req: int,
     ) -> None:
-        """Verify the bonus-anchor flag selects the expected query layout."""
+        """Verify the anchor-sampling setting selects the expected query layout."""
         proposer = self._make_proposer(
             max_num_tokens=_MAX_NUM_TOKENS,
             num_reqs=_MAX_BATCH_SIZE,
@@ -659,6 +664,20 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert cad.actual_seq_lengths_q == [block_size] * num_reqs
         assert cad.decode_token_per_req == block_size
 
+    def test_cad_uses_model_reported_causality(self):
+        num_reqs, block_size, max_num_tokens = 4, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            draft_attn_causal=True,
+        )
+        _, _, cad, _ = self._invoke_set_inputs_first_pass(
+            proposer, num_reqs=num_reqs, block_size=block_size
+        )[:4]
+
+        assert cad.causal is True
+
     def test_cad_query_start_loc_and_seq_lens(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         proposer = self._make_proposer(
@@ -731,6 +750,10 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
     def _make_proposer_for_init():
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
         proposer.vllm_config = SimpleNamespace()
+        # The real proposer constructor always sets this field.  These
+        # lightweight initializer tests bypass __init__, so preserve that
+        # production invariant with a generic non-K3 draft config.
+        proposer.draft_model_config = SimpleNamespace(hf_config=object())
         proposer.device = torch.device("cpu")
         return proposer
 
@@ -784,6 +807,10 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         proposer.model = SimpleNamespace(
             get_draft_kv_cache_layer_names=lambda: {"L0", "L1"}
         )
+        assert not isinstance(
+            proposer.draft_model_config.hf_config,
+            dspark_proposer_module.K3DSparkConfig,
+        )
         proposer.max_query_tokens = 8
         proposer.max_num_tokens = 16
         kv_cache_config = SimpleNamespace(
@@ -812,6 +839,63 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
             call.kwargs["kernel_block_size"]
             for call in create_builders.call_args_list
         ] == [128, 64]
+
+    def test_k3_initialization_enables_rope_on_mla_builders(self, monkeypatch):
+        class FakeK3Config:
+            pass
+
+        class FakeMLABuilder:
+            def __init__(self):
+                self.use_mla_rope = False
+
+        fake_builder = FakeMLABuilder()
+
+        def create_metadata_builders(group, *args, **kwargs):
+            del args, kwargs
+            group.metadata_builders = [fake_builder]
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layer = MagicMock()
+        layer.get_attn_backend.return_value = backend
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "get_layers_from_vllm_config",
+            lambda *args, **kwargs: {"L0": layer},
+        )
+        monkeypatch.setattr(dspark_proposer_module, "K3DSparkConfig", FakeK3Config)
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "AscendMLAMetadataBuilder",
+            FakeMLABuilder,
+        )
+        monkeypatch.setattr(
+            AttentionGroup,
+            "create_metadata_builders",
+            create_metadata_builders,
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.draft_model_config = SimpleNamespace(hf_config=FakeK3Config())
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"L0"}
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        manager_spec = MagicMock()
+        manager_spec.block_size = 128
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=["L0"],
+                    kv_cache_spec=manager_spec,
+                )
+            ]
+        )
+
+        proposer.initialize_attn_backend(kv_cache_config)
+
+        assert fake_builder.use_mla_rope is dspark_proposer_module.K3_DSPARK_USE_MLA_ROPE
 
     def test_kernel_block_size_falls_back_to_cache_spec(self):
         proposer = self._make_proposer_for_init()

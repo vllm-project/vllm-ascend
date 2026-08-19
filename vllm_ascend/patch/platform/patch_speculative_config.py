@@ -1,7 +1,13 @@
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.speculators import algos as speculator_algos
 from vllm.utils.import_utils import LazyLoader
+
+from vllm_ascend.transformers_utils.configs.kimi_k3 import (
+    K3DSparkConfig,
+    register_k3_dspark_config,
+)
 
 _orig_post_init = SpeculativeConfig.__post_init__
 
@@ -12,6 +18,31 @@ else:
     PretrainedConfig = Any
 
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
+
+
+# This patch may be imported before the model plugin entry point runs. Register
+# the lightweight config here as well so ModelConfig can parse the draft before
+# speculative post-init normalizes its architecture.
+register_k3_dspark_config()
+
+
+# Backport vLLM #48639. v0.26 unconditionally rewrites Speculators DSpark
+# checkpoints to the legacy bonus-anchor layout and drops the checkpoint's
+# sample_from_anchor field before hf_config_override() runs.
+_orig_update_dspark = speculator_algos.SUPPORTED_SPECULATORS_TYPES["dspark"]
+
+
+def _update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
+    _orig_update_dspark(config_dict, pre_trained_config)
+    aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
+    pre_trained_config["dflash_config"] = {
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": [i - 1 for i in aux_layer_ids],
+    }
+    pre_trained_config["sample_from_anchor"] = config_dict.get("sample_from_anchor", False)
+
+
+speculator_algos.SUPPORTED_SPECULATORS_TYPES["dspark"] = _update_dspark
 
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
@@ -156,25 +187,24 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
 def _dspark_post_init(self):
     _orig_post_init(self)
     if self.use_dspark():
-        draft_model_config = getattr(self, "draft_model_config", None)
-        draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        draft_model_config = self.draft_model_config
+        if draft_model_config is None:
+            raise ValueError("DSpark requires a draft model config.")
+        draft_hf_config = draft_model_config.hf_config
         # deepseek v4 dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)  # type: ignore
         # gqa backend dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
-        architectures = getattr(draft_hf_config, "architectures", ()) or ()
-        if getattr(draft_hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures:
-            block_size = getattr(draft_hf_config, "block_size", None)
-            if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size <= 0:
-                raise ValueError("Qwen3/GQA DSpark requires a positive integer block_size in the draft config.")
-            if self.num_speculative_tokens != block_size:
-                raise ValueError(
-                    "Qwen3/GQA DSpark requires num_speculative_tokens to match "
-                    f"the trained block_size ({block_size}); got "
-                    f"{self.num_speculative_tokens}."
-                )
+        # Upstream DSpark normalization rewrites the config's model_type and
+        # architecture in place. The concrete config class remains intact, so
+        # restore K3 from that explicit type contract instead of probing for
+        # optional sentinel attributes shared by other draft families.
+        if isinstance(draft_hf_config, K3DSparkConfig):
+            draft_hf_config.model_type = K3DSparkConfig.model_type
+            draft_hf_config.architectures = ["K3DSparkModel"]
+            self.update_arch_()
 
 
 SpeculativeConfig.hf_config_override = hf_config_override
