@@ -1120,6 +1120,41 @@
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
 #
+#   3. `vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel`,
+#      `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`
+#    Why:
+#       These kernels expose two independent Triton-Ascend compiler issues.
+#
+#       On Triton-Ascend versions earlier than 3.6, the marker-cache kernel
+#       cannot compile chained runtime boolean expressions such as
+#       `A and B and C`. Triton-Ascend 3.6 supports this syntax, so this part of
+#       the compatibility patch is unnecessary when 3.6 or later is the
+#       minimum supported version.
+#
+#       The thinking-budget kernel calls `_load_effective_token`, which returns
+#       a value from inside a runtime `if` branch and otherwise returns a value
+#       loaded through a different pointer. During TTIR-to-Linalg conversion,
+#       Triton-Ascend can emit a zero-operand `func.return` for this one-result
+#       helper and leave an unresolved `memref<?xi32>` to `!tt.ptr<i32>`
+#       materialization. Compilation then fails in
+#       `ConvertTritonIRToLinalgIR` before the kernel runs.
+#    How:
+#       For pre-3.6 compatibility, express the marker-cache chained conditions
+#       as nested two-operand conditions without changing the scan algorithm.
+#
+#       Replace only `_load_effective_token` with an Ascend helper that performs
+#       complementary masked loads from committed and in-flight token buffers,
+#       then selects the loaded scalar with `tl.where`. This gives the helper
+#       one explicit value-return path and avoids the unsupported control-flow
+#       and pointer conversion while retaining the upstream thinking-budget
+#       kernel unchanged.
+#    Related PR (if no, explain why):
+#       No. These are Triton-Ascend compiler compatibility issues.
+#    Future Plan:
+#       Remove the marker-cache replacement once Triton-Ascend 3.6 is the
+#       minimum supported version. Remove the thinking-budget replacement once
+#       Triton-Ascend can lower the upstream runtime branch return correctly.
+#
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
