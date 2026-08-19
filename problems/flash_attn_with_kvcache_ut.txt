@@ -1,21 +1,35 @@
-python tests/standalone/fa3/test_fa3_graph_identity_vs_reorder.py 
-[W819 22:44:27.451046777 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_blockid_threshold.py 
+[W819 22:56:17.263452885 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C15 identity vs reorder (warm-up + repeat)   kv=2048  nblk=16
+C16 block-id threshold   kv=2048  nblk=16
 ========================================================================
-[W819 22:44:32.726132313 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[W819 22:56:22.526599809 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
 ------------------------------------------------------------------------
-[warm] reorder (not compared)
-[A   ] identity #1       vs manual ref : 0.000405
-[B   ] reorder           vs manual ref : 0.160710
-[C   ] reversed-identity vs manual ref : 0.000405
-[D   ] identity w/ swap  vs manual ref : 0.056961
-[E   ] identity #2       vs manual ref : 0.000405
+[sweep] blockTable[0] = X, blocks 1..15 stay identity:
+  blockTable[0]=  0  diff = 0.000405
+  blockTable[0]=  1  diff = 0.000484
+  blockTable[0]=  8  diff = 0.000348
+  blockTable[0]= 15  diff = 0.000563
+  blockTable[0]= 16  diff = 0.000377
+  blockTable[0]= 17  diff = 0.000448
+  blockTable[0]= 24  diff = 0.000401
+  blockTable[0]= 32  diff = 0.000443
+  blockTable[0]= 48  diff = 0.000460
+  blockTable[0]= 63  diff = 0.000464
+------------------------------------------------------------------------
+[position] high id (63) at a specific slot:
+  blockTable[ 0]=63  diff = 0.000464
+  blockTable[ 7]=63  diff = 0.000400
+  blockTable[15]=63  diff = 0.000327
+------------------------------------------------------------------------
+[contiguity] contiguous HIGH blocks:
+  asc [48..63]  diff = 0.000449
+  desc [63..48]  diff = 0.000450
 ------------------------------------------------------------------------
 Read:
-  A large AND E large, B/C/D ~1e-4 => REAL identity-specific bug.
-  A large but E ~1e-4           => FIRST-CALL artifact (C14 cell order).
-  C large but D ~1e-4           => block-table VALUE 0 is pad/skip.
-  all ~1e-4                      => both fine; try batch>1 / stride.
+  sweep jumps at X==T            => VALUE threshold == T.
+  contiguous-high ~1e-4          => CONTIGUITY trigger, not value.
+  contiguous-high LARGE          => VALUE threshold, not contiguity.
+  [pos]=63 large only at pos=0   => position-dependent.
 ------------------------------------------------------------------------
