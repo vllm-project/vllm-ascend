@@ -1,15 +1,12 @@
-python tests/standalone/fa3/test_fa3_graph_split_smallbatch.py 
-[W819 17:27:39.037329753 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_bt_stride.py 
+[W819 18:40:50.948179137 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 ========================================================================
-C10 flash-decode split workspace sweep  maxk=32768
+C11 block-table stride sweep  batch=128 kv=8 (non-split)
 ========================================================================
-         b1   b2   b3   b4   b8   b16  
-kv=1     OK    OK    OK    OK    OK    OK    
-kv=2     OK    OK    OK    OK    OK    OK    
-kv=4     OK    OK    OK    OK    OK    OK    
-kv=8     OK    OK    OK    OK    OK    OK    
+  msk=1024   w=256  r=32768  -> OK  [msk1024 w256 r32768] OK maxdiff=0.0002 (graph vs eager)
+  msk=32768  w=256  r=32768  -> OK  [msk32768 w256 r32768] OK maxdiff=0.0000 (graph vs eager)
+  msk=1024   w=8    r=32768  -> OK  [msk1024 w8 r32768] OK maxdiff=0.0000 (graph vs eager)
+  msk=1024   w=8    r=1024   -> OK  [msk1024 w8 r1024] OK maxdiff=0.0000 (graph vs eager)
 ========================================================================
-Predicted crash region (workspace overflow 2048*B > 4160, gate B*kv<=16):
-  kv=1: B>=3 (gate B<=16)   kv=2: B>=3 (B<=8)
-  kv=4: B=3,4 (B<=4)        kv=8: none (4096 fits; B>=3 gate off)
-If a CRASH leaves the device in a bad state, reset it before re-running.
+Expect: (a) WRONG, (b) OK, (c) CRASH, (d) OK
+If a CRASH leaves the device bad, reset it before re-running.
