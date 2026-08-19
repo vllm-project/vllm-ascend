@@ -67,3 +67,40 @@ def minimax_m3_sparse_attn(
         inner_precise=_SPARSE_ATTN_INNER_PRECISE,
     )
     output.copy_(out)
+
+
+@torch.no_grad()
+def minimax_m3_sparse_attn_decode(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+    topk_idx: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_kv_heads: int,
+    sm_scale: float,
+    output: torch.Tensor,
+    decode_query_len: int,
+    block_size: int = 128,
+) -> None:
+    """Run sparse decode through the AscendC sparse-attention operator."""
+    if q.shape[0] != seq_lens.shape[0] * decode_query_len:
+        raise ValueError("Decode query tokens must equal request count times decode_query_len")
+
+    key, value = _split_main_kv_cache(kv_cache)
+    query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)
+    out = torch.ops._C_ascend.npu_sparse_attention_score(
+        q,
+        key,
+        value,
+        topk_idx,
+        block_table,
+        select_num_idx=_select_num_idx_from_topk(topk_idx),
+        actual_seq_lengths=query_lens,
+        actual_seq_lengths_kv=seq_lens,
+        num_key_value_heads=num_kv_heads,
+        scale_value=sm_scale,
+        block_size=block_size,
+        top_k=topk_idx.shape[-1],
+        inner_precise=_SPARSE_ATTN_INNER_PRECISE,
+    )
+    output.copy_(out)
