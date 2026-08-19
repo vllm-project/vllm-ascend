@@ -122,7 +122,7 @@ class AscendSFABackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_type: str = "",
+        cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
@@ -457,6 +457,8 @@ class AscendSFAImpl(MLAAttentionImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    supports_mtp_with_cp_non_trivial_interleave_size = True
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None

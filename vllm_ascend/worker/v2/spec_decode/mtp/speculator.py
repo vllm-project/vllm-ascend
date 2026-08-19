@@ -39,6 +39,7 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
             draft_parallel_config = replace(
                 vllm_config.parallel_config,
                 prefill_context_parallel_size=1,
+                cp_kv_cache_interleave_size=1,
             )
             self._draft_attn_vllm_config = replace(
                 vllm_config,
@@ -64,7 +65,10 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         *args,
         **kwargs,
     ) -> torch.Tensor:
-        if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        if (
+            self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and not kwargs.get("is_profile", False)
+        ):
             assert isinstance(input_batch, AscendInputBatch)
             attn_metadata, slot_mappings = self._build_global_pcp_draft_inputs(
                 input_batch

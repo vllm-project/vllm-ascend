@@ -53,11 +53,6 @@ class AscendPCPManager(PCPManager):
                     "MRV2 PCP currently supports MTP with exactly one speculative "
                     "token only."
                 )
-            if cudagraph_mode != CUDAGraphMode.NONE:
-                raise NotImplementedError(
-                    "MRV2 PCP + MTP is currently supported in eager mode only."
-                )
-
         if cudagraph_mode.has_full_cudagraphs() or speculative_config is not None:
             vllm_config = copy(vllm_config)
         if cudagraph_mode.has_full_cudagraphs():
