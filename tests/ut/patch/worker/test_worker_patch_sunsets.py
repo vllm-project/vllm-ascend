@@ -11,6 +11,8 @@ from torch import nn
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import base_loader, utils
 
+pytest.importorskip("torch_npu")
+
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 
 
