@@ -25,7 +25,7 @@ def _make_moe_config():
     return moe_config
 
 
-def _make_ascend_config(mega_moe_max_tokens=65536, max_num_batched_tokens=8192):
+def _make_ascend_config(mega_moe_max_tokens=16, max_num_batched_tokens=8192):
     return SimpleNamespace(
         mega_moe_max_tokens=mega_moe_max_tokens,
         vllm_config=SimpleNamespace(
@@ -96,9 +96,9 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     get_symm_buffer.assert_called_once()
     assert get_symm_buffer.call_args.args[0] is mega_moe_device_group
     assert get_symm_buffer.call_args.kwargs["intermediate_hidden"] == 16
-    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 2048
+    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 4
     assert get_symm_buffer.call_args.kwargs["dispatch_quant_mode"] == 4
-    assert sym_buffer.num_max_tokens_per_rank == 0
+    assert sym_buffer.num_max_tokens_per_rank is None
 
     mega_moe.assert_called_once()
     mega_moe_kwargs = mega_moe.call_args.kwargs
@@ -121,9 +121,19 @@ def test_mega_moe_prepare_pads_to_common_token_count_and_crops_output():
     # Gate multistream overlap can select experts before prepare().
     torch.testing.assert_close(prepare_finalize.pad_and_split_input_ids(input_ids), input_ids)
 
-    with patch(
-        "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
-        SimpleNamespace(max_tokens_across_dp=6),
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+            SimpleNamespace(max_tokens_across_dp=6),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize.get_ascend_config",
+            return_value=_make_ascend_config(mega_moe_max_tokens=24),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize.get_mega_moe_group",
+            return_value=_make_mega_moe_group(),
+        ),
     ):
         prepare_output = prepare_finalize.prepare(hidden_states, router_logits)
 
@@ -153,9 +163,17 @@ def test_mega_moe_prepare_rejects_target_smaller_than_local_tokens():
     with (
         patch(
             "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
-            SimpleNamespace(max_tokens_across_dp=3),
+            SimpleNamespace(max_tokens_across_dp=5),
         ),
-        pytest.raises(ValueError, match="cannot be smaller than the local token count"),
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize.get_ascend_config",
+            return_value=_make_ascend_config(mega_moe_max_tokens=16),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize.get_mega_moe_group",
+            return_value=_make_mega_moe_group(),
+        ),
+        pytest.raises(ValueError, match="exceeds the symmetric buffer token capacity"),
     ):
         prepare_finalize.prepare(torch.randn(4, 8), torch.randn(4, 2))
 
@@ -170,7 +188,7 @@ def test_main_and_draft_mega_moe_backends_share_single_buffer():
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
-            return_value=_make_ascend_config(mega_moe_max_tokens=512),
+            return_value=_make_ascend_config(mega_moe_max_tokens=16),
         ),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
@@ -183,8 +201,8 @@ def test_main_and_draft_mega_moe_backends_share_single_buffer():
         draft_backend.fused_experts(fused_input)
 
     get_symm_buffer.assert_called_once()
-    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 128
-    assert sym_buffer.num_max_tokens_per_rank == 0
+    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 4
+    assert sym_buffer.num_max_tokens_per_rank is None
     assert mega_moe.call_count == 2
     assert all(call.kwargs["sym_buffer"] is sym_buffer for call in mega_moe.call_args_list)
 
@@ -198,8 +216,8 @@ def test_mega_moe_backend_rejects_buffer_reinitialization():
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
             side_effect=(
-                _make_ascend_config(mega_moe_max_tokens=512),
-                _make_ascend_config(mega_moe_max_tokens=1024),
+                _make_ascend_config(mega_moe_max_tokens=16),
+                _make_ascend_config(mega_moe_max_tokens=16),
             ),
         ),
         patch(
@@ -210,7 +228,7 @@ def test_mega_moe_backend_rejects_buffer_reinitialization():
         backend = MegaMoEBackend(_make_moe_config())
         backend._get_sym_buffer(fused_input, projected_hidden=16)
         with pytest.raises(RuntimeError, match="shared by the main and draft models"):
-            backend._get_sym_buffer(fused_input, projected_hidden=16)
+            backend._get_sym_buffer(fused_input, projected_hidden=8)
 
     get_symm_buffer.assert_called_once()
 
@@ -246,7 +264,7 @@ def test_mega_moe_backend_passes_positive_swiglu_limit_as_clamp():
         patch("vllm_ascend.ops.fused_moe.mega_moe._get_mega_moe_ops", return_value=(get_symm_buffer, mega_moe)),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_ascend_config",
-            return_value=_make_ascend_config(mega_moe_max_tokens=512),
+            return_value=_make_ascend_config(mega_moe_max_tokens=16),
         ),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
@@ -308,16 +326,16 @@ def test_mega_moe_backend_validates_fp4_packed_dimensions():
         w2_scale=torch.ones(2, 128, 1, 2, dtype=torch.uint8),
     )
 
-    key = MegaMoEBackend(_make_moe_config())._make_buffer_key(fused_input, buffer_tokens_per_rank=512)
+    key = MegaMoEBackend(_make_moe_config())._make_buffer_key(fused_input, buffer_tokens_per_rank=4)
 
     assert key.hidden_size == 128
     assert key.intermediate_hidden == 128
 
 
-def test_mega_moe_backend_rejects_input_over_configured_capacity():
+def test_mega_moe_backend_rejects_input_not_matching_configured_capacity():
     fused_input = _make_fused_input()
     backend = MegaMoEBackend(_make_moe_config())
-    with pytest.raises(ValueError, match="exceeds the configured capacity"):
+    with pytest.raises(ValueError, match="must match the symmetric buffer token capacity"):
         backend._make_buffer_key(fused_input, buffer_tokens_per_rank=3)
 
 

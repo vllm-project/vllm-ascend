@@ -422,6 +422,53 @@ def test_is_pd_decode_recompute_scheduler_enabled_without_config():
     assert utils.is_pd_decode_recompute_scheduler_enabled() is False
 
 
+def test_should_not_skip_dp_sync_when_mega_moe_can_be_selected():
+    from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.scheduler_config.max_num_batched_tokens = 120
+
+    with (
+        mock.patch("vllm_ascend.utils.is_hierarchical_communication_enabled", return_value=False),
+        mock.patch("vllm_ascend.utils.is_drafter_moe_model", return_value=True),
+        mock.patch("vllm_ascend.utils.get_potential_max_tokens", return_value=30),
+        mock.patch("vllm_ascend.utils.get_ascend_config") as mock_ascend_config,
+        mock.patch(
+            "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+            side_effect=(MoECommType.FUSED_MC2, MoECommType.MC2),
+        ) as mock_select,
+    ):
+        mock_ascend_config.return_value.recompute_scheduler_enable = False
+        assert utils.should_skip_allreduce_across_dp_group(vllm_config, is_draft_model=True) is False
+
+    assert mock_select.call_args_list == [
+        mock.call(30, vllm_config, is_draft_model=True),
+        mock.call(120, vllm_config, is_draft_model=True),
+    ]
+
+
+def test_should_skip_dp_sync_for_uneven_regular_mc2_batches():
+    from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.scheduler_config.max_num_batched_tokens = 120
+
+    with (
+        mock.patch("vllm_ascend.utils.is_hierarchical_communication_enabled", return_value=False),
+        mock.patch("vllm_ascend.utils.is_moe_model", return_value=True),
+        mock.patch("vllm_ascend.utils.get_potential_max_tokens", return_value=30),
+        mock.patch("vllm_ascend.utils.get_ascend_config") as mock_ascend_config,
+        mock.patch(
+            "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+            return_value=MoECommType.MC2,
+        ),
+    ):
+        mock_ascend_config.return_value.recompute_scheduler_enable = False
+        assert utils.should_skip_allreduce_across_dp_group(vllm_config) is True
+
+
 def test_is_pd_decode_recompute_scheduler_enabled_kv_producer():
     vllm_config = mock.MagicMock()
     vllm_config.kv_transfer_config = mock.MagicMock()

@@ -29,8 +29,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import compute_mega_moe_buffer_tokens_per_rank, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.distributed.parallel_state import get_mega_moe_group
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -330,13 +331,20 @@ class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
         quant_type=QuantType.NONE,
     ) -> MoEPrepareOutput:
         self.num_tokens = hidden_states.shape[0]
-        target_num_tokens = _EXTRA_CTX.max_tokens_across_dp
-        if target_num_tokens is None:
-            target_num_tokens = self.num_tokens
-        if target_num_tokens < self.num_tokens:
+        ascend_config = get_ascend_config()
+        target_num_tokens = compute_mega_moe_buffer_tokens_per_rank(
+            ascend_config.mega_moe_max_tokens,
+            ascend_config.vllm_config.scheduler_config.max_num_batched_tokens,
+            get_mega_moe_group().world_size,
+        )
+        max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
+        if max_tokens_across_dp is None:
+            max_tokens_across_dp = self.num_tokens
+        if max_tokens_across_dp > target_num_tokens or self.num_tokens > target_num_tokens:
             raise ValueError(
-                "MegaMoE target token count cannot be smaller than the local "
-                f"token count: target={target_num_tokens}, local={self.num_tokens}."
+                "MegaMoE input exceeds the symmetric buffer token capacity: "
+                f"capacity={target_num_tokens}, max_across_dp={max_tokens_across_dp}, "
+                f"local={self.num_tokens}."
             )
 
         self.padded_num_tokens = target_num_tokens
