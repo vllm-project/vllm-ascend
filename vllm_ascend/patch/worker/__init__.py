@@ -24,7 +24,6 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
-import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
@@ -39,13 +38,6 @@ else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 
-# torchair/npugraph_ex is only available on NPU; silently skip when missing
-# so that CPU-only environments (e.g. UT runners without torch_npu) can still
-# import this module without crashing.
-try:  # noqa: SIM105
-    import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
-except ImportError:
-    pass
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
