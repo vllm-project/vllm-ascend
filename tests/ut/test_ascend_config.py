@@ -421,6 +421,27 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_ignores_legacy_dynamic_dump_config(self, mock_fix_incompatible_config):
+        """Legacy additional_config.dynamic_dump_config is dropped; DFX uses JSON only."""
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "dynamic_dump_config": {
+                "spec_acceptance_window": 20,
+                "dynamic_dump_cooldown_seconds": 120,
+                "dynamic_dump_max_times": 3,
+            }
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertFalse(hasattr(ascend_config, "dynamic_dump_config"))
+        # Live DFX knobs come only from DFX JSON / defaults — not dynamic_dump_config.
+        self.assertEqual(ascend_config.dfx_config.detector_get("spec_acceptance", "window"), 10)
+        self.assertEqual(ascend_config.dfx_config.dump_max_times(), 0)
+        self.assertEqual(ascend_config.dfx_config.dump_cooldown_seconds(), 300)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_recreates_for_new_vllm_config(self, mock_fix_incompatible_config):
         first_vllm_config = VllmConfig()
         first_vllm_config.additional_config = {
