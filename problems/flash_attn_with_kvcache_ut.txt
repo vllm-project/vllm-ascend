@@ -1,25 +1,51 @@
-python tests/standalone/fa3/test_fa3_graph_flashdecode_diverge.py 
-[W819 21:31:19.202803677 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py 
+[W819 22:14:30.925403226 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C13 flashDecodeFlag divergence  short=16  long=16384
+C14 block_table reorder / -1 sentinel   kv=2048  nblk=16
 ========================================================================
-[W819 21:31:24.510961255 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[dump] batch=1 kv=16          maxKvSeqlen=16  batch=1  maxNumBlocksPerBatch=128  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=0  numSplits=1  splitLseTotalSize=0  splitOTotalSize=0  totalSplitNodeNum=0  needCoreNum=0
-[dump] batch=1 kv=1024        maxKvSeqlen=1024  batch=1  maxNumBlocksPerBatch=128  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=1  numSplits=1  splitLseTotalSize=256  splitOTotalSize=32768  totalSplitNodeNum=8  needCoreNum=16
-[dump] batch=1 kv=16384       maxKvSeqlen=16384  batch=1  maxNumBlocksPerBatch=128  firstBatchTaskNum=8  totalTaskNum=8  flashDecodeFlag=1  numSplits=1  splitLseTotalSize=432  splitOTotalSize=55296  totalSplitNodeNum=8  needCoreNum=20
-------------------------------------------------------------------------
-[ok ] eager(long meta)   vs manual ref : 0.000121
-[x  ] eager(short meta)  vs manual ref : 0.000121
-[x  ] eager(1024 meta)   vs manual ref : 0.000121
-[x  ] graph(short meta)  vs manual ref : 0.000121
-------------------------------------------------------------------------
-Read:
-  flashDecodeFlag toggles 0->1 AND short/1024 cells LARGE (>~1e-1)
-      => CONFIRMED: graph bakes the wrong (or stale) split plan.
-  short cell LARGE but 1024 cell ~1e-1 => non-split path is broken;
-      force graph to split.
-  1024 cell LARGE but short cell ~1e-1 => split tiling staleness
-      (needCoreNum/launchBlockDim mismatch) is the bug.
-  all cells ~1e-1 => split == non-split numerically; look elsewhere.
-------------------------------------------------------------------------
+[W819 22:14:36.451556313 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+Traceback (most recent call last):
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py", line 230, in <module>
+    main()
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py", line 183, in main
+    out_reorder = _run_fa3(q, k, v, seq, cu_q, page_reorder, meta)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_blocktable_reorder.py", line 109, in _run_fa3
+    return _fa3_kvcache(
+           ^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/flash_attn_npu_3/flash_attn_npu_interface.py", line 1091, in flash_attn_with_kvcache
+    out, softmax_lse, *rest = _flash_attn_forward(
+                              ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 698, in __call__
+    return self._opoverload(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_ops.py", line 819, in __call__
+    return self._op(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/autograd.py", line 112, in autograd_impl
+    result = forward_no_grad(*args, Metadata(keyset, keyword_only_args))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/autograd.py", line 41, in forward_no_grad
+    result = op.redispatch(keyset & _C._after_autograd_keyset, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_ops.py", line 826, in redispatch
+    return self._handle.redispatch_boxed(keyset, *args, **kwargs)  # type: ignore[return-value]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 347, in backend_impl
+    result = self._backend_fns[device_type](*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_compile.py", line 54, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_dynamo/eval_frame.py", line 1181, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 382, in wrapped_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/flash_attn_npu_3/flash_attn_npu_interface.py", line 135, in _flash_attn_forward
+    out, softmax_lse, out_accum, softmax_lse_accum = flash_attn_npu_3.fwd(
+                                                     ^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: page_table must have dtype int32
+[ERROR] 2026-08-19-22:14:37 (PID:173502, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
