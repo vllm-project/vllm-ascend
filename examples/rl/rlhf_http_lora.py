@@ -80,8 +80,7 @@ In a real RLHF setup (e.g., with TRL or OpenRLHF), the trainer would:
         save_lora_adapter(lora_state_dict, "/tmp/lora_checkpoint")
 
         # 4. Push the updated LoRA onto the same adapter name in place
-        load_lora_adapter(base_url, lora_name, "/tmp/lora_checkpoint",
-                          load_inplace=True)
+        load_lora_adapter(base_url, lora_name, "/tmp/lora_checkpoint", load_inplace=True)
 
         # The server now serves requests with the updated LoRA
         # No unload, no pause/resume, no HCCL broadcast needed
@@ -220,8 +219,7 @@ def load_lora_adapter(
     }
     if load_inplace:
         payload["load_inplace"] = True
-    print(f"[trainer] Loading LoRA '{lora_name}' from {lora_path} "
-          f"(load_inplace={load_inplace}) ...")
+    print(f"[trainer] Loading LoRA '{lora_name}' from {lora_path} (load_inplace={load_inplace}) ...")
     response = requests.post(url, json=payload, timeout=120)
     response.raise_for_status()
     print(f"[trainer] LoRA '{lora_name}' loaded successfully")
@@ -269,8 +267,7 @@ class LoRAServer:
         # If a server is already serving this port, reuse it.
         try:
             if requests.get(f"{base_url}/health", timeout=5).status_code == 200:
-                print(f"[server] using an existing server at {base_url}",
-                      flush=True)
+                print(f"[server] using an existing server at {base_url}", flush=True)
                 self.external = True
                 self.proc = None
                 return
@@ -283,12 +280,17 @@ class LoRAServer:
         # endpoints.
         env["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
         command = [
-            "vllm", "serve", model,
+            "vllm",
+            "serve",
+            model,
             "--enforce-eager",
             "--enable-lora",
-            "--max-lora-rank", "8",
-            "--max-cpu-loras", "4",
-            "--port", str(port),
+            "--max-lora-rank",
+            "8",
+            "--max-cpu-loras",
+            "4",
+            "--port",
+            str(port),
         ]
         print(f"[server] starting: {' '.join(command)}", flush=True)
         self.proc = subprocess.Popen(command, env=env)
@@ -303,15 +305,12 @@ class LoRAServer:
                 # serving this port, use it instead of failing.
                 try:
                     if requests.get(health_url, timeout=5).status_code == 200:
-                        print(f"[server] using an existing server at {base_url}",
-                              flush=True)
+                        print(f"[server] using an existing server at {base_url}", flush=True)
                         self.external = True
                         return
                 except requests.exceptions.RequestException:
                     pass
-                raise RuntimeError(
-                    f"vLLM server exited with status {self.proc.returncode}"
-                )
+                raise RuntimeError(f"vLLM server exited with status {self.proc.returncode}")
             try:
                 if requests.get(health_url, timeout=5).status_code == 200:
                     print(f"[server] ready: {health_url}", flush=True)
@@ -320,9 +319,7 @@ class LoRAServer:
                 pass
             time.sleep(2)
         self.stop()
-        raise TimeoutError(
-            f"vLLM server did not become ready within {SERVER_START_TIMEOUT}s"
-        )
+        raise TimeoutError(f"vLLM server did not become ready within {SERVER_START_TIMEOUT}s")
 
     def stop(self) -> None:
         if self.external or self.proc.poll() is not None:
@@ -386,14 +383,10 @@ def main():
         try:
             unload_lora_adapter(BASE_URL, POLICY_NAME, ignore_missing=True)
         except requests.exceptions.ConnectionError as exc:
-            raise SystemExit(
-                f"Could not reach the vLLM server at {BASE_URL}."
-            ) from exc
+            raise SystemExit(f"Could not reach the vLLM server at {BASE_URL}.") from exc
 
         # ── Step 1: Generate WITHOUT LoRA (baseline) ───────────────────
-        baseline_outputs = generate_and_print(
-            client, "Step 1: Generating WITHOUT LoRA (baseline)", MODEL_NAME
-        )
+        baseline_outputs = generate_and_print(client, "Step 1: Generating WITHOUT LoRA (baseline)", MODEL_NAME)
 
         # ── Step 2: Deploy the initial policy (Alice under a fixed name) ──
         load_lora_adapter(BASE_URL, POLICY_NAME, alice_path)
@@ -450,9 +443,7 @@ def main():
         assert alice_outputs[identity_idx] != baseline_outputs[identity_idx], (
             "Deploying Alice under 'policy' did not change the output vs baseline"
         )
-        assert bob_outputs[identity_idx] != alice_outputs[identity_idx], (
-            "Inplace push Alice → Bob did not take effect"
-        )
+        assert bob_outputs[identity_idx] != alice_outputs[identity_idx], "Inplace push Alice → Bob did not take effect"
         assert rollback_outputs[identity_idx] != bob_outputs[identity_idx], (
             "Inplace push Bob → Alice (rollback) did not take effect"
         )
