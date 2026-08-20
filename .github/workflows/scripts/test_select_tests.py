@@ -287,6 +287,16 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
     select_tests._dedup_groups(groups)
     assert groups[select_tests._DEFAULT_KEY] == ["b", "a"]
 
+    groups.update(
+        {
+            (1, select_tests.NpuType.A2): ["a2.py"],
+            (2, select_tests.NpuType.A3): ["a3.py"],
+        }
+    )
+    assert select_tests._filter_groups_by_npu_types(groups, {select_tests.NpuType.A3}) == {
+        (2, select_tests.NpuType.A3): ["a3.py"]
+    }
+
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(
@@ -795,12 +805,16 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     rel_ut_file = "tests/ut/test_ut.py"
     rel_missing = "tests/e2e/pull_request/one_card/does_not_exist.py"
 
-    def run_explicit(*paths):
+    def run_explicit(*paths, npu_types=None):
         capsys.readouterr()
+        argv = ["select_tests.py", "--config", str(config_path)]
+        if npu_types:
+            argv.extend(["--npu-types", *npu_types])
+        argv.extend(["--explicit-e2e-tests", *paths])
         monkeypatch.setattr(
             sys,
             "argv",
-            ["select_tests.py", "--config", str(config_path), "--explicit-e2e-tests", *paths],
+            argv,
         )
         select_tests.main()
         captured = capsys.readouterr()
@@ -825,6 +839,11 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     assert npu_keys == {("a2", 1), ("a3", 2), ("a3", 4), ("a3", 8)}
     selected = {t for g in test_groups for t in g["tests"].split()}
     assert selected == {rel_one_a, rel_two_a, rel_four_a, rel_eight_a}
+
+    # 2b. NPU-type filtering removes CPU/A2-style groups at output time.
+    test_groups, _, _ = run_explicit(rel_one_a, rel_two_a, rel_four_a, npu_types=["a3"])
+    assert {(g["npu_type"], g["num_npus"]) for g in test_groups} == {("a3", 2), ("a3", 4)}
+    assert {t for g in test_groups for t in g["tests"].split()} == {rel_two_a, rel_four_a}
 
     # 3. _310p suffix overrides the default runner.
     test_groups, _, _ = run_explicit(rel_one_310p)

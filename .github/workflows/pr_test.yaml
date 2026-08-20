@@ -42,7 +42,6 @@ concurrency:
 
 jobs:
   pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -191,14 +190,14 @@ jobs:
 
   select-tests:
     needs: pre-commit
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
-      csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
+      csrc_cache_target_ids: ${{ steps.scope.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
       has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
       test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
@@ -277,15 +276,21 @@ jobs:
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
-      - name: Select tests based on changed files
+      - name: Select focused A3 accuracy diagnostics
         id: scope
         if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}'
+            --npu-types a3 \
+            --explicit-e2e-tests \
+              tests/e2e/pull_request/two_card/test_shared_expert_dp.py \
+              tests/e2e/pull_request/two_card/test_shared_expert_dp_deterministic.py \
+              tests/e2e/pull_request/two_card/test_shared_expert_dp_diagnostics.py \
+              tests/e2e/pull_request/four_card/test_graph_mode.py \
+              tests/e2e/pull_request/four_card/test_graph_mode_deterministic.py \
+              tests/e2e/pull_request/four_card/test_graph_mode_diagnostics.py
 
       - name: Set no-tests output when source paths unchanged
         id: noop
@@ -300,7 +305,8 @@ jobs:
 
       - name: Select A5 tests
         id: scope-a5
-        if: steps.filter.outputs.src == 'true'
+        # Temporarily disabled while this PR validates A3 560T only.
+        if: ${{ false }}
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           git fetch origin ${{ github.base_ref }}
@@ -310,36 +316,22 @@ jobs:
             --modules a5 \
             --runner-override a5_x4
 
-      - name: Set no-tests output for A5 when source paths unchanged
+      - name: Set no-tests output for disabled A5 suite
         id: noop-a5
-        if: steps.filter.outputs.src != 'true'
+        if: ${{ always() }}
         run: |
           {
             echo "has_tests=false"
             echo "test_groups=[]"
           } >> "$GITHUB_OUTPUT"
           
-      - name: Add upstream test cache target
-        id: cache-targets
-        env:
-          SELECTED_TARGET_IDS: ${{ steps.scope.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-
-          target_ids = json.loads(os.environ["SELECTED_TARGET_IDS"])
-          target_ids = sorted(set(target_ids) | {"a2-arm64-ubuntu"})
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              print("target_ids=" + json.dumps(target_ids, separators=(",", ":")), file=output)
-          PY
-
   ensure-csrc-cache:
     needs: select-tests
+    # Temporarily run A3 validation without requiring the ready label.
     if: >-
       ${{
         needs.select-tests.result == 'success' &&
-        (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5'))
+        needs.select-tests.outputs.has_tests == 'true'
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
@@ -358,10 +350,10 @@ jobs:
         needs.pre-commit.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.select-tests.outputs.has_tests == 'true' &&
-        contains(github.event.pull_request.labels.*.name, 'ready') &&
         needs.ensure-csrc-cache.result == 'success'
       }}
     strategy:
+      fail-fast: false
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
@@ -379,13 +371,8 @@ jobs:
       - pre-commit
       - select-tests
       - ensure-csrc-cache
-    if: >-
-      ${{
-        needs.pre-commit.result == 'success' &&
-        needs.select-tests.result == 'success' &&
-        contains(github.event.pull_request.labels.*.name, 'ready') &&
-        needs.ensure-csrc-cache.result == 'success'
-      }}
+    # Temporarily disabled while PR tests validate the A3 560T runners only.
+    if: ${{ false }}
     strategy:
       matrix:
         vllm_version:
@@ -400,9 +387,9 @@ jobs:
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
   generate-hitest:
+    if: ${{ false }}
     name: Generate hitest recommendations
     needs: select-tests
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_manual-hitest.yaml
     secrets:
       HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
@@ -410,6 +397,7 @@ jobs:
       HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
 
   recommend-tests-from-coverage:
+    if: ${{ false }}
     name: Recommend tests from coverage
     runs-on: linux-amd64-cpu-8-hk
     continue-on-error: true
@@ -492,7 +480,7 @@ jobs:
           
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+    if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' }}
     strategy:
       matrix:
         vllm_version:
@@ -513,9 +501,6 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
-        env:
-          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
-          HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           set -euo pipefail
 
@@ -553,11 +538,6 @@ jobs:
           fi
 
           if [ "${HAS_TESTS}" = "true" ]; then
-            if [ "${HAS_READY_LABEL}" != "true" ]; then
-              echo "::error::Selected tests are required; add the ready label"
-              exit 1
-            fi
-
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${TESTS_RESULT}" != "success" ]; then
@@ -569,9 +549,7 @@ jobs:
           if [ "${HAS_TESTS_A5}" = "true" ]; then
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
-              echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
-            elif [ "${TESTS_A5_RESULT}" != "success" ]; then
+            if [ "${TESTS_A5_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
               exit 1
             fi
@@ -583,9 +561,9 @@ jobs:
   # failure analyze & upload reports
   
   analyze-failure-report:
+    if: ${{ false }}
     name: Analyze failure report
     needs: [run-selected-tests, recommend-tests-from-coverage]
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/_analyze_failure.yaml
     with:
       log_artifact_pattern: selected-test-logs-*
