@@ -1,21 +1,39 @@
 python tests/standalone/fa3/test_fa3_graph_capture_replay.py 
-[W820 15:05:10.766005280 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[W820 15:44:45.216682177 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
 C28 capture+replay   batch=4 width=128 maxk=16384
 ========================================================================
-[W820 15:05:15.055206303 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[W820 15:44:50.483325622 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
 [capture] torch.npu.graph begin
 [capture] done
 ------------------------------------------------------------------------
 [T1] replay, no refresh (capture-time buffers)
-Traceback (most recent call last):
-  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_capture_replay.py", line 245, in <module>
-    main()
-  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_capture_replay.py", line 190, in main
-    _report("T1", out, q, k, v, bt, seqlens, batch)
-  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_capture_replay.py", line 113, in _report
-    d = _max_abs_diff(out[b], ref[b])
-                      ~~~^^^
-TypeError: 'NoneType' object is not subscriptable
-[ERROR] 2026-08-20-15:05:18 (PID:182337, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+    [T1] row 0 seq=  512 : 0.987314  <-- WRONG
+    [T1] row 1 seq= 1024 : 0.968460  <-- WRONG
+    [T1] row 2 seq= 2048 : 0.914800  <-- WRONG
+    [T1] row 3 seq= 4096 : 0.887976  <-- WRONG
+------------------------------------------------------------------------
+[T2] refresh on current stream, then replay
+    [T2] row 0 seq=  512 : 0.000957
+    [T2] row 1 seq= 1024 : 0.000614
+    [T2] row 2 seq= 2048 : 0.000382
+    [T2] row 3 seq= 4096 : 0.000249
+------------------------------------------------------------------------
+[T3] refresh on side stream + wait_stream, then replay
+    [T3] row 0 seq=  512 : 0.000957
+    [T3] row 1 seq= 1024 : 0.000614
+    [T3] row 2 seq= 2048 : 0.000382
+    [T3] row 3 seq= 4096 : 0.000249
+------------------------------------------------------------------------
+[T4] second batch, same-stream refresh, replay
+    [T4] row 0 seq=  256 : 0.001361
+    [T4] row 1 seq=  768 : 0.000927
+    [T4] row 2 seq= 1536 : 0.000553
+    [T4] row 3 seq= 3072 : 0.000344
+------------------------------------------------------------------------
+Read:
+  T1 wrong + T2/T3/T4 correct -> stale first-token is the bug (ordering).
+  T2/T3 wrong                 -> graph capture/replay itself broken.
+  T3 wrong, T2 correct        -> side-stream refresh races replay.
+------------------------------------------------------------------------
