@@ -633,7 +633,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 assert len(self.draft_attn_groups) > 0
                 builder = self.draft_attn_groups[0].get_metadata_builder()
-                kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -641,7 +640,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if self.use_compress:
                         extra_attn_metadata_args.update(
                             common_ratio_to_sas_metadata=dict(),
-                            block_size=kv_cache_spec.block_size,
                         )
                     # Set the real slot_mapping.
                     slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
@@ -1724,11 +1722,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         attn_metadata_builder = attn_group.get_metadata_builder()
 
-        extra_attn_metadata_args = {}
+        extra_attn_metadata_args: dict[str, Any] = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
                 common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
         if dcp_manager is not None:
             dcp_manager.prepare_spec_decode_drafting_cp_metadata(
@@ -2174,7 +2171,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.use_compress:
                 extra_attn_metadata_args = dict(
                     common_ratio_to_sas_metadata=dict(),
-                    block_size=attn_group.kv_cache_spec.block_size,
                 )
             if self.method == "dspark":
                 gid = attn_group.kv_cache_group_id
