@@ -200,41 +200,45 @@ class MooncakeBackend(Backend):
             if failed_count:
                 error_codes = sorted(set(failed_codes))
                 logger.error(
-                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
+                    "event=kv pool backend put failed backend=mooncake "
+                    "failed_keys=%d key_count=%d error_codes=%s reason=backend_returned_error "
+                    "next_action=check_memory_and_store_capacity",
                     failed_count,
                     len(keys),
                     error_codes,
                 )
-                logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
+                logger.debug("event=kv pool backend put result key_count=%d result_count=%d", len(keys), len(res))
+                logger.debug("event=kv pool backend put keys sample_keys=%s", keys[:3])
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
+                "event=kv pool backend put failed backend=mooncake "
+                "failed_keys=%d key_count=%d error_type=%s reason=%s "
+                "next_action=check_store_state_and_memory",
                 len(keys),
                 len(keys),
                 type(e).__name__,
                 e,
             )
-            logger.debug("Failed to put key details. keys=%s", keys)
+            logger.debug("event=kv pool backend put keys sample_keys=%s", keys[:3])
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
             logger.error(
-                "Failed to get %d keys out of %d. Store is not initialized; "
-                "call put() first to trigger initialization.",
+                "event=kv pool backend get failed backend=mooncake "
+                "failed_keys=%d key_count=%d reason=store_not_initialized "
+                "next_action=call_put_to_initialize_store",
                 len(keys),
                 len(keys),
             )
-            logger.debug("Failed to get key details. keys=%s", keys)
             return
         assert self.store is not None
         logger.debug(
-            "MooncakeBackend.get enter keys=%d sample_keys=%s",
+            "event=kv pool backend get started backend=mooncake key_count=%d",
             len(keys),
-            keys[:3],
         )
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
@@ -244,25 +248,29 @@ class MooncakeBackend(Backend):
             error_codes = sorted(set(failed_codes))
             if failed_count:
                 logger.error(
-                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
+                    "event=kv pool backend get failed backend=mooncake "
+                    "failed_keys=%d key_count=%d error_codes=%s reason=backend_returned_error "
+                    "next_action=check_key_existence_and_memory_state",
                     failed_count,
                     len(keys),
                     error_codes,
                 )
-                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res_list)
+                logger.debug("event=kv pool backend get keys sample_keys=%s", keys[:3])
             for i, value in enumerate(res_list):
                 if value > 0:
                     res_list[i] = 0
             return res_list
         except Exception as e:
             logger.error(
-                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
+                "event=kv pool backend get failed backend=mooncake "
+                "failed_keys=%d key_count=%d error_type=%s reason=%s "
+                "next_action=check_store_state_and_network",
                 len(keys),
                 len(keys),
                 type(e).__name__,
                 e,
             )
-            logger.debug("Failed to get key details. keys=%s", keys)
+            logger.debug("event=kv pool backend get keys sample_keys=%s", keys[:3])
             return None
 
 

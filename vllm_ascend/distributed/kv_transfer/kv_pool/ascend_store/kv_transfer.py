@@ -481,7 +481,15 @@ class KVTransferThread(threading.Thread):
                 direction,
             )
             if res != 0:
-                logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
+                logger.error(
+                    "event=kv pool batch copy failed operation=%s "
+                    "status_code=%d block_count=%d bytes=%d reason=batch_copy_returned_error "
+                    "next_action=check_memcache_store_and_transfer_path",
+                    dir_name,
+                    res,
+                    len(split_gvas),
+                    int(split_sizes.sum()),
+                )
                 return res
         return 0
 
@@ -510,10 +518,11 @@ class KVTransferThread(threading.Thread):
             except Exception as e:
                 self._fatal_error = e
                 logger.error(
-                    "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
+                    "event=kv pool transfer thread failed task_id=%s "
+                    "reason=%s error_type=%s next_action=check_thread_state_and_request_processing",
                     self.name,
-                    type(e).__name__,
                     e,
+                    type(e).__name__,
                 )
                 return
 
@@ -539,8 +548,10 @@ class KVTransferThread(threading.Thread):
                 exists_list[index] = value == 1
             return exists_list
         except Exception as e:
-            logger.error(
-                "Remote connection failed in lookup. type=%s, error=%s. Check network and remote store.",
+            logger.exception(
+                "event=kv pool exists failed operation=exists "
+                "reason=backend_exists_exception error_type=%s error=%s "
+                "next_action=check_backend_exists_implementation",
                 type(e).__name__,
                 e,
             )
@@ -682,7 +693,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             try:
                 self.worker._store_kv_tp_mismatch(req_meta)
             except Exception:
-                logger.exception("Failed to store KV cache for TP-mismatch request %s", req_id)
+                logger.exception(
+                    "event=kv pool save failed req_id=%s "
+                    "reason=tp_mismatch_store_exception error_code=KV_POOL_SAVE_FAILED",
+                    req_id,
+                )
             finally:
                 remaining = self.get_stored_request_count(req_id)
                 if remaining == 0:
@@ -703,7 +718,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
             self._handle_stored_request(req_meta)
         except Exception:
-            logger.exception("Failed to store KV cache for request %s", req_id)
+            logger.exception(
+                "event=kv pool save failed req_id=%s "
+                "reason=store_exception error_code=KV_POOL_SAVE_FAILED",
+                req_id,
+            )
         finally:
             remaining = self.dec_stored_request(req_id) if tracked_request else None
             if tracked_request and remaining == 0:
@@ -721,7 +740,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         try:
             store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
         except AssertionError as exc:
-            logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_id, exc)
+            logger.debug("Skip KV pool store mask for unaligned request %s: %s", req_id, exc)
             store_masks = None
         load_spec = req_meta.load_spec
         skip_start = load_spec.vllm_cached_tokens if load_spec is not None else 0
@@ -925,7 +944,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             load_spec = req_meta.load_spec
             req_id = req_meta.req_id
             if load_spec is None:
-                logger.error("KV pool async recv request %s has no load spec; skip load.", req_id)
+                logger.error(
+                    "event=kv pool load spec missing req_id=%s "
+                    "reason=missing_load_spec error_code=KV_POOL_LOAD_SPEC_MISSING "
+                    "next_action=check_scheduler_connector_metadata",
+                    req_id,
+                )
                 self.set_finished_request(req_id)
                 return
 
@@ -1235,7 +1259,10 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
 
     def _wait_for_save(self, layer_id: int) -> None:
         while not self.layer_save_finished_events[layer_id].wait(timeout=10):
-            logger.info("Layerwise %d save wait timed out, keep waiting before load", layer_id)
+            logger.info(
+                "event=kv pool layer save waiting layer_id=%d",
+                layer_id,
+            )
         logger.debug("Key-based layer save event cleared: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].clear()
 
@@ -1249,7 +1276,10 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
 
         if data.attention_start_gate is not None:
             while not data.attention_start_gate.wait(timeout=10):
-                logger.info("Layerwise %d load waits for attention compute start", layer_id)
+                logger.info(
+                    "event=kv pool attention start waiting layer_id=%d",
+                    layer_id,
+                )
 
         key_list = []
         addr_list = []
@@ -1552,7 +1582,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if wait_for_save is not None:
             while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+                logger.info(
+                    "event=kv pool layer save waiting layer_id=%d",
+                    wait_for_save,
+                )
             # Non-saving TP ranks have no D2H task to synchronize the event.
             # Their CPU save-finished signal only means the event was recorded;
             # wait for the NPU work before reusing the local HBM buffer.
@@ -1588,7 +1621,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if attention_start_gate is not None:
             while not attention_start_gate.wait(timeout=10):
-                logger.info("Layerwise %d load waits for attention compute start", layer_id)
+                logger.info(
+                    "event=kv pool attention start waiting layer_id=%d",
+                    layer_id,
+                )
 
         all_load_keys: list[str] = []
         all_req_ids: set[str] = set()
