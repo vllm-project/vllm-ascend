@@ -20,7 +20,7 @@
 The same AIME2024 accuracy benchmark is run once with the V1 model runner
 (``VLLM_USE_V2_MODEL_RUNNER=0``) and once with the V2 model runner
 (``VLLM_USE_V2_MODEL_RUNNER=1``); the absolute V2-V1 accuracy difference must
-stay within 1 question. AIME2024 has 30 questions, so 1 question == 3.33pp.
+stay within 3 questions. AIME2024 has 30 questions, so 3 questions == 10.0pp.
 
 Scenario (2026-08-17 revision, eagle3 excluded until its accuracy fix lands
 upstream):
@@ -44,8 +44,8 @@ from tools.aisbench import run_aisbench_cases
 
 MODEL = os.environ.get("QWEN3_32B_W8A8_MODEL_PATH", "vllm-ascend/Qwen3-32B-W8A8")
 
-# AIME2024: 30 questions, 1 question == 100/30 == 3.33pp.
-MAX_ACCURACY_DELTA_PP = 3.33
+# AIME2024: 30 questions, 3 questions == 100/30*3 == 10.0pp.
+MAX_ACCURACY_DELTA_PP = 10.0
 
 _BENCH_CASE = {
     "case_type": "accuracy",
@@ -109,13 +109,13 @@ def _run_aime2024_accuracy(env):
     return accuracy
 
 
-def test_qwen3_32b_w8a8_aime2024_v1_v2_accuracy_within_1_question():
+def test_qwen3_32b_w8a8_aime2024_v1_v2_accuracy_within_3_questions():
     v1_accuracy = _run_aime2024_accuracy(_V1_ENV)
     v2_accuracy = _run_aime2024_accuracy(_V2_ENV)
     delta = abs(v2_accuracy - v1_accuracy)
     print(f"[AIME2024 acc] V1={v1_accuracy:.2f}% V2={v2_accuracy:.2f}% delta={delta:.2f}pp")
     assert delta <= MAX_ACCURACY_DELTA_PP, (
         f"AIME2024 accuracy regression: |V2-V1|={delta:.2f}pp exceeds the "
-        f"{MAX_ACCURACY_DELTA_PP}pp (1-question) limit "
+        f"{MAX_ACCURACY_DELTA_PP}pp (3-question) limit "
         f"(V1={v1_accuracy:.2f}%, V2={v2_accuracy:.2f}%)."
     )

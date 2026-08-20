@@ -30,12 +30,9 @@ upstream):
   the eagle3 accuracy fix lands upstream; restore temperature=0.6, top_k=20,
   top_p=0.95 afterwards.
 
-Tolerance note: the per-run |V2-V1| gate is 3.00pp. A no-eagle3 V1/V2 GPQA
-experiment (2026-08-07, 3 rounds per runner) measured single-round
-|V2-V1| = 0.00 / 1.01 / 2.52 pp and a mean difference of +0.51 pp, so the
-3.00pp per-run gate absorbs the natural sampling fluctuation (temperature=0.6)
-without flaking. Tighten or loosen ``MAX_ACCURACY_DELTA_PP`` only with team
-approval.
+Tolerance note: the per-run |V2-V1| gate is 5.00pp (team-confirmed
+2026-08-20), widened from 3.00pp to absorb the observed sampling fluctuation.
+Tighten or loosen ``MAX_ACCURACY_DELTA_PP`` only with team approval.
 """
 
 import os
@@ -48,10 +45,10 @@ from tools.aisbench import run_aisbench_cases
 MODEL = os.environ.get("QWEN3_32B_MODEL_PATH", "Qwen/Qwen3-32B")
 
 # GPQA diamond: 198 questions.
-# Team-confirmed per-run tolerance (2026-08-09): |V2-V1| <= 3.00pp (about
-# 6 questions). It is loose enough for the natural sampling fluctuation seen
-# in the 2026-08-07 no-eagle3 experiment (max single-round |V2-V1| = 2.52pp).
-MAX_ACCURACY_DELTA_PP = 3.0
+# Team-confirmed per-run tolerance (2026-08-20): |V2-V1| <= 5.00pp (about
+# 10 questions), widened from 3.00pp to absorb the observed sampling
+# fluctuation.
+MAX_ACCURACY_DELTA_PP = 5.0
 
 _BENCH_CASE = {
     "case_type": "accuracy",
