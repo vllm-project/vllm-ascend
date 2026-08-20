@@ -500,8 +500,10 @@ def quant_apply_mlp(
             if use_mxfp_quant:
                 gmm1_kwargs.update(
                     {
-                        "scale_dtype": torch_npu.float8_e8m0fnu,
-                        "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
+                        "scale_dtype": scale_type,
+                        "per_token_scale_dtype": per_token_scale_type,
+                        "x_dtype": act_quant_type,
+                        "weight_dtype": weight_quant_type,
                         "output_dtype": torch.bfloat16,
                     }
                 )
@@ -518,7 +520,9 @@ def quant_apply_mlp(
                 gate, up = hidden_states.chunk(2, dim=-1)
                 approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
                 hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
-                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                hidden_states, swiglu_out_scale = DeviceOperator.npu_dynamic_quant(
+                    hidden_states, act_quant_type=act_quant_type, use_mxfp_quant=use_mxfp_quant
+                )
             elif is_swigluoai_uninterleave:
                 if use_mxfp_quant:
                     hidden_states, swiglu_out_scale = _swiglu_oai_dynamic_mx_quant(
