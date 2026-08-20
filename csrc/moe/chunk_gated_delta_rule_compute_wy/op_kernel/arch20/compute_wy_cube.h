@@ -25,12 +25,18 @@ using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, 
 
 // GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
 // Doubling applies U/W separately so N <= MAX_HEAD (no stacked 2N-wide staging).
-constexpr uint32_t WY_CUBE_MAX_HEAD = 64;
+// 128 is UB-safe again since the kernel solves W and U in two passes (one RHS
+// resident at a time) instead of keeping K,V,Kβ fp32 chunks live together.
+constexpr uint32_t WY_CUBE_MAX_HEAD = 128;
 constexpr uint32_t WY_CUBE_CHUNK = 64;
 constexpr uint32_t WY_CUBE_STAGING_A_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
 constexpr uint32_t WY_CUBE_STAGING_B_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
 constexpr uint32_t WY_CUBE_STAGING_A_OFF = 0;
 constexpr uint32_t WY_CUBE_STAGING_B_OFF = WY_CUBE_STAGING_A_BYTES;
+// Per-core fp32 A-snapshot slot: the two-pass solve parks A here between passes
+// (UB is too tight at head dim 128 to keep a second 64x64 fp32 copy resident).
+constexpr uint32_t WY_CUBE_SNAP_BYTES = WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float);
+constexpr uint32_t WY_CUBE_SNAP_OFF = WY_CUBE_STAGING_A_BYTES + WY_CUBE_STAGING_B_BYTES;
 
 class WyCubeGemm {
  public:
@@ -56,18 +62,22 @@ class WyCubeGemm {
     localWs_ = localWs;
     (void)localWsBytes;
 
-    // Shapes are fixed for the launch; configure once. SetTensorA/B stay at call sites.
-    // Attn SingleShape stays in the K-loop: the last slice may be a partial kCur.
-    mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kHeadDim));
+    // Every cube call runs at <=64-wide tiles (larger single-shapes wedge the
+    // 310P matmul); per-call SetOrgShape/SetSingleShape in the helpers below
+    // re-set partial slices, so Init only ever configures 64^3.
+    (void)kHeadDim;
+    (void)vHeadDim;
+    mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmAttn_.SetLocalWorkspace(localWs_);
     mmSquare_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmSquare_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmSquare_.SetLocalWorkspace(localWs_);
-    mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(vHeadDim), WY_CUBE_CHUNK);
-    mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(vHeadDim), WY_CUBE_CHUNK);
+    mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyU_.SetLocalWorkspace(localWs_);
-    mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(kHeadDim), WY_CUBE_CHUNK);
-    mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(kHeadDim), WY_CUBE_CHUNK);
+    mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetLocalWorkspace(localWs_);
 
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
@@ -75,6 +85,7 @@ class WyCubeGemm {
         workspaceOffset + static_cast<uint64_t>(blockIdx) * static_cast<uint64_t>(perCoreBytes_);
     aGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_A_OFF));
     bGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_B_OFF));
+    snapGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace + coreBase + WY_CUBE_SNAP_OFF));
   }
 
   // C[64,64] = A[64,K] @ B[64,K]^T
@@ -83,17 +94,24 @@ class WyCubeGemm {
   __aicore__ inline void GemmATransB(LocalTensor<float> cUb, const LocalTensor<half> aUb, const LocalTensor<half> bUb,
                                      LocalTensor<float> accScratch, uint32_t kDim, uint32_t aLda, uint32_t bLda)
   {
-    WaitVToMte3();
-    CopyHalfRowsToGm(aGm_, aUb, WY_CUBE_CHUNK, kDim, aLda);
-    CopyHalfRowsToGm(bGm_, bUb, WY_CUBE_CHUNK, kDim, bLda);
-    WaitMte3ToMte2();
-    PipeBarrier<PIPE_ALL>();
-
+    // Each K slice is restaged contiguously so no cube call — including its
+    // OrgShape strides — ever sees a dimension above 64 (128 hangs the aicore).
     for (uint32_t k0 = 0; k0 < kDim; k0 += WY_CUBE_CHUNK) {
       const uint32_t kCur = (kDim - k0) < WY_CUBE_CHUNK ? (kDim - k0) : WY_CUBE_CHUNK;
-      mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
-      mmAttn_.SetTensorA(aGm_[k0], false);
-      mmAttn_.SetTensorB(bGm_[k0], true);
+      WaitVToMte3();
+      CopyHalfRowsToGm(aGm_, aUb[k0], WY_CUBE_CHUNK, kCur, aLda);
+      CopyHalfRowsToGm(bGm_, bUb[k0], WY_CUBE_CHUNK, kCur, bLda);
+      WaitMte3ToMte2();
+      PipeBarrier<PIPE_ALL>();
+
+      // Re-configuring shapes between IterateAll calls wedges the 310P matmul;
+      // full 64-slices keep Init's 64^3 config untouched.
+      if (kCur != WY_CUBE_CHUNK) {
+        mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
+        mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
+      }
+      mmAttn_.SetTensorA(aGm_, false);
+      mmAttn_.SetTensorB(bGm_, true);
       if (k0 == 0) {
         mmAttn_.IterateAll(cUb);
       } else {
@@ -137,38 +155,73 @@ class WyCubeGemm {
     WaitMte3ToMte2();
   }
 
+  // Park/restore the fp32 A block in the per-core GM snapshot slot.
+  __aicore__ inline void SaveSnap(const LocalTensor<float> pUb)
+  {
+    WaitVToMte3();
+    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
+    DataCopy(snapGm_, pUb, params);
+    WaitMte3ToMte2();
+  }
+  __aicore__ inline void LoadSnap(LocalTensor<float> pUb)
+  {
+    // pUb (A) was last read/written by V or Cube; order that before the MTE2 write.
+    event_t evtV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+    SetFlag<HardEvent::V_MTE2>(evtV);
+    WaitFlag<HardEvent::V_MTE2>(evtV);
+    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
+    DataCopy(pUb, snapGm_, params);
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+    SetFlag<HardEvent::MTE2_V>(evt);
+    WaitFlag<HardEvent::MTE2_V>(evt);
+  }
+
   // R = R + P @ R for one RHS block (U or W). Assumes P already on aGm_ (UploadP).
-  // halfScratch holds contiguous R half only (>= 64*nDim) — do not reuse UploadP buffer.
-  // floatScratch (>= 64*nDim floats, e.g. tmpBuf_ [64,max(K,V)]) holds C for Add.
+  // halfScratch holds contiguous R half only (>= 64*min(nDim,64)) — do not reuse the
+  // UploadP buffer. floatScratch (>= 64*min(nDim,64) floats) holds C for Add.
+  // nDim > 64 is processed in <=64-wide column slices: a single matmul call with
+  // N=128 hangs the 310P aicore even with FixSplit-64 tiling, so no cube call may
+  // ever see a dimension above 64.
   __aicore__ inline void GemmApplyAdd(LocalTensor<float> rUb, LocalTensor<half> halfScratch,
                                       LocalTensor<float> floatScratch, uint32_t nDim, uint32_t rLda, bool useU)
   {
-    CastFloatRowsToHalfContiguous(halfScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
-    WaitVToMte3();
-    CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nDim, nDim);
-    WaitMte3ToMte2();
-    PipeBarrier<PIPE_ALL>();
+    for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
+      const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
+      CastFloatRowsToHalfContiguous(halfScratch, rUb[n0], WY_CUBE_CHUNK, nCur, rLda);
+      WaitVToMte3();
+      CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nCur, nCur);
+      WaitMte3ToMte2();
+      PipeBarrier<PIPE_ALL>();
 
-    if (useU) {
-      mmApplyU_.SetTensorA(aGm_, false);
-      mmApplyU_.SetTensorB(bGm_, false);
-      mmApplyU_.IterateAll(floatScratch);
-    } else {
-      mmApplyW_.SetTensorA(aGm_, false);
-      mmApplyW_.SetTensorB(bGm_, false);
-      mmApplyW_.IterateAll(floatScratch);
-    }
-    PipeBarrier<PIPE_ALL>();
-
-    // Cube wrote C[64,nDim] directly to floatScratch; now R += C.
-    if (rLda == nDim) {
-      Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nDim);
-    } else {
-      for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
-        Add(rUb[row * rLda], rUb[row * rLda], floatScratch[row * nDim], nDim);
+      if (useU) {
+        if (nCur != WY_CUBE_CHUNK) {
+          mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+          mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        }
+        mmApplyU_.SetTensorA(aGm_, false);
+        mmApplyU_.SetTensorB(bGm_, false);
+        mmApplyU_.IterateAll(floatScratch);
+      } else {
+        if (nCur != WY_CUBE_CHUNK) {
+          mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+          mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        }
+        mmApplyW_.SetTensorA(aGm_, false);
+        mmApplyW_.SetTensorB(bGm_, false);
+        mmApplyW_.IterateAll(floatScratch);
       }
+      PipeBarrier<PIPE_ALL>();
+
+      // Cube wrote C[64,nCur] directly to floatScratch; now R[:, n0:n0+nCur] += C.
+      if (rLda == nCur && n0 == 0) {
+        Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nCur);
+      } else {
+        for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
+          Add(rUb[row * rLda + n0], rUb[row * rLda + n0], floatScratch[row * nCur], nCur);
+        }
+      }
+      PipeBarrier<PIPE_V>();
     }
-    PipeBarrier<PIPE_V>();
   }
 
  private:
@@ -223,6 +276,7 @@ class WyCubeGemm {
   WyMatmulNoTrans mmApplyW_;
   GlobalTensor<half> aGm_;
   GlobalTensor<half> bGm_;
+  GlobalTensor<float> snapGm_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy
