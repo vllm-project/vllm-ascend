@@ -1,20 +1,72 @@
-python tests/standalone/fa3/test_fa3_graph_multibatch.py 
-[W820 09:58:40.506169409 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_bakemax.py 
+[W820 10:09:55.338767534 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C22 multi-batch non-split   batch=4  seqlens=[512, 1024, 2048, 4096]
-    width=128  pool=128  max_block_needed=32
+C23 bake-max   batch=4  seqlens=[512, 1024, 2048, 4096]
+    width=128  maxk=16384  BAKEMAX=16384
 ========================================================================
-[W820 09:58:45.823349673 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[W820 10:10:00.601960128 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
 ------------------------------------------------------------------------
-per-batch max-abs-diff (FA3 non-split vs float32 ref):
-  batch 0  seqlen=  512  : 0.471888  <-- WRONG
-  batch 1  seqlen= 1024  : 0.419918  <-- WRONG
-  batch 2  seqlen= 2048  : 0.395184  <-- WRONG
-  batch 3  seqlen= 4096  : 0.353149  <-- WRONG
-  overall               : 0.471888
+[Q1] control: bake=actual-long, call=actual-long
+  [Q1]
+    batch 0  seqlen=  512  : 0.467910  <-- WRONG
+    batch 1  seqlen= 1024  : 0.477334  <-- WRONG
+    batch 2  seqlen= 2048  : 0.391569  <-- WRONG
+    batch 3  seqlen= 4096  : 0.330767  <-- WRONG
 ------------------------------------------------------------------------
-Read:
-  any batch LARGE => non-split multi-batch long-KV bug CONFIRMED.
-  all ~1e-4       => multi-batch non-split is fine; look elsewhere.
+[Q2] fix: bake=MAX(16384), call=actual-mixed
+  [Q2]
+    batch 0  seqlen=  512  : 0.467910  <-- WRONG
+    batch 1  seqlen= 1024  : 0.477334  <-- WRONG
+    batch 2  seqlen= 2048  : 0.391569  <-- WRONG
+    batch 3  seqlen= 4096  : 0.330767  <-- WRONG
 ------------------------------------------------------------------------
+[Q3] fix: bake=MAX(16384), call=SHORT[128, 256, 512, 768]
+  [Q3]
+    batch 0  seqlen=  128  : 0.807512  <-- WRONG
+    batch 1  seqlen=  256  : 0.699273  <-- WRONG
+    batch 2  seqlen=  512  : 0.441188  <-- WRONG
+    batch 3  seqlen=  768  : 0.443398  <-- WRONG
+------------------------------------------------------------------------
+[Q4] fix: bake=MAX(16384), call=single 2048
+Traceback (most recent call last):
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_bakemax.py", line 238, in <module>
+    main()
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_bakemax.py", line 224, in main
+    torch.npu.synchronize()
+  File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/utils.py", line 72, in synchronize
+    return torch_npu._C._npu_synchronize()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507015
+[ERROR] 2026-08-20-10:10:06 (PID:174043, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+[Error]: The aicore execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+EZ9999: Inner Error!
+EZ9999[PID: 174043] 2026-08-20-10:10:06.539.880 (EZ9999):  The error from device(chipId:0, dieId:0), serial number is 9, there is an exception of fftsplus aicore error, core id is 1, error code = 0x800000, dump info: pc start: 0x12400000ceec, current: 0x12400000e708, vec error info: 0, mte error info: 0x3903000032, ifu error info: 0x1000000000000, ccu error info: 0x8619ae8600000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c140000080, aic cond: 0.
+The extend info: errcode:(0x800000, 0, 0) errorStr: MTE accesses an invalid GM address or the cross-device memory access times out. fixp_error0 info: 0x3000032, fixp_error1 info: 0x39, fsmId:0, tslot:4, thread:0, ctxid:0, blk:8, sublk:0, subErrType:4.
+For details, see the troubleshooting document on the Ascend official website. Search for the keyword "AI Core Error".[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:1117]
+TraceBack (most recent call last):
+       An error occurred in the kernel task, retCode=0x26, [aicore exception].[FUNC:PreCheckTaskErr][FILE:davinci_kernel_task.cc][LINE:1262]
+       rtDeviceSynchronizeWithTimeout execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+
+[W820 10:10:06.706434290 NPUStream.cpp:734] Warning: NPU warning, error code is 507015[Error]: 
+[Error]: The aicore execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+EE9999: Inner Error!
+EE9999[PID: 174043] 2026-08-20-10:10:06.544.588 (EE9999):  rtDeviceSynchronizeWithTimeout execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+TraceBack (most recent call last):
+ (function npuSynchronizeUsedDevices)
+[W820 10:10:06.706938613 NPUStream.cpp:716] Warning: NPU warning, error code is 507015[Error]: 
+[Error]: The aicore execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+EE9999: Inner Error!
+EE9999[PID: 174043] 2026-08-20-10:10:06.545.123 (EE9999):  rtDeviceSynchronizeWithTimeout execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+TraceBack (most recent call last):
+ (function npuSynchronizeDevice)
+[W820 10:10:06.707217335 NPUStream.cpp:716] Warning: NPU warning, error code is 507015[Error]: 
+[Error]: The aicore execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+EE9999: Inner Error!
+EE9999[PID: 174043] 2026-08-20-10:10:06.545.453 (EE9999):  rtDeviceSynchronizeWithTimeout execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
+TraceBack (most recent call last):
+ (function npuSynchronizeDevice)
