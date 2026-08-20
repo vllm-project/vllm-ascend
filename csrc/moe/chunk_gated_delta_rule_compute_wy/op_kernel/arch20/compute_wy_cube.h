@@ -33,6 +33,10 @@ constexpr uint32_t WY_CUBE_STAGING_A_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * 
 constexpr uint32_t WY_CUBE_STAGING_B_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
 constexpr uint32_t WY_CUBE_STAGING_A_OFF = 0;
 constexpr uint32_t WY_CUBE_STAGING_B_OFF = WY_CUBE_STAGING_A_BYTES;
+// Per-core fp32 A-snapshot slot: the two-pass solve parks A here between passes
+// (UB is too tight at head dim 128 to keep a second 64x64 fp32 copy resident).
+constexpr uint32_t WY_CUBE_SNAP_BYTES = WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float);
+constexpr uint32_t WY_CUBE_SNAP_OFF = WY_CUBE_STAGING_A_BYTES + WY_CUBE_STAGING_B_BYTES;
 
 class WyCubeGemm {
  public:
@@ -81,6 +85,7 @@ class WyCubeGemm {
         workspaceOffset + static_cast<uint64_t>(blockIdx) * static_cast<uint64_t>(perCoreBytes_);
     aGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_A_OFF));
     bGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_B_OFF));
+    snapGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace + coreBase + WY_CUBE_SNAP_OFF));
   }
 
   // C[64,64] = A[64,K] @ B[64,K]^T
@@ -144,6 +149,23 @@ class WyCubeGemm {
     // Apply matmul reads A from GM via MTE2, so we must gate MTE3 write completion
     // with MTE3->MTE2 instead of MTE3->V.
     WaitMte3ToMte2();
+  }
+
+  // Park/restore the fp32 A block in the per-core GM snapshot slot.
+  __aicore__ inline void SaveSnap(const LocalTensor<float> pUb)
+  {
+    WaitVToMte3();
+    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
+    DataCopy(snapGm_, pUb, params);
+    WaitMte3ToMte2();
+  }
+  __aicore__ inline void LoadSnap(LocalTensor<float> pUb)
+  {
+    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
+    DataCopy(pUb, snapGm_, params);
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+    SetFlag<HardEvent::MTE2_V>(evt);
+    WaitFlag<HardEvent::MTE2_V>(evt);
   }
 
   // R = R + P @ R for one RHS block (U or W). Assumes P already on aGm_ (UploadP).
@@ -242,6 +264,7 @@ class WyCubeGemm {
   WyMatmulNoTrans mmApplyW_;
   GlobalTensor<half> aGm_;
   GlobalTensor<half> bGm_;
+  GlobalTensor<float> snapGm_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy

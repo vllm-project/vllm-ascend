@@ -23,7 +23,9 @@ static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
 // Per-core GM staging for Cube inputs: A_half(64*MAX_HEAD_DIM) + B_half(64*MAX_HEAD_DIM).
 static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);
 static constexpr uint32_t STAGING_B_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);
-static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES;
+// A_half + B_half staging + fp32 A-snapshot slot for the two-pass solve.
+static constexpr uint32_t SNAP_BYTES = FIXED_CHUNK * FIXED_CHUNK * sizeof(float);
+static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES + SNAP_BYTES;
 
 static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, int64_t n, int64_t k, bool bTranspose,
                                       TCubeTiling &out)
