@@ -439,8 +439,8 @@ def create_scheme_for_layer(
         logger.error(err_msg)
         raise ValueError(err_msg)
     if layer_type == "moe":
-        logger.info_once("ModelSlim MoE quant scheme detected: prefix=%s, quant_type=%s", prefix, quant_type)
-    logger.info(
+        logger.debug_once("ModelSlim MoE quant scheme detected: prefix=%s, quant_type=%s", prefix, quant_type)
+    logger.debug(
         "ModelSlim quant scheme lookup: prefix=%s, layer_type=%s, quant_type=%s",
         prefix,
         layer_type,

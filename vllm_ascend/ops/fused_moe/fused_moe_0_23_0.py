@@ -367,7 +367,7 @@ class AscendFusedMoE(FusedMoE):
         if method is not None:
             quant_type = getattr(method, "quant_type", QuantType.NONE)
 
-        logger.info_once(
+        logger.debug_once(
             "MoE runner quant type resolved: runner=%s, quant_method=%s, inner_method=%s, quant_type=%s",
             type(self).__name__,
             type(self.quant_method).__name__,
