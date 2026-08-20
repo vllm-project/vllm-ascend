@@ -13,7 +13,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -61,6 +61,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+
+
+def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
+    """Return the complete range re-prefilled by a scheduled-new request."""
+    if request.prefill_token_ids is not None:
+        return request.prefill_token_ids
+    assert request.prompt_token_ids is not None
+    return request.prompt_token_ids
 
 
 class KVPoolScheduler:
@@ -116,8 +124,6 @@ class KVPoolScheduler:
             "save_decode_cache", False
         )
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
-        kv_event_config = getattr(vllm_config, "kv_events_config", None)
-        self.enable_kv_events = getattr(kv_event_config, "enable_kv_cache_events", False) is True
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -875,14 +881,15 @@ class KVPoolScheduler:
         request_real = request_tuple[0]
         block_ids_by_group = normalize_block_ids_by_group(request.block_ids)
         previous_tracker = self._request_trackers.get(request.req_id)
+        prefill_tokens = _new_req_prefill_tokens(request)
         request_tracker = RequestTracker(
             req_id=request.req_id,
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=block_ids_by_group,
             num_saved_tokens=0,
-            token_ids=(request.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
+            token_ids=(prefill_tokens[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request.prompt_token_ids),
-            prefill_end_tokens=len(request.prompt_token_ids),
+            prefill_end_tokens=len(prefill_tokens),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
@@ -893,7 +900,7 @@ class KVPoolScheduler:
             request_tracker,
             request_real.block_hashes,
             load_spec,
-            request.prompt_token_ids,
+            prefill_tokens,
             force_skip_save,
         )
 
@@ -935,7 +942,7 @@ class KVPoolScheduler:
             request_tracker,
             request_real.block_hashes,
             load_spec,
-            request_real.prompt_token_ids,
+            list(request_real.all_token_ids),
             force_skip_save,
         )
 
@@ -959,19 +966,6 @@ class KVPoolScheduler:
         is_decoding = num_computed_tokens >= prefill_end_tokens
         if is_decoding and not self.save_decode_cache and not self.layerwise_offload:
             return None
-        if is_decoding and force_skip_save and self.save_decode_cache:
-            # Do not count complete Prefill blocks as newly generated Decode
-            # data. Preserve an unaligned prompt tail so the mixed
-            # Prompt/Decode block is stored once Decode completes it. The
-            # worker may still deduplicate the initial prefix against the
-            # backend to keep the hash chain recoverable after an eviction.
-            prefill_save_boundary = (
-                prefill_end_tokens // self.cache_transfer_granularity * self.cache_transfer_granularity
-            )
-            request_tracker.num_saved_tokens = max(
-                request_tracker.num_saved_tokens,
-                prefill_save_boundary,
-            )
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
         if req_tuple:
             request = req_tuple[0]
@@ -1164,6 +1158,7 @@ class KVPoolScheduler:
             )
             current_step_sending.extend([block_id for block_id in non_spec_block_ids if block_id > 0])
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
+        assert self._block_pool is not None
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
         self.sending_events[using_event_id] = 0
         self.sending_blocks[using_event_id] = current_step_sending
