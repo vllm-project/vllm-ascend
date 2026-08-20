@@ -5,13 +5,15 @@ from typing import Any
 
 import pytest
 
+from tests.e2e.kv_pool import (
+    KVPoolConfig,
+    MemcacheKVPoolConfig,
+    MooncakeKVPoolConfig,
+)
 from tests.e2e.nightly.multi_node.external_dp.scripts import runtime
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ExternalDPConfig,
     ExternalDPConfigLoader,
-    KVPoolConfig,
-    MemcacheKVPoolConfig,
-    MooncakeKVPoolConfig,
     RoutingConfig,
 )
 
