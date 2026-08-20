@@ -81,7 +81,11 @@ THROUGHPUT_THRESHOLD = 0.97
 THROUGHPUT_THRESHOLD_128K = 0.94
 
 SERVER_ENV = {
+    # AIV expansion mode matches the validated internal benchmark setup and is
+    # required to reproduce the measured V1/V2 throughput on A3.
     "HCCL_OP_EXPANSION_MODE": "AIV",
+    # Keep the NPU task queue enabled; disabling it changes scheduling and
+    # therefore the benchmark throughput.
     "TASK_QUEUE_ENABLE": "1",
     "PYTHONHASHSEED": "0",
 }

@@ -69,6 +69,10 @@ def _filter_reduced_layer_weights(
     a 16-layer config (``num_hidden_layers=16``, ``num_hidden_layers_orig=62``).
     Layers 16..61 have no destination module, so they must be filtered before
     ``AutoWeightsLoader`` sees them.
+
+    Note: ``num_hidden_layers_orig`` is a vllm-ascend convention injected via
+    ``--hf-overrides`` (not an HF-native config field); it is always paired
+    with ``num_hidden_layers`` in the e2e config.
     """
     num_layers = getattr(self.config, "num_hidden_layers", None)
     orig_layers = getattr(self.config, "num_hidden_layers_orig", None)
