@@ -23,7 +23,8 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
 from vllm_ascend.utils import maybe_trans_nz
@@ -42,6 +43,11 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
     # Declare the quantization type for this scheme
     quant_type: QuantType = QuantType.W8A8
+    # Activation quant dtype used by the MLP gmm hooks.
+    act_quant_type: torch.dtype = torch.int8
+    # 310P gmm1+swiglu+quant is fused inside npu_quant_grouped_matmul_dequant
+    # + npu_swiglu, so silu is handled by ``apply_gmm1_act_quant``.
+    fused_activations = frozenset({"silu"})
 
     def __init__(self):
         self.ep_group = get_ep_group()
@@ -94,8 +100,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                layer=layer,
                 quant_type=self.quant_type,
                 dynamic_eplb=False,
                 expert_map=layer.ascend_expert_map,
@@ -103,11 +108,97 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                activation=getattr(layer, "activation", "silu"),
             ),
+            quant_method=self,
         )
         return final_hidden_states
+
+    def _get_group_list(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+        """Return the cumulative-sum group_list expected by 310P kernels."""
+        group_list = mlp_compute_input.group_list
+        if mlp_compute_input.group_list_type == 1:
+            # Convert group_list to cumulative sum format if group_list is count format
+            group_list = torch.cumsum(group_list, dim=0)
+        return group_list
+
+    def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
+        """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
+        return (
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+        )
+
+    def get_mlp_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        """Standard MLP-layout weights used by the quantized MoE LoRA backend."""
+        w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
+        return MoEWeights(
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
+
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        """Normalized weight payload for the FUSED_MC2 comm path.
+
+        310P only registers the ALLGATHER comm method (no FUSED_MC2 / mega-moe
+        kernels), so the standard MLP layout is returned as-is.
+        """
+        return self.get_mlp_weights(layer)
+
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        """Fused gmm1 (quant + dequant) + swiglu via 310P kernels.
+
+        ``npu_quant_grouped_matmul_dequant`` quantizes the hidden states to
+        int8 internally (``quant_mode="pertoken"``) and dequantizes the gmm1
+        output, so the activation scale is not needed by ``apply_gmm2``.
+        """
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        w1, w1_scale, _, _ = self._get_mlp_weights(layer)
+        hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
+            x=mlp_compute_input.hidden_states,
+            quantized_weight=w1,
+            weight_scale=w1_scale,
+            group_list=self._get_group_list(mlp_compute_input),
+            quant_mode="pertoken",
+        )
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        return hidden_states, None
+
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
+        """gmm1 (quant + dequant) only, returns the pre-activation output."""
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        w1, w1_scale, _, _ = self._get_mlp_weights(layer)
+        return torch_npu.npu_quant_grouped_matmul_dequant(
+            x=mlp_compute_input.hidden_states,
+            quantized_weight=w1,
+            weight_scale=w1_scale,
+            group_list=self._get_group_list(mlp_compute_input),
+            quant_mode="pertoken",
+        )
+
+    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
+        # The 310P gmm2 kernel re-quantizes the activation internally with
+        # ``quant_mode="pertoken"``, so no explicit quantization is needed.
+        return hidden_states, None
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        """down projection (gmm2, quant + dequant)."""
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        _, _, w2, w2_scale = self._get_mlp_weights(layer)
+        return torch_npu.npu_quant_grouped_matmul_dequant(
+            x=hidden_states,
+            quantized_weight=w2,
+            weight_scale=w2_scale,
+            group_list=self._get_group_list(mlp_compute_input),
+            quant_mode="pertoken",
+        )
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
