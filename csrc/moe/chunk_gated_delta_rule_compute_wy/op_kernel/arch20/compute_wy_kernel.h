@@ -54,6 +54,7 @@ class KernelComputeWy {
     kHeadDim_ = static_cast<uint32_t>(tiling->kHeadDim);
     vHeadDim_ = static_cast<uint32_t>(tiling->vHeadDim);
     chunkSize_ = static_cast<uint32_t>(tiling->chunkSize);
+    debugStage_ = tiling->debugStage;
     numChunks_ = static_cast<uint32_t>(tiling->numChunks);
     localWorkspaceSize_ = tiling->localWorkspaceSize;
     perCoreWorkspaceBytes_ = tiling->perCoreWorkspaceBytes;
@@ -443,12 +444,14 @@ class KernelComputeWy {
     // attnSnap's first 64 floats hold gRaw; attnLocal is the g-load scratch
     // (Hv<=64 ⇒ FIXED_CHUNK*Hv <= ATTEN_ELEMS). Both are free until the gram.
     BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, attnSnap, attnLocal, ATTEN_ELEMS);
+    if (debugStage_ == 1) { PipeBarrier<PIPE_ALL>(); return; }
 
     // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
     CastFloatRowsToHalf(qHalf, rhs, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     CastFloatRowsToHalf(halfLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);  // K fp32 dead after
     cubeGemm_.GemmATransB(attnLocal, qHalf, halfLocal, scratch, kHeadDim_, kHeadDim_, kHeadDim_);
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    if (debugStage_ == 2) { PipeBarrier<PIPE_ALL>(); return; }
     Muls(attnLocal, attnLocal, -1.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
     ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
@@ -463,14 +466,17 @@ class KernelComputeWy {
     // restart from P₀. (No-op cost on the fp32 path, kept unconditional.)
     Adds(attnSnap, attnLocal, 0.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
+    if (debugStage_ == 3) { PipeBarrier<PIPE_ALL>(); return; }
 
     // ---- Pass 1: W = (I−A)⁻¹ (γβK), resident in rhs. halfLocal stages R halves. ----
     SolveOneRhs(useFp32ForwardSubstitution, attnLocal, rhs, halfLocal, qHalf, scratch, kHeadDim_, alignK_,
                 /*useU=*/false);
+    if (debugStage_ == 4) { PipeBarrier<PIPE_ALL>(); return; }
     Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(wKernelGm_, halfLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+    if (debugStage_ == 5) { PipeBarrier<PIPE_ALL>(); return; }
 
     // ---- Pass 2: load V now, U = (I−A)⁻¹ (βV). ----
     Adds(attnLocal, attnSnap, 0.0f, ATTEN_ELEMS);
@@ -480,8 +486,10 @@ class KernelComputeWy {
     Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
     PipeBarrier<PIPE_V>();
     BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
+    if (debugStage_ == 6) { PipeBarrier<PIPE_ALL>(); return; }
     SolveOneRhs(useFp32ForwardSubstitution, attnLocal, rhs, halfLocal, qHalf, scratch, vHeadDim_, alignV_,
                 /*useU=*/true);
+    if (debugStage_ == 7) { PipeBarrier<PIPE_ALL>(); return; }
     Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(uKernelGm_, halfLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
@@ -499,6 +507,7 @@ class KernelComputeWy {
   uint32_t chunkSize_{0}, numChunks_{0}, headGroups_{0}, alignK_{0}, alignV_{0}, chunkKElems_{0}, chunkVElems_{0};
   uint32_t maxAlign_{0};
   uint32_t localWorkspaceSize_{0}, perCoreWorkspaceBytes_{0}, usedCoreNum_{1};
+  uint32_t debugStage_{0};
   GlobalTensor<half> qGm_, kGm_, vGm_, betaGm_, qKernelGm_, kKernelGm_, wKernelGm_, uKernelGm_;
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;

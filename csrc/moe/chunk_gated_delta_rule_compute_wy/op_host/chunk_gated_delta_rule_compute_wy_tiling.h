@@ -20,6 +20,7 @@ TILING_DATA_FIELD_DEF(int64_t, totalTasks);
 TILING_DATA_FIELD_DEF(uint32_t, localWorkspaceSize);
 TILING_DATA_FIELD_DEF(uint32_t, perCoreWorkspaceBytes);
 TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
+TILING_DATA_FIELD_DEF(uint32_t, debugStage);
 TILING_DATA_FIELD_DEF(uint64_t, workspaceOffset);
 TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmAttn);
 TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmSquare);
