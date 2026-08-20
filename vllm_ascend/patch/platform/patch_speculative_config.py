@@ -124,6 +124,13 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     if initial_architecture == "MistralLarge3ForCausalLM":
         hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
 
+    if hf_config.model_type == "hy_v3":
+        hf_config.model_type = "hy_v3_mtp"
+        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        hf_config.update(
+            {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
+        )
+
     return hf_config
 
 

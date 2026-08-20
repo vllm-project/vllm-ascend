@@ -327,7 +327,22 @@ def get_linear_quant_type(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
-        quant_type = quant_description[prefix + ".weight"]
+        key = prefix + ".weight"
+        if key not in quant_description:
+            # MoE layers use per-expert keys (e.g. experts.0.gate_proj.weight)
+            # instead of a single experts.weight key. Find any sub-entry.
+            prefix_dot = prefix + "."
+            for k, v in quant_description.items():
+                if k.startswith(prefix_dot) and k.endswith(".weight"):
+                    quant_type = v
+                    break
+            else:
+                raise KeyError(
+                    f"Neither '{key}' nor any key starting with "
+                    f"'{prefix_dot}' found in quant_description."
+                )
+        else:
+            quant_type = quant_description[key]
     return quant_type
 
 
