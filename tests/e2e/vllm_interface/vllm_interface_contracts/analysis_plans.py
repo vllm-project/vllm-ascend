@@ -12,77 +12,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Fixed execution plans for interface-contract analysis scenarios.
-
-The plans select existing engine capabilities.  They deliberately do not
-expose independent low-level switches because combinations must preserve the
-dependencies between inheritance/MRO discovery and override resolution.
-"""
+"""Fixed execution plan for the upstream vLLM interface CI check."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-ANALYSIS_PLAN_VERSION = 2
-MAIN2MAIN_SCENARIO = "main2main"
+ANALYSIS_PLAN_VERSION = 3
 VLLM_INTERFACE_SCENARIO = "vllm-interface"
-SCENARIOS = (MAIN2MAIN_SCENARIO, VLLM_INTERFACE_SCENARIO)
 
 
 @dataclass(frozen=True)
 class AnalysisPlan:
-    """One reviewed combination of engine phases and report semantics."""
+    """The only supported analysis scope in this CI package."""
 
-    scenario: str
-    collect_inheritance: bool
-    analyze_inheritance: bool
-    collect_overrides: bool
-    collect_monkey_patches: bool
-    analyze_direct_imports: bool
-    analyze_direct_calls: bool
-    include_generator_findings: bool
-    report_style: str
+    scenario: str = VLLM_INTERFACE_SCENARIO
 
     @property
     def relation_types(self) -> frozenset[str]:
-        enabled: set[str] = set()
-        if self.analyze_inheritance:
-            enabled.add("inheritance")
-        if self.collect_overrides:
-            enabled.add("override")
-        if self.collect_monkey_patches:
-            enabled.add("monkey_patch")
-        return frozenset(enabled)
+        return frozenset({"override"})
 
     def capabilities(self) -> dict[str, dict[str, Any]]:
-        inheritance_state = (
-            "analyzed" if self.analyze_inheritance else "prerequisite" if self.collect_inheritance else "skipped"
-        )
         return {
             "inheritance_mro": {
-                "state": inheritance_state,
-                "produces_findings": self.analyze_inheritance,
+                "state": "prerequisite",
+                "produces_findings": False,
             },
             "override": {
-                "state": "analyzed" if self.collect_overrides else "skipped",
-                "produces_findings": self.collect_overrides,
+                "state": "analyzed",
+                "produces_findings": True,
             },
             "monkey_patch": {
-                "state": "analyzed" if self.collect_monkey_patches else "skipped",
-                "produces_findings": self.collect_monkey_patches,
+                "state": "skipped",
+                "produces_findings": False,
             },
             "direct_import": {
-                "state": "analyzed" if self.analyze_direct_imports else "skipped",
-                "produces_findings": self.analyze_direct_imports,
+                "state": "analyzed",
+                "produces_findings": True,
             },
             "direct_call": {
-                "state": "analyzed" if self.analyze_direct_calls else "skipped",
-                "produces_findings": self.analyze_direct_calls,
+                "state": "analyzed",
+                "produces_findings": True,
             },
             "generator_findings": {
-                "state": "included" if self.include_generator_findings else "skipped",
-                "produces_findings": self.include_generator_findings,
+                "state": "skipped",
+                "produces_findings": False,
             },
         }
 
@@ -90,44 +65,13 @@ class AnalysisPlan:
         return {
             "scenario": self.scenario,
             "plan_version": ANALYSIS_PLAN_VERSION,
-            "report_style": self.report_style,
+            "report_style": "upstream-pr-introduced-only",
             "capabilities": self.capabilities(),
         }
 
 
-MAIN2MAIN_PLAN = AnalysisPlan(
-    scenario=MAIN2MAIN_SCENARIO,
-    collect_inheritance=True,
-    analyze_inheritance=True,
-    collect_overrides=True,
-    collect_monkey_patches=True,
-    analyze_direct_imports=True,
-    analyze_direct_calls=True,
-    include_generator_findings=True,
-    report_style="main2main-full",
-)
-
-VLLM_INTERFACE_PLAN = AnalysisPlan(
-    scenario=VLLM_INTERFACE_SCENARIO,
-    collect_inheritance=True,
-    analyze_inheritance=False,
-    collect_overrides=True,
-    collect_monkey_patches=False,
-    analyze_direct_imports=True,
-    analyze_direct_calls=True,
-    include_generator_findings=False,
-    report_style="upstream-pr-introduced-only",
-)
-
-_PLANS = {
-    MAIN2MAIN_PLAN.scenario: MAIN2MAIN_PLAN,
-    VLLM_INTERFACE_PLAN.scenario: VLLM_INTERFACE_PLAN,
-}
+VLLM_INTERFACE_PLAN = AnalysisPlan()
 
 
-def resolve_analysis_plan(scenario: str = MAIN2MAIN_SCENARIO) -> AnalysisPlan:
-    try:
-        return _PLANS[scenario]
-    except KeyError as error:
-        choices = ", ".join(SCENARIOS)
-        raise ValueError(f"unsupported scenario {scenario!r}; choose one of: {choices}") from error
+def resolve_analysis_plan() -> AnalysisPlan:
+    return VLLM_INTERFACE_PLAN

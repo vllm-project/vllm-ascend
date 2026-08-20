@@ -21,7 +21,8 @@ tests/e2e/vllm_interface/
 1. Detect the vLLM source checkout at `/workspace/vllm`.
 2. Fetch upstream `main` and calculate the exact `merge-base -> HEAD` PR range.
 3. Record the current vllm-ascend Git revision.
-4. Run `python -m tests.e2e.vllm_interface.vllm_interface_contracts` with the `vllm-interface` analysis plan.
+4. Run `python -m tests.e2e.vllm_interface.vllm_interface_contracts`; this package has one fixed `vllm-interface`
+   analysis scope and does not expose a main2main scenario switch.
 5. Reuse unchanged upstream file fragments by Git blob SHA, build misses with a process pool, and load the downstream
    source index cache. Then run relation comparison, direct-import analysis, and direct-call analysis concurrently
    inside the same job.
@@ -39,9 +40,10 @@ failure rather than a compatibility result.
 
 ### Dependency discovery
 
-The `vllm-interface` plan reads vllm-ascend first and discovers direct imports, verified overrides, and exact downstream
+The analyzer reads vllm-ascend first and discovers direct imports, verified overrides, and exact downstream
 calls to vLLM. Inheritance and C3 MRO are used only to prove override ownership. Monkey patches, inheritance-only
-findings, and broad generator reviews are intentionally outside this upstream PR plan.
+findings, and broad generator reviews are intentionally outside this upstream PR check; their collector and report
+implementations are not included in this directory.
 
 ### Old/new contract comparison
 
@@ -106,7 +108,7 @@ and sampler duration fits the existing job timeout.
 Run the source-only unit tests without NPU hardware:
 
 ```bash
-pytest -q tests/e2e/vllm_interface/unit_tests
+pytest -q --confcutdir=tests/e2e/vllm_interface tests/e2e/vllm_interface/unit_tests
 ```
 
 Running the E2E entry outside the upstream vLLM NPU image skips it because `/workspace/vllm` is not present:
@@ -124,7 +126,6 @@ python -m tests.e2e.vllm_interface.vllm_interface_contracts analyze-range \
   --old <old-sha> \
   --new <new-sha> \
   --expect-ascend-sha <ascend-sha> \
-  --scenario vllm-interface \
   --analysis-workers 1 \
   --index-workers 4 \
   --upstream-file-index-cache-dir ~/.cache/vllm-interface/file-fragments \

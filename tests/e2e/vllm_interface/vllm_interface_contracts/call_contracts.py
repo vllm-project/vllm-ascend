@@ -14,10 +14,8 @@
 # This file is a part of the vllm-ascend project.
 """Exact static contracts for downstream calls and callable return values.
 
-This module intentionally lives in the shared engine.  The main2main skill is
-only an orchestration layer and must not grow a second AST implementation.
-The analysis here is conservative: a dependency is returned only when its
-callee is uniquely resolved, and dynamic argument/return shapes stay unknown.
+The analysis is conservative: a dependency is returned only when its callee is
+uniquely resolved, and dynamic argument or return shapes stay unknown.
 """
 
 from __future__ import annotations

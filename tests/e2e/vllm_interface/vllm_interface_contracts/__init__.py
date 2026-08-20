@@ -16,7 +16,6 @@
 
 from .analysis_plans import (
     ANALYSIS_PLAN_VERSION,
-    MAIN2MAIN_SCENARIO,
     VLLM_INTERFACE_SCENARIO,
     AnalysisPlan,
     resolve_analysis_plan,
@@ -28,16 +27,13 @@ from .call_contracts import (
 )
 from .generator import (
     GENERATOR_VERSION,
-    SCHEMA_VERSION,
     InterfaceBoundaryGenerator,
     RepositoryIndex,
 )
 
 __all__ = [
     "GENERATOR_VERSION",
-    "SCHEMA_VERSION",
     "ANALYSIS_PLAN_VERSION",
-    "MAIN2MAIN_SCENARIO",
     "VLLM_INTERFACE_SCENARIO",
     "AnalysisPlan",
     "DirectCallDetector",
