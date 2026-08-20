@@ -211,10 +211,11 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
     from vllm.model_executor.models.interfaces import EagleModelMixin
 
-    native_forward = getattr(
-        inner_model, "eagle3_pp_aux_propagation_native", False
-    )
-    if native_forward:
+    from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3Model
+
+    if isinstance(inner_model, MiniMaxM3Model):
+        # MiniMax-M3 uses support_torch_compile, which captures the class-level
+        # forward during __init__. Its PP aux propagation must stay native.
         make_forward = None
     elif isinstance(inner_model, DeepseekV2Model):
         make_forward = _make_deepseek_v2_forward

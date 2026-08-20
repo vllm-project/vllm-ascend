@@ -794,11 +794,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
 @support_torch_compile
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
-    # The PP aux propagation must live in the class forward itself.  An
-    # instance-level forward monkeypatch is too late for support_torch_compile:
-    # its compiled callable is created in __init__ and keeps the original
-    # bound forward method.
-    eagle3_pp_aux_propagation_native = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
