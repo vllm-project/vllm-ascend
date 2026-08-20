@@ -232,6 +232,10 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `adaptive_draft_k_min` | int | `1` | Minimum physical draft K while the batch-level proposal gate is open. A gate-selected K=0 still takes precedence. |
 | `adaptive_draft_k_slack` | int | `1` | Number of extra draft positions kept beyond the previous maximum logical verify prefix to avoid overreacting to one step. |
 | `confidence_temperatures` | list[float] | `None` | Optional per-position temperature scaling values. They override values stored in the hardware profile. |
+| `hybrid_policy_enabled` | bool | `False` | Hardware-aware only. Keep a low-overhead full-width path for small or high-acceptance batches, and enter profile-based dynamic K only for larger/low-acceptance batches. |
+| `hybrid_min_batch_size` | int | `8` | Minimum request batch size before the hybrid policy considers profile-based dynamic K. Smaller batches use the full-width fast path when the confidence budget covers the physical K. |
+| `hybrid_acceptance_threshold` | float | `0.6` | Mean conditional acceptance threshold for holding the full-width path after a confidence probe. Must be in `[0, 1]`. |
+| `hybrid_probe_interval` | int | `16` | Number of held full-width steps before probing confidence and the hardware policy again. |
 
 **scheduler_config.short_request_first_config**
 
