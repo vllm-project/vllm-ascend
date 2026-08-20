@@ -18,7 +18,9 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import _prepare_dflash_
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
 )
-from vllm_ascend.worker.v2.structured_outputs import _apply_grammar_bitmask_kernel
+
+from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitmask_kernel
+
 
 # triton ops that need to be filed in ops/triton
 penalties.apply_penalties = apply_penalties
