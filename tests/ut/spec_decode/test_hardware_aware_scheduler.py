@@ -274,10 +274,19 @@ def test_hybrid_policy_holds_large_high_acceptance_batch_until_probe() -> None:
         draft_token_ids=draft_ids,
         num_reqs=8,
     )
+    third = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=8,
+    )
 
     assert first.tolist() == [3] * 8
     assert second.tolist() == [3] * 8
+    assert third.tolist() == [3] * 8
     assert model.confidence_calls == 1
+    # The first held step refreshes the request-to-length host mapping after
+    # the probe. Subsequent held steps can safely reuse that mapping.
     assert scheduler.reused_last_result
 
 
