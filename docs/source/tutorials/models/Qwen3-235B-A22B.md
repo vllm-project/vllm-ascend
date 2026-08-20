@@ -226,8 +226,7 @@ vllm serve your_model_path \
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true}'
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
 !!! note
@@ -364,7 +363,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --quantization ascend \
     --no-enable-prefix-caching \
     --enforce-eager \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_fused_mc2": 1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -428,7 +427,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_fused_mc2": 1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -492,7 +491,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_fused_mc2": 1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -568,7 +567,7 @@ python load_balance_proxy_server_example.py \
 
 !!! note
 
-    - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+    - [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — Additional parameter details for vLLM serve commands.
     - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 
 **Service Verification:**
@@ -736,7 +735,12 @@ After several minutes, you will get the performance evaluation result.
 |----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|
 | High Throughput | Single-Node | 16 | 4 | 4 | none | On | On  | On |
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |
-| Long Context | Single-Node | 16 | 8 | 1 | none | On | On | Off |
+| Long Context | Single-Node | 16 | 8 | 2 | none | On | On | On |
+
+Key Parameter Descriptions:
+
+- `MTP Speculation Num`: set to `3` only in Low Latency (via `speculative-config(eagle3)`) to cut decode rounds per token; kept none in High Throughput and Long Context where raw throughput/context capacity outweighs per-token latency gains.
+- `FUSED_MC2`: a MoE-specific fused dispatch/combine optimization, applicable since Qwen3-235B-A22B is a true MoE model; kept On in High Throughput and Long Context (sufficient MoE dispatch volume to benefit), but Off in Low Latency (low concurrency doesn't offset the fusion overhead).
 
 > For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment)
 
@@ -781,8 +785,13 @@ vllm serve your_model_path \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+    --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2": 1}'
 ```
+
+Key Parameter Descriptions:
+
+- `enable_cpu_binding` reduces scheduling jitter under high concurrency.
+- `enable_fused_mc2` enables fused MoE dispatch/combine operators for better expert efficiency.
 
 <u>Single-node PD Hybrid — Low Latency:</u>
 
@@ -826,8 +835,13 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true}'
+    --additional-config '{"enable_cpu_binding":true}'
 ```
+
+Key Parameter Descriptions:
+
+- `speculative-config (eagle3)` reduces decode rounds via speculative decoding.
+- `enable_cpu_binding` is still enabled, but `enable_fused_mc2` is left unset since MoE dispatch pressure isn't the bottleneck under low-concurrency traffic.
 
 <u>Single-node PD Hybrid — Long Context:</u>
 
@@ -867,8 +881,14 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+    --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2": 1}'
 ```
+
+Key Parameter Descriptions:
+
+- YaRN RoPE scaling via `hf-overrides` extends the maximum position length to support a 135k context.
+- `max-num-seqs` is lowered to 32 to avoid OOM from the large per-request memory footprint of long sequences.
+- `enable_cpu_binding`/`enable_fused_mc2` are all enabled, matching the High Throughput scenario.
 
 ### 9.2 Tuning Guidelines
 

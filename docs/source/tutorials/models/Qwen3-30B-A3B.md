@@ -245,7 +245,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --distributed_executor_backend "mp" \
         --no-enable-prefix-caching \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+        --additional-config '{"weight_nz_mode": 2}' \
         --gpu-memory-utilization 0.95 \
         --port 8000 \
         --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -513,7 +513,13 @@ vllm bench serve \
 | Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
 | Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | YaRN         |
 
-> For detailed parameter descriptions, please refer to the deployment examples in Section 5.
+Key Parameter Descriptions:
+
+- `max-num-seqs`: Maximum concurrent requests per instance. Set to 100 in High Throughput and Low Latency; lowered to 14 in Long Context, since long sequences consume much more KV cache memory per request, requiring reduced concurrency to avoid OOM.
+- `FUSED_MC2`: A MoE-specific fused dispatch/combine communication optimization; kept Off in all three scenarios (High Throughput, Low Latency, Long Context) for Qwen3-30B-A3B.
+- `hf-overrides`: Overrides the model's HuggingFace config. Only set to YaRN (RoPE scaling) in Long Context to extend the maximum supported position length for a max-model-len of 131072; unset (-) in High Throughput and Low Latency.
+
+> For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-single-node-online-deployment)
 
 **Low Latency Configuration:**
 
@@ -537,7 +543,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -608,12 +614,17 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}' \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
 ```
+
+Key Parameter Descriptions:
+
+- YaRN RoPE scaling via `hf-overrides` extends the maximum position length to support a 131072 context.
+- `max-num-seqs` is sharply lowered to 14 (vs. 100 in High Throughput/Low Latency) to avoid OOM from the large per-request memory footprint of long sequences.
 
 !!! tip
 
