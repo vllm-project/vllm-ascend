@@ -3,7 +3,11 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from vllm_ascend.models.gemma4_mm import AscendGemma4ForConditionalGeneration, _get_tower_quant_config
+from vllm_ascend.models.gemma4_mm import (
+    AscendGemma4ForConditionalGeneration,
+    _get_tower_quant_config,
+    _patch_gemma4_vision_patch_embedder,
+)
 from vllm_ascend.ops.linear import AscendReplicatedLinear
 from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
 
@@ -62,6 +66,27 @@ def test_other_quantization_keeps_upstream_dimension_guard():
 
     assert _get_tower_quant_config(_vllm_config(quant_config)) is None
     assert _get_tower_quant_config(_vllm_config(quant_config, intermediate_size=4352)) is quant_config
+
+
+def test_patched_vision_embedder_uses_activation_dtype_and_preserves_output_dtype():
+    class FakePatchEmbedder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_proj = torch.nn.Identity()
+
+        def _position_embeddings(self, pixel_position_ids, padding_positions):
+            return torch.ones((*pixel_position_ids.shape[:-1], 2), dtype=torch.float32)
+
+    patch_embedder = FakePatchEmbedder()
+    _patch_gemma4_vision_patch_embedder(patch_embedder, torch.bfloat16)
+
+    pixel_values = torch.tensor([[[0.5, 1.0]]], dtype=torch.float32)
+    pixel_position_ids = torch.zeros((1, 1, 2), dtype=torch.long)
+    padding_positions = torch.zeros((1, 1), dtype=torch.bool)
+    output = patch_embedder(pixel_values, pixel_position_ids, padding_positions)
+
+    assert output.dtype == torch.bfloat16
+    torch.testing.assert_close(output, torch.tensor([[[1.0, 2.0]]], dtype=torch.bfloat16))
 
 
 def test_mxfp4_vit_linear_registers_and_loads_weight_scale():
