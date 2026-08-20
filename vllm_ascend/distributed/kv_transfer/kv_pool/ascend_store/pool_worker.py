@@ -450,8 +450,6 @@ class KVPoolWorker:
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
-                    self.my_key_index,
-                    self.num_ranks_per_layer,
                     group_page_size,
                     group_num_layers,
                     group_id=group_id,
@@ -481,9 +479,6 @@ class KVPoolWorker:
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
-                    self.put_step,
-                    self.my_key_index,
-                    self.num_ranks_per_layer,
                     self.page_size_bytes,
                     ready_event_sending,
                     self.num_layers,
@@ -521,8 +516,6 @@ class KVPoolWorker:
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
-                    self.my_key_index,
-                    self.num_ranks_per_layer,
                     self.page_size_bytes,
                     ready_event,
                     self.get_event,
