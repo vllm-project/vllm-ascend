@@ -392,6 +392,67 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     torch.testing.assert_close(output, expected)
 
 
+def test_set_lora_context_updates_routed_experts():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.routed_experts = SimpleNamespace()
+    lora_context = object()
+
+    runner.set_lora_context(lora_context)
+
+    assert runner.routed_experts._ascend_moe_lora_context is lora_context
+
+
+def test_active_shared_expert_lora_uses_wrapped_projections(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up = torch.randn(2, 8, dtype=torch.bfloat16)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up_proj = MagicMock(weight_scale=torch.ones(1))
+    down_proj = MagicMock(weight_scale=torch.ones(1))
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=gate_up_proj,
+        down_proj=down_proj,
+        act_fn=nn.Identity(),
+    )
+    runner._shared_experts_part1 = MagicMock(return_value=gate_up)
+    runner._shared_experts_part2 = MagicMock(return_value=down_out)
+    runner.routed_experts = SimpleNamespace(
+        _ascend_moe_lora_context=SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+    )
+    runner.quant_type = QuantType.W8A8
+    runner.multistream_overlap_shared_expert = False
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_gmm2=MagicMock(),
+        before_combine=MagicMock(),
+    )
+    dynamic_quant = MagicMock()
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_dynamic_quant", dynamic_quant, raising=False)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.ALLGATHER,
+        ),
+    )
+
+    output = runner._forward_shared_experts(hidden_states, events)
+
+    assert output is down_out
+    dynamic_quant.assert_not_called()
+    runner._shared_experts_part1.assert_called_once_with(hidden_states)
+    runner._shared_experts_part2.assert_called_once_with(hidden_states, gate_up)
+
+
 def test_unquantized_shared_situ_uses_split_bf16_path(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
