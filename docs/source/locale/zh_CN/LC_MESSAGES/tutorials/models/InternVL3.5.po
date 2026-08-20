@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-07 10:56+0000\n"
+"POT-Creation-Date: 2026-08-20 12:53+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -21,8 +21,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/InternVL3.5.md:1
-msgid "InternVL3.5(InternVL3_5-38B/241B-A28B)"
-msgstr "InternVL3.5(InternVL3_5-38B/241B-A28B)"
+msgid "InternVL3.5(38B/241B-A28B)"
+msgstr "InternVL3.5（38B/241B-A28B）"
 
 #: ../../source/tutorials/models/InternVL3.5.md:3
 msgid "1 Introduction"

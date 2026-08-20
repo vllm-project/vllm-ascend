@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-17 01:24+0000\n"
+"POT-Creation-Date: 2026-08-20 12:53+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -110,14 +110,6 @@ msgid ""
 "the model-weight mount with the path used in your environment."
 msgstr "使用与硬件对应的 vLLM-Ascend Docker 镜像。将模型权重挂载路径替换为您环境中的路径。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:31
-msgid ""
-"For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
-"later `-310p` image)."
-msgstr ""
-"对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
-"`-310p` 镜像）。"
-
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md
 msgid "Atlas A2 inference products"
 msgstr "Atlas A2 推理产品"
@@ -126,30 +118,30 @@ msgstr "Atlas A2 推理产品"
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:88
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:86
 msgid ""
 "Verify that the container is running and that the installed package version "
 "matches the image tag:"
 msgstr "验证容器正在运行，且已安装的包版本与镜像标签匹配："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:95
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:93
 msgid ""
 "Expected result: `docker ps` lists the container with status `Up`, and `pip "
 "show` displays version information for both packages."
 msgstr "预期结果：`docker ps` 列出状态为 `Up` 的容器，`pip show` 显示两个包的版本信息。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:97
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:95
 msgid "4.2 Source Code Installation"
 msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:99
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:97
 msgid ""
 "f you prefer to build from source instead of using the Docker image, install"
 " vLLM-Ascend following the [Installation Guide](../../installation.md)."
 msgstr ""
 "如果您希望从源码构建而非使用 Docker 镜像，请按照[安装指南](../../installation.md)安装 vLLM-Ascend。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:103
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:101
 msgid ""
 "For Atlas 300I DUO, source installation may pull in `triton` and `triton-"
 "ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:"
@@ -157,19 +149,19 @@ msgstr ""
 "对于Atlas 300I DUO，源码安装可能会引入`triton`和`triton-ascend`。在Atlas 300I DUO上运行vLLM-"
 "Ascend之前，请先卸载它们："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:109
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:107
 msgid "To verify the source installation:"
 msgstr "验证源码安装："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:117
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:115
 msgid "5 Online Service Deployment"
 msgstr "5 在线服务部署"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:119
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:117
 msgid "5.1 Single-Node Online Deployment"
 msgstr "5.1 单节点在线部署"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:121
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:119
 msgid ""
 "Single-node deployment runs both audio prefill and decoding on one NPU, "
 "making it suitable for development, testing, and small-scale ASR services. "
@@ -180,18 +172,18 @@ msgstr ""
 "单节点部署将音频预填充和解码运行在同一张 NPU 上，适用于开发、测试及小规模 ASR 服务。将 `your_model_path` "
 "替换为本地模型目录，或使用 `Qwen/Qwen3-ASR-1.7B` 通过已配置的模型仓库下载模型。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:157
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:155
 msgid "Key parameters Descriptions:"
 msgstr "关键参数说明："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:159
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:157
 msgid ""
 "`--tensor-parallel-size 1` uses one NPU. Increase it only after confirming "
 "that the hardware and deployment topology support the chosen parallel "
 "configuration."
 msgstr "`--tensor-parallel-size 1` 使用一张 NPU。仅在确认硬件和部署拓扑支持所选并行配置后，再增加该值。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:160
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:158
 msgid ""
 "`--max-model-len 4096` limits the maximum sequence length. On Atlas 300I "
 "DUO, always specify a conservative value explicitly; automatic detection can"
@@ -200,20 +192,20 @@ msgstr ""
 "`--max-model-len 4096` 限制最大序列长度。在 Atlas 300I DUO "
 "上，务必显式指定一个保守值；自动检测可能分配过大的注意力掩码并导致内存不足错误。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:161
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:159
 msgid ""
 "`--gpu-memory-utilization 0.9` sets the fraction of device memory available "
 "to the vLLM executor. Lower this value if other workloads share the NPU."
 msgstr ""
 "`--gpu-memory-utilization 0.9` 设置 vLLM 执行器可用的设备内存比例。如果其他工作负载共享 NPU，请降低此值。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:162
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:160
 msgid ""
 "`--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 "
 "2UP example for compatibility."
 msgstr "`--enforce-eager` 禁用图执行。在 Atlas 300I A2 2UP 示例中用于兼容性。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:164
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:162
 msgid ""
 "When the service starts successfully, the log contains `Application startup "
 "complete`. If startup fails, see the [Public "
@@ -222,20 +214,20 @@ msgstr ""
 "服务启动成功后，日志中包含 `Application startup complete`。如果启动失败，请参阅[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:166
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:164
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:168
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:166
 msgid ""
 "After the service is started, the model can be invoked by sending a prompt."
 msgstr "服务启动后，可通过发送提示词来调用模型。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:168
 msgid "**Chat Completions API:**"
 msgstr "**聊天补全 API：**"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:195
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:193
 msgid ""
 "Replace `localhost`, `8000`, and `qwen3-asr` with the address, port, and "
 "`--served-model-name` used by your deployment. Expected result: HTTP 200 and"
@@ -244,21 +236,21 @@ msgstr ""
 "将 `localhost`、`8000` 和 `qwen3-asr` 替换为部署所用的地址、端口和 `--served-model-"
 "name`。预期结果：HTTP 200 及包含转录文本的 JSON 响应（位于 `choices` 字段中）。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:197
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:195
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:199
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:197
 msgid ""
 "Evaluate transcription quality with Word Error Rate (WER) for word-level "
 "recognition and Character Error Rate (CER) for character-level recognition."
 msgstr "使用词错误率（WER）评估词级识别质量，使用字符错误率（CER）评估字符级识别质量。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:201
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:199
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:203
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:201
 msgid ""
 "Measure ASR serving performance with audio samples that represent the "
 "production workload. Record at least the audio duration, request "
@@ -269,88 +261,88 @@ msgstr ""
 "使用代表生产工作负载的音频样本测量 ASR "
 "服务性能。至少记录音频时长、请求并发数、端到端延迟、实时因子和吞吐量。这确保结果包含音频预处理、请求构建、API 通信、推理和响应解析。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:205
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:203
 msgid ""
 "Actual performance varies with hardware, audio duration, concurrency, and "
 "deployment configuration. Evaluate short audio, long audio, and concurrent "
 "requests separately before selecting a production configuration."
 msgstr "实际性能因硬件、音频时长、并发数和部署配置而异。在选择生产配置前，请分别评估短音频、长音频和并发请求。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:207
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:205
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:209
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:207
 msgid ""
 "The following settings are starting points rather than globally optimal "
 "configurations. Tune them according to audio duration, concurrency, latency "
 "requirements, and available NPU memory."
 msgstr "以下设置是起点而非全局最优配置。请根据音频时长、并发数、延迟要求和可用 NPU 内存进行调整。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Scenario"
 msgstr "场景"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Recommended Starting Point"
 msgstr "推荐起点"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Key Considerations"
 msgstr "关键考量"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Low latency"
 msgstr "低延迟"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "`--tensor-parallel-size 1`, `--max-model-len 4096`"
 msgstr "`--tensor-parallel-size 1`, `--max-model-len 4096`"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Use short audio inputs and avoid sharing the NPU with other workloads."
 msgstr "使用短音频输入，避免与其他工作负载共享 NPU。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "High throughput"
 msgstr "高吞吐量"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Increase request concurrency after establishing the latency baseline"
 msgstr "在建立延迟基线后增加请求并发数"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid ""
 "Monitor NPU memory and end-to-end latency; do not use synthetic text-only "
 "requests as a proxy for ASR traffic."
 msgstr "监控NPU内存和端到端延迟；不要使用合成的纯文本请求作为ASR流量的代理。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Long audio"
 msgstr "长音频"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid "Increase `--max-model-len` only as required"
 msgstr "仅在必要时增加`--max-model-len`"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:172
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:170
 msgid ""
 "On Atlas 300I DUO, keep the value conservative because attention-mask memory"
 " grows with the configured maximum length."
 msgstr "在Atlas 300I DUO上，请保持该值保守，因为注意力掩码内存会随配置的最大长度增长。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:217
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:215
 msgid ""
 "For general parameter tuning, refer to the [Performance Tuning "
 "Guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)."
 msgstr ""
 "关于通用参数调优，请参考[性能调优指南](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:219
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:217
 msgid "10 FAQ"
 msgstr "10 常见问题"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:221
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:219
 msgid ""
 "For common environment, installation, and general parameter issues, see the "
 "[Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This"
@@ -358,17 +350,17 @@ msgid ""
 msgstr ""
 "关于常见环境、安装和通用参数问题，请参阅[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本节涵盖模型和硬件特定的指导。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:223
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:221
 msgid "Atlas 300I DUO runs out of memory during startup"
 msgstr "Atlas 300I DUO在启动过程中内存不足"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:225
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:223
 msgid ""
 "**Symptom:** The server fails with an out-of-memory error while initializing"
 " attention."
 msgstr "**症状：** 服务器在初始化注意力机制时因内存不足错误而失败。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:227
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:225
 msgid ""
 "**Cause:** On Atlas 300I DUO, an automatically detected large context length"
 " can create a full causal attention mask whose memory consumption grows "
@@ -377,7 +369,7 @@ msgstr ""
 "**原因：**在Atlas 300I "
 "DUO上，自动检测到的大上下文长度可能会生成完整的因果注意力掩码，其内存消耗随`max_model_len`呈二次方增长。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:229
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:227
 msgid ""
 "**Solution:** Always set `--max-model-len` explicitly to a conservative "
 "value, such as `4096`, and increase it only after verifying available NPU "
@@ -386,3 +378,10 @@ msgstr "**解决方案：** 始终将`--max-model-len`显式设置为保守值�
 
 #~ msgid "Atlas inference products"
 #~ msgstr "Atlas 推理产品"
+
+#~ msgid ""
+#~ "For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
+#~ "later `-310p` image)."
+#~ msgstr ""
+#~ "对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
+#~ "`-310p` 镜像）。"

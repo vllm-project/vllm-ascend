@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-17 01:24+0000\n"
+"POT-Creation-Date: 2026-08-20 12:53+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -165,14 +165,6 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动docker镜像，请参考[使用docker](../../installation.md#set-up-"
 "using-docker)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:49
-msgid ""
-"For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
-"later `-310p` image)."
-msgstr ""
-"对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
-"`-310p` 镜像）。"
-
 #: ../../source/tutorials/models/Qwen-VL-Dense.md
 msgid "Ascend950DT series"
 msgstr "Ascend950DT系列"
@@ -185,48 +177,48 @@ msgstr "A2 / A3系列"
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:165
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:210
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:163
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:208
 msgid "**Installation Verification:**"
 msgstr "**安装验证：**"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:167
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:165
 msgid ""
 "After starting the container, run the following command to verify the "
 "installation:"
 msgstr "启动容器后，运行以下命令验证安装："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:173
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:171
 msgid ""
 "Expected result: The container is listed with status `Up`. You can also "
 "verify the vllm-ascend version inside the container:"
 msgstr "预期结果：容器被列出，状态为`Up`。您还可以在容器内验证vllm-ascend版本："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:179
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:177
 msgid ""
 "Expected result: The version information is displayed, matching the pulled "
 "image version."
 msgstr "预期结果：显示版本信息，与拉取的镜像版本匹配。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:181
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:179
 msgid "4.2 Source Code Installation"
 msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:183
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:181
 msgid ""
 "If you prefer not to use the Docker image, you can build from source. "
 "Install vLLM from source first:"
 msgstr "如果您不想使用Docker镜像，可以从源码构建。首先从源码安装vLLM："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:185
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:183
 msgid "Clone and install vLLM:"
 msgstr "克隆并安装vLLM："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:193
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:191
 msgid "Clone and install the vLLM-Ascend repository:"
 msgstr "克隆并安装vLLM-Ascend仓库："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:202
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:200
 msgid ""
 "Atlas 300I DUO does not support `triton` or `triton-ascend`. Source "
 "installation may pull them in automatically; uninstall them manually before "
@@ -234,44 +226,44 @@ msgid ""
 msgstr ""
 "Atlas 300I DUO 不支持 `triton` 或 `triton-ascend`。源码安装可能会自动引入这些依赖；运行前请手动卸载："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:216
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:214
 msgid ""
 "Expected result: The version information for both packages is displayed, "
 "confirming a successful installation."
 msgstr "预期结果：显示两个包的版本信息，确认安装成功。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:219
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:217
 msgid ""
 "If deploying a multi-node environment, set up the environment on each node."
 msgstr "如果部署多节点环境，请在每个节点上设置环境。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:222
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:220
 msgid ""
 "For more details, please refer to the [Installation "
 "Guide](../../installation.md)."
 msgstr "更多详情，请参考[安装指南](../../installation.md)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:224
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:222
 msgid "5 Online Service Deployment"
 msgstr "5 在线服务部署"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:226
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:224
 msgid "5.1 Single-Node Online Deployment"
 msgstr "5.1 单节点在线部署"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:228
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:226
 msgid "Run docker container to start the vLLM server on single-NPU:"
 msgstr "运行docker容器在单NPU上启动vLLM服务器："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:328
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:326
 msgid "On Atlas 300I DUO:"
 msgstr "在 Atlas 300I DUO 上："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:330
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:328
 msgid "Only `float16` dtype is supported."
 msgstr "仅支持`float16`数据类型。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:331
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:329
 msgid ""
 "Graph compilation (`--compilation-config`) requires **CANN version >= "
 "9.0.0**. If your CANN version is lower, replace `--compilation-config` with "
@@ -280,7 +272,7 @@ msgstr ""
 "图编译（`--compilation-config`）需要**CANN版本 >= "
 "9.0.0**。如果您的CANN版本较低，请将`--compilation-config`替换为`--enforce-eager`。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:332
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:330
 #, python-brace-format
 msgid ""
 "`--additional-config` with `\"ascend_compilation_config\": "
@@ -290,11 +282,11 @@ msgstr ""
 "需要使用带有 `\"ascend_compilation_config\": {\"enable_npugraph_ex\": false}` 的 "
 "`--additional-config`，因为 Atlas 300I DUO 不支持 `enable_npugraph_ex`。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:337
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:335
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:339
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:337
 msgid ""
 "Add the `--max_model_len` option to avoid the ValueError that occurs when "
 "the Qwen3-VL-8B-Instruct model's max-seq-len (256000) exceeds the maximum "
@@ -305,104 +297,104 @@ msgstr ""
 "添加`--max_model_len`选项，以避免当Qwen3-VL-8B-Instruct模型的max-seq-"
 "len（256000）超过KV缓存中可存储的最大token数时出现的ValueError。该值因不同NPU系列的片上内存大小而异。请根据您的NPU系列修改为合适的值。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:341
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:339
 msgid "If your service starts successfully, you can see the info shown below:"
 msgstr "如果您的服务启动成功，您可以看到如下所示的信息："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:349
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:347
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:351
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:349
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示查询模型："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:368
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:366
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:370
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:368
 msgid "The service returns HTTP 200 OK."
 msgstr "服务返回HTTP 200 OK。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:376
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:374
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:378
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:376
 msgid ""
 "The accuracy of some models is already within our CI monitoring scope, "
 "including:"
 msgstr "部分模型的精度已在我们的CI监控范围内，包括："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:380
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:378
 msgid "`Qwen3-VL-8B-Instruct`"
 msgstr "`Qwen3-VL-8B-Instruct`"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:389
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:387
 msgid "**Using Language Model Evaluation Harness**"
 msgstr "**使用语言模型评估工具**"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:391
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:389
 msgid ""
 "As an example, take the `mmmu_val` dataset as a test dataset, and run "
 "accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode."
 msgstr "以`mmmu_val`数据集作为测试数据集为例，在离线模式下运行`Qwen3-VL-8B-Instruct`的精度评估。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:393
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:391
 msgid ""
 "Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) "
 "for more details on `lm_eval` installation."
 msgstr ""
 "有关`lm_eval`安装的更多详情，请参考[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:399
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:397
 msgid "Run `lm_eval` to execute the accuracy evaluation."
 msgstr "运行 `lm_eval` 执行精度评估。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:410
 msgid ""
 "After execution, you can get the result, here is the result of "
 "`Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only."
 msgstr ""
 "执行后即可获得结果，以下为 `vllm-ascend:0.11.0rc3` 中 `Qwen3-VL-8B-Instruct` 的结果，仅供参考。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:414
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Tasks"
 msgstr "任务"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:414
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Value"
 msgstr "值"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:414
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Stderr"
 msgstr "标准错误"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:414
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "mmmu_val"
 msgstr "mmmu_val"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:414
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "0.5389"
 msgstr "0.5389"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:414
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "0.0159"
 msgstr "0.0159"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:422
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:420
 msgid "**Using AISBench**"
 msgstr "**使用 AISBench**"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:424
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:422
 msgid ""
 "Take the `text_vqa` dataset as an example, and run accuracy evaluation of "
 "`Qwen3-VL-8B-Instruct`."
 msgstr "以 `text_vqa` 数据集为例，运行 `Qwen3-VL-8B-Instruct` 的精度评估。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:426
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:424
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
@@ -411,99 +403,99 @@ msgstr ""
 "安装、数据集下载及配置详情请参考[使用 "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:428
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:426
 msgid "Run `ais_bench` to execute the accuracy evaluation."
 msgstr "运行 `ais_bench` 执行精度评估。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:432
 msgid ""
 "After execution, you can get the result, here is the result of "
 "`Qwen3-VL-8B-Instruct` in `vllm-ascend:0.23.0rc1` for reference only."
 msgstr ""
 "执行后即可获得结果，以下为 `vllm-ascend:0.23.0rc1` 中 `Qwen3-VL-8B-Instruct` 的结果，仅供参考。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "dataset"
 msgstr "数据集"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "metric"
 msgstr "指标"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "mode"
 msgstr "模式"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "vllm-api-general-chat"
 msgstr "vllm-api-general-chat"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "text_vqa"
 msgstr "text_vqa"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "accuracy"
 msgstr "准确率"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "gen"
 msgstr "gen"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:436
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:434
 msgid "80.57"
 msgstr "80.57"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:442
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:440
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:444
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:442
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM Benchmark"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:446
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:444
 msgid ""
 "Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
 msgstr ""
 "更多详情请参考 [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:448
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:446
 msgid "There are three `vllm bench` subcommands:"
 msgstr "`vllm bench` 包含三个子命令："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:450
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:448
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：对单批次请求的延迟进行基准测试。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:451
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:449
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：对在线服务吞吐量进行基准测试。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:452
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:450
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：对离线推理吞吐量进行基准测试。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:454
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:452
 msgid ""
 "The performance evaluation must be conducted in an online mode. Take the "
 "`serve` as an example. Run the code as follows."
 msgstr "性能评估必须以在线模式进行。以 `serve` 为例，运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:460
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:458
 msgid "After several minutes, you can get the performance evaluation result."
 msgstr "几分钟后，您可以获得性能评估结果。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:462
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:460
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:464
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:462
 msgid "9.1 Recommended Configurations"
 msgstr "9.1 推荐配置"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:466
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:464
 msgid ""
 "**Note**: The following configurations are validated in specific test "
 "environments and are for reference only. The optimal configuration depends "
@@ -514,147 +506,147 @@ msgstr ""
 "**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求及部署机器配比等因素。建议根据实际情况参考第"
 " 9.2 节进行调优。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:468
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:466
 msgid "Table 1: Scenario Overview"
 msgstr "表 1：场景概览"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Scenario"
 msgstr "场景"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Deployment Mode"
 msgstr "部署模式"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "*Total NPUs"
 msgstr "*NPU 总数"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Weight Version"
 msgstr "权重版本"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Key Considerations"
 msgstr "关键考量"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "High Throughput<br>(16k context)"
 msgstr "高吞吐量<br>（16k上下文）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Single-Node Mixed"
 msgstr "单节点混合"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "1 (A3)"
 msgstr "1 (A3)"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Qwen3-VL-8B-Instruct"
 msgstr "Qwen3-VL-8B-Instruct"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Use tp2 for high-resolution text inputs"
 msgstr "高分辨率文本输入使用 tp2"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Long Context<br>(128k, no prefix cache)"
 msgstr "长上下文<br>（128k，无前缀缓存）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "tp2 for high-resolution text inputs"
 msgstr "高分辨率文本输入使用 tp2"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Long Context<br>(128k, with prefix cache)"
 msgstr "长上下文<br>（128k，带前缀缓存）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Multimodal<br>(1080p)"
 msgstr "多模态<br>（1080p）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "tp2 for high-resolution visual inputs"
 msgstr "高分辨率视觉输入使用 tp2"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:477
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:475
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
 "node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
 msgstr "`*NPU 总数` 表示所有节点使用的 NPU 总数。1 节点 = 1 台 Atlas 800 A3 服务器（64G × 16 NPU）。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:479
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:477
 msgid "Table 2: Detailed Node Configuration"
 msgstr "表 2：详细节点配置"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Configuration"
 msgstr "配置"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "NPUs"
 msgstr "NPU"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "TP"
 msgstr "TP"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "DP"
 msgstr "DP"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Max Model Len"
 msgstr "最大模型长度"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "MTP Speculation Num"
 msgstr "MTP 推测数量"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "High Throughput / Low Latency (16k)"
 msgstr "高吞吐量/低延迟（16k）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Server / Single Machine"
 msgstr "服务器 / 单机"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "1"
 msgstr "1"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "~16k"
 msgstr "~16k"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "3"
 msgstr "3"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Long Context (128k, no cache)"
 msgstr "长上下文（128k，无缓存）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "128k"
 msgstr "128k"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Long Context (128k, with cache)"
 msgstr "长上下文（128k，带缓存）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:418
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "Multimodal (1080p)"
 msgstr "多模态（1080p）"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:488
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:486
 msgid ""
 "For complete startup commands and parameter descriptions, please refer to "
 "the deployment examples in [Chapter 5](#5-online-service-deployment)."
 msgstr "完整的启动命令及参数说明请参考[第 5 章](#5-online-service-deployment)中的部署示例。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:490
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:488
 msgid ""
 "**Notice:** `max-model-len` and `max-num-seqs` need to be set according to "
 "the actual usage scenario. For other settings, please refer to the "
@@ -663,15 +655,15 @@ msgstr ""
 "**注意：** `max-model-len` 和 `max-num-seqs` 需根据实际使用场景设置。其他设置请参考 "
 "**[部署](#5-online-service-deployment)** 章节。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:491
 msgid "9.2 Tuning Guidelines"
 msgstr "9.2 调优指南"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:495
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
 msgid "9.2.1 General Tuning Reference"
 msgstr "9.2.1 通用调优参考"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:497
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:495
 msgid ""
 "Please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
@@ -679,7 +671,7 @@ msgid ""
 msgstr ""
 "调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:499
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:497
 msgid ""
 "Please refer to the [Feature "
 "Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed "
@@ -687,11 +679,11 @@ msgid ""
 msgstr ""
 "请参阅[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:501
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:499
 msgid "10 FAQ"
 msgstr "10 常见问题"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:503
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:501
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "
@@ -714,3 +706,10 @@ msgstr ""
 #~ "weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)"
 #~ msgstr ""
 #~ "`Qwen3-VL-4B-Instruct`：[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)"
+
+#~ msgid ""
+#~ "For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
+#~ "later `-310p` image)."
+#~ msgstr ""
+#~ "对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
+#~ "`-310p` 镜像）。"
