@@ -46,6 +46,23 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     return bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0")))
 
 
+def _coordinated_dummy_run_enabled(vllm_config) -> bool:
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if parallel_config is None or parallel_config.data_parallel_size <= 1 or not parallel_config.enable_expert_parallel:
+        return False
+
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    enable_fused_mc2 = additional_config.get("enable_fused_mc2")
+    if enable_fused_mc2 is None:
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        except Exception:
+            enable_fused_mc2 = 0
+    return enable_fused_mc2 == 1
+
+
 class BalanceScheduler(Scheduler):
     def __init__(
         self,
@@ -613,6 +630,23 @@ class BalanceScheduler(Scheduler):
 
 
 class BalanceDPEngineCoreProc(DPEngineCoreProc):
+    def _complete_wave(self) -> None:
+        if self.dp_rank == 0 or not self.has_coordinator:
+            # Notify client that we are pausing the loop.
+            # In the coordinator case, dp rank 0 sends updates to the
+            # coordinator. Otherwise (offline spmd case), each rank
+            # sends the update to its colocated front-end process.
+            client_index = -1 if self.has_coordinator else 0
+            self.output_queue.put_nowait(
+                (
+                    client_index,
+                    EngineCoreOutputs(wave_complete=self.current_wave),
+                )
+            )
+        # Increment wave count and reset step counter.
+        self.current_wave += 1
+        self.step_counter = 0
+
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
@@ -621,47 +655,37 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
-            # 2) Step the engine core.
+            # 2) Coordinate before any rank enters model execution. MegaMoE
+            # uses the complete DP/EP-like group, so an idle rank must run a
+            # dummy batch in the same iteration as another rank's real batch.
+            was_running = self.engines_running
+            local_has_work = self.scheduler.has_unfinished_requests() or bool(self.scheduler.finished_req_ids)
+            self.engines_running = self._has_global_unfinished_reqs(local_has_work)
+            if not self.engines_running:
+                if was_running:
+                    self._complete_wave()
+                continue
+
+            # 3) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
-            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
-                if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle.
-                    continue
-
-                # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
+                # Another DP rank has work, so participate in the same model
+                # collectives even when this rank has no ready requests.
                 self.execute_dummy_batch()
 
-            # 3) All-reduce operation to determine global unfinished reqs.
-            self.engines_running = self._has_global_unfinished_reqs(local_unfinished_reqs)
-            self.scheduler.balance_gather(self.dp_group)
-
-            if not self.engines_running:
-                if self.dp_rank == 0 or not self.has_coordinator:
-                    # Notify client that we are pausing the loop.
-                    logger.debug("Wave %d finished, pausing engine loop.", self.current_wave)
-                    # In the coordinator case, dp rank 0 sends updates to the
-                    # coordinator. Otherwise (offline spmd case), each rank
-                    # sends the update to its colocated front-end process.
-                    client_index = -1 if self.has_coordinator else 0
-                    self.output_queue.put_nowait(
-                        (
-                            client_index,
-                            EngineCoreOutputs(wave_complete=self.current_wave),
-                        )
-                    )
-                # Increment wave count and reset step counter.
-                self.current_wave += 1
-                self.step_counter = 0
+            # 4) Gather scheduler load after real and dummy ranks have both
+            # completed the model iteration. Global completion is observed at
+            # the beginning of the next iteration.
+            if balance_gather := getattr(self.scheduler, "balance_gather", None):
+                balance_gather(self.dp_group)
 
 
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
     vllm_config = kwargs.get("vllm_config")
-    if not _balance_scheduling_enabled(vllm_config):
+    if not _balance_scheduling_enabled(vllm_config) and not _coordinated_dummy_run_enabled(vllm_config):
         return _ORIGINAL_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
     # Signal handler used for graceful termination.
