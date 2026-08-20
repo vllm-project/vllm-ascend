@@ -100,12 +100,14 @@ def _make_vllm_config(
     enable_prefix_caching: bool,
     dcp: int,
     block_size: int = 16,
+    kv_transfer_config: object | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
         ),
+        kv_transfer_config=kv_transfer_config,
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
         ),
@@ -124,20 +126,23 @@ def _make_coordinator_for_effective_block_size(
 
 
 @pytest.mark.parametrize(
-    ("enable_prefix_caching", "expected_hash_block_size"),
+    ("enable_prefix_caching", "kv_transfer_config", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2, id="dcp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="dcp-with-prefix-caching"),
+        pytest.param(False, None, math.lcm(16, 32) * 2, id="dcp-without-hashing"),
+        pytest.param(False, object(), math.gcd(16, 32), id="dcp-with-connector"),
+        pytest.param(True, None, math.gcd(16, 32), id="dcp-with-prefix-caching"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     enable_prefix_caching: bool,
+    kv_transfer_config: object | None,
     expected_hash_block_size: int,
 ) -> None:
     kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
     vllm_config = _make_vllm_config(
         enable_prefix_caching=enable_prefix_caching,
         dcp=2,
+        kv_transfer_config=kv_transfer_config,
     )
 
     scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
