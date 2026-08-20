@@ -330,6 +330,27 @@ To enable Decode node KV Cache storage for Prefill use with MLA models, add `con
 }
 ```
 
+Alternatively, set `save_decode_cache: true` when a consumer should keep
+Prefill writes disabled and publish only complete blocks produced during
+Decode. The first Decode save checks the aligned Prefill prefix and fills any
+missing ancestor blocks, preserving a reusable hash chain after store eviction.
+Later saves resume from the worker's last successful offset. Failed writes are
+retried at the next completed-block boundary. This mode requires non-layerwise
+transfer.
+
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "save_decode_cache": true
+    }
+}
+```
+
 Expected output: Returns a JSON response conforming to the OpenAI Completions API specification, containing `id`, `choices` (with `text` and `finish_reason`), `usage`, and other fields.
 
 #### Step 4: PD-Mixed Scenario
