@@ -280,6 +280,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             )
         return layer
 
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config", new=lambda: None)
+    @patch("vllm_ascend.quantization.methods.w4a8.use_cann_megamoe", new=lambda _: False)
     @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
@@ -350,6 +352,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(result["w13_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(result["w2_weight_scale"].dtype, torch.bfloat16)
 
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config", new=lambda: None)
+    @patch("vllm_ascend.quantization.methods.w4a8.use_cann_megamoe", new=lambda _: False)
     @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
