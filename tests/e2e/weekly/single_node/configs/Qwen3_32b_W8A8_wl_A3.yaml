@@ -140,5 +140,3 @@ test_cases:
       - "--additional-config"
       - '{"enable_weight_nz_layout":true}'
       - "--enforce-eager"
-    benchmarks:
-      <<: *benchmarks_perf1
