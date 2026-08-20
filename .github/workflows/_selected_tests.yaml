@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'The vllm-ascend ref to test.'
+      base_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -108,12 +113,12 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
 
-      - name: Rebase on latest main
+      - name: Rebase on latest ${{ inputs.base_ref }}
         run: |
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
+          git fetch origin ${{ inputs.base_ref }}
+          git rebase origin/${{ inputs.base_ref }}
 
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
