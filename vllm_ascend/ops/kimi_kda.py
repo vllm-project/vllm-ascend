@@ -29,7 +29,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
@@ -230,16 +229,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             prefer_copy=True,
         )
 
-    def _recurrent_gate(self, raw_gate: torch.Tensor) -> torch.Tensor:
-        flat_gate = rearrange(raw_gate, "1 n h d -> n (h d)")
-        gate = fused_kda_gate(
-            flat_gate,
-            self.A_log,
-            self.head_dim,
-            g_bias=self.dt_bias,
-        )
-        return gate.unsqueeze(0)
-
     def _run_recurrent(
         self,
         q: torch.Tensor,
@@ -296,50 +285,36 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             state_indices = state_indices[keep]
             has_initial_state = has_initial_state[keep]
 
-        # The recurrent cache is [H, V, K], while chunk_kda_fwd consumes
-        # [H, K, V].  Keep the conversion at this operator boundary.
+        # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
+        # that state layout directly through state_v_first.
         initial_state_vk = recurrent_state[state_indices].contiguous()
         clear_ssm_states(initial_state_vk, has_initial_state)
-        initial_state_kv = initial_state_vk.transpose(-1, -2).contiguous()
 
         q = l2norm_fwd(q.contiguous())
         k = l2norm_fwd(k.contiguous())
-        if self.gate_lower_bound is not None:
-            gate_cumsum = torch.ops._C_ascend.kda_gate_cumsum(
-                raw_gate.contiguous(),
-                _KDA_CHUNK_SIZE,
-                A_log=self.A_log.reshape(-1).contiguous(),
-                dt_bias=self.dt_bias.contiguous(),
-                cu_seqlens=cu_seqlens,
-                use_gate_in_kernel=True,
-                safe_gate=True,
-                lower_bound=self.gate_lower_bound,
-                layout="BSND",
-            )
-        else:
-            gate = self._recurrent_gate(raw_gate)
-            gate_cumsum = torch.ops._C_ascend.kda_gate_cumsum(
-                gate.contiguous(),
-                _KDA_CHUNK_SIZE,
-                cu_seqlens=cu_seqlens,
-                layout="BSND",
-            )
         result = torch.ops._C_ascend.chunk_kda_fwd(
             q,
             k,
             v.contiguous(),
-            gate_cumsum,
+            raw_gate.contiguous(),
             beta.contiguous(),
             self.head_dim**-0.5,
             _KDA_CHUNK_SIZE,
             layout="BSND",
-            initial_state=initial_state_kv,
+            initial_state=initial_state_vk,
             output_final_state=True,
             cu_seqlens=cu_seqlens,
             chunk_indices=prebuilt_metadata.chunk_indices_chunk64_host,
-            return_intermediate=False,
+            safe_gate=self.gate_lower_bound is not None,
+            lower_bound=self.gate_lower_bound if self.gate_lower_bound is not None else -5.0,
+            use_gate_in_kernel=True,
+            A_log=self.A_log.reshape(-1).contiguous(),
+            dt_bias=self.dt_bias.contiguous(),
+            disable_recompute=False,
+            return_intermediate_states=False,
+            state_v_first=True,
         )
-        recurrent_state[state_indices] = result[1].transpose(-1, -2).contiguous().to(recurrent_state.dtype)
+        recurrent_state[state_indices] = result[1].to(recurrent_state.dtype)
         return result[0]
 
     @eager_break_during_capture

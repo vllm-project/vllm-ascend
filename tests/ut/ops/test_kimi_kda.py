@@ -10,7 +10,6 @@ from torch import nn
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
-    AscendKimiK3MergedGateProjection,
     _prepare_beta,
     _zero_padded_output,
     _zero_padded_recurrent_output,
@@ -91,12 +90,9 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
             enable_prompt_embeds=False,
         )
     )
-    with (
-        patch(
-            "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
-            new=fake_upstream_init,
-        ),
-        patch("vllm_ascend.ops.kimi_kda.is_vl_model", return_value=False),
+    with patch(
+        "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
+        new=fake_upstream_init,
     ):
         attention = AscendKimiK3DeltaAttention(config, vllm_config)
 
@@ -117,30 +113,7 @@ def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
     assert torch.all((beta >= 0.0) & (beta <= 1.0))
 
 
-def test_recurrent_gate_uses_unbounded_kda_transform():
-    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
-    nn.Module.__init__(attention)
-    attention.head_dim = 3
-    attention.A_log = nn.Parameter(torch.randn(2))
-    attention.dt_bias = nn.Parameter(torch.randn(6))
-    raw_gate = torch.randn(1, 4, 2, 3)
-    expected = torch.randn(4, 2, 3)
-
-    with patch(
-        "vllm_ascend.ops.kimi_kda.fused_kda_gate",
-        return_value=expected,
-    ) as fused_gate:
-        actual = attention._recurrent_gate(raw_gate)
-
-    torch.testing.assert_close(actual, expected.unsqueeze(0))
-    fused_gate.assert_called_once()
-    torch.testing.assert_close(fused_gate.call_args.args[0], raw_gate.reshape(4, 6))
-    assert fused_gate.call_args.args[1] is attention.A_log
-    assert fused_gate.call_args.args[2] == attention.head_dim
-    assert fused_gate.call_args.kwargs["g_bias"] is attention.dt_bias
-
-
-def test_prefill_accepts_unbounded_gate():
+def test_prefill_fuses_raw_gate_and_updates_v_first_state():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.head_dim = 2
@@ -162,27 +135,18 @@ def test_prefill_accepts_unbounded_gate():
         keep_meta=None,
         chunk_indices_chunk64_host=(0, 0),
     )
-    transformed_gate = torch.randn_like(raw_gate)
-    gate_cumsum = torch.randn_like(raw_gate, dtype=torch.float32)
     output = torch.randn_like(v)
     final_state = torch.randn(1, 1, 2, 2)
 
     with (
         patch("vllm_ascend.ops.kimi_kda.clear_ssm_states"),
         patch("vllm_ascend.ops.kimi_kda.l2norm_fwd", side_effect=lambda x: x),
-        patch.object(attention, "_recurrent_gate", return_value=transformed_gate) as recurrent_gate,
-        patch.object(
-            torch.ops._C_ascend,
-            "kda_gate_cumsum",
-            return_value=gate_cumsum,
-            create=True,
-        ) as kda_gate_cumsum,
         patch.object(
             torch.ops._C_ascend,
             "chunk_kda_fwd",
-            return_value=(output, final_state),
+            return_value=(output, final_state, *([None] * 10)),
             create=True,
-        ),
+        ) as chunk_kda_fwd,
     ):
         actual = attention._run_prefill(
             q,
@@ -197,32 +161,11 @@ def test_prefill_accepts_unbounded_gate():
         )
 
     assert actual is output
-    recurrent_gate.assert_called_once_with(raw_gate)
-    assert kda_gate_cumsum.call_args.args[0] is transformed_gate
-    assert kda_gate_cumsum.call_args.args[1] == 64
-    assert "use_gate_in_kernel" not in kda_gate_cumsum.call_args.kwargs
-
-
-def test_merged_gate_projection_uses_vllm_shard_loader():
-    projection = AscendKimiK3MergedGateProjection.__new__(
-        AscendKimiK3MergedGateProjection,
-    )
-    nn.Module.__init__(projection)
-    param = nn.Parameter(torch.empty(4, 3))
-    loaded_weight = torch.empty(2, 3)
-
-    with patch(
-        "vllm_ascend.ops.kimi_kda._KimiGDNMergedColumnParallelLinear.weight_loader",
-        autospec=True,
-    ) as weight_loader:
-        projection.load_shard_weight(param, loaded_weight, shard_id=2)
-
-    weight_loader.assert_called_once_with(
-        projection,
-        param,
-        loaded_weight,
-        2,
-    )
+    assert chunk_kda_fwd.call_args.args[3] is raw_gate
+    assert chunk_kda_fwd.call_args.kwargs["use_gate_in_kernel"] is True
+    assert chunk_kda_fwd.call_args.kwargs["state_v_first"] is True
+    assert chunk_kda_fwd.call_args.kwargs["safe_gate"] is False
+    torch.testing.assert_close(recurrent_state[state_indices], final_state)
 
 
 def test_kda_empty_forward_context_clears_preallocated_output():
