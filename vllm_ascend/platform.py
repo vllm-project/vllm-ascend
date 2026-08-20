@@ -421,7 +421,7 @@ class NPUPlatform(Platform):
             # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
             # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
             # not be detected in advance assert.
-            compilation_config.splitting_ops.extend(["vllm::mla_forward"])
+            compilation_config.splitting_ops.extend(["vllm::mla_forward", "vllm::dsa_forward"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif (
