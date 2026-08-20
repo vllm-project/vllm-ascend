@@ -86,6 +86,25 @@ class HardwareAwarePrefixPolicy:
 
         max_total = num_reqs * num_draft_tokens
         min_total_tokens = min(min_total_tokens, max_total)
+
+        # When the configured hardware floor already requires every draft
+        # position, there is no allocation decision left to make.  Returning
+        # the full width avoids the device sort/top-k path on every decode
+        # step while preserving the exact result of the general allocator.
+        if min_total_tokens >= max_total:
+            self._best_total_tokens = max_total
+            self._last_num_reqs = num_reqs
+            self._last_min_total_tokens = min_total_tokens
+            self.last_goodput = float(
+                (num_reqs + max_total)
+                / self.cost_model.latency(max(1, num_reqs + max_total))
+            )
+            return torch.full(
+                (num_reqs,),
+                num_draft_tokens,
+                dtype=torch.int32,
+                device=survival.device,
+            )
         if self._last_min_total_tokens != min_total_tokens:
             self._best_total_tokens = None
             self._last_min_total_tokens = min_total_tokens
@@ -164,6 +183,13 @@ class HardwareAwarePrefixPolicy:
             selected_total,
             min_total_tokens,
         )
+        if selected_total >= max_total:
+            return torch.full(
+                (num_reqs,),
+                num_draft_tokens,
+                dtype=torch.int32,
+                device=survival.device,
+            )
         extra = selected_total - base_total
         lengths = torch.full(
             (num_reqs,), mandatory, dtype=torch.int32, device=survival.device
