@@ -5,7 +5,6 @@ import time
 
 import msgspec
 import msgspec.msgpack
-import pytest
 import zmq
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
@@ -128,21 +127,20 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     assert success_count >= 0.5 * test_count
 
 
-@pytest.mark.skip(reason="cpu offload connector is deprecated.")
 def test_cpu_offloading() -> None:
     """
     Tests OffloadingConnector with CPUOffloadingSpec.
     """
 
-    # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
+    # Configure OffloadingConnector with the Ascend transfer worker.
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
-            "num_cpu_blocks": 1000,
+            "cpu_bytes_to_use": 1 << 30,
             "block_size": 128,
             "spec_name": "NPUOffloadingSpec",
-            "spec_module_path": "vllm_ascend.kv_offload.npu",
+            "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
         },
     )
 
