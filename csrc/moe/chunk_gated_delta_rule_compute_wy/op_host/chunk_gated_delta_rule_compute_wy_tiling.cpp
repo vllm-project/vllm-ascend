@@ -101,8 +101,12 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     }
     context->SetBlockDim(usedCoreNum);
 
-    // mmAttn: kBeta[64,K] @ K[64,K]^T -> [64,64]
-    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, kdim, /*bTranspose=*/true, tiling.mmAttn) !=
+    // All cube work runs as <=64-wide tiles: the kernel slices K and N itself and
+    // re-sets OrgShape/SingleShape per call. Tilings generated at any dim above 64
+    // wedge MatmulImpl::Init on the device (bisected: Init alone hangs at K=128),
+    // so every tiling is generated for the 64^3 tile.
+    // mmAttn: kBeta[64,<=64] @ K[64,<=64]^T -> [64,64], K-slices accumulated in UB.
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/true, tiling.mmAttn) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
@@ -111,13 +115,12 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    // mmApplyU / mmApplyW: both tiled for max(K,V) so either side can run at full width.
-    const int64_t applyN = std::max(kdim, vdim);
-    if (FillCubeTiling(context, FIXED_CHUNK, applyN, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyU) !=
+    // mmApplyU / mmApplyW: P[64,64] @ R[64,<=64] column slices.
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyU) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    if (FillCubeTiling(context, FIXED_CHUNK, applyN, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW) !=
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
