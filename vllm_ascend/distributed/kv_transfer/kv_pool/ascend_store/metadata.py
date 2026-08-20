@@ -895,6 +895,11 @@ class ReqMeta:
     original_block_size: list[int] | int | None = None
 
     event_id: int | None = None
+    # Monotonic identity of one queued store operation. Unlike req_id, this
+    # value is never reused while the engine is alive, so an old asynchronous
+    # operation cannot update the save progress of a new request generation
+    # that happens to reuse the same req_id.
+    store_job_id: int | None = None
 
     def __init__(
         self,
@@ -914,6 +919,7 @@ class ReqMeta:
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
+        store_job_id: int | None = None,
         save_end_token: int | None = None,
         target_token_len: int | None = None,
         save_start_token: int = 0,
@@ -955,6 +961,7 @@ class ReqMeta:
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
+        self.store_job_id = store_job_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.starts = starts

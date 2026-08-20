@@ -1185,6 +1185,7 @@ class TestKVPoolSchedulerBindBlockPool(unittest.TestCase):
         scheduler.reference_sending_blocks(req_meta)
 
         self.assertEqual(req_meta.event_id, 0)
+        self.assertEqual(req_meta.store_job_id, 0)
         scheduler._block_pool.touch.assert_called_once_with(scheduler._block_pool.blocks)
         self.assertEqual(scheduler.sending_blocks, {0: [0, 1]})
         self.assertTrue(scheduler.has_pending_push_work())

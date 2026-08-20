@@ -1085,9 +1085,17 @@ class KVPoolScheduler:
         Dense block 0 is valid; block 0 is skipped only for aligned Mamba
         groups where it is the connector's null-block sentinel.
         """
-        if not req_meta.can_save or self.layerwise_offload or self._block_pool is None:
+        if not req_meta.can_save or self.layerwise_offload:
             return
         using_event_id = self.get_sending_event_id()
+        # AscendStore already has a scheduler-owned, engine-lifetime-unique
+        # event id. Reuse it as the store-job generation instead of adding a
+        # second scheduler/worker completion protocol.
+        req_meta.store_job_id = using_event_id
+        if self._block_pool is None:
+            # Standalone model-runner paths synchronously drain the queue and
+            # therefore do not need a scheduler-visible completion event.
+            return
         req_meta.event_id = using_event_id
         current_step_sending: list[int] = []
         seen: set[int] = set()
