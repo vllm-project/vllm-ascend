@@ -864,16 +864,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
             aux_keys = sorted(
-                (
-                    key
-                    for key in intermediate_tensors.tensors
-                    if key.startswith("aux_layer_")
-                ),
+                (key for key in intermediate_tensors.tensors if key.startswith("aux_layer_")),
                 key=lambda key: int(key.rsplit("_", 1)[-1]),
             )
-            aux_hidden_states = [
-                intermediate_tensors.tensors[key] for key in aux_keys
-            ]
+            aux_hidden_states = [intermediate_tensors.tensors[key] for key in aux_keys]
 
         self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         for idx, layer in enumerate(

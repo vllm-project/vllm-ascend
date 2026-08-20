@@ -229,10 +229,7 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
         )
         return False
 
-    if (
-        make_forward is not None
-        and not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False)
-    ):
+    if make_forward is not None and not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
         inner_model.forward = make_forward().__get__(inner_model, type(inner_model))
         inner_model._eagle3_pp_aux_forward_patched = True
     _patch_make_empty_intermediate_tensors(inner_model)
