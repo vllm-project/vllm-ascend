@@ -16,7 +16,12 @@
 #
 import torch
 import torch.nn.functional as F
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
+from vllm.distributed import (
+    get_dp_group,
+    get_ep_group,
+    get_tp_group,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
 
@@ -24,8 +29,10 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ops.fused_moe.shared_experts import (
+    AscendSharedExperts,
+    SharedExpertParallelMode,
+)
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
@@ -98,12 +105,30 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # handles it for the shared output. Signal this to the upstream
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
-        moe_comm_type = _EXTRA_CTX.moe_comm_type
-        return moe_comm_type in {
+        return _EXTRA_CTX.moe_comm_type in {
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
-        } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+        } or (_EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+
+    def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
+        shared_experts = getattr(self, "ascend_shared_experts", None)
+        if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
+            return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
+        return shared_experts.parallel_mode()
+
+    def _reduce_shared_output_if_needed(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool,
+    ) -> torch.Tensor | None:
+        if (
+            shared_output is not None
+            and fused_output_is_reduced
+            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
+        ):
+            shared_output = tensor_model_parallel_all_reduce(shared_output)
+        return shared_output
 
     @property
     def local_num_experts(self) -> int:
@@ -114,67 +139,54 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
 
-    # main2main compat: `fused_output_is_reduced` was added to upstream
-    # _maybe_reduce_shared_expert_output() in vllm main after 0.26.0.
-    # Ascend already reduces shared expert output in
-    # _forward_shared_experts, so the parameter is accepted for
-    # interface alignment only.
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
+    # Shared-expert layout-specific communication is handled by
+    # AscendSharedExperts, so only standard TP weights need a separate
+    # all-reduce when routed output has already been reduced.
+    def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
+    ) -> torch.Tensor | None:
+        if fused_output_is_reduced is None:
+            fused_output_is_reduced = self._fused_output_is_reduced
+        return self._reduce_shared_output_if_needed(
+            shared_output,
+            fused_output_is_reduced,
+        )
 
-        def _maybe_reduce_shared_expert_output(
-            self,
-            shared_output: torch.Tensor | None,
-        ) -> torch.Tensor | None:
-            # _forward_shared_experts already handles shared expert TP
-            # all-reduce for MC2/ALLTOALL/FUSED_MC2. For AllGather the
-            # reduction is done via _maybe_reduce_final_output on the
-            # combined (shared + routed) output.
-            return shared_output
-    else:
+    def _maybe_reduce_routed_output_before_transform(
+        self,
+        fused_output: torch.Tensor,
+        fused_output_is_reduced: bool,
+    ) -> tuple[torch.Tensor, bool]:
+        fused_output, fused_output_is_reduced = super()._maybe_reduce_routed_output_before_transform(
+            fused_output,
+            fused_output_is_reduced,
+        )
 
-        def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
-            self,
-            shared_output: torch.Tensor | None,
-            fused_output_is_reduced: bool | None = None,
-        ) -> torch.Tensor | None:
-            # Ascend handles shared expert reduction in
-            # _forward_shared_experts; the upstream kwarg is unused here.
-            _ = fused_output_is_reduced
-            return shared_output
+        if (
+            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON
+            and not fused_output_is_reduced
+        ):
+            fused_output = tensor_model_parallel_all_reduce(fused_output)
+            fused_output_is_reduced = True
+        return fused_output, fused_output_is_reduced
 
-    # main2main compat: `output_is_reduced` was added to upstream
-    # _maybe_reduce_final_output() in vllm main after 0.26.0.
     # Ascend already handles reduction in its own dispatch path, so
     # the upstream kwarg is accepted for interface alignment only.
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
-
-        def _maybe_reduce_final_output(
-            self,
-            states: torch.Tensor,
-            trunc_size: int,
-        ) -> torch.Tensor:
-            # Sequence-parallel MoE returns a token-sharded result after EP
-            # reduce-scatter.  Qwen3Moe gathers those token shards across TP in
-            # the model, so a TP all-reduce here would sum different token
-            # segments and corrupt the sequence.
-            if not self.moe_config.is_sequence_parallel:
-                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
-            return states[..., :trunc_size]
-    else:
-
-        def _maybe_reduce_final_output(  # type: ignore[misc]
-            self,
-            states: torch.Tensor,
-            trunc_size: int | None,
-            output_is_reduced: bool | None = None,
-        ) -> torch.Tensor:
-            _ = output_is_reduced
+    def _maybe_reduce_final_output(  # type: ignore[misc]
+        self,
+        states: torch.Tensor,
+        trunc_size: int | None,
+        output_is_reduced: bool | None = None,
+    ) -> torch.Tensor:
+        if output_is_reduced is None:
+            output_is_reduced = self._fused_output_is_reduced
+        if not output_is_reduced:
             states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
-            if trunc_size is not None and trunc_size > 0:
-                return states[..., :trunc_size]
-            return states
+        if trunc_size is not None and trunc_size > 0:
+            return states[..., :trunc_size]
+        return states
 
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context

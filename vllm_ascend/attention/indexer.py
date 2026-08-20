@@ -32,6 +32,10 @@ class AscendSFAIndexerBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
+    def get_impl_cls():
+        return None
+
+    @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA_INDEXER"
 

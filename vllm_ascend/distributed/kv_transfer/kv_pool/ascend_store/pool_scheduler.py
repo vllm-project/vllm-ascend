@@ -27,7 +27,13 @@ from vllm.v1.serial_utils import MsgpackEncoder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
+    get_gva_layerwise_config,
+    get_layerwise_kv_cache_specs,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     KeyMetadata,
@@ -37,17 +43,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
-    get_cache_family_granularity,
-    infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
-    build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
-    get_gva_layerwise_config,
-    get_layerwise_kv_cache_specs,
 )
 
 
@@ -419,7 +417,7 @@ class KVPoolScheduler:
         vllm_config: "VllmConfig",
         kv_cache_config: KVCacheConfig | None,
     ) -> list[int]:
-        if kv_cache_config is None or not self.use_hybrid:
+        if kv_cache_config is None:
             return [vllm_config.cache_config.block_size]
 
         block_sizes: list[int] = []
@@ -441,18 +439,12 @@ class KVPoolScheduler:
         return families[group_id]
 
     def _get_effective_group_block_size(self, group_id: int) -> int:
-        cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
-        return self._get_group_block_size(group_id) * max(infer_cache_family_ratio(cache_family), 1)
+        return self._get_group_block_size(group_id)
 
     def _infer_cache_transfer_granularity(self) -> int:
         granularities = [self.lcm_block_size]
         for group_id in self.kv_cache_group_ids:
-            granularities.append(
-                get_cache_family_granularity(
-                    self._get_group_block_size(group_id),
-                    self._get_group_family(self.kv_cache_group_families, group_id),
-                )
-            )
+            granularities.append(self._get_group_block_size(group_id))
         return math.lcm(*granularities)
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:

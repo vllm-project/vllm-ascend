@@ -19,6 +19,7 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -34,22 +35,24 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -57,8 +60,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
     kv_cache_spec: dict[str, KVCacheSpec] = {}
+    attention_layer_names: list[str] = []
+    mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        c8_k_cache_dtype = torch.float8_e4m3fn
+        c8_k_scale_cache_dtype = torch.float32
+    else:
+        c8_k_cache_dtype = torch.int8
+        c8_k_scale_cache_dtype = torch.float16
 
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
@@ -68,10 +80,25 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if spec is None:
             continue
 
+        if isinstance(spec, MambaSpec):
+            # Keep Mamba groups after attention groups. Ascend graph parameter
+            # updates rely on this stable backend ordering.
+            mamba_specs[layer_name] = spec
+            continue
+
         if isinstance(attn_module, MLAAttention):
+            cache_sparse_sfa_c8 = False
             if getattr(attn_module.impl, "fa_quant_layer", False):
                 head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                 dtype, cache_dtype_str = attn_module.impl.dtype, None
+            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
+                cache_sparse_sfa_c8 = True
+                head_size = get_sfa_qsfa_packed_head_dim(
+                    vllm_config.model_config.hf_text_config.kv_lora_rank,
+                    vllm_config.model_config.hf_text_config.qk_rope_head_dim,
+                )
+                dtype = c8_k_cache_dtype
+                cache_dtype_str = vllm_config.cache_config.cache_dtype
             else:
                 head_size = spec.head_size
                 dtype = spec.dtype
@@ -82,21 +109,50 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 head_size=head_size,
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
+                cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
+            cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=vllm_config.model_config.hf_text_config.index_head_dim,
-                dtype=get_kv_cache_torch_dtype(
+                dtype=c8_k_cache_dtype
+                if cache_sparse_li_c8
+                else get_kv_cache_torch_dtype(
                     vllm_config.cache_config.cache_dtype,
                     vllm_config.model_config.dtype,
                 ),
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
+                scale_dim=1 if cache_sparse_li_c8 else 0,
+                scale_dtype=c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
+                cache_sparse_li_c8=cache_sparse_li_c8,
             )
             continue
 
         kv_cache_spec[layer_name] = spec
+        if isinstance(spec, AttentionSpec):
+            attention_layer_names.append(layer_name)
+            continue
+
+    if mamba_specs:
+        common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
+        for layer_name in attention_layer_names:
+            spec = kv_cache_spec[layer_name]
+            page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
+            # Ascend exposes K and V as separate block-first views even when
+            # the backend's logical cache shape starts with the K/V dimension.
+            # Consequently, padded pages are indexed by their runtime block
+            # stride and are safe for hybrid Attention/Mamba allocations.
+            kv_cache_spec[layer_name] = replace(
+                spec,
+                page_size_padded=page_size_padded,
+                indexes_kv_by_block_stride=True,
+            )
+        for layer_name, spec in mamba_specs.items():
+            if spec.page_size_bytes < common_page_size:
+                mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
+        kv_cache_spec.update(mamba_specs)
 
     return kv_cache_spec
 
@@ -124,6 +180,7 @@ def build_attn_metadata(
     graph_pad_size: int = -1,
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
+    is_prefilling: torch.Tensor | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -149,12 +206,7 @@ def build_attn_metadata(
         num_input_tokens = num_tokens
 
     attn_metadata: dict[str, Any] = {}
-    # DSA metadata is shared by the ratio-specific cache groups for one model
-    # execution. Keep the cache at the batch-builder scope,
-    # so each DSA builder can reuse the split results and SAS metadata produced
-    # by earlier groups in this invocation.
-    prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
-    decode_ratio_to_sas_metadata: dict[Any, Any] = {}
+    # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
@@ -183,6 +235,7 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,
@@ -204,10 +257,7 @@ def build_attn_metadata(
                 if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
                     attn_metadata_extra_kwargs.update(
                         num_reqs_actual=num_reqs,
-                        prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
-                        decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
-                        block_size=attn_group.kv_cache_spec.block_size,
                     )
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
@@ -217,8 +267,6 @@ def build_attn_metadata(
                 if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
-                    prefill_ratio_to_sas_metadata = attn_metadata_builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
-                    decode_ratio_to_sas_metadata = attn_metadata_builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
@@ -344,7 +392,7 @@ def _view_dsv4_cache(
 
     k_shape = attn_backend.get_kv_cache_shape(
         num_blocks,
-        kv_cache_spec.block_size,
+        kv_cache_spec.storage_block_size,
         kv_cache_spec.num_kv_heads,
         kv_cache_spec.head_size,
     )
@@ -357,7 +405,7 @@ def _view_dsv4_cache(
         scale_dtype = kv_cache_spec.scale_dtype
         scale_shape = attn_backend.get_kv_cache_shape(
             num_blocks,
-            kv_cache_spec.block_size,
+            kv_cache_spec.storage_block_size,
             kv_cache_spec.num_kv_heads,
             scale_dim,
         )
@@ -366,7 +414,7 @@ def _view_dsv4_cache(
         if get_ascend_device_type() in {AscendDeviceType.A5}:
             full_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
-                kv_cache_spec.block_size,
+                kv_cache_spec.storage_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size + scale_dim * get_dtype_size(scale_dtype),
             )
@@ -475,11 +523,30 @@ def _allocate_kv_cache(
     shared_layers: dict[str, str],
     device: torch.device,
 ) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Initialize the KV cache buffer with the correct size. The buffer needs to be
+    reshaped to the desired shape before being used by the models.
+
+    NOTE: To support prefill disaggregation, we need to split kvcache tensor
+    into k_cache and v_cache, and the addr of both are aligned by 2M.
+
+    Args:
+        kv_cache_config: The KV cache config
+        device: The device
+    Returns:
+        dict[str, tuple[torch.Tensor, torch.Tensor]]: A map between layer names
+            to their corresponding memory buffer for K cache and V cache
+    """
     vllm_config = get_current_vllm_config()
     is_dsv4_model = _is_dsv4_model(vllm_config)
+    # init kv cache tensors
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
+    # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
+    has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
+    use_hybrid_layout = has_mamba and has_attention
 
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if not kv_cache_tensor.shared_by:
@@ -502,6 +569,27 @@ def _allocate_kv_cache(
 
         example_layer_name = kv_cache_tensor.shared_by[0]
         example_spec = layer_kv_cache_spec[example_layer_name]
+
+        # Use one raw allocation for Mamba and hybrid caches. The reshape step
+        # creates the V1-compatible contiguous state views and overlaps
+        # Attention K/V with the aligned tail of the same buffer.
+        contains_mamba = any(
+            isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in kv_cache_tensor.shared_by
+        )
+        if contains_mamba or use_hybrid_layout:
+            tensor_size = kv_cache_tensor.size
+            if vllm_config.kv_transfer_config is None:
+                tensor = torch.zeros(tensor_size, dtype=torch.int8, device=device)
+            else:
+                tensor = torch.zeros(
+                    tensor_size + alignment,
+                    dtype=torch.int8,
+                    device=device,
+                )
+                tensor = _align_memory(tensor, alignment)[:tensor_size]
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = tensor
+            continue
         assert isinstance(example_spec, AttentionSpec)
 
         if isinstance(example_spec, AscendSFAIndexerCacheSpec):
@@ -546,32 +634,62 @@ def _allocate_kv_cache(
 
             continue
 
-        k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
-        if enable_fa_quant(vllm_config):
-            k_factor, v_factor = vllm_config.quant_config.get_kv_quant_split_factor(example_layer_name, [k_dim, v_dim])
+        # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
+        if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
+            k_size = kv_cache_tensor.size
+            k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = k_tensor
         else:
-            k_factor, v_factor = calc_split_factor([k_dim, v_dim])
-        k_size = int(kv_cache_tensor.size // k_factor)
-        v_size = int(kv_cache_tensor.size // v_factor)
-
-        if vllm_config.kv_transfer_config is None:
-            k_tensor = torch.zeros(k_size, dtype=torch.int8, device=device)
-            v_tensor = torch.zeros(v_size, dtype=torch.int8, device=device)
-        else:
-            k_tensor = _align_memory(torch.zeros(k_size + alignment, dtype=torch.int8, device=device), alignment)[
-                :k_size
-            ]
-            v_tensor = _align_memory(torch.zeros(v_size + alignment, dtype=torch.int8, device=device), alignment)[
-                :v_size
-            ]
-        for layer_name in kv_cache_tensor.shared_by:
-            kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+            k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
+            if enable_fa_quant(vllm_config):
+                k_factor, v_factor = vllm_config.quant_config.get_kv_quant_split_factor(
+                    example_layer_name, [k_dim, v_dim]
+                )
+            else:
+                k_factor, v_factor = calc_split_factor([k_dim, v_dim])
+            k_size = int(kv_cache_tensor.size // k_factor)
+            v_size = int(kv_cache_tensor.size // v_factor)
+            k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+            v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
     return kv_cache_raw_tensors
+
+
+def _reshape_mamba_kv_cache(
+    raw_cache: torch.Tensor,
+    kv_cache_spec: MambaSpec,
+) -> list[torch.Tensor]:
+    """Create the contiguous per-state views used by the Ascend v1 runner."""
+    page_size_bytes = kv_cache_spec.page_size_bytes
+    assert raw_cache.numel() % page_size_bytes == 0
+    num_blocks = raw_cache.numel() // page_size_bytes
+
+    state_tensors: list[torch.Tensor] = []
+    start_idx = 0
+    # Keep the same hybrid storage layout as model_runner_v1:
+    #
+    # tensor1: [(kv_padding), conv, ...]
+    # tensor2: [k,            ssm,  ...]
+    # tensor3: [v,            (mamba_padding), ...]
+    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+        target_shape = (num_blocks, *shape)
+        end_idx = start_idx + torch.empty(
+            target_shape,
+            device="meta",
+        ).numel() * get_dtype_size(dtype)
+        state = raw_cache[start_idx:end_idx].view(dtype).view(target_shape)
+        state_tensors.append(state)
+        start_idx = end_idx
+
+    assert start_idx <= raw_cache.numel()
+    return state_tensors
 
 
 def _reshape_kv_cache_v2(
@@ -606,7 +724,6 @@ def _reshape_kv_cache_v2(
                 continue
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
-            assert isinstance(kv_cache_spec, AttentionSpec)
 
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None
@@ -662,14 +779,29 @@ def _reshape_kv_cache_v2(
                 )
                 continue
 
-            if not isinstance(raw_cache, tuple):
-                raise ValueError(f"KV cache for {layer_name} must contain K and V tensors.")
-            raw_k_tensor, raw_v_tensor = raw_cache
-            total_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
+            if isinstance(kv_cache_spec, MambaSpec):
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
+                mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec)
+                if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
+                    raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
+                kv_caches[layer_name] = mamba_cache
+                continue
+
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                raise TypeError(f"Unsupported KV cache spec: {type(kv_cache_spec).__name__}.")
+
+            if isinstance(raw_cache, tuple):
+                raw_k_tensor, raw_v_tensor = raw_cache
+                total_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
+            else:
+                # Attention and Mamba share one aligned raw allocation.
+                total_bytes = raw_cache.numel()
+
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
-            num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+            num_blocks_per_kv_block = kv_cache_spec.storage_block_size // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
@@ -678,11 +810,14 @@ def _reshape_kv_cache_v2(
                 kv_cache_spec.head_size,
                 cache_dtype,
             )
-
+            sparse_sfa_c8 = enable_sfa(vllm_config) and bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
                 num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
+                if sparse_sfa_c8:
+                    k_shape = (num_blocks_, block_size_, num_kv_heads, kv_cache_spec.head_size)
+                    v_dim = 0
                 v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
             else:
                 k_shape = kv_cache_shape[1:]
@@ -698,10 +833,28 @@ def _reshape_kv_cache_v2(
                     kv_cache_spec.dtype,
                     vllm_config.model_config,
                 )
-            kv_caches[layer_name] = (
-                raw_k_tensor.view(k_dtype).view(k_shape),
-                raw_v_tensor.view(v_dtype).view(v_shape),
-            )
+
+            if sparse_sfa_c8:
+                raw_k_tensor = raw_cache
+                k_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+                k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
+                kv_caches[layer_name] = (k_cache,)
+            elif isinstance(raw_cache, tuple):
+                raw_k_tensor, raw_v_tensor = raw_cache
+                k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
+                v_cache = raw_v_tensor.view(v_dtype).view(v_shape)
+                kv_caches[layer_name] = (k_cache, v_cache)
+            else:
+                # Keep Attention K/V contiguous across the tail of the hybrid
+                # allocation, matching the model_runner_v1 storage contract.
+                k_size = torch.empty(k_shape, device="meta").numel() * get_dtype_size(k_dtype)
+                v_size = torch.empty(v_shape, device="meta").numel() * get_dtype_size(v_dtype)
+                kv_start = raw_cache.numel() - k_size - v_size
+                if kv_start < 0:
+                    raise ValueError(f"Attention cache views exceed the allocation for {layer_name}.")
+                k_cache = raw_cache[kv_start : kv_start + k_size].view(k_dtype).view(k_shape)
+                v_cache = raw_cache[kv_start + k_size :].view(v_dtype).view(v_shape)
+                kv_caches[layer_name] = (k_cache, v_cache)
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
@@ -720,3 +873,26 @@ def build_attn_metadata_wrapper():
         yield
     finally:
         _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
+
+
+@contextmanager
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+
+    The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
+    DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
+    speculator path does not forward them. Must run inside
+    ``build_attn_metadata_wrapper()``.
+    """
+    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
+
+    def build_attn_metadata(*args, **kwargs):
+        kwargs["positions"] = positions[:pad]
+        kwargs["is_prefilling"] = is_prefilling
+        return raw(*args, **kwargs)
+
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore

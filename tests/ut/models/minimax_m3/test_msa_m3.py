@@ -16,6 +16,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
+from vllm_ascend.models.minimax_m3.minimax_m3 import _scatter_index_cache
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3IndexerCache,
@@ -28,10 +30,15 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3SparseMetadataBuilder,
     AscendMiniMaxM3SparsePrefillMetadata,
     _register_m3_sparse_packed_modules,
+    _should_use_tp_sharded_index_decode,
     _sparse_proj_quant_type,
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
 )
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
+)
+from vllm_ascend.utils import AscendDeviceType
 
 
 @dataclass
@@ -369,12 +376,91 @@ def test_register_m3_sparse_packed_modules_adds_split_indexer_mapping() -> None:
     }
 
 
-def test_sparse_prepare_keeps_npu_fused_qkv_norm_rope_path() -> None:
+def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     source = inspect.getsource(MiniMaxM3SparseAttention._sparse_prepare)
 
     assert "qkv_rmsnorm_rope" in source
+    assert "get_ascend_device_type() == AscendDeviceType.A5" in source
     assert 'main_qkv.device.type != "npu"' in source
     assert "1.0 + self.q_norm.weight" in source
+
+
+def test_a5_index_decode_uses_a5_triton_without_tp_block_sharding() -> None:
+    module_source = inspect.getsource(msa_m3_module)
+    a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
+    a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
+    import_branches = module_source[a5_branch_start:a5_branch_end]
+
+    assert import_branches.count("minimax_m3_index_decode") == 2
+    assert "msa_m3_triton_a5" in import_branches
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    ):
+        assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
+
+
+def test_non_a5_decode_keeps_tp_block_sharding() -> None:
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
+        return_value=AscendDeviceType.A3,
+    ):
+        assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
+        assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
+        assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=1)
+
+
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.get_ascend_device_type",
+    return_value=AscendDeviceType.A5,
+)
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.torch_npu.npu_scatter_pa_cache",
+    create=True,
+)
+def test_scatter_index_cache_uses_pa_cache_on_a5(
+    mock_scatter_pa_cache: MagicMock,
+    _mock_device_type: MagicMock,
+) -> None:
+    cache = torch.zeros(2, 128, 4, dtype=torch.bfloat16)
+    updates = torch.randn(3, 4, dtype=torch.bfloat16)
+    slots = torch.tensor([0, 129, -1], dtype=torch.int64)
+
+    _scatter_index_cache(cache, updates, slots)
+
+    mock_scatter_pa_cache.assert_called_once()
+    key, actual_slots = mock_scatter_pa_cache.call_args.args
+    key_cache = mock_scatter_pa_cache.call_args.kwargs["key_cache"]
+    assert key.shape == (3, 1, 4)
+    assert key.dtype == torch.bfloat16
+    assert key.is_contiguous()
+    assert torch.equal(actual_slots, slots)
+    assert actual_slots.is_contiguous()
+    assert key_cache.shape == (2, 128, 1, 4)
+    assert key_cache.data_ptr() == cache.data_ptr()
+
+
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.get_ascend_device_type",
+    return_value=AscendDeviceType.A2,
+)
+def test_scatter_index_cache_keeps_legacy_op_off_a5(_mock_device_type: MagicMock) -> None:
+    cache = torch.zeros(2, 128, 4, dtype=torch.bfloat16)
+    updates = torch.randn(3, 4, dtype=torch.bfloat16)
+    slots = torch.tensor([0, 1, 2], dtype=torch.int64)
+
+    with patch.object(
+        torch.ops._C_ascend,
+        "npu_scatter_nd_update_v2",
+        create=True,
+    ) as mock_scatter_nd_update:
+        _scatter_index_cache(cache, updates, slots)
+
+    mock_scatter_nd_update.assert_called_once()
+    flat_cache, actual_slots, actual_updates = mock_scatter_nd_update.call_args.args
+    assert flat_cache.shape == (256, 4)
+    assert actual_slots.shape == (3, 1)
+    assert torch.equal(actual_updates, updates)
 
 
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.logger.warning")
@@ -542,4 +628,49 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     mock_sparse_attn_decode.assert_called_once()
     mock_sparse_attn_prefill.assert_called_once()
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
+    assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
+
+
+@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
+def test_sparse_attn_decode_npu_forwards_runtime_metadata(
+    mock_sparse_attention_score: MagicMock,
+) -> None:
+    q = torch.zeros(4, 2, 4)
+    kv_cache = torch.zeros(2, 6, 128, 2, 4)
+    topk_idx = torch.tensor(
+        [
+            [[0, 1], [0, -1], [2, 3], [-1, -1]],
+            [[0, 1], [1, -1], [2, 3], [3, -1]],
+        ],
+        dtype=torch.int32,
+    )
+    block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
+    seq_lens = torch.tensor([129, 385], dtype=torch.int32)
+    output = torch.empty_like(q)
+    mock_sparse_attention_score.return_value = torch.ones_like(output)
+
+    minimax_m3_sparse_attn_decode_npu(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        num_kv_heads=2,
+        sm_scale=0.5,
+        output=output,
+        decode_query_len=2,
+        block_size=128,
+    )
+
+    mock_sparse_attention_score.assert_called_once()
+    kwargs = mock_sparse_attention_score.call_args.kwargs
+    assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([2, 2], dtype=torch.int32))
+    assert kwargs["actual_seq_lengths_kv"] is seq_lens
+    assert torch.equal(
+        kwargs["select_num_idx"],
+        torch.tensor([[2, 1, 2, 0], [2, 1, 2, 1]], dtype=torch.int32),
+    )
+    assert kwargs["block_size"] == 128
+    assert kwargs["top_k"] == 2
+    assert torch.equal(output, torch.ones_like(output))

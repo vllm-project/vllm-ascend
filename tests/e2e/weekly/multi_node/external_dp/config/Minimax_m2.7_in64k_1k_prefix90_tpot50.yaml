@@ -1,4 +1,4 @@
-test_name: "Minimax_m2.7_in3_5_tpot50"
+test_name: "Minimax_m2.7_in64k_tpot50"
 model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
 num_nodes: 2
 npu_per_node: 16
@@ -73,13 +73,11 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "70000"
-      - -max-num-batched-tokens
+      - --max-num-batched-tokens
       - "16384"
-      - -max-num-seqs
+      - --max-num-seqs
       - "48"
       - --trust-remote-code
       - --gpu-memory-utilization
@@ -126,13 +124,11 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "70000"
-      - -max-num-batched-tokens
+      - --max-num-batched-tokens
       - "16384"
-      - -max-num-seqs
+      - --max-num-seqs
       - "48"
       - --trust-remote-code
       - --gpu-memory-utilization

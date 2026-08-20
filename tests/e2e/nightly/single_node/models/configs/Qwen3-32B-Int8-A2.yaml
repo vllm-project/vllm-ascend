@@ -47,7 +47,7 @@ _benchmarks: &benchmarks
     num_prompts: 288
     max_out_len: 1500
     batch_size: 72
-    baseline: 1
+    baseline: 1065.179
     threshold: 0.97
 
 # ==========================================

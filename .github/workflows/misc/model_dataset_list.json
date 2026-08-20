@@ -120,7 +120,7 @@
       "Shanghai_AI_Laboratory/internlm-7b-chat",
       "Shanghai_AI_Laboratory/internlm-7bi-chat",
       "Shanghai_AI_Laboratory/internlm-chat-7b",
-      "Tencent-Hunyuan/HunyuanOCR",
+      "vllm-ascend/HunyuanOCR",
       "Tencent-Hunyuan/Hunyuan-A13B-Instruct",
       "Tencent-Hunyuan/Hy3-preview",
       "Tengyunw/qwen3_8b_eagle3",
@@ -309,6 +309,7 @@
       "Eco-Tech/MiniMax-M2.7-eagle-model-short"
     ],
     "datasets": [
+      "vllm-ascend/mm_request",
       "vllm-ascend/GSM8K-in1024-bs210",
       "vllm-ascend/GSM8K-in3500-bs2800",
       "vllm-ascend/GSM8K-in3500-bs400",
@@ -364,6 +365,7 @@
       "vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi",
       "vllm-ascend/GSM8K-in3500-bs8000-qwen3",
       "vllm-ascend/GSM8K-in2048-bs4000-ds3.2",
+      "vllm-ascend/GSM8K-in16384-bs1024-prefix0-qwen",
       "vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51",
       "vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51",
       "vllm-ascend/GSM8K_prefix99_in203738_bs1_mini",

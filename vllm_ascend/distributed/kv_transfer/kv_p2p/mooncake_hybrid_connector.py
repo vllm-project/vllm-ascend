@@ -54,7 +54,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op, is_vl_model, vllm_version_is
+from vllm_ascend.utils import enable_custom_op, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -1079,45 +1079,22 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
-    # main2main compat: upstream KVConnectorBase_V1.__init__() now sets
-    # _kv_transfer_config (required by requires_kv_delivery property in
-    # Scheduler.__init__() post-0.26.0).
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
+    def __init__(  # type: ignore[misc]
+        self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
+    ):
+        assert vllm_config.kv_transfer_config is not None
+        self._kv_transfer_config = vllm_config.kv_transfer_config
+        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        self._connector_metadata = MooncakeConnectorMetadata()
 
-        def __init__(
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-        ):
-            assert vllm_config.kv_transfer_config is not None
-            self._kv_transfer_config = vllm_config.kv_transfer_config
-            self.engine_id = vllm_config.kv_transfer_config.engine_id
-            self._connector_metadata = MooncakeConnectorMetadata()
-
-            if role == KVConnectorRole.SCHEDULER:
-                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(  # type: ignore[no-redef]
-                    vllm_config, str(self.engine_id), kv_cache_config
-                )
-                self.connector_worker: MooncakeConnectorWorker | None = None  # type: ignore[no-redef]
-            elif role == KVConnectorRole.WORKER:
-                self.connector_scheduler = None
-                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
+                vllm_config, str(self.engine_id), kv_cache_config
+            )
+            self.connector_worker: MooncakeConnectorWorker | None = None
+        elif role == KVConnectorRole.WORKER:
+            self.connector_scheduler = None
+            self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
     ############################################################
     # Scheduler Side Methods
@@ -1254,8 +1231,7 @@ class MooncakeConnectorScheduler:
         self.need_truncate = self.use_compress
         sw_sizes_tokens: list[tuple[int, int]] = []
         self.group_block_size = []
-        self.group_compress_ratio = [1 for _ in range(len(kv_cache_config.kv_cache_groups))]
-        for i, g in enumerate(kv_cache_config.kv_cache_groups):
+        for g in kv_cache_config.kv_cache_groups:
             if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
                 group_spec_set = []
                 for layer_name in g.layer_names:
@@ -1268,8 +1244,6 @@ class MooncakeConnectorScheduler:
                     sw_sizes_tokens.append((group_spec_set[0].sliding_window, group_spec_set[0].block_size))
                 else:
                     sw_sizes_tokens.append((0, layer_spec.block_size))
-                    if self.use_compress and hasattr(group_spec_set[0], "compress_ratio"):
-                        self.group_compress_ratio[i] = group_spec_set[0].compress_ratio
                 if isinstance(layer_spec, MambaSpec):
                     self.need_truncate = True
             else:
@@ -1278,8 +1252,6 @@ class MooncakeConnectorScheduler:
                     sw_sizes_tokens.append((g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size))
                 else:
                     sw_sizes_tokens.append((0, g.kv_cache_spec.block_size))
-                    if self.use_compress and hasattr(g.kv_cache_spec, "compress_ratio"):
-                        self.group_compress_ratio[i] = g.kv_cache_spec.compress_ratio
                 if isinstance(g.kv_cache_spec, MambaSpec):
                     self.need_truncate = True
                 self.kv_cache_specs.append([g.kv_cache_spec])
@@ -1344,10 +1316,7 @@ class MooncakeConnectorScheduler:
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         transfer_block_ids = []
         for i, blocks in enumerate(block_ids):
-            if self.use_compress and self.num_swa_blocks[i] == 0:
-                group_token_len = prompt_len // self.group_compress_ratio[i]
-            else:
-                group_token_len = prompt_len
+            group_token_len = prompt_len
             group_block_len = math.ceil(group_token_len / self.group_block_size[i])
             if group_block_len > 0:
                 transfer_block_ids.append(blocks[:group_block_len])
