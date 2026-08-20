@@ -157,10 +157,10 @@ extra:
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
-  vllm_version: v0.22.1
-  vllm_ascend_version: v0.22.1rc1
-  pip_vllm_ascend_version: 0.22.1rc1
-  pip_vllm_version: 0.22.1
+  vllm_version: v0.23.0
+  vllm_ascend_version: v0.23.0
+  pip_vllm_ascend_version: 0.23.0
+  pip_vllm_version: 0.23.0
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
@@ -224,6 +224,7 @@ nav:
         - tutorials/models/gpt-oss-120b.md
         - tutorials/models/Mixtral-8x7B-Instruct-v0.1.md
         - tutorials/models/Qwen3-ASR-1.7B.md
+        - tutorials/models/Cohere-Transcribe.md
         - tutorials/models/Qwen2.5-Math-RM-72B.md
         - tutorials/models/InternVL3.5.md
         - tutorials/models/Dots3-Note.md
@@ -309,9 +310,6 @@ nav:
         - developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
         - developer_guide/Design_Documents/quantization.md
         - developer_guide/Design_Documents/npugraph_ex.md
-        - developer_guide/Design_Documents/ModelRunner_v2_310P_adaptation.md
-        - developer_guide/Design_Documents/ModelRunner_v2_310P_code_changes.md
-        - developer_guide/Design_Documents/ModelRunner_v2_310P_pr_notes.md
     - Evaluation:
         - developer_guide/evaluation/index.md
         - developer_guide/evaluation/using_evalscope.md
