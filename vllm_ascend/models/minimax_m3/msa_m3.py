@@ -42,13 +42,29 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
-    minimax_m3_index_decode,
-    minimax_m3_index_score,
-    minimax_m3_index_topk,
-)
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+if get_ascend_device_type() == AscendDeviceType.A5:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+
+
+def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool:
+    # The A5 Triton decode kernel operates on the complete, replicated index-K
+    # cache on every TP rank. Keep the mainline block-sharded optimization for
+    # the other device families only.
+    return get_ascend_device_type() != AscendDeviceType.A5 and tp_size > 1 and num_prefills == 0
 
 
 def _active_decode_num_reqs(
@@ -407,7 +423,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             tp_size = tp_group.world_size
             tp_rank = tp_group.rank_in_group
             decode_iq = iq[:num_decode_tokens]
-            if tp_group is not None and tp_size > 1 and index_md.num_prefills == 0:
+            if _should_use_tp_sharded_index_decode(tp_size, index_md.num_prefills):
                 decode_topk = self._decode_topk_tp_sharded(
                     decode_iq,
                     kv,

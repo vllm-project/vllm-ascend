@@ -31,9 +31,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -92,6 +90,8 @@ class NPUPlatform(Platform):
         COMPRESSED_TENSORS_METHOD,
         FP8_METHOD,
         "deepseek_v4_fp8",
+        "modelopt_mxfp8",
+        "mxfp8",
     ]
 
     @property
@@ -217,7 +217,7 @@ class NPUPlatform(Platform):
         use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
-        if selected_backend == AttentionBackendEnum.FLASH_ATTN and _validate_fa3_backend(key, attn_selector_config):
+        if _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
@@ -276,7 +276,12 @@ class NPUPlatform(Platform):
         if is_310p():
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
         else:
-            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
+            from vllm_ascend.quantization import (  # noqa: F401
+                AscendCompressedTensorsConfig,
+                AscendFp8Config,
+                AscendModelOptMxFp8Config,
+                AscendModelSlimConfig,
+            )
 
         _config_deprecated_logging()
 
@@ -664,10 +669,10 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             )
             att_config.flash_attn_version = None
 
-        # Notify user that the backend will be managed by Ascend plugins,
-        # and for training-inference consistency, when att_config.backend
-        # == AttentionBackendEnum.FLASH_ATTN,it is NOT reset to None
-        if getattr(att_config, "backend", None) is not None and att_config.backend != AttentionBackendEnum.FLASH_ATTN:
+        # Notify the user that the backend will be managed by Ascend plugins.
+        # FA3 is selected directly in get_attn_backend_cls when RL training
+        # consistency is enabled, so it does not depend on this field.
+        if getattr(att_config, "backend", None) is not None:
             logger.info(
                 "User specified attention backend '%s'. Note that Ascend NPU "
                 "will use its registered plugin backend instead. Resetting to None.",
@@ -1235,10 +1240,28 @@ def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
         logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
 
-def _validate_fa3_backend(key, attn_selector_config):
-    if not attn_selector_config.use_batch_invariant:
+def _disable_expandable_segments() -> None:
+    """Remove the allocator option that conflicts with sleep mode."""
+    npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "")
+    if not npu_alloc_configs:
+        return
+
+    filtered_configs = [
+        config.strip()
+        for config in npu_alloc_configs.split(",")
+        if config.strip() and not config.strip().startswith("expandable_segments:")
+    ]
+    updated_configs = ",".join(filtered_configs)
+    if updated_configs != npu_alloc_configs:
+        os.environ["PYTORCH_NPU_ALLOC_CONF"] = updated_configs
+        logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
+
+
+def _validate_fa3_backend(key, _attn_selector_config):
+    rl_config = get_ascend_config().rl_config
+    if not (rl_config.enabled and rl_config.enable_training_consistency):
         logger.info(
-            "FA3 will not be enabled when not in training-inference consistency scenario. "
+            "FA3 will not be enabled when rl_config.enable_training_consistency is false. "
             "Note that Ascend NPU will use its registered plugin backend instead."
         )
         return False

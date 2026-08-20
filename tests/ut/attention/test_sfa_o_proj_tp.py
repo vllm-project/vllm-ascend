@@ -123,7 +123,7 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl.has_indexer = False
         impl.skip_topk = True
         impl.enable_sparse_sfa_c8 = False
-        impl.is_kv_producer = False
+        impl.is_kv_producer = True
         impl.preprocess_type = PreprocessType.NATIVE
         impl.tp_size = 2
         impl.q_lora_rank = 8
@@ -144,13 +144,15 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl._store_parallel_kv = MagicMock(return_value=(None, None, None))
         impl._get_indexcache_topk_indices = MagicMock(return_value=MagicMock())
         impl._execute_sparse_flash_attention_process = MagicMock(return_value=MagicMock())
-        impl._v_up_proj = MagicMock(return_value=MagicMock())
+        attn_output = MagicMock()
+        impl._v_up_proj = MagicMock(return_value=attn_output)
         impl.o_proj = MagicMock()
 
         output = MagicMock()
+        finalized_output = MagicMock()
         kv_cache = (MagicMock(), MagicMock())
         impl._compose_sfa_kv_cache = MagicMock(return_value=kv_cache)
-        impl._finalize_o_proj = MagicMock(return_value=output)
+        impl._finalize_o_proj = MagicMock(return_value=finalized_output)
 
         attn_metadata = MagicMock()
         attn_metadata.dcp_context = None
@@ -170,6 +172,7 @@ class TestAscendSFAOProjTPParams(TestBase):
             patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
             patch("vllm_ascend.attention.sfa_v1.record_attention_compute_start") as record_gate,
             patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector") as save_layer,
+            patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written") as notify_cache_written,
         ):
             result = impl.forward(
                 layer_name=impl.layer_name,
@@ -179,7 +182,9 @@ class TestAscendSFAOProjTPParams(TestBase):
                 output=output,
             )
 
-        self.assertIs(result, output)
+        self.assertIs(result, finalized_output)
+        impl._finalize_o_proj.assert_called_once_with(attn_output, output, True)
+        notify_cache_written.assert_called_once_with(impl.layer_name)
         record_gate.assert_called_once_with()
         save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))
         impl.o_proj.assert_not_called()

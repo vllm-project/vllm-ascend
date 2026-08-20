@@ -9,6 +9,9 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
+    AscendAttentionPCPImpl,
+    AscendAttentionPCPMetadata,
+    AscendAttentionPCPMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
 )
@@ -65,9 +68,15 @@ class TestAscendAttentionBackend(TestBase):
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_dcp
+        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
 
+        self.enable_dcp = enable_dcp
+        self.enable_pcp = enable_pcp
         enable_dcp.cache_clear()
+        enable_pcp.cache_clear()
+        self.addCleanup(self.utils_patcher.stop)
+        self.addCleanup(enable_dcp.cache_clear)
+        self.addCleanup(enable_pcp.cache_clear)
 
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
@@ -77,6 +86,35 @@ class TestAscendAttentionBackend(TestBase):
 
     def test_get_builder_cls(self):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
+
+    def test_get_impl_cls_with_pcp(self):
+        self.mock_config.parallel_config.prefill_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
+
+        self.assertIs(
+            AscendAttentionBackend.get_impl_cls(),
+            AscendAttentionPCPImpl,
+        )
+
+    def test_get_builder_cls_with_pcp(self):
+        self.mock_config.parallel_config.prefill_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
+
+        self.assertIs(
+            AscendAttentionBackend.get_builder_cls(),
+            AscendAttentionPCPMetadataBuilder,
+        )
+
+    def test_pcp_and_dcp_are_rejected_together(self):
+        self.mock_config.parallel_config.prefill_context_parallel_size = 2
+        self.mock_config.parallel_config.decode_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
+        self.enable_dcp.cache_clear()
+
+        with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):
+            AscendAttentionBackend.get_impl_cls()
+        with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):
+            AscendAttentionBackend.get_builder_cls()
 
     def test_get_kv_cache_shape_not(self):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
@@ -168,6 +206,112 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
+
+
+def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
+    builder = AscendAttentionPCPMetadataBuilder.__new__(AscendAttentionPCPMetadataBuilder)
+    builder.pcp_size = 2
+    common_metadata = SimpleNamespace(
+        slot_mapping=torch.tensor(
+            [10, 11, -1, -1, 20, 21, -1, -1],
+            dtype=torch.int64,
+        )
+    )
+    metadata = AscendAttentionPCPMetadata(
+        num_actual_tokens=3,
+        num_decode_tokens=1,
+        num_prefills=1,
+        attn_state=AscendAttentionState.PrefillCacheHit,
+    )
+
+    with patch.object(
+        AscendAttentionMetadataBuilder,
+        "build",
+        return_value=metadata,
+    ):
+        result = builder.build(0, common_metadata)
+
+    assert result.slot_mapping is common_metadata.slot_mapping
+    assert result.pcp_local_num_input_tokens == 4
+    assert result.attn_state == AscendAttentionState.ChunkedPrefill
+
+
+def test_pcp_cache_write_uses_gathered_inputs() -> None:
+    impl = AscendAttentionPCPImpl.__new__(AscendAttentionPCPImpl)
+    impl.attn_type = attn_module.AttentionType.DECODER
+    impl.key_cache = None
+    impl.value_cache = None
+    impl.kv_sharing_target_layer_name = None
+    impl.is_kv_producer = True
+
+    query = torch.empty((4, 2, 1))
+    output = torch.empty((4, 2, 1))
+    key = torch.arange(4).reshape(4, 1, 1)
+    value = key + 10
+    gathered_key = torch.arange(20, 27).reshape(7, 1, 1)
+    gathered_value = torch.arange(30, 37).reshape(7, 1, 1)
+    gathered_slots = torch.tensor([10, 11, -1, -1, 21, -1, -1])
+    slot_mapping = torch.tensor([10, 11, -1, -1, 20, 21, -1, -1])
+    metadata = AscendAttentionPCPMetadata(
+        num_actual_tokens=3,
+        num_decode_tokens=1,
+        pcp_local_num_input_tokens=4,
+        slot_mapping=slot_mapping,
+    )
+    key_cache = torch.empty((8, 1, 1))
+    value_cache = torch.empty((8, 1, 1))
+
+    with (
+        patch(
+            "vllm_ascend.attention.attention_v1._gather_prefill_cache_inputs",
+            return_value=(
+                (gathered_key, gathered_value),
+                gathered_slots,
+            ),
+        ) as gather_inputs,
+        patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
+        patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
+    ):
+        result = impl.reshape_and_cache(
+            query,
+            key,
+            value,
+            (key_cache, value_cache),
+            metadata,
+            output,
+        )
+
+    local_inputs, actual_slots, num_decode_tokens = gather_inputs.call_args.args
+    torch.testing.assert_close(local_inputs[0], key)
+    torch.testing.assert_close(local_inputs[1], value)
+    assert actual_slots is slot_mapping
+    assert num_decode_tokens == 1
+
+    cache_args = reshape_and_cache.call_args.kwargs
+    torch.testing.assert_close(cache_args["key"], gathered_key)
+    torch.testing.assert_close(cache_args["value"], gathered_value)
+    torch.testing.assert_close(cache_args["slot_mapping"], gathered_slots)
+    assert metadata.slot_mapping is slot_mapping
+    assert metadata.num_actual_tokens == 3
+    assert result[0] is query
+    assert result[1] is key
+    assert result[2] is value
+    assert result[3] is output
+
+
+def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
+    builder = AscendAttentionPCPMetadataBuilder.__new__(AscendAttentionPCPMetadataBuilder)
+    builder.decode_threshold = 1
+    common_metadata = SimpleNamespace(
+        context_parallel_metadata=None,
+        max_query_len=4,
+        num_reqs=2,
+        num_actual_tokens=5,
+        query_start_loc_cpu=torch.tensor([0, 1, 5], dtype=torch.int32),
+        is_prefilling=torch.tensor([True, True], dtype=torch.bool),
+    )
+
+    assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
 
 
 class TestAscendAttentionBackendImpl(TestBase):
