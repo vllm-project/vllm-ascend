@@ -31,7 +31,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
+from vllm.model_executor.models.interfaces import SupportsEagle3
+from vllm.model_executor.models.utils import (
+    PPMissingLayer,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2DecoderLayer,
@@ -307,7 +312,7 @@ class DeepseekV4DSparkModel(nn.Module):
 
 
 @support_torch_compile
-class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
+class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -359,6 +364,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
             input_ids=input_ids,
             positions=positions,
         )
+
+    def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Full-vocab draft: base logits, no d2t scatter.
+        return self.compute_logits(hidden_states)
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        return draft_ids  # full-vocab: draft ids are target ids
 
     def compute_logits(
         self,
@@ -437,6 +449,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
                 if mapped_name is None:
                     continue
                 name = mapped_name
+
+            # Detect whether the checkpoint ships its own embed_tokens / lm_head
+            # for the draft model.
+            process_eagle_weight(self, name)
 
             # Expert scale parameters use Ascend's ``weight_scale`` convention.
             if name.endswith(".scale"):

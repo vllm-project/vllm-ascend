@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -20,6 +21,23 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
+
+    def test_modelopt_config_defaults_group_size(self):
+        vllm_config = create_mock_vllm_config()
+        vllm_config.quant_config = SimpleNamespace()
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
+                return_value=0,
+            ),
+        ):
+            scheme = AscendW8A8MXFP8DynamicLinearMethod()
+
+        self.assertEqual(scheme.group_size, 32)
 
     def test_get_weight_various_input_sizes(self):
         sizes = [(128, 64), (512, 256), (1024, 512)]
@@ -112,6 +130,8 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         bias = torch.randn(128, dtype=torch.float16)
         output = self.scheme.apply(layer, x, bias)
         self.assertEqual(output.shape, (32, 1, 128))
+        dynamic_quant_kwargs = mock_torch_npu.npu_dynamic_mx_quant.call_args.kwargs
+        self.assertEqual(dynamic_quant_kwargs["scale_alg"], self.scheme.dynamic_mx_quant_scale_alg)
         call_kwargs = mock_torch_npu.npu_quant_matmul.call_args.kwargs
         self.assertEqual(call_kwargs["bias"].dtype, torch.float32)
         self.assertEqual(call_kwargs["group_sizes"], [1, 1, self.scheme.group_size])
@@ -129,6 +149,24 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+
+    def test_modelopt_config_defaults_group_size(self):
+        vllm_config = create_mock_vllm_config()
+        vllm_config.quant_config = SimpleNamespace()
+        vllm_config.use_v2_model_runner = True
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_ascend_config",
+                return_value=create_mock_ascend_config(),
+            ),
+        ):
+            scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+
+        self.assertEqual(scheme.group_size, 32)
 
     def test_get_weight_various_expert_counts(self):
         for num_experts in [4, 8, 16]:
