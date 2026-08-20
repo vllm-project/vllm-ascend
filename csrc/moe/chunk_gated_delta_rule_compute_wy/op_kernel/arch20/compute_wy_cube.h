@@ -85,17 +85,20 @@ class WyCubeGemm {
   __aicore__ inline void GemmATransB(LocalTensor<float> cUb, const LocalTensor<half> aUb, const LocalTensor<half> bUb,
                                      LocalTensor<float> accScratch, uint32_t kDim, uint32_t aLda, uint32_t bLda)
   {
-    WaitVToMte3();
-    CopyHalfRowsToGm(aGm_, aUb, WY_CUBE_CHUNK, kDim, aLda);
-    CopyHalfRowsToGm(bGm_, bUb, WY_CUBE_CHUNK, kDim, bLda);
-    WaitMte3ToMte2();
-    PipeBarrier<PIPE_ALL>();
-
+    // Each K slice is restaged contiguously so no cube call — including its
+    // OrgShape strides — ever sees a dimension above 64 (128 hangs the aicore).
     for (uint32_t k0 = 0; k0 < kDim; k0 += WY_CUBE_CHUNK) {
       const uint32_t kCur = (kDim - k0) < WY_CUBE_CHUNK ? (kDim - k0) : WY_CUBE_CHUNK;
+      WaitVToMte3();
+      CopyHalfRowsToGm(aGm_, aUb[k0], WY_CUBE_CHUNK, kCur, aLda);
+      CopyHalfRowsToGm(bGm_, bUb[k0], WY_CUBE_CHUNK, kCur, bLda);
+      WaitMte3ToMte2();
+      PipeBarrier<PIPE_ALL>();
+
+      mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
       mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
-      mmAttn_.SetTensorA(aGm_[k0], false);
-      mmAttn_.SetTensorB(bGm_[k0], true);
+      mmAttn_.SetTensorA(aGm_, false);
+      mmAttn_.SetTensorB(bGm_, true);
       if (k0 == 0) {
         mmAttn_.IterateAll(cUb);
       } else {
@@ -140,37 +143,47 @@ class WyCubeGemm {
   }
 
   // R = R + P @ R for one RHS block (U or W). Assumes P already on aGm_ (UploadP).
-  // halfScratch holds contiguous R half only (>= 64*nDim) — do not reuse UploadP buffer.
-  // floatScratch (>= 64*nDim floats, e.g. tmpBuf_ [64,max(K,V)]) holds C for Add.
+  // halfScratch holds contiguous R half only (>= 64*min(nDim,64)) — do not reuse the
+  // UploadP buffer. floatScratch (>= 64*min(nDim,64) floats) holds C for Add.
+  // nDim > 64 is processed in <=64-wide column slices: a single matmul call with
+  // N=128 hangs the 310P aicore even with FixSplit-64 tiling, so no cube call may
+  // ever see a dimension above 64.
   __aicore__ inline void GemmApplyAdd(LocalTensor<float> rUb, LocalTensor<half> halfScratch,
                                       LocalTensor<float> floatScratch, uint32_t nDim, uint32_t rLda, bool useU)
   {
-    CastFloatRowsToHalfContiguous(halfScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
-    WaitVToMte3();
-    CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nDim, nDim);
-    WaitMte3ToMte2();
-    PipeBarrier<PIPE_ALL>();
+    for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
+      const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
+      CastFloatRowsToHalfContiguous(halfScratch, rUb[n0], WY_CUBE_CHUNK, nCur, rLda);
+      WaitVToMte3();
+      CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nCur, nCur);
+      WaitMte3ToMte2();
+      PipeBarrier<PIPE_ALL>();
 
-    if (useU) {
-      mmApplyU_.SetTensorA(aGm_, false);
-      mmApplyU_.SetTensorB(bGm_, false);
-      mmApplyU_.IterateAll(floatScratch);
-    } else {
-      mmApplyW_.SetTensorA(aGm_, false);
-      mmApplyW_.SetTensorB(bGm_, false);
-      mmApplyW_.IterateAll(floatScratch);
-    }
-    PipeBarrier<PIPE_ALL>();
-
-    // Cube wrote C[64,nDim] directly to floatScratch; now R += C.
-    if (rLda == nDim) {
-      Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nDim);
-    } else {
-      for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
-        Add(rUb[row * rLda], rUb[row * rLda], floatScratch[row * nDim], nDim);
+      if (useU) {
+        mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyU_.SetTensorA(aGm_, false);
+        mmApplyU_.SetTensorB(bGm_, false);
+        mmApplyU_.IterateAll(floatScratch);
+      } else {
+        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyW_.SetTensorA(aGm_, false);
+        mmApplyW_.SetTensorB(bGm_, false);
+        mmApplyW_.IterateAll(floatScratch);
       }
+      PipeBarrier<PIPE_ALL>();
+
+      // Cube wrote C[64,nCur] directly to floatScratch; now R[:, n0:n0+nCur] += C.
+      if (rLda == nCur && n0 == 0) {
+        Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nCur);
+      } else {
+        for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
+          Add(rUb[row * rLda + n0], rUb[row * rLda + n0], floatScratch[row * nCur], nCur);
+        }
+      }
+      PipeBarrier<PIPE_V>();
     }
-    PipeBarrier<PIPE_V>();
   }
 
  private:
