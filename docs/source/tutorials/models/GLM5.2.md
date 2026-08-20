@@ -137,7 +137,7 @@ The deployment scenarios validated for this release are organized by context win
 
 ##### 5.1.1.1 Single-Node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` (experimental, see [Model Weight](#31-model-weight)) can be deployed on 1 Atlas 800 A3 (128GB × 8) .
+- Quantized model `GLM-5.2-w4a8c8` (experimental, see [Model Weight](#31-model-weight)) can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
 Run the following script to execute online inference.
 
@@ -259,7 +259,7 @@ Run the following scripts on two nodes respectively.
     --enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -315,7 +315,7 @@ Run the following scripts on two nodes respectively.
     --enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -1144,7 +1144,7 @@ This 8-node A2 layout splits the global P/D topology across 8 Atlas 800 A2 nodes
 
 **Prefill node-specific configurations (A2):**
 
-- `--additional-config '{"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, ...}'`: Both SFA C8 optimizations are enabled in this scenario (vs. `enable_sparse_sfa_c8: false` in the A3 co-located scenarios).
+- `--additional-config '{"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, ...}'`: Both SFA C8 optimizations are enabled in this scenario.
 
 **Decode node-specific configurations (A2):**
 
@@ -1185,7 +1185,7 @@ DCP and Sparse Flash Attention C8 (`enable_sparse_sfa_c8`, also referred to as `
 - `GLM-5.2-w4a8c8`: enabling them together has known issues in v0.23.0, including performance degradation, and is not recommended.
 ::::
 
-#### 5.2.2 Dual-Node Co-Located 1M Deployment
+#### 5.2.1 Dual-Node Co-Located 1M Deployment
 
 **GLM-5.2-w8a8c8 (1M context, dual-node co-located):**
 
@@ -1247,7 +1247,7 @@ vllm serve <MODEL_PATH> \
 --enable-prefix-caching \
 --async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+--additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -1305,7 +1305,7 @@ vllm serve <MODEL_PATH> \
 --enable-prefix-caching \
 --async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+--additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -1314,7 +1314,7 @@ vllm serve <MODEL_PATH> \
 - `VLLM_ASCEND_ENABLE_FUSED_MC2=1` conflicts with `"multistream_overlap_shared_expert": true` — the runtime automatically disables `multistream_overlap_shared_expert` when fused MC2 is enabled.
 - When testing with a prefix cache hit rate > 0, keep `--enable-prefix-caching` (as in the script above); when the hit rate is 0, replace it with `--no-enable-prefix-caching`.
 
-#### 5.2.3 PD Disaggregation 1M Deployment
+#### 5.2.2 PD Disaggregation 1M Deployment
 
 **GLM-5.2-w8a8c8 (1M context, PD disaggregation):**
 
@@ -1586,7 +1586,7 @@ python load_balance_proxy_server_example.py \
 - When testing with a prefix cache hit rate > 0, add `--enable-prefix-caching` on the prefill nodes (as in the script above); when the hit rate is 0, use `--no-enable-prefix-caching` instead.
 - `"recompute_scheduler_enable"` is set to `false` on prefill nodes and `true` on decode nodes in this scenario.
 
-Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation) and [Dual-Node Co-Located 1M Deployment](#522-dual-node-co-located-1m-deployment)):
+Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation) and [Dual-Node Co-Located 1M Deployment](#521-dual-node-co-located-1m-deployment)):
 
 **Prefill nodes (1M):**
 

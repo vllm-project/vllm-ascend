@@ -401,7 +401,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - For low-latency scenarios, use `dp1tp16` (data-parallel-size 1, tensor-parallel-size 16) and consider reducing `--max-num-seqs` and `--max-num-batched-tokens`.
 - For high-throughput scenarios, increase `--max-num-seqs` and enable `--enable-prefix-caching`.
-- For long-context scenarios (e.g., 200K), use w8a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
+- For long-context scenarios (e.g., 200K), use w4a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
 - If you encounter OOM, reduce `--gpu-memory-utilization`, `--max-num-seqs`, or `--max-model-len`. Disabling `VLLM_ASCEND_ENABLE_MLAPO` can also reduce memory usage (at the cost of performance).
 
 ### 5.2 Multi-node Deployment
@@ -416,7 +416,9 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 ::::{tab-item} A3 series
 :sync: A3
 
-- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for high-throughput scenarios (64K context, 16k/1k and 64k/1k cases at 0/50%/90% prefix cache hit rate).
+**High-Throughput Scenario (DP8 TP4)**
+
+- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for high-throughput scenarios (128k/1k and 198k/1k cases at 50%/90% prefix cache hit rate, and 198k/1k at 99%).
 
 Run the following scripts on two nodes respectively.
 
@@ -424,14 +426,9 @@ Run the following scripts on two nodes respectively.
 
 ```{code-block} bash
    :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
-
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
-
+# Auto-detect the network interface name and local IP
+nic_name=`ip route show default|awk '{print $5}'`
+local_ip=`hostname -I|awk -F " " '{print$1}'`
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -444,47 +441,40 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1800
-
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
 --host 0.0.0.0 \
 --port 8077 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
+--data-parallel-size 8 \
+--data-parallel-size-local 4 \
+--data-parallel-address $local_ip \
+--enable-expert-parallel \
 --data-parallel-rpc-port 12980 \
---tensor-parallel-size 16 \
+--tensor-parallel-size 4 \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --seed 1024 \
 --served-model-name glm-5 \
---enable-expert-parallel \
 --tool-call-parser glm47 \
 --reasoning-parser glm45 \
 --enable-auto-tool-choice \
---max-num-seqs 32 \
---max-model-len 133120 \
---max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --async-scheduling \
+--additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
 **node 1**
 
 ```{code-block} bash
    :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
-
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+# Auto-detect the network interface name and local IP
+nic_name=`ip route show default|awk '{print $5}'`
+local_ip=`hostname -I|awk -F " " '{print$1}'`
+# IP of node 0 (the data parallel master node), must be consistent with the local_ip of node 0
 node0_ip="xxxx"
 
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -499,8 +489,105 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1800
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+--host 0.0.0.0 \
+--port 8077 \
+--headless \
+--data-parallel-size 8 \
+--data-parallel-size-local 4 \
+--data-parallel-start-rank 4 \
+--data-parallel-address $node0_ip \
+--enable-expert-parallel \
+--data-parallel-rpc-port 12980 \
+--tensor-parallel-size 4 \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
+--seed 1024 \
+--served-model-name glm-5 \
+--tool-call-parser glm47 \
+--reasoning-parser glm45 \
+--enable-auto-tool-choice \
+--trust-remote-code \
+--gpu-memory-utilization 0.92 \
+--quantization ascend \
+--enable-chunked-prefill \
+--enable-prefix-caching \
+--async-scheduling \
+--additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
+```
 
+**Low-Latency Scenario (DP2 TP16)**
+
+- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for low-latency scenarios (16k/1k and 64k/1k cases at 0/50%/90% prefix cache hit rate, 128k/1k and 198k/1k cases at 50%/90%, and 198k/1k at 99%).
+
+Run the following scripts on two nodes respectively.
+
+**node 0**
+
+```{code-block} bash
+   :substitutions:
+# Auto-detect the network interface name and local IP
+nic_name=`ip route show default|awk '{print $5}'`
+local_ip=`hostname -I|awk -F " " '{print$1}'`
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=400
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+--host 0.0.0.0 \
+--port 8077 \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $local_ip \
+--enable-expert-parallel \
+--data-parallel-rpc-port 12980 \
+--tensor-parallel-size 16 \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
+--seed 1024 \
+--served-model-name glm-5 \
+--tool-call-parser glm47 \
+--reasoning-parser glm45 \
+--enable-auto-tool-choice \
+--trust-remote-code \
+--gpu-memory-utilization 0.92 \
+--quantization ascend \
+--enable-chunked-prefill \
+--enable-prefix-caching \
+--async-scheduling \
+--additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
+```
+
+**node 1**
+
+```{code-block} bash
+   :substitutions:
+# Auto-detect the network interface name and local IP
+nic_name=`ip route show default|awk '{print $5}'`
+local_ip=`hostname -I|awk -F " " '{print$1}'`
+# IP of node 0 (the data parallel master node), must be consistent with the local_ip of node 0
+node0_ip="xxxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=400
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
 --host 0.0.0.0 \
 --port 8077 \
@@ -509,27 +596,24 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
 --data-parallel-size-local 1 \
 --data-parallel-start-rank 1 \
 --data-parallel-address $node0_ip \
+--enable-expert-parallel \
 --data-parallel-rpc-port 12980 \
 --tensor-parallel-size 16 \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --seed 1024 \
 --served-model-name glm-5 \
---enable-expert-parallel \
 --tool-call-parser glm47 \
 --reasoning-parser glm45 \
 --enable-auto-tool-choice \
---max-num-seqs 32 \
---max-model-len 133120 \
---max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --async-scheduling \
+--additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
 **Notice:**
@@ -660,7 +744,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 **Multi-node performance tuning:**
 
 - For low-latency multi-node scenarios, keep `--data-parallel-size-local 1` to minimize cross-node communication.
-- `--max-num-seqs` should be tuned based on available KV cache memory after model loading. For the w8a8c8 64K high-throughput scenario on A3, `32` is recommended. For w4a8 on A2 multi-node with long context, start with `2` and increase if memory permits.
+- `--max-num-seqs` should be tuned based on available KV cache memory after model loading. For the w8a8c8 198K high-throughput scenario on A3, `6` is recommended; for the 198K low-latency scenario, `16` is recommended. For w4a8 on A2 multi-node with long context, start with `2` and increase if memory permits.
 - All nodes in a multi-node deployment must use identical `--tensor-parallel-size`, `--enable-expert-parallel`, and model weight path configurations.
 
 **w8a8c8-specific `--additional-config` fields:**
@@ -1137,7 +1221,7 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB
             --port $2 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
-            --master-addr $local_ip \
+            --master-addr $node_p0_ip \
             --master-port 7060 \
             --nnodes 2 \
             --node-rank $node_rank \
@@ -1177,6 +1261,8 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB
         ```shell
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
+        # IP of prefill node 0 (the PP master node), must be consistent with the local_ip of prefill node 0
+        node_p0_ip="xxxx"
         # pp=2
         export VLLM_PP_LAYER_PARTITION="41,37"
         # prefill node 0: node_rank=0, prefill node 1: node_rank=1
@@ -1545,11 +1631,11 @@ The following optimizations must be explicitly enabled to take effect. They appl
 |Parameter|Low Latency|High Throughput|Long Context|Description|
 |---------|-----------|---------------|-------------|-----------|
 |`--max-num-seqs`|Lower (16)|Higher (6–64)|Higher (32–64)|Limits concurrent sequences. Lower values reduce scheduling latency; higher values increase throughput.|
-|`--max-model-len`|Shorter (16K–64K)|Longer (128K–198K)|Maximum (198K)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
+|`--max-model-len`|198K|Longer (128K–198K)|Maximum (198K)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
 |`--max-num-batched-tokens`|Lower (4096)|Higher for prefill (4096–16384)|Higher for prefill (16384); small on decode nodes (close to `max-num-seqs`)|Controls batch size per step. Lower values reduce per-step latency; higher values improve prefill throughput.|
 |`--gpu-memory-utilization`|0.92|0.92|0.92|NPU memory fraction. The reference configs in this document use 0.92. Reduce if OOM.|
 |`--enable-chunked-prefill`|Enable (co-located)|Enable (co-located)|Enable (co-located)|Splits long prompts into chunks to prevent prefill from blocking decode. PD prefill nodes use `--enforce-eager` instead.|
-|`num_speculative_tokens` (MTP)|3|3|3 (prefill and decode)|MTP speculation count. Higher values improve decode throughput at the cost of memory for the draft model KV cache. In the reference PD configs, both prefill and decode nodes use `3`.|
+|`num_speculative_tokens` (MTP)|3|3|3 (prefill and decode)|MTP speculation count. Higher values improve decode throughput at the cost of memory for the draft model KV cache. In the reference PD configs, prefill nodes use `3` in the A3 scenario and `1` in the Ascend950DT scenario; decode nodes use `3` in both scenarios.|
 |`cudagraph_mode`|FULL_DECODE_ONLY|FULL_DECODE_ONLY (co-located / decode nodes)|FULL_DECODE_ONLY (co-located / decode nodes)|Graph capture for the decode phase only. PD prefill nodes use `--enforce-eager` instead.|
 
 ### 9.2 Tuning Guidelines
