@@ -134,6 +134,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
         self.mock_vllm_config.scheduler_config.max_num_seqs = 10
+        self.mock_vllm_config.scheduler_config.max_num_batched_tokens = 64
         self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = "cpu:0"
         torch.Tensor.pin_memory = lambda x: x  # noqa
@@ -199,12 +200,15 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
-            seq_lens=None,
+            seq_lens=torch.tensor([4, 5, 6]),
             max_seq_len=6,
         )
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
+
+        metadata_kwargs = mock_ascend_metadata.call_args.kwargs
+        self.assertTrue(torch.equal(metadata_kwargs["seq_lens_device"], common_attn_metadata.seq_lens))
 
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
