@@ -33,7 +33,26 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
+        self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
         return [attn_metadata]
+
+    def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
+        """Rebuild ``actual_seq_lengths_q`` from the padded request count,
+        mirroring Eagle's ``_update_decode_attn_metadata``.
+
+        Upstream ``Speculator._build_draft_attn_metadata`` clamps
+        ``query_start_loc`` at the real ``num_reqs`` to keep the cumulative
+        series non-decreasing, so when a batch is padded to a capture size
+        (``num_reqs_padded > num_reqs``) the cumulative query lengths stop at
+        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
+        Ascend FIA operator requires, in TND layout, that the last element of
+        ``actual_seq_lengths_q`` equals the query token count of the graph
+        being replayed; otherwise tiling fails with
+        ``queryT != last element of actualSequenceLengthQ``.
+        """
+        query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
+        for metadata in attn_metadata.values():
+            metadata.actual_seq_lengths_q = query_lens_list
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)

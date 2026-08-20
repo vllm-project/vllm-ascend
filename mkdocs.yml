@@ -157,10 +157,10 @@ extra:
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
-  vllm_version: v0.22.1
-  vllm_ascend_version: v0.22.1rc1
-  pip_vllm_ascend_version: 0.22.1rc1
-  pip_vllm_version: 0.22.1
+  vllm_version: v0.23.0
+  vllm_ascend_version: v0.23.0
+  pip_vllm_ascend_version: 0.23.0
+  pip_vllm_version: 0.23.0
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
@@ -200,6 +200,8 @@ nav:
         - tutorials/models/Qwen3.5-Dense.md
         - tutorials/models/Qwen3.5-397B-A17B.md
         - tutorials/models/Qwen3.6-35B-A3B.md
+        - tutorials/models/Qwen3.8-2.4T-A95B.md
+        - tutorials/models/Qwen3.8-27B.md
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
