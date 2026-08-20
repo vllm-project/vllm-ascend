@@ -603,6 +603,14 @@ Execute the following commands on each node in sequence. The results must all be
 hccn_tool -i 0 -ping -g address x.x.x.x
 ```
 
+### Atlas 950 Series Server Pre-check
+
+This pre-check applies only to Atlas 950 series servers. Other server series can skip it.
+
+- **Prepare HiXLEP configuration paths**
+
+    When deploying an inference service on Atlas 950 series servers, verify on each server that `/lib/route.conf`, `/etc/hccl_rootinfo.json`, and the `/etc/hixlep` directory (which describes the UB link topology) exist and are configured correctly. If any of them are missing or incorrect, follow the [HiXLEP configuration file generation guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) to generate the required content. When generating `/etc/hixlep`, use the "D2D scenario".
+
 ### Run Container In Each Node
 
 Using vLLM-ascend official container is more efficient to run multi-node environment.
