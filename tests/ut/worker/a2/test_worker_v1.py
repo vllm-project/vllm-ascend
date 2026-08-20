@@ -758,9 +758,8 @@ class TestNPUWorker(TestBase):
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
-            # Test execute_dummy_batch
-            worker.execute_dummy_batch()
-
+            # Idle DP must join DFX world sync with busy execute_model peers.
+            mock_model_runner.dfx.sync_for_step.assert_called_once_with(allow_arm=False)
             # Verify call
             mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
 

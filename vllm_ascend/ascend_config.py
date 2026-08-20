@@ -13,9 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import fcntl
 import importlib.util
 import json
 import os
+from contextlib import contextmanager, suppress
+from pathlib import Path
+from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
@@ -31,6 +35,9 @@ class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
     """
+
+    _MATERIALIZE_WAIT_TIMEOUT_S = 5.0
+    _MATERIALIZE_WAIT_INTERVAL_S = 0.05
 
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
@@ -100,8 +107,47 @@ class AscendConfig:
                 "cannot be enabled at the same time. Please disable one of them."
             )
 
-        # Dump / PrecisionDebugger configuration
+        # Dump / PrecisionDebugger / DFX configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
+        dfx_config_path = additional_config.get("dfx_config_path") or additional_config.get("dfx-config")
+        if dfx_config_path is not None and not isinstance(dfx_config_path, str):
+            raise ValueError(
+                f"additional_config.dfx_config_path must be a string, got {type(dfx_config_path).__name__}."
+            )
+        self.dfx_config_path = self._resolve_dfx_config_path(additional_config, dfx_config_path)
+        raw_reload = additional_config.get("dfx_config_reload_interval", 0)
+        if raw_reload is None:
+            raw_reload = 0
+        try:
+            self.dfx_config_reload_interval = float(raw_reload)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "additional_config.dfx_config_reload_interval must be a number of seconds "
+                f"(0 disables hot-reload; default 0), got {raw_reload!r}."
+            ) from exc
+        if self.dfx_config_reload_interval < 0:
+            raise ValueError(
+                f"additional_config.dfx_config_reload_interval must be >= 0, got {self.dfx_config_reload_interval}."
+            )
+        from vllm_ascend.dfx.runtime_config import DfxRuntimeConfig
+
+        # Do not persist here: API / EngineCore / every worker would race the same
+        # JSON. Worker ``DfxProcessor`` calls ``ensure_persisted()`` on the leader.
+        self.dfx_config = DfxRuntimeConfig(
+            self.dfx_config_path,
+            report_dir=additional_config.get("dfx_report_dir"),
+            reload_interval_seconds=self.dfx_config_reload_interval,
+            ensure_file=False,
+            msprobe_config_path=self.dump_config_path,
+        )
+        # Path / hot-reload / persisted flags already logged by DfxRuntimeConfig.
+        # Apply ascend_log immediately (API/EngineCore and workers). Workers also
+        # re-apply from Dumper / refresh_config after sync.
+        self.dfx_config.apply_ascend_log_level()
+        # API / EngineCore: file-poll ascend_log. Workers skip (RANK/LOCAL_RANK/
+        # VLLM_DP_RANK/world) and keep execute_model → sync_for_step → broadcast.
+        # If this runs before Worker env is set, the bg loop self-exits later.
+        self.dfx_config.start_non_worker_background_reload()
 
         # Log configuration
         self.ascend_log_path = additional_config.get(
@@ -463,8 +509,228 @@ class AscendConfig:
         logger.info("Materialized additional_config.dump_config to file: %s", dump_config_file_path)
         return dump_config_file_path
 
+    @staticmethod
+    def _dp_rank_tag_or_none() -> str | None:
+        dp_rank = os.getenv("VLLM_DP_RANK")
+        if dp_rank is None:
+            return None
+        dp_rank = str(dp_rank).strip()
+        return dp_rank if dp_rank else None
+
+    @staticmethod
+    def _append_dp_suffix(path_value: str, dp_rank_tag: str) -> str:
+        suffix = f"dp{dp_rank_tag}"
+        norm_value = path_value.rstrip("/\\")
+        if not norm_value:
+            return path_value
+        if os.path.basename(norm_value) == suffix:
+            return path_value
+        return os.path.join(path_value, suffix)
+
+    @staticmethod
+    @contextmanager
+    def _lock_file(lock_path: Path):
+        os.makedirs(lock_path.parent, exist_ok=True)
+        with lock_path.open("w", encoding="utf-8") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+    @staticmethod
+    def _is_materialize_writer() -> bool:
+        """Best-effort writer election for config materialization.
+
+        Prefer TP0/PP0 when env ranks are available. Missing rank envs are
+        treated as unknown (do not disqualify). If no rank envs are set, allow
+        local write so single-process / early-init paths still work.
+        """
+
+        def _env_int(name: str) -> int | None:
+            val = os.getenv(name)
+            if val is None:
+                return None
+            try:
+                return int(str(val).strip())
+            except Exception:
+                return None
+
+        def _first_env_int(*names: str) -> int | None:
+            for name in names:
+                value = _env_int(name)
+                if value is not None:
+                    return value
+            return None
+
+        pp_rank = _first_env_int("VLLM_PP_RANK", "PP_RANK")
+        tp_rank = _first_env_int("VLLM_TP_RANK", "TP_RANK")
+        if pp_rank is not None and pp_rank != 0:
+            return False
+        return tp_rank is None or tp_rank == 0
+
+    @classmethod
+    def _wait_for_file(cls, path: Path) -> bool:
+        deadline = monotonic() + cls._MATERIALIZE_WAIT_TIMEOUT_S
+        while monotonic() < deadline:
+            if path.exists():
+                return True
+            sleep(cls._MATERIALIZE_WAIT_INTERVAL_S)
+        return path.exists()
+
+    @classmethod
+    def _load_json_or_default(cls, source: Path, *, allow_missing_source: bool) -> dict[str, Any]:
+        if not source.exists():
+            if allow_missing_source:
+                return {}
+            raise FileNotFoundError(f"Source config file not found: {source}")
+        with source.open(encoding="utf-8") as file:
+            config_obj = json.load(file)
+        if not isinstance(config_obj, dict):
+            raise ValueError(f"Config JSON root must be object, got {type(config_obj).__name__} path={source}")
+        return config_obj
+
+    @classmethod
+    def _materialize_isolated_json(
+        cls,
+        *,
+        source_config_path: str,
+        dp_rank_tag: str,
+        allow_missing_source: bool,
+        dump_path_suffix: bool,
+        log_name: str,
+    ) -> str:
+        source = Path(source_config_path).expanduser().resolve()
+        config_obj = cls._load_json_or_default(source, allow_missing_source=allow_missing_source)
+
+        if dump_path_suffix:
+            dump_path = config_obj.get("dump_path")
+            if isinstance(dump_path, str) and dump_path.strip():
+                config_obj["dump_path"] = cls._append_dp_suffix(dump_path, dp_rank_tag)
+
+        isolated_dir = source.parent / f"dp{dp_rank_tag}"
+        isolated_file_path = isolated_dir / source.name
+        tmp_file_path = isolated_file_path.with_name(f"{isolated_file_path.name}.{os.getpid()}.tmp")
+        lock_path = isolated_file_path.with_suffix(f"{isolated_file_path.suffix}.lock")
+
+        if not cls._is_materialize_writer():
+            if cls._wait_for_file(isolated_file_path):
+                return str(isolated_file_path)
+            logger.warning(
+                "DP-isolated %s not materialized in time; fallback to local write. path=%s dp_rank=%s",
+                log_name,
+                str(isolated_file_path),
+                dp_rank_tag,
+            )
+
+        os.makedirs(isolated_dir, exist_ok=True)
+        with cls._lock_file(lock_path):
+            try:
+                with tmp_file_path.open("w", encoding="utf-8") as file:
+                    json.dump(config_obj, file, ensure_ascii=False, indent=2)
+                    file.write("\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(tmp_file_path, isolated_file_path)
+            finally:
+                if tmp_file_path.exists():
+                    with suppress(OSError):
+                        tmp_file_path.unlink()
+
+        logger.info(
+            "Materialized DP-isolated %s: src=%s dst=%s dp_rank=%s",
+            log_name,
+            str(source),
+            str(isolated_file_path),
+            dp_rank_tag,
+        )
+        return str(isolated_file_path)
+
+    @classmethod
+    def _materialize_dp_isolated_dump_config(cls, source_dump_config_path: str, dp_rank_tag: str) -> str:
+        return cls._materialize_isolated_json(
+            source_config_path=source_dump_config_path,
+            dp_rank_tag=dp_rank_tag,
+            allow_missing_source=False,
+            dump_path_suffix=True,
+            log_name="msprobe config",
+        )
+
+    @classmethod
+    def _materialize_inline_dp_isolated_dump_config(cls, dump_config: dict[str, Any], dp_rank_tag: str) -> str:
+        """Materialize inline dump config directly to per-DP target file.
+
+        Avoids writing a shared intermediate file first, which can race under
+        multi-DP same-host startup.
+        """
+        config_obj = dict(dump_config)
+        dump_path = config_obj.get("dump_path")
+        if isinstance(dump_path, str) and dump_path.strip():
+            config_obj["dump_path"] = cls._append_dp_suffix(dump_path, dp_rank_tag)
+
+        base_dir = Path(os.getcwd()) / ".vllm_ascend" / "msprobe"
+        isolated_dir = base_dir / f"dp{dp_rank_tag}"
+        isolated_file_path = isolated_dir / "msprobe_dump_config.json"
+        tmp_file_path = isolated_file_path.with_name(f"{isolated_file_path.name}.{os.getpid()}.tmp")
+        lock_path = isolated_file_path.with_suffix(f"{isolated_file_path.suffix}.lock")
+
+        if not cls._is_materialize_writer():
+            if cls._wait_for_file(isolated_file_path):
+                return str(isolated_file_path)
+            logger.warning(
+                "DP-isolated inline msprobe config not materialized in time; fallback to local write. "
+                "path=%s dp_rank=%s",
+                str(isolated_file_path),
+                dp_rank_tag,
+            )
+
+        os.makedirs(isolated_dir, exist_ok=True)
+        with cls._lock_file(lock_path):
+            try:
+                with tmp_file_path.open("w", encoding="utf-8") as file:
+                    json.dump(config_obj, file, ensure_ascii=False, indent=2)
+                    file.write("\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(tmp_file_path, isolated_file_path)
+            finally:
+                if tmp_file_path.exists():
+                    with suppress(OSError):
+                        tmp_file_path.unlink()
+
+        logger.info(
+            "Materialized DP-isolated inline msprobe config: dst=%s dp_rank=%s",
+            str(isolated_file_path),
+            dp_rank_tag,
+        )
+        return str(isolated_file_path)
+
+    @classmethod
+    def _materialize_dp_isolated_dfx_config(cls, source_dfx_config_path: str, dp_rank_tag: str) -> str:
+        return cls._materialize_isolated_json(
+            source_config_path=source_dfx_config_path,
+            dp_rank_tag=dp_rank_tag,
+            allow_missing_source=False,
+            dump_path_suffix=False,
+            log_name="dfx config",
+        )
+
+    @classmethod
+    def _materialize_default_dp_isolated_dfx_config(cls, dp_rank_tag: str) -> str:
+        source = Path(os.getcwd()) / "dfx" / "config" / "dfx_config.json"
+        return cls._materialize_isolated_json(
+            source_config_path=str(source),
+            dp_rank_tag=dp_rank_tag,
+            allow_missing_source=True,
+            dump_path_suffix=False,
+            log_name="dfx config(default path)",
+        )
+
     @classmethod
     def _resolve_dump_config_path(cls, additional_config: dict[str, Any]) -> str | None:
+        isolate_by_dp = bool(additional_config.get("dump_config_isolate_by_dp", False))
+        dp_rank_tag = cls._dp_rank_tag_or_none() if isolate_by_dp else None
+
         dump_config_path = additional_config.get("dump_config_path")
         dump_config = additional_config.get("dump_config")
         if dump_config_path is not None and dump_config is not None:
@@ -474,12 +740,26 @@ class AscendConfig:
         if dump_config is not None:
             if not isinstance(dump_config, dict):
                 raise ValueError(f"additional_config.dump_config must be a dict, got {type(dump_config).__name__}.")
+            if dp_rank_tag is not None:
+                return cls._materialize_inline_dp_isolated_dump_config(dump_config, dp_rank_tag)
             return cls._materialize_dump_config_to_file(dump_config)
         if dump_config_path is not None and not isinstance(dump_config_path, str):
             raise ValueError(
                 f"additional_config.dump_config_path must be a string, got {type(dump_config_path).__name__}."
             )
+        if dump_config_path is not None and dp_rank_tag is not None:
+            return cls._materialize_dp_isolated_dump_config(dump_config_path, dp_rank_tag)
         return dump_config_path
+
+    @classmethod
+    def _resolve_dfx_config_path(cls, additional_config: dict[str, Any], dfx_config_path: str | None) -> str | None:
+        isolate_by_dp = bool(additional_config.get("dfx_config_isolate_by_dp", False))
+        dp_rank_tag = cls._dp_rank_tag_or_none() if isolate_by_dp else None
+        if dp_rank_tag is None:
+            return dfx_config_path
+        if dfx_config_path is None:
+            return cls._materialize_default_dp_isolated_dfx_config(dp_rank_tag)
+        return cls._materialize_dp_isolated_dfx_config(dfx_config_path, dp_rank_tag)
 
     @staticmethod
     def _has_sparse_li_c8_layer_config(quant_config: Any) -> bool:
