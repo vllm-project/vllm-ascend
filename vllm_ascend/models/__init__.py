@@ -24,7 +24,7 @@ def register_model():
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
     ModelRegistry.register_model(
         "Qwen3OmniDSparkModel",
-        "vllm_ascend.models.qwen3_omni_dspark:AscendQwen3OmniDSparkForCausalLM",
+        "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM",
     )
     ModelRegistry.register_model("DeepSeekMTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("GlmMoeDsaForCausalLM", "vllm_ascend.models.deepseek_mtp:AscendGlmMoeDsaForCausalLM")
