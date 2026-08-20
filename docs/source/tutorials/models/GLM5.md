@@ -418,7 +418,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 ::::{tab-item} A3 series
 :sync: A3
 
-- `GLM-5`(BF16 version) and `GLM-5.1`(BF16 version): require at least 2 Atlas 800 A3 (64GB × 16).
+- BF16 model `glm-5-bf16` and `glm-5.1-bf16` can be deployed on 2 Atlas 800 A3 (64GB × 16) .
 
 Run the following scripts on two nodes respectively.
 
@@ -837,106 +837,99 @@ Before you start, please
 
 prepare the script `launch_online_dp.py` on each node:
 
-    ```python
-    import argparse
-    import multiprocessing
-    import os
-    import subprocess
-    import sys
-
-    def parse_args():
-        parser = argparse.ArgumentParser()
-        parser.add_argument(
-            "--dp-size",
-            type=int,
-            required=True,
-            help="Data parallel size."
-        )
-        parser.add_argument(
-            "--tp-size",
-            type=int,
-            default=1,
-            help="Tensor parallel size."
-        )
-        parser.add_argument(
-            "--dp-size-local",
-            type=int,
-            default=-1,
-            help="Local data parallel size."
-        )
-        parser.add_argument(
-            "--dp-rank-start",
-            type=int,
-            default=0,
-            help="Starting rank for data parallel."
-        )
-        parser.add_argument(
-            "--dp-address",
-            type=str,
-            required=True,
-            help="IP address for data parallel master node."
-        )
-        parser.add_argument(
-            "--dp-rpc-port",
-            type=str,
-            default=12345,
-            help="Port for data parallel master node."
-        )
-        parser.add_argument(
-            "--vllm-start-port",
-            type=int,
-            default=9000,
-            help="Starting port for the engine."
-        )
-        return parser.parse_args()
-
-    args = parse_args()
-    dp_size = args.dp_size
-    tp_size = args.tp_size
-    dp_size_local = args.dp_size_local
-    if dp_size_local == -1:
-        dp_size_local = dp_size
-    dp_rank_start = args.dp_rank_start
-    dp_address = args.dp_address
-    dp_rpc_port = args.dp_rpc_port
-    vllm_start_port = args.vllm_start_port
-
-    def run_command(visible_devices, dp_rank, vllm_engine_port):
-        command = [
-            "bash",
-            "./run_dp_template.sh",
-            visible_devices,
-            str(vllm_engine_port),
-            str(dp_size),
-            str(dp_rank),
-            dp_address,
-            dp_rpc_port,
-            str(tp_size),
-        ]
-        subprocess.run(command, check=True)
-
-    if __name__ == "__main__":
-        template_path = "./run_dp_template.sh"
-        if not os.path.exists(template_path):
-            print(f"Template file {template_path} does not exist.")
-            sys.exit(1)
-
-        processes = []
-        num_cards = dp_size_local * tp_size
-        for i in range(dp_size_local):
-            dp_rank = dp_rank_start + i
-            vllm_engine_port = vllm_start_port + i
-            visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
-            process = multiprocessing.Process(target=run_command,
-                                            args=(visible_devices, dp_rank,
-                                                    vllm_engine_port))
-            processes.append(process)
-            process.start()
-
-        for process in processes:
-            process.join()
-
-    ```
+```python
+import argparse
+import multiprocessing
+import os
+import subprocess
+import sys
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dp-size",
+        type=int,
+        required=True,
+        help="Data parallel size."
+    )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size."
+    )
+    parser.add_argument(
+        "--dp-size-local",
+        type=int,
+        default=-1,
+        help="Local data parallel size."
+    )
+    parser.add_argument(
+        "--dp-rank-start",
+        type=int,
+        default=0,
+        help="Starting rank for data parallel."
+    )
+    parser.add_argument(
+        "--dp-address",
+        type=str,
+        required=True,
+        help="IP address for data parallel master node."
+    )
+    parser.add_argument(
+        "--dp-rpc-port",
+        type=str,
+        default=12345,
+        help="Port for data parallel master node."
+    )
+    parser.add_argument(
+        "--vllm-start-port",
+        type=int,
+        default=9000,
+        help="Starting port for the engine."
+    )
+    return parser.parse_args()
+args = parse_args()
+dp_size = args.dp_size
+tp_size = args.tp_size
+dp_size_local = args.dp_size_local
+if dp_size_local == -1:
+    dp_size_local = dp_size
+dp_rank_start = args.dp_rank_start
+dp_address = args.dp_address
+dp_rpc_port = args.dp_rpc_port
+vllm_start_port = args.vllm_start_port
+def run_command(visible_devices, dp_rank, vllm_engine_port):
+    command = [
+        "bash",
+        "./run_dp_template.sh",
+        visible_devices,
+        str(vllm_engine_port),
+        str(dp_size),
+        str(dp_rank),
+        dp_address,
+        dp_rpc_port,
+        str(tp_size),
+    ]
+    subprocess.run(command, check=True)
+if __name__ == "__main__":
+    template_path = "./run_dp_template.sh"
+    if not os.path.exists(template_path):
+        print(f"Template file {template_path} does not exist.")
+        sys.exit(1)
+    processes = []
+    num_cards = dp_size_local * tp_size
+    for i in range(dp_size_local):
+        dp_rank = dp_rank_start + i
+        vllm_engine_port = vllm_start_port + i
+        visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+        process = multiprocessing.Process(target=run_command,
+                                        args=(visible_devices, dp_rank,
+                                                vllm_engine_port))
+        processes.append(process)
+        process.start()
+    for process in processes:
+        process.join()
+```
 
 #### 5.3.1 Prefill-Decode Disaggregation (Ascend950DT series)
 
