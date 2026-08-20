@@ -13,6 +13,22 @@ from vllm_ascend.spec_decode.dynamic.policy import HardwareAwarePrefixPolicy
 from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
 
 
+class _FakeDSparkModel:
+    def __init__(self) -> None:
+        self.confidence_calls = 0
+
+    def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return token_ids.float().unsqueeze(-1)
+
+    def confidence_logits(
+        self,
+        hidden_states: torch.Tensor,
+        markov_embs: torch.Tensor,
+    ) -> torch.Tensor:
+        self.confidence_calls += 1
+        return (hidden_states[..., :1] + markov_embs).squeeze(-1)
+
+
 def _policy(
     latency_ms: dict[int, float],
     *,
@@ -93,6 +109,54 @@ def test_hardware_policy_amortizes_request_prefix_mapping() -> None:
         torch.tensor([[0.9, 0.9, 0.1], [0.1, 0.1, 0.1]])
     )
     assert refreshed.tolist() == [2, 0]
+
+
+def test_hardware_scheduler_can_hold_confidence_result() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "profile": {
+                "fingerprint": {"device": "Ascend", "graph_mode": "FULL_DECODE_ONLY"},
+                "latency_ms": {"1": 1.0, "2": 1.0, "3": 1.0, "4": 10.0},
+                "confidence_temperatures": [1.0, 1.0, 1.0],
+            },
+            "confidence_update_interval": 2,
+            "decision_interval": 64,
+            "hardware_min_budget_ratio": 0.0,
+        },
+        max_batch_size=2,
+        num_speculative_tokens=3,
+        device=torch.device("cpu"),
+    )
+    model = _FakeDSparkModel()
+    draft_ids = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]])
+    hidden = torch.zeros((6, 1))
+
+    scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=2,
+    )
+    scheduler.update(
+        model=model,
+        last_hidden_states=hidden + 1,
+        draft_token_ids=draft_ids,
+        num_reqs=2,
+    )
+
+    assert model.confidence_calls == 1
+
+    scheduler.update(
+        model=model,
+        last_hidden_states=hidden + 1,
+        draft_token_ids=draft_ids,
+        num_reqs=2,
+    )
+    assert model.confidence_calls == 2
 
 
 def test_hardware_policy_uses_nearest_profiled_shape() -> None:

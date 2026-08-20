@@ -276,6 +276,15 @@ class DynamicSpecScheduler:
             )
         )
 
+        self.confidence_update_interval = int(
+            method_params.get(
+                "confidence_update_interval",
+                1,
+            )
+        )
+        if self.confidence_update_interval <= 0:
+            raise ValueError("confidence_update_interval must be > 0")
+
         self.budget_threshold = float(
             method_params.get(
                 "budget_threshold",
@@ -414,6 +423,10 @@ class DynamicSpecScheduler:
 
         # Latest result consumed by the model runner.
         self.num_verify_tokens: torch.Tensor | None = None
+        self._cached_num_verify_tokens: torch.Tensor | None = None
+        self._confidence_steps = 0
+        self._last_confidence_num_reqs: int | None = None
+        self._last_confidence_num_draft_tokens: int | None = None
 
     @staticmethod
     def _hardware_decision_interval(method_params: dict[str, Any]) -> int:
@@ -483,6 +496,35 @@ class DynamicSpecScheduler:
                 self.num_verify_tokens.fill_(physical_k)
                 return self.num_verify_tokens
 
+        # The confidence head and the cumulative-prefix policy are device
+        # work.  For a hardware-aware profile, holding the last safe prefix
+        # for a short cadence avoids repeating that work when the physical
+        # draft width and batch shape are unchanged.  A width/shape change
+        # always refreshes immediately so cached lengths cannot exceed the
+        # current draft tensor.
+        num_draft_tokens = None
+        if draft_token_ids is not None:
+            num_draft_tokens = max(int(draft_token_ids.shape[1]) - 1, 0)
+        elif logits is not None and num_reqs:
+            num_draft_tokens = int(logits.shape[0]) // int(num_reqs)
+
+        if (
+            self.hardware_policy is not None
+            and self.confidence_update_interval > 1
+            and self._cached_num_verify_tokens is not None
+            and num_reqs is not None
+            and num_draft_tokens is not None
+            and self._last_confidence_num_reqs == int(num_reqs)
+            and self._last_confidence_num_draft_tokens == num_draft_tokens
+        ):
+            self._confidence_steps += 1
+            if self._confidence_steps < self.confidence_update_interval:
+                self.num_verify_tokens = self._cached_num_verify_tokens[:num_reqs]
+                return self.num_verify_tokens
+
+        if self.hardware_policy is not None and self.confidence_update_interval > 1:
+            self._confidence_steps = 0
+
         if self.method == "dflash":
             if logits is None:
                 raise ValueError("DFlash requires logits.")
@@ -504,7 +546,17 @@ class DynamicSpecScheduler:
         else:
             raise RuntimeError(f"Unsupported dynamic speculative method: {self.method}")
 
-        return self._update_from_token_probs(token_probs)
+        result = self._update_from_token_probs(token_probs)
+        if (
+            self.hardware_policy is not None
+            and self.confidence_update_interval > 1
+            and num_reqs is not None
+            and num_draft_tokens is not None
+        ):
+            self._cached_num_verify_tokens = result
+            self._last_confidence_num_reqs = int(num_reqs)
+            self._last_confidence_num_draft_tokens = num_draft_tokens
+        return result
 
     def _compute_dflash_token_probs(
         self,
