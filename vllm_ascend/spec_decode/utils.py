@@ -631,13 +631,19 @@ class DynamicSpecScheduler:
 
         result = self._update_from_token_probs(token_probs)
         if self.hybrid_policy_enabled and self.hardware_policy is not None:
-            # The mean conditional acceptance is a cheap batch-level proxy for
-            # the acceptance rate. One scalar sync is paid only when the
-            # confidence path is actually evaluated; held full-width steps do
-            # not re-enter this branch.
-            self._hybrid_last_acceptance = float(token_probs.mean().item())
+            # The mean full-prefix survival is a batch-level proxy for the
+            # probability that the complete physical K is useful. It is more
+            # selective than the mean per-position confidence for low-
+            # acceptance batches. The cumulative survival buffer was already
+            # produced by _update_from_token_probs, so this adds only one
+            # scalar sync when the confidence path is actually evaluated.
+            draft_width = int(num_draft_tokens or 0)
+            if num_reqs and draft_width:
+                self._hybrid_last_acceptance = float(
+                    self._survival_buffer[:num_reqs, draft_width - 1].mean().item()
+                )
             self._hybrid_last_num_reqs = int(num_reqs or 0)
-            self._hybrid_last_num_draft_tokens = int(num_draft_tokens or 0)
+            self._hybrid_last_num_draft_tokens = draft_width
             self._hybrid_steps_since_probe = 0
             self._hybrid_full_width_active = False
         if (
