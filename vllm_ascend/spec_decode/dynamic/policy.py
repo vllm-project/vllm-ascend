@@ -46,6 +46,11 @@ class HardwareAwarePrefixPolicy:
         self._last_num_draft_tokens: int | None = None
         self._last_min_total_tokens: int | None = None
         self.last_goodput: float | None = None
+        self._full_lengths_buffer = torch.empty(
+            max_batch_size,
+            dtype=torch.int32,
+            device=device,
+        )
 
         # The profile is tiny, so keeping the lookup on device avoids a CPU
         # round-trip for each candidate m.  Zero means that a shape was not
@@ -92,19 +97,21 @@ class HardwareAwarePrefixPolicy:
         # the full width avoids the device sort/top-k path on every decode
         # step while preserving the exact result of the general allocator.
         if min_total_tokens >= max_total:
+            state_changed = (
+                self._best_total_tokens != max_total
+                or self._last_num_reqs != num_reqs
+                or self._last_min_total_tokens != min_total_tokens
+            )
             self._best_total_tokens = max_total
             self._last_num_reqs = num_reqs
             self._last_min_total_tokens = min_total_tokens
-            self.last_goodput = float(
-                (num_reqs + max_total)
-                / self.cost_model.latency(max(1, num_reqs + max_total))
-            )
-            return torch.full(
-                (num_reqs,),
-                num_draft_tokens,
-                dtype=torch.int32,
-                device=survival.device,
-            )
+            if state_changed:
+                self.last_goodput = float(
+                    (num_reqs + max_total)
+                    / self.cost_model.latency(max(1, num_reqs + max_total))
+                )
+            self._full_lengths_buffer[:num_reqs].fill_(num_draft_tokens)
+            return self._full_lengths_buffer[:num_reqs]
         if self._last_min_total_tokens != min_total_tokens:
             self._best_total_tokens = None
             self._last_min_total_tokens = min_total_tokens
@@ -184,12 +191,8 @@ class HardwareAwarePrefixPolicy:
             min_total_tokens,
         )
         if selected_total >= max_total:
-            return torch.full(
-                (num_reqs,),
-                num_draft_tokens,
-                dtype=torch.int32,
-                device=survival.device,
-            )
+            self._full_lengths_buffer[:num_reqs].fill_(num_draft_tokens)
+            return self._full_lengths_buffer[:num_reqs]
         extra = selected_total - base_total
         lengths = torch.full(
             (num_reqs,), mandatory, dtype=torch.int32, device=survival.device

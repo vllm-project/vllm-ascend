@@ -605,10 +605,18 @@ class DynamicSpecScheduler:
                 * self.budget_k
                 * self.hardware_min_budget_ratio
             )
-            self.num_verify_tokens = self.hardware_policy.allocate(
-                survival,
-                min_total_tokens=min_total_tokens,
-            )
+            if min_total_tokens >= num_reqs * num_draft_tokens:
+                # The hardware floor already covers every physical draft
+                # position. Reuse the scheduler buffer and bypass the
+                # hardware policy entirely; its result is necessarily the
+                # full width and no profile decision can improve it.
+                self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
+                self.num_verify_tokens.fill_(num_draft_tokens)
+            else:
+                self.num_verify_tokens = self.hardware_policy.allocate(
+                    survival,
+                    min_total_tokens=min_total_tokens,
+                )
         else:
             self.compute_verify_budget(survival)
             self.num_verify_tokens = self.allocate_verify_budget(survival)
