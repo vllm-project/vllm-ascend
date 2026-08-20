@@ -40,7 +40,7 @@ from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
-    from vllm_ascend.ops.triton.rope import rope_forward_triton
+    from vllm_ascend.ops.triton.rope import rope_forward_triton, rope_forward_triton_siso
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
@@ -230,6 +230,38 @@ def rope_forward_oot(
     return query.view(query_shape), key.view(key_shape)
 
 
+def rope_forward_query_only(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    """Apply RoPE when cross-layer KV sharing leaves the draft without K."""
+    if HAS_TRITON:
+        query_shape = query.shape
+        num_tokens = query.shape[0]
+        query = rope_forward_triton_siso(
+            query.view(num_tokens, -1, head_size),
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            rope_dim=rotary_dim,
+            is_neox_style=is_neox_style,
+        )
+        return query.view(query_shape)
+    query, _ = RotaryEmbedding.forward_static(
+        positions,
+        query,
+        None,
+        head_size,
+        rotary_dim,
+        cos_sin_cache,
+        is_neox_style,
+    )
+    return query
+
+
 class AscendRotaryEmbedding(RotaryEmbedding):
     def __init__(
         self,
@@ -251,7 +283,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
         out_dtype: torch.dtype | None = None,
@@ -263,6 +295,18 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if is_draft_model and self.use_mtp and enable_sp():
             tp_group = get_tp_group()
             positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
+        if key is None:
+            return (
+                rope_forward_query_only(
+                    positions,
+                    query,
+                    self.cos_sin_cache,
+                    self.head_size,
+                    self.rotary_dim,
+                    is_neox_style,
+                ),
+                None,
+            )
 
         rope_args = (
             positions,
