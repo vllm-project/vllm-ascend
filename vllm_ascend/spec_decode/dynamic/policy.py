@@ -29,24 +29,37 @@ class HardwareAwarePrefixPolicy:
         max_draft_tokens: int,
         device: torch.device,
         decision_interval: int = 16,
+        allocation_interval: int = 1,
     ) -> None:
         if min_k < 0 or min_k > max_draft_tokens:
             raise ValueError("min_k must be in [0, max_draft_tokens]")
         if decision_interval <= 0:
             raise ValueError("decision_interval must be > 0")
+        if allocation_interval <= 0:
+            raise ValueError("allocation_interval must be > 0")
         self.cost_model = cost_model
         self.min_k = min_k
         self.max_batch_size = max_batch_size
         self.max_draft_tokens = max_draft_tokens
         self.device = device
         self.decision_interval = decision_interval
+        self.allocation_interval = allocation_interval
         self._steps = 0
         self._best_total_tokens: int | None = None
         self._last_num_reqs: int | None = None
         self._last_num_draft_tokens: int | None = None
         self._last_min_total_tokens: int | None = None
+        self._allocation_valid = False
+        self._last_allocation_num_reqs: int | None = None
+        self._last_allocation_num_draft_tokens: int | None = None
+        self._last_allocation_min_total_tokens: int | None = None
         self.last_goodput: float | None = None
         self._full_lengths_buffer = torch.empty(
+            max_batch_size,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._cached_lengths_buffer = torch.empty(
             max_batch_size,
             dtype=torch.int32,
             device=device,
@@ -73,6 +86,7 @@ class HardwareAwarePrefixPolicy:
     ) -> torch.Tensor:
         num_reqs, num_draft_tokens = survival.shape
         if num_reqs == 0:
+            self._allocation_valid = False
             return torch.empty((0,), dtype=torch.int32, device=survival.device)
         if num_draft_tokens > self.max_draft_tokens:
             raise ValueError(
@@ -88,6 +102,7 @@ class HardwareAwarePrefixPolicy:
         if self._last_num_draft_tokens != num_draft_tokens:
             self._best_total_tokens = None
             self._last_num_draft_tokens = num_draft_tokens
+            self._allocation_valid = False
 
         max_total = num_reqs * num_draft_tokens
         min_total_tokens = min(min_total_tokens, max_total)
@@ -111,25 +126,31 @@ class HardwareAwarePrefixPolicy:
                     / self.cost_model.latency(max(1, num_reqs + max_total))
                 )
             self._full_lengths_buffer[:num_reqs].fill_(num_draft_tokens)
+            self._cached_lengths_buffer[:num_reqs].fill_(num_draft_tokens)
+            self._allocation_valid = True
+            self._last_allocation_num_reqs = num_reqs
+            self._last_allocation_num_draft_tokens = num_draft_tokens
+            self._last_allocation_min_total_tokens = min_total_tokens
             return self._full_lengths_buffer[:num_reqs]
         if self._last_min_total_tokens != min_total_tokens:
             self._best_total_tokens = None
             self._last_min_total_tokens = min_total_tokens
+            self._allocation_valid = False
 
         self._steps += 1
         mandatory = min(self.min_k, num_draft_tokens)
         base_total = num_reqs * mandatory
 
-        # Recompute the global optimum periodically.  Confidence still drives
-        # the per-request allocation on every step, but the hardware budget is
-        # stable across a short interval and does not need a top-k search each
-        # time.
-        should_recompute = (
+        # Recompute the global optimum periodically.  The selected total is
+        # intentionally independent from the per-request mapping interval:
+        # the former is expensive but infrequent, while the latter used to
+        # repeat a device top-k and scatter on every decode step.
+        should_recompute_total = (
             self._best_total_tokens is None
             or self._last_num_reqs != num_reqs
             or self._steps % self.decision_interval == 0
         )
-        if should_recompute:
+        if should_recompute_total:
             mandatory_accepts = survival[:, :mandatory].sum() if mandatory else survival.new_zeros(())
             candidates = survival[:, mandatory:]
             candidate_count = candidates.numel()
@@ -190,30 +211,53 @@ class HardwareAwarePrefixPolicy:
             selected_total,
             min_total_tokens,
         )
-        if selected_total >= max_total:
-            self._full_lengths_buffer[:num_reqs].fill_(num_draft_tokens)
-            return self._full_lengths_buffer[:num_reqs]
-        extra = selected_total - base_total
-        lengths = torch.full(
-            (num_reqs,), mandatory, dtype=torch.int32, device=survival.device
-        )
-        if extra <= 0:
-            return lengths
 
-        candidates = survival[:, mandatory:]
-        cols = torch.arange(
-            mandatory,
-            num_draft_tokens,
-            device=survival.device,
-            dtype=survival.dtype,
-        ).repeat(num_reqs, 1)
-        tie_break = (num_draft_tokens - cols) * torch.finfo(survival.dtype).eps
-        ranked = (candidates + tie_break).reshape(-1)
-        _, selected = torch.topk(ranked, k=min(extra, ranked.numel()), largest=True, sorted=False)
-        request_indices = torch.div(
-            selected,
-            num_draft_tokens - mandatory,
-            rounding_mode="floor",
+        should_reallocate = (
+            not self._allocation_valid
+            or self._last_allocation_num_reqs != num_reqs
+            or self._last_allocation_num_draft_tokens != num_draft_tokens
+            or self._last_allocation_min_total_tokens != min_total_tokens
+            or self._steps % self.allocation_interval == 0
         )
-        lengths.scatter_add_(0, request_indices, torch.ones_like(request_indices, dtype=torch.int32))
-        return lengths.clamp_(min=mandatory, max=num_draft_tokens)
+        if not should_reallocate:
+            return self._cached_lengths_buffer[:num_reqs]
+
+        if selected_total >= max_total:
+            self._cached_lengths_buffer[:num_reqs].fill_(num_draft_tokens)
+        else:
+            extra = selected_total - base_total
+            lengths = self._cached_lengths_buffer[:num_reqs]
+            lengths.fill_(mandatory)
+            if extra > 0:
+                candidates = survival[:, mandatory:]
+                cols = torch.arange(
+                    mandatory,
+                    num_draft_tokens,
+                    device=survival.device,
+                    dtype=survival.dtype,
+                ).repeat(num_reqs, 1)
+                tie_break = (num_draft_tokens - cols) * torch.finfo(survival.dtype).eps
+                ranked = (candidates + tie_break).reshape(-1)
+                _, selected = torch.topk(
+                    ranked,
+                    k=min(extra, ranked.numel()),
+                    largest=True,
+                    sorted=False,
+                )
+                request_indices = torch.div(
+                    selected,
+                    num_draft_tokens - mandatory,
+                    rounding_mode="floor",
+                )
+                lengths.scatter_add_(
+                    0,
+                    request_indices,
+                    torch.ones_like(request_indices, dtype=torch.int32),
+                )
+            lengths.clamp_(min=mandatory, max=num_draft_tokens)
+
+        self._allocation_valid = True
+        self._last_allocation_num_reqs = num_reqs
+        self._last_allocation_num_draft_tokens = num_draft_tokens
+        self._last_allocation_min_total_tokens = min_total_tokens
+        return self._cached_lengths_buffer[:num_reqs]

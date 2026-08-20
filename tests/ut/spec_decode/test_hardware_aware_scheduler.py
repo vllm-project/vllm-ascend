@@ -19,6 +19,8 @@ def _policy(
     min_k: int = 0,
     max_batch_size: int = 4,
     max_draft_tokens: int = 3,
+    decision_interval: int = 16,
+    allocation_interval: int = 1,
 ) -> HardwareAwarePrefixPolicy:
     model = HardwareCostModel(latency_ms=latency_ms, fingerprint={})
     return HardwareAwarePrefixPolicy(
@@ -27,6 +29,8 @@ def _policy(
         max_batch_size=max_batch_size,
         max_draft_tokens=max_draft_tokens,
         device=torch.device("cpu"),
+        decision_interval=decision_interval,
+        allocation_interval=allocation_interval,
     )
 
 
@@ -65,6 +69,30 @@ def test_hardware_policy_respects_minimum_total_budget() -> None:
     lengths = policy.allocate(survival, min_total_tokens=4)
 
     assert int(lengths.sum().item()) >= 4
+
+
+def test_hardware_policy_amortizes_request_prefix_mapping() -> None:
+    policy = _policy(
+        {2: 1.0, 3: 1.0, 4: 1.0, 5: 100.0, 6: 100.0, 7: 100.0},
+        max_batch_size=2,
+        decision_interval=64,
+        allocation_interval=4,
+    )
+
+    first = policy.allocate(torch.tensor([[0.9, 0.1, 0.1], [0.8, 0.1, 0.1]]))
+    held = policy.allocate(torch.tensor([[0.9, 0.9, 0.1], [0.1, 0.1, 0.1]]))
+
+    # The hardware total stays fixed, but the request mapping is held until
+    # the configured cadence instead of re-running top-k on every step.
+    assert first.tolist() == [1, 1]
+    assert held.tolist() == [1, 1]
+    assert held.data_ptr() == first.data_ptr()
+
+    policy.allocate(torch.tensor([[0.9, 0.9, 0.1], [0.1, 0.1, 0.1]]))
+    refreshed = policy.allocate(
+        torch.tensor([[0.9, 0.9, 0.1], [0.1, 0.1, 0.1]])
+    )
+    assert refreshed.tolist() == [2, 0]
 
 
 def test_hardware_policy_uses_nearest_profiled_shape() -> None:

@@ -324,6 +324,7 @@ class DynamicSpecScheduler:
                     max_draft_tokens=self.num_speculative_tokens,
                     device=device,
                     decision_interval=self._hardware_decision_interval(method_params),
+                    allocation_interval=self._hardware_allocation_interval(method_params),
                 )
                 profile_temperatures = self.cost_model.confidence_temperatures
             except (OSError, TypeError, ValueError) as exc:
@@ -441,6 +442,20 @@ class DynamicSpecScheduler:
                 interval,
             )
         return interval
+
+    @staticmethod
+    def _hardware_allocation_interval(method_params: dict[str, Any]) -> int:
+        """Return the cadence for remapping survival scores to request prefixes.
+
+        The hardware optimum is intentionally searched at ``decision_interval``
+        cadence, but the request-level top-k/scatter mapping can be held for a
+        shorter, independently tuned interval.  Keep the default at one so
+        existing deployments retain their exact per-step allocation semantics.
+        """
+        configured = int(method_params.get("allocation_interval", 1))
+        if configured <= 0:
+            raise ValueError("allocation_interval must be > 0")
+        return configured
 
     def update(
         self,
