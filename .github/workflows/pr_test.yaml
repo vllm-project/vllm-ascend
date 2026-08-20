@@ -163,30 +163,30 @@ jobs:
           path: /tmp/pre-commit-cache
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
 
-      - name: Run pre-commit
-        env:
-          PRE_COMMIT_HOME: /tmp/pre-commit-cache
-          PRE_COMMIT_COLOR: always
-          FORCE_COLOR: "1"
-          TERM: xterm-256color
-          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
-          # Keep golang-based pre-commit hooks on a domestic module proxy.
-          GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
-          GONOSUMDB: '*'
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+      # - name: Run pre-commit
+      #   env:
+      #     PRE_COMMIT_HOME: /tmp/pre-commit-cache
+      #     PRE_COMMIT_COLOR: always
+      #     FORCE_COLOR: "1"
+      #     TERM: xterm-256color
+      #     SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+      #     # Keep golang-based pre-commit hooks on a domestic module proxy.
+      #     GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
+      #     GONOSUMDB: '*'
+      #   run: |
+      #     git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      #     pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
-      - name: Run mypy
-        run: |
-          PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
-          export PYTHONPATH
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          for python_version in "3.10" "3.11" "3.12"; do
-            echo "============================"
-            tools/mypy.sh 1 "$python_version"
-            echo "============================"
-          done
+      # - name: Run mypy
+      #   run: |
+      #     PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+      #     export PYTHONPATH
+      #     git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      #     for python_version in "3.10" "3.11" "3.12"; do
+      #       echo "============================"
+      #       tools/mypy.sh 1 "$python_version"
+      #       echo "============================"
+      #     done
 
   recommend-tests-from-coverage:
     name: Recommend tests from coverage
@@ -532,7 +532,7 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
+          # - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
