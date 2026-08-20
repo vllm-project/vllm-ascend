@@ -43,8 +43,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
-    get_cache_family_granularity,
-    infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
@@ -419,7 +417,7 @@ class KVPoolScheduler:
         vllm_config: "VllmConfig",
         kv_cache_config: KVCacheConfig | None,
     ) -> list[int]:
-        if kv_cache_config is None or not self.use_hybrid:
+        if kv_cache_config is None:
             return [vllm_config.cache_config.block_size]
 
         block_sizes: list[int] = []
@@ -441,18 +439,12 @@ class KVPoolScheduler:
         return families[group_id]
 
     def _get_effective_group_block_size(self, group_id: int) -> int:
-        cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
-        return self._get_group_block_size(group_id) * max(infer_cache_family_ratio(cache_family), 1)
+        return self._get_group_block_size(group_id)
 
     def _infer_cache_transfer_granularity(self) -> int:
         granularities = [self.lcm_block_size]
         for group_id in self.kv_cache_group_ids:
-            granularities.append(
-                get_cache_family_granularity(
-                    self._get_group_block_size(group_id),
-                    self._get_group_family(self.kv_cache_group_families, group_id),
-                )
-            )
+            granularities.append(self._get_group_block_size(group_id))
         return math.lcm(*granularities)
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:

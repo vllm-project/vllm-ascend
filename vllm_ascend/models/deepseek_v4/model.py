@@ -126,9 +126,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+        from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend
 
-        return AscendDSABackend
+        return AscendDSASWABackend
 
 
 def precompute_freqs_cis_cpu(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow) -> torch.Tensor:

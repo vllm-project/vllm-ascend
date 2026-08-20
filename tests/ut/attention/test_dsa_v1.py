@@ -58,7 +58,13 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
         speculative_config=None,
         parallel_config=SimpleNamespace(tensor_parallel_size=2),
     )
-    kv_cache_spec = SimpleNamespace(compress_ratio=compressor_ratio, block_size=128)
+    physical_block_size = 128
+    logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
+    kv_cache_spec = SimpleNamespace(
+        compress_ratio=compressor_ratio,
+        block_size=physical_block_size * logical_compress_ratio,
+        storage_block_size=physical_block_size,
+    )
     builder = AscendDSAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
         layer_names=["model.layers.0.self_attn.attn"],
@@ -544,7 +550,7 @@ def _make_req_metadata() -> AscendDSAReqMetadata:
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         seq_lens=torch.ones(2, dtype=torch.int32),
         slot_mapping=None,
-        block_size=128,
+        storage_block_size=128,
         query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
         sin=cast(Any, {"layer": torch.zeros(1)}),
         cos=cast(Any, {"layer": torch.ones(1)}),
@@ -685,7 +691,7 @@ def test_forward_attention_routes_unified_req_metadata(
         block_table=torch.tensor([[1], [2]], dtype=torch.int32),
         seq_lens=torch.tensor([8, 6], dtype=torch.int32),
         slot_mapping=slot_mapping,
-        block_size=128,
+        storage_block_size=128,
         query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32),
         sin=cast(Any, {"layer": sin}),
         cos=cast(Any, {"layer": cos}),
@@ -933,7 +939,7 @@ def test_forward_attention_sets_compressed_kv_args(compress_ratio: int):
         block_table=torch.tensor([[1]], dtype=torch.int32),
         seq_lens=seq_lens,
         slot_mapping=None,
-        block_size=128,
+        storage_block_size=128,
         query_start_loc=query_start_loc,
         sin=cast(Any, {"layer": sin}),
         cos=cast(Any, {"layer": cos}),
@@ -944,7 +950,7 @@ def test_forward_attention_sets_compressed_kv_args(compress_ratio: int):
         block_table=torch.tensor([[5]], dtype=torch.int32),
         seq_lens=seq_lens,
         slot_mapping=torch.tensor([[0, 0], [0, 1]], dtype=torch.int32),
-        block_size=128,
+        storage_block_size=128,
         query_start_loc=query_start_loc,
     )
     attention_metadata = AscendDSAMetadata(2, 0, 0, 1, req_metadata=common_req)

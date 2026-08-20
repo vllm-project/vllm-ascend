@@ -179,17 +179,6 @@ def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
     return f"c{compress_ratio}"
 
 
-def infer_cache_family_ratio(cache_family: str | None) -> int:
-    if not cache_family or not cache_family.startswith("c"):
-        return 1
-    ratio = cache_family[1:]
-    return int(ratio) if ratio.isdigit() else 1
-
-
-def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
-    return block_size * infer_cache_family_ratio(cache_family)
-
-
 def _get_layer_compress_ratio(
     layer_name: str,
     compress_ratios: Sequence[int] | None,
@@ -481,32 +470,26 @@ class ChunkedTokenDatabase:
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         if not block_hashes:
             return
-        base_block_size = self.get_block_size(kv_cache_group_id)
-        if cache_family is None:
-            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
-        cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
-        effective_block_size = base_block_size * cache_family_ratio
-        grouped_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
+        logical_block_size = self.get_block_size(kv_cache_group_id)
+        grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
         if not grouped_hashes:
             return
-        num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, effective_block_size)) if token_len > 0 else 0
+        num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         candidate_index = 0
 
         for chunk_id in range(num_logical_blocks):
-            start_token = chunk_id * effective_block_size
-            end_token = min(start_token + effective_block_size, token_len)
-            if start_token < mask_num:
+            start_idx = chunk_id * logical_block_size
+            end_idx = min(start_idx + logical_block_size, token_len)
+            if start_idx < mask_num:
                 continue
-            start_idx = start_token // cache_family_ratio
-            end_idx = end_token // cache_family_ratio
             if end_idx <= start_idx:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
                 continue
             block_id = None
             if block_ids is not None:
-                block_idx = start_idx // base_block_size - block_id_offset
+                block_idx = start_idx // logical_block_size - block_id_offset
                 if block_idx < 0 or block_idx >= len(block_ids):
                     continue
                 block_id = block_ids[block_idx]

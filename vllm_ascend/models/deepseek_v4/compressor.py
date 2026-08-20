@@ -73,9 +73,16 @@ class AscendCompressorStateCache(CompressorStateCache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+        # Keep these imports lazy to avoid a model-inspection circular import.
+        if self.compress_ratio == 4:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC4StateBackend
 
-        return AscendDSABackend
+            return AscendDSAC4StateBackend
+        if self.compress_ratio == 128:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC128StateBackend
+
+            return AscendDSAC128StateBackend
+        raise ValueError(f"Unsupported DeepSeek V4 state-cache compression ratio: {self.compress_ratio}")
 
 
 @dataclass(frozen=True)
@@ -184,7 +191,7 @@ class Compressor(nn.Module):
             metadata.query_start_loc,
             metadata.start_pos,
             metadata.block_table,
-            metadata.block_size,
+            metadata.storage_block_size,
             DeviceOperator.get_dsa_compressor_slot_mapping_format(),
             self.compress_ratio,
             metadata.num_compressed_tokens,
