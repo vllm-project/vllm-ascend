@@ -1,17 +1,27 @@
-python tests/standalone/fa3/test_fa3_graph_warmup_state.py 
-[W819 23:07:45.047048962 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_permb_isolation.py 
+[W820 09:11:00.406148139 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C17 warm-up state   kv=2048  nblk=16
+C18 perm_B isolation   kv=2048  nblk=16
 ========================================================================
-[W819 23:07:51.318084654 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-[warmup=identity]  identity=0.000405 reorder=0.000418 swap=0.000464
-[warmup=reorder ]  identity=0.000405 reorder=0.000418 swap=0.000464
-[warmup=zeros   ]  identity=0.000405 reorder=0.000418 swap=0.000464
+[W820 09:11:05.693445210 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+------------------------------------------------------------------------
+perm_A[:16] = [29, 14, 41, 44, 60, 22, 18, 57, 7, 9, 59, 17, 19, 6, 27, 55]
+perm_B[:16] = [27, 19, 16, 9, 44, 10, 45, 55, 60, 2, 36, 47, 22, 63, 4, 0]
+perm_A[:nblk] ids>=16 count = 12
+perm_B[:nblk] ids>=16 count = 11
+------------------------------------------------------------------------
+[S1] perm_B  first-call (fresh meta, no warm-up) : 0.000351
+[S2] perm_A  first-call (fresh meta, no warm-up) : 0.000418
+[S3] perm_B  after warm-up=identity            : 0.000351
+[S4] perm_B  after [perm_A, identity]          : 0.149113
+[S4] swap    after [perm_A,identity,perm_B]    : 0.000464
+[S5] swap    clean (fresh meta, warm-up identity): 0.000464
 ------------------------------------------------------------------------
 Read:
-  warm-up row matters (reorder row wrong), fresh meta does NOT fix it
-      => state lives in workspace/kernel/HW, NOT metadata.
-  fresh meta DOES change the row => metadata is mutated by the kernel.
-  zeros warm-up -> reorder WRONG  => reproduced production precision bug.
+  S1 large AND S2 small      => H1: perm_B is a table-content kernel bug.
+  S1 small, but S4-swap large while S5-swap small
+                            => H2: pollution chain (perm_B corrupts workspace).
+  S1 small AND S3 large      => perm_B needs warm-up=identity to fail (odd).
+  S4 == S1                   => warm-up/context has NO effect (pure content).
 ------------------------------------------------------------------------
