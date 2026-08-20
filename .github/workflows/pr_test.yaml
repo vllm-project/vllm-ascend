@@ -40,11 +40,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
 jobs:
   pre-commit:
     runs-on: linux-amd64-cpu-8-hk
@@ -239,9 +234,6 @@ jobs:
           find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
 
       - name: Recommend tests for current PR
-        id: comment-body
-        env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           if ! python3 -c "import regex" >/dev/null 2>&1; then
@@ -256,18 +248,7 @@ jobs:
           python3 .github/workflows/scripts/test_selector.py \
             --github-pr "${PR_SPEC}" \
             --source-dir ./vllm-ascend/covstub \
-            --map-file test_case_map.json \
-            --head-sha "${HEAD_SHA}"
-
-      - name: Comment recommended tests on PR
-        continue-on-error: true
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.repository }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body: ${{ steps.comment-body.outputs.comment_body }}
-          reactions: hooray
+            --map-file test_case_map.json
 
       - name: Merge extra tests from YAML
         run: |

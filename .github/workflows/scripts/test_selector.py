@@ -37,38 +37,6 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 # Minimum affected lines threshold
 MIN_AFFECTED_LINES = 1
 
-_COMMENT_MARKER = "<!-- coverage-recommended-tests -->"
-_COMMENT_BODY_LIMIT = 60000
-
-
-def build_recommended_tests_comment(test_names: list[str], head_sha: str) -> str:
-    short_sha = head_sha[:12]
-    lines = [
-        _COMMENT_MARKER,
-        "## Coverage-based recommended tests",
-        "",
-    ]
-    if test_names:
-        lines.append(f"Found **{len(test_names)}** recommended pytest path(s) for `{short_sha}`:")
-        lines.append("")
-        lines.extend(f"- `{name}`" for name in test_names)
-    else:
-        lines.append(f"No tests were recommended from coverage analysis for `{short_sha}`.")
-    body = "\n".join(lines)
-    if len(body) > _COMMENT_BODY_LIMIT:
-        body = body[:_COMMENT_BODY_LIMIT].rsplit("\n", 1)[0] + (
-            "\n\n... (truncated, too many recommended paths to list)\n"
-        )
-    return body
-
-
-def write_github_output(name: str, value: str) -> None:
-    output_path = os.environ.get("GITHUB_OUTPUT")
-    if not output_path:
-        raise RuntimeError("GITHUB_OUTPUT is not set")
-    with open(output_path, "a", encoding="utf-8") as output:
-        output.write(f"{name}<<EOF\n{value}\nEOF\n")
-
 
 def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
@@ -1117,10 +1085,6 @@ def main():
         action="store_true",
         help="Skip import statement lines (only effective for function-level matching, default off)",
     )
-    parser.add_argument(
-        "--head-sha",
-        help="When set, write a PR comment body for these recommendations to GITHUB_OUTPUT",
-    )
 
     args = parser.parse_args()
 
@@ -1368,10 +1332,6 @@ def main():
         for test_name in test_names:
             f.write(test_name + "\n")
     print("\nResults saved to: recommended_pytest_paths.txt")
-
-    if args.head_sha:
-        write_github_output("comment_body", build_recommended_tests_comment(test_names, args.head_sha))
-        print("PR comment body written to GITHUB_OUTPUT")
 
 
 if __name__ == "__main__":
