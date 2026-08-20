@@ -114,6 +114,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Select the DSv4 compressed KV family to place in host-backed memory.
+    # Supported values: "c128" or empty string. Default is disabled.
+    "VLLM_ASCEND_DSV4_HOST_KV_FAMILY": lambda: os.getenv("VLLM_ASCEND_DSV4_HOST_KV_FAMILY", "").strip().lower(),
+    # Total host-backed budget in bytes for the selected DSv4 KV family.
+    # If unset, host-backed DSv4 KV tiering is disabled.
+    "VLLM_ASCEND_DSV4_HOST_KV_BYTES": lambda: (
+        int(value) if (value := os.getenv("VLLM_ASCEND_DSV4_HOST_KV_BYTES")) else None
+    ),
 }
 
 # end-env-vars-definition

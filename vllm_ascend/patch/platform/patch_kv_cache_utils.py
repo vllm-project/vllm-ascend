@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
+from vllm_ascend import envs
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
@@ -53,6 +54,24 @@ def _ascend_resolve_kv_cache_block_sizes(
         return scheduler_block_size, scheduler_block_size
 
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+
+def _get_dsv4_host_kv_budget() -> tuple[str, int] | None:
+    family = envs.VLLM_ASCEND_DSV4_HOST_KV_FAMILY
+    host_bytes = envs.VLLM_ASCEND_DSV4_HOST_KV_BYTES
+    if not family or host_bytes is None or host_bytes <= 0:
+        return None
+    return family, int(host_bytes)
+
+
+def _is_host_backed_spec(spec: KVCacheSpec, family: str) -> bool:
+    return family == "c128" and getattr(spec, "compress_ratio", None) == 128
+
+
+def _blocks_for_budget(budget_bytes: int, bytes_per_block: int) -> float:
+    if bytes_per_block <= 0:
+        return float("inf")
+    return budget_bytes // bytes_per_block
 
 
 def group_and_unify_kv_cache_specs(
@@ -226,7 +245,25 @@ def _get_kv_cache_config_deepseek_v4(
     # this equals the sub-group size (each has a single page_size).
     num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
 
-    num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples)
+    host_kv_budget = _get_dsv4_host_kv_budget()
+    if host_kv_budget is None:
+        num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples)
+    else:
+        family, host_bytes = host_kv_budget
+        hbm_bytes_per_block = 0
+        host_bytes_per_block = 0
+        for group in kv_cache_groups:
+            assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            for layer_name in group.layer_names:
+                layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
+                if _is_host_backed_spec(layer_spec, family):
+                    host_bytes_per_block += layer_spec.page_size_bytes
+                else:
+                    hbm_bytes_per_block += layer_spec.page_size_bytes
+        num_blocks = int(min(
+            _blocks_for_budget(available_memory, hbm_bytes_per_block),
+            _blocks_for_budget(host_bytes, host_bytes_per_block),
+        ))
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
     kv_cache_tensors: list[KVCacheTensor] = []

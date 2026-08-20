@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import ctypes
 import math
 import sys
 import time
@@ -78,6 +79,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.worker.utils import select_common_block_size
 
+from vllm_ascend import envs
 from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.20.2"):
@@ -173,6 +175,7 @@ else:
 
 
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+import torch_npu
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -188,6 +191,85 @@ SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
+
+
+def _acl_malloc_host(size: int) -> tuple[int, int]:
+    libacl = ctypes.CDLL("libascendcl.so")
+    host_ptr = ctypes.c_void_p()
+    ret = libacl.aclrtMallocHost(ctypes.byref(host_ptr), ctypes.c_size_t(size))
+    if ret != 0:
+        raise RuntimeError(f"aclrtMallocHost failed: error {ret} (size={size}).")
+
+    dev_ptr = ctypes.c_void_p()
+    ret = libacl.aclrtHostRegister(
+        host_ptr, ctypes.c_uint64(size), ctypes.c_int(0), ctypes.byref(dev_ptr)
+    )
+    if ret != 0:
+        libacl.aclrtFreeHost(host_ptr)
+        raise RuntimeError(f"aclrtHostRegister failed: error {ret}")
+    return host_ptr.value, dev_ptr.value
+
+
+def _compact_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
+    strides = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        strides[i] = strides[i + 1] * shape[i + 1]
+    return tuple(strides)
+
+
+def _make_host_tensor(dev_ptr_int: int, shape: tuple[int, ...], dtype: torch.dtype,
+                      device: torch.device, size_bytes: int) -> torch.Tensor:
+    storage = torch_npu._C._construct_storage_from_data_pointer(
+        dev_ptr_int, device, size_bytes
+    )
+    return torch.empty(0, dtype=dtype, device=device).set_(
+        storage, 0, shape, _compact_strides(shape)
+    )
+
+
+@dataclass
+class _HostKVAllocation:
+    host_ptr: int
+    size_bytes: int
+
+
+class _HostKVAllocationOwner:
+    def __init__(self, budget_bytes: int | None, device: torch.device):
+        self.budget_bytes = budget_bytes
+        self.device = device
+        self.used_bytes = 0
+        self.allocations: list[_HostKVAllocation] = []
+        self.libacl = ctypes.CDLL("libascendcl.so")
+        self.libacl.aclrtHostUnregister.argtypes = [ctypes.c_void_p]
+        self.libacl.aclrtHostUnregister.restype = ctypes.c_int
+        self.libacl.aclrtFreeHost.argtypes = [ctypes.c_void_p]
+        self.libacl.aclrtFreeHost.restype = ctypes.c_int
+
+    def alloc_int8_tensor(self, size_bytes: int) -> torch.Tensor:
+        if self.budget_bytes is not None and self.used_bytes + size_bytes > self.budget_bytes:
+            raise RuntimeError(
+                f"DSv4 host-backed KV exceeded budget: requested={self.used_bytes + size_bytes}, budget={self.budget_bytes}."
+            )
+        host_ptr, dev_ptr = _acl_malloc_host(size_bytes)
+        self.allocations.append(_HostKVAllocation(host_ptr, size_bytes))
+        self.used_bytes += size_bytes
+        return _make_host_tensor(dev_ptr, (size_bytes,), torch.int8, self.device, size_bytes)
+
+    def close(self) -> None:
+        while self.allocations:
+            allocation = self.allocations.pop()
+            ptr = ctypes.c_void_p(allocation.host_ptr)
+            try:
+                self.libacl.aclrtHostUnregister(ptr)
+            finally:
+                self.libacl.aclrtFreeHost(ptr)
+        self.used_bytes = 0
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 @contextmanager
@@ -283,6 +365,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.max_num_reqs + 1,  # type: ignore[has-type]
                 dtype=torch.int32,
             )
+
+        self._host_kv_owner: _HostKVAllocationOwner | None = None
 
         vllm_config.scheduler_config.max_num_batched_tokens -= max_pcp_pad_tokens
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
@@ -3561,6 +3645,17 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_caches
 
+    def __del__(self):
+        host_kv_owner = getattr(self, "_host_kv_owner", None)
+        if host_kv_owner is None:
+            return
+        try:
+            host_kv_owner.close()
+        except Exception:
+            pass
+        finally:
+            self._host_kv_owner = None
+
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
@@ -3614,6 +3709,24 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        host_kv_family = envs.VLLM_ASCEND_DSV4_HOST_KV_FAMILY
+        host_kv_budget = envs.VLLM_ASCEND_DSV4_HOST_KV_BYTES
+        host_kv_enabled = (
+            host_kv_family == "c128"
+            and host_kv_budget is not None
+            and host_kv_budget > 0
+            and self.vllm_config.kv_transfer_config is None
+        )
+        if self._host_kv_owner is not None:
+            self._host_kv_owner.close()
+            self._host_kv_owner = None
+        if host_kv_enabled:
+            self._host_kv_owner = _HostKVAllocationOwner(host_kv_budget, self.device)
+
+        def _get_host_mapped_int8_tensor(size_bytes: int) -> torch.Tensor:
+            if self._host_kv_owner is None:
+                raise RuntimeError("DSv4 host-backed KV owner is not initialized.")
+            return self._host_kv_owner.alloc_int8_tensor(size_bytes)
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -3646,7 +3759,14 @@ class NPUModelRunner(GPUModelRunner):
                         # shared the kvcache for all shared layers
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
-                    if self.vllm_config.kv_transfer_config is None:
+                    shared_specs = [layer_kv_cache_spec[name] for name in kv_cache_tensor.shared_by]
+                    shared_is_host_backed = (
+                        host_kv_enabled
+                        and all(getattr(spec, "compress_ratio", None) == 128 for spec in shared_specs)
+                    )
+                    if shared_is_host_backed:
+                        tensor = _get_host_mapped_int8_tensor(kv_cache_tensor.size)
+                    elif self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size,
                                                 dtype=torch.int8,
                                                 device=self.device)
