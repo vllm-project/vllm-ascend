@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
+import os
 from collections import defaultdict
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
@@ -39,6 +41,19 @@ def _ascend_resolve_kv_cache_block_sizes(
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     pcp = vllm_config.parallel_config.prefill_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
+    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    logger.warning(
+        "Ascend KV cache block size resolve: pid=%s, vllm_config_id=%s, "
+        "cache_config_id=%s, cache_config.block_size=%r, group_block_sizes=%s, "
+        "dcp=%s, pcp=%s.",
+        os.getpid(),
+        id(vllm_config),
+        id(cache_config),
+        cache_config.block_size,
+        group_block_sizes,
+        dcp,
+        pcp,
+    )
 
     if len(groups) <= 1:
         bs = cache_config.block_size * dcp * pcp
@@ -48,7 +63,6 @@ def _ascend_resolve_kv_cache_block_sizes(
         # Ascend supports CP with multiple KV cache groups; compute
         # scheduler_block_size using the LCM of all group block sizes
         # multiplied by the CP factors for proper alignment.
-        group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
         return scheduler_block_size, scheduler_block_size
 
