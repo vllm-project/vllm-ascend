@@ -27,8 +27,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-import torch
-
 from vllm_ascend.dfx.detector.alert import AnomalyAlert
 from vllm_ascend.dfx.detector.base import AnomalyDetector
 from vllm_ascend.dfx.detector.output_substring import OutputSubstringDetector
@@ -193,10 +191,15 @@ class DetectorManager:
         sampled_tokens: Any,
         accepted_token_nums: Any,
     ) -> list[AnomalyAlert]:
-        """Record accepted speculative tokens, then run spec-acceptance detect."""
+        """Run spec-acceptance detect only (no cumulative IO append).
+
+        Accepted tokens are recorded once in :meth:`check_after_sample` from
+        the engine's validated sampled ids. Appending here as well doubled
+        MTP/Eagle output in reports (same-wave dedupe fails under async
+        scheduling when ``clear_wave_cache`` runs before ``get_output``).
+        """
         if self._gated("after_spec"):
             return []
-        self._record_spec_step_outputs(sampled_tokens, accepted_token_nums)
         skip = RequestDfxStore.get().stopped_req_ids() if self._stop_after_alert() else None
         alerts = self._spec_det.check_all(sampled_tokens, accepted_token_nums, skip_req_ids=skip)
         if skip is not None:
@@ -213,21 +216,20 @@ class DetectorManager:
 
         Order: ``token_logprob`` → ``output_substring`` → ``token_repeat``.
 
-        ``sampled_token_ids`` is appended to cumulative IO on the detect path.
-        When anomaly detection is gated off, TP0 still appends when
-        ``log.print_output_on_finish=true`` (finish log for every req) or when
-        a dump finish sidecar may still need cumulative output (pending /
-        active dump / already-activated finish meta). Appends happen only on
-        steps where those gates are already true — there is no backfill of
-        tokens produced while the flag was off; mid-request enable may leave
-        finish logs partial or empty. Detection then skips
-        ``stop_after_alert`` reqs by id — never by row-subsetting — so
-        ``req_idx`` stays aligned with ``input_batch`` (filters / dump related).
+        ``sampled_token_ids`` is the sole path that appends to cumulative IO
+        (including MTP/Eagle accepted tokens). When anomaly detection is gated
+        off, TP0 still appends when ``log.print_output_on_finish=true`` (finish
+        log for every req) or when a dump finish sidecar may still need
+        cumulative output (pending / active dump / already-activated finish
+        meta). Appends happen only on steps where those gates are already true
+        — there is no backfill of tokens produced while the flag was off;
+        mid-request enable may leave finish logs partial or empty. Detection
+        then skips ``stop_after_alert`` reqs by id — never by row-subsetting —
+        so ``req_idx`` stays aligned with ``input_batch`` (filters / dump related).
 
         ``OutputSubstringDetector`` and ``TokenRepeatDetector`` are called with
         ``sampled_token_ids=None`` so they read the shared cumulative IO buffer
-        instead of re-appending (avoids double count; includes tokens recorded
-        earlier by ``check_after_spec``).
+        instead of re-appending (avoids double count).
 
         With ``detector.stop_after_alert`` (default true) a request keeps being
         checked on every step until it produces an anomaly; afterwards it is
@@ -283,37 +285,3 @@ class DetectorManager:
         if skip is not None:
             self._mark_alerted(alerts)
         return alerts
-
-    # ---- helpers ----------------------------------------------------------
-
-    def _record_spec_step_outputs(
-        self,
-        sampled_tokens: Any,
-        accepted_token_nums: Any,
-    ) -> None:
-        """Accumulate accepted speculative tokens into DFX cumulative output."""
-        if sampled_tokens is None or accepted_token_nums is None:
-            return
-        input_batch = getattr(self._runner, "input_batch", None)
-        req_ids = getattr(input_batch, "req_ids", None) if input_batch is not None else None
-        if not req_ids:
-            return
-        num_reqs = len(req_ids)
-        if torch.is_tensor(accepted_token_nums):
-            accepted_list = accepted_token_nums[:num_reqs].tolist()
-        else:
-            accepted_list = [int(x) for x in accepted_token_nums[:num_reqs]]
-        io_mgr = RequestIoSnapshotManager.get()
-        for batch_idx, req_id in enumerate(req_ids):
-            accepted_n = int(accepted_list[batch_idx])
-            if accepted_n <= 0:
-                continue
-            try:
-                row = sampled_tokens[batch_idx]
-            except (IndexError, TypeError):
-                continue
-            if torch.is_tensor(row):
-                ids = [int(x) for x in row[:accepted_n].tolist()]
-            else:
-                ids = [int(x) for x in list(row)[:accepted_n]]
-            io_mgr.append_output(req_id, ids)

@@ -83,10 +83,10 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
     ) -> list[AnomalyAlert]:
         """Batch entry: return alerts for the model runner to hand to Dumper.
 
-        Note: this detector does **not** self-accumulate accepted output tokens
-        into the DFX cumulative IO buffer. ``DetectorManager.check_after_spec``
-        calls :meth:`DetectorManager._record_spec_step_outputs` before this, so
-        report I/O counts stay accurate. Direct callers must do the same.
+        Note: this detector does **not** accumulate accepted output tokens into
+        the DFX cumulative IO buffer. IO is appended once in
+        ``DetectorManager.check_after_sample`` from validated sampled ids
+        (avoids MTP double-count when both hooks run).
 
         ``skip_req_ids`` (optional): requests to skip (e.g. already alerted under
         ``stop_after_alert``). Batch index alignment is preserved for the rest.

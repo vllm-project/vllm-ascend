@@ -26,7 +26,7 @@ detector.check_all(...) → list[AnomalyAlert]
 - **只产 `AnomalyAlert`**：detector 不碰 Dumper；arm 由 processor 调 `Dumper.handle_anomaly_alert`。
 - **配置**：`detector.<name>.enabled`（默认 `false`）+ 各自阈值，JSON 热更新（广播 / file poll）。
 - **与 dump 正交**：detect 不依赖 `dump.enabled` / `max_times`；dump arm 失败仍写 report。
-- **累计 output 流**：数据在 Store；`check_after_spec` / `check_after_sample` 经 `append_batch` 写入；`OutputSubstring` / `TokenRepeat` 在 sample 阶段以 `sampled_token_ids=None` 读同一条累计流。
+- **累计 output 流**：数据在 Store；**仅** `check_after_sample` 经 `append_batch` 写入（MTP/Eagle 的 accepted tokens 也走这条路径，避免与 `check_after_spec` 双写）；`OutputSubstring` / `TokenRepeat` 在 sample 阶段以 `sampled_token_ids=None` 读同一条累计流。
 
 当前检测器：SpecAcceptance / TokenLogprob / OutputSubstring / TokenRepeat，以下分节。
 
@@ -45,7 +45,7 @@ detector.check_all(...) → list[AnomalyAlert]
 
 - 每请求滑窗统计接受率 / 接受长度，低（异常低接受）或高（异常高接受，疑似作弊）双阈值告警。
 - 需要 runner 上存在 `speculative_config`（MTP / Eagle 等）才有效。
-- 检测前先 `_record_spec_step_outputs` 把本步 accepted token 计入累计 output（report 用）。
+- **不**再往累计 IO 写 token；report 用的 output 由后续 `check_after_sample` 单次 `append_batch` 写入（避免 MTP 双写）。
 
 ## 3. TokenLogprob（token/logprob 异常）
 
@@ -229,7 +229,7 @@ DfxProcessor.check_after_sample
 
 设计原则：
 
-- **与 OutputSubstring 同流**：读 `RequestIoSnapshotManager` 累计 output（含 `check_after_spec` 写入的 accepted tokens）；manager 传 `sampled_token_ids=None`，避免二次 `append_batch`。
+- **与 OutputSubstring 同流**：读 `RequestIoSnapshotManager` 累计 output（由 `check_after_sample` 写入，含 MTP accepted tokens）；manager 传 `sampled_token_ids=None`，避免二次 `append_batch`。
 - **增量 fold**：每请求维护 `_consumed_len` 游标，只推送自上次 check 以来的新 id；跳过 / 已告警仍推进游标，防止之后重复计入。
 - **O(1) 滑窗**：`freq` + `scores` deque；每步 score = 新 id 在**先前** content 窗内的出现次数；`repeat_sum` = 最近 `window` 个 score 之和。
 - **可忽略 filler**：`ignore_token_ids` 不进 content 窗（score=0），避免标点等拉高假阳性。
