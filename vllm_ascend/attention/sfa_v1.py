@@ -739,21 +739,38 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         self._quant_type = type(quant_method) if quant_method is not None else None
-        qt = self._quant_type
 
-        if self.is_kv_consumer and (
-            (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
-            or qt is AscendW8A8MXFP8DynamicLinearMethod
-            or qt is None
-        ):
-            if self._try_enable_type(PreprocessType.PROLOG_V3, act_dtype):
+        pp_type = self._fused_preprocess_type()
+        if pp_type is not None and self._try_enable_type(pp_type, act_dtype):
+            return pp_type
+        return PreprocessType.NATIVE
+
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        """Return the fused preprocess type that will actually run, or None.
+
+        The check includes the same unsupported-reason conditions used by
+        :meth:`_try_enable_type`, so a non-None result means the fused path
+        will not fall back to native at weight-processing time. It is
+        therefore safe to use for init-time NZ-deferral marking in ops/mla.py.
+        """
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        qt = type(quant_method) if quant_method is not None else None
+
+        # PROLOG_V3 takes precedence over MLAPO.
+        if getattr(self, "dcp_group", None) is None:
+            eligible = self.is_kv_consumer and (
+                (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
+                or qt is AscendW8A8MXFP8DynamicLinearMethod
+                or qt is None
+            )
+            if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3):
                 return PreprocessType.PROLOG_V3
 
-        if qt is AscendW8A8LinearMethod and self.enable_mlapo:
-            if self._try_enable_type(PreprocessType.MLAPO, act_dtype):
-                return PreprocessType.MLAPO
+        eligible = qt is AscendW8A8LinearMethod and self.enable_mlapo
+        if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.MLAPO):
+            return PreprocessType.MLAPO
 
-        return PreprocessType.NATIVE
+        return None
 
     def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
         reasons = self._get_fused_type_unsupported_reasons(pp_type)
@@ -776,10 +793,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.fused_qkv_a_proj is None:
             reasons.append("fused_qkv_a_proj is None, mlapo is disabled.")
 
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
             if self.is_kv_producer:
                 reasons.append("PROLOG_V3 is disabled on KV producer workers.")
-            if self._quant_type is None and self.enable_sparse_sfa_c8:
+            if qt is None and self.enable_sparse_sfa_c8:
                 reasons.append("PROLOG_V3: C8 sparse requires quantized MLAPO.")
             if getattr(self.q_proj, "_chunk_size", 0):
                 reasons.append("PROLOG_V3 does not support chunked q_proj weights yet.")

@@ -1006,17 +1006,17 @@ class TestAscendSFAImpl(TestBase):
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
 
-    def test_resolve_path_unquantized_c8_goes_prolog_v3(self):
-        """Unquantized + is_kv_consumer + C8 → PROLOG_V3 (blocked by reasons)."""
+    def test_resolve_path_unquantized_c8_goes_native(self):
+        """Unquantized + is_kv_consumer + C8 → NATIVE (blocked by reasons)."""
         self._set_quant(None)
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
-        # Enters candidate but blocked by _get_fused_type_unsupported_reasons
-        # (unquantized + C8).  With _try_enable_type mocked to True, still
-        # returns PROLOG_V3 in the test.
-        self.assertEqual(path, PreprocessType.PROLOG_V3)
+        # The candidate is blocked by _get_fused_type_unsupported_reasons
+        # (unquantized + C8), so the path must fall back to NATIVE even when
+        # _try_enable_type is mocked to True.
+        self.assertEqual(path, PreprocessType.NATIVE)
 
     def test_resolve_path_no_mlapo_goes_native(self):
         """No quant + MLAPO disabled → NATIVE."""
@@ -1040,6 +1040,9 @@ class TestAscendSFAImpl(TestBase):
         """Minimal setup so unsupported-reasons checks can run."""
         self.impl.preprocess_type = PreprocessType.PROLOG_V3
         self.impl._quant_type = AscendW8A8DynamicLinearMethod
+        quant_method = AscendW8A8DynamicLinearMethod.__new__(AscendW8A8DynamicLinearMethod)
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=quant_method)
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5
         self.impl.q_a_layernorm = MagicMock()
@@ -1064,6 +1067,7 @@ class TestAscendSFAImpl(TestBase):
     def test_reasons_unquantized_c8_blocked(self):
         self._setup_prolog_v3_state()
         self.impl._quant_type = None
+        self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=None)
         self.impl.enable_sparse_sfa_c8 = True
 
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
