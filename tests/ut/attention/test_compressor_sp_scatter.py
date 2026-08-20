@@ -3,7 +3,10 @@ import torch
 
 from vllm_ascend.attention.context_parallel.compressor_sp import (
     build_padded_destination_for_scatter,
+    flatten_slot_mapping,
     is_block_offset_slot_mapping,
+    select_block_cache_rows,
+    update_block_cache_rows_,
 )
 
 
@@ -59,11 +62,28 @@ def test_a5_flat_and_non_a5_block_offset_mapping_detection():
     assert not is_block_offset_slot_mapping(torch.zeros((4, 1), dtype=torch.int32))
 
 
-def test_a5_flat_slot_mapping_is_rejected_by_block_offset_helper():
-    with pytest.raises(ValueError, match="block-offset"):
-        build_padded_destination_for_scatter(
-            torch.tensor([1, 2]),
-            torch.tensor([0, 1]),
-            padded_rows=2,
-            block_size=128,
-        )
+def test_state_slot_mapping_flattens_both_device_formats():
+    block_offset = torch.tensor([[2, 3], [4, 5]], dtype=torch.int32)
+    flat = torch.tensor([259, 517], dtype=torch.int32)
+
+    assert flatten_slot_mapping(block_offset, 128).tolist() == [259, 517]
+    assert flatten_slot_mapping(flat, 128).tolist() == [259, 517]
+
+
+def test_invalid_state_slot_mapping_shape_is_rejected():
+    with pytest.raises(ValueError, match="slot mapping"):
+        flatten_slot_mapping(torch.zeros((2, 1), dtype=torch.int32), 128)
+
+
+def test_state_cache_rows_support_non_contiguous_block_storage():
+    storage = torch.zeros((2, 5, 4), dtype=torch.float32)
+    cache_rows = storage[:, :3, :]
+    assert not cache_rows.is_contiguous()
+    flat_slots = torch.tensor([1, 4], dtype=torch.int32)
+    updates = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+
+    update_block_cache_rows_(cache_rows, flat_slots, updates, block_size=3)
+
+    assert select_block_cache_rows(cache_rows, flat_slots, block_size=3).equal(updates)
+    assert storage[0, 1].equal(updates[0])
+    assert storage[1, 1].equal(updates[1])

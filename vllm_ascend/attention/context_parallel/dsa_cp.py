@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -19,7 +19,10 @@ from vllm_ascend.attention.context_parallel.compressor_sp import (
     CompressorSPPlan,
     build_compressor_sp_plan,
     build_padded_destination_for_scatter,
+    flatten_slot_mapping,
     is_block_offset_slot_mapping,
+    select_block_cache_rows,
+    update_block_cache_rows_,
 )
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
@@ -46,6 +49,15 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     olora_tp_enable,
 )
+
+_COMPRESSOR_SP_COMM_STREAM: torch.npu.Stream | None = None
+
+
+def _compressor_sp_comm_stream() -> torch.npu.Stream:
+    global _COMPRESSOR_SP_COMM_STREAM
+    if _COMPRESSOR_SP_COMM_STREAM is None:
+        _COMPRESSOR_SP_COMM_STREAM = torch_npu.npu.Stream()
+    return _COMPRESSOR_SP_COMM_STREAM
 
 
 def hadamard_transform_ref(
@@ -88,6 +100,7 @@ class DSACPMetadata:
 class CompressorSPMetadata:
     enabled: bool
     reason: str
+    num_input_tokens: int = 0
     token_indices: torch.Tensor | None = None
     token_slice: tuple[int, int] | None = None
     req_indices: torch.Tensor | None = None
@@ -101,6 +114,20 @@ class CompressorSPMetadata:
     gather_compact_indices: torch.Tensor | None = None
     gather_compact_slice: tuple[int, int] | None = None
     sp_row_counts_per_rank: tuple[int, ...] = ()
+    state_replay_token_indices: torch.Tensor | None = None
+    state_replay_token_slice: tuple[int, int] | None = None
+    state_replay_req_indices: torch.Tensor | None = None
+    state_replay_req_slice: tuple[int, int] | None = None
+    state_replay_cu_seqlens: torch.Tensor | None = None
+    state_replay_start_pos: torch.Tensor | None = None
+    state_replay_rope_row_indices: torch.Tensor | None = None
+    state_replay_rope_row_slice: tuple[int, int] | None = None
+    requires_state_sync: bool = False
+    state_sync_token_indices: torch.Tensor | None = None
+    state_sync_global_token_indices: torch.Tensor | None = None
+    state_sync_gather_compact_indices: torch.Tensor | None = None
+    state_sync_gather_compact_slice: tuple[int, int] | None = None
+    state_sync_row_counts_per_rank: tuple[int, ...] = ()
     tp_rank: int = 0
     tp_size: int = 1
 
@@ -374,7 +401,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions,
             num_input_tokens,
             num_reqs_actual,
-            attn_state,
             cos=cos,
             sin=sin,
         )
@@ -692,7 +718,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         input_positions: torch.Tensor | None,
         num_input_tokens: int,
         num_reqs_actual: int | None,
-        attn_state: AscendAttentionState,
         cos: RopeDataProxy,
         sin: RopeDataProxy,
     ) -> AscendDSAReqMetadata:
@@ -815,7 +840,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         compressor_sp_metadata = self._build_compressor_sp_metadata(
             common_attn_metadata=common_attn_metadata,
             input_positions=input_positions,
-            attn_state=attn_state,
             local_start=local_start,
             local_end=local_end_with_pad,
         )
@@ -846,7 +870,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         *,
         common_attn_metadata: AscendCommonAttentionMetadata,
         input_positions: torch.Tensor | None,
-        attn_state: AscendAttentionState,
         local_start: int,
         local_end: int,
     ) -> CompressorSPMetadata | None:
@@ -862,11 +885,16 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         tp_group = get_tp_group()
         query_start_loc = tuple(query_start_loc_cpu[: num_reqs + 1].tolist())
         seq_lens = tuple(seq_lens_cpu[:num_reqs].tolist())
-        positions = tuple(input_positions[: common_attn_metadata.num_actual_tokens].tolist())
+        positions = self.common_ratio_to_sas_metadata.get("_compressor_sp_positions")
+        if positions is None:
+            positions_source = common_attn_metadata.positions_cpu
+            if positions_source is None:
+                positions_source = input_positions
+            positions = tuple(positions_source[: common_attn_metadata.num_actual_tokens].tolist())
+            self.common_ratio_to_sas_metadata["_compressor_sp_positions"] = positions
         cache_key = (
             "compressor_sp",
             self.compressor_ratio,
-            attn_state,
             tp_group.world_size,
             tp_group.rank_in_group,
             local_start,
@@ -879,9 +907,15 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if cached is not None:
             return cached
 
+        ascend_config = get_ascend_config()
+        min_input_tokens = (
+            ascend_config.compressor_sp_min_tokens_c4
+            if self.compressor_ratio == 4
+            else ascend_config.compressor_sp_min_tokens_c128
+        )
         plan = build_compressor_sp_plan(
             enabled=True,
-            is_full_prefill=attn_state == AscendAttentionState.PrefillNoCache,
+            has_prefill=self.num_prefills > 0,
             need_gather_q_kv=True,
             tp_size=tp_group.world_size,
             compress_ratio=self.compressor_ratio,
@@ -891,6 +925,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_start=local_start,
             local_end=local_end,
             tp_rank=tp_group.rank_in_group,
+            min_input_tokens=min_input_tokens,
         )
         metadata = self._to_compressor_sp_metadata(plan)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
@@ -901,6 +936,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             return CompressorSPMetadata(
                 enabled=False,
                 reason=plan.reason,
+                num_input_tokens=plan.num_input_tokens,
                 sp_row_counts_per_rank=plan.sp_row_counts_per_rank,
                 tp_rank=plan.tp_rank,
                 tp_size=plan.tp_size,
@@ -914,6 +950,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return CompressorSPMetadata(
             enabled=True,
             reason=plan.reason,
+            num_input_tokens=plan.num_input_tokens,
             token_indices=indices(plan.token_indices, plan.token_slice),
             token_slice=plan.token_slice,
             req_indices=indices(plan.req_indices, plan.req_slice),
@@ -927,6 +964,49 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             gather_compact_indices=indices(plan.gather_compact_indices, plan.gather_compact_slice),
             gather_compact_slice=plan.gather_compact_slice,
             sp_row_counts_per_rank=plan.sp_row_counts_per_rank,
+            state_replay_token_indices=indices(
+                plan.state_replay_token_indices,
+                plan.state_replay_token_slice,
+            ),
+            state_replay_token_slice=plan.state_replay_token_slice,
+            state_replay_req_indices=indices(
+                plan.state_replay_req_indices,
+                plan.state_replay_req_slice,
+            ),
+            state_replay_req_slice=plan.state_replay_req_slice,
+            state_replay_cu_seqlens=torch.tensor(
+                plan.state_replay_cu_seqlens,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            state_replay_start_pos=torch.tensor(
+                plan.state_replay_start_pos,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            state_replay_rope_row_indices=indices(
+                plan.state_replay_rope_row_indices,
+                plan.state_replay_rope_row_slice,
+            ),
+            state_replay_rope_row_slice=plan.state_replay_rope_row_slice,
+            requires_state_sync=plan.requires_state_sync,
+            state_sync_token_indices=(
+                torch.tensor(plan.state_sync_token_indices, dtype=torch.long, device=self.device)
+                if plan.requires_state_sync
+                else None
+            ),
+            state_sync_global_token_indices=(
+                torch.tensor(plan.state_sync_global_token_indices, dtype=torch.long, device=self.device)
+                if plan.requires_state_sync
+                else None
+            ),
+            state_sync_gather_compact_indices=(
+                indices(plan.state_sync_gather_compact_indices, plan.state_sync_gather_compact_slice)
+                if plan.requires_state_sync
+                else None
+            ),
+            state_sync_gather_compact_slice=plan.state_sync_gather_compact_slice,
+            state_sync_row_counts_per_rank=plan.state_sync_row_counts_per_rank,
             tp_rank=plan.tp_rank,
             tp_size=plan.tp_size,
         )
@@ -1241,7 +1321,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.attn_sink = kwargs["attn_sink"]
 
         self.vllm_config = get_current_vllm_config()
-        self.enable_compressor_sp = get_ascend_config().enable_compressor_sp
+        self.compressor_sp_hccl_overlap = get_ascend_config().compressor_sp_hccl_overlap
+        self.compressor_sp_hccl_overlap_min_tokens = get_ascend_config().compressor_sp_hccl_overlap_min_tokens
         self._compressor_sp_slot_buffer: torch.Tensor | None = None
 
         # indexer param
@@ -1530,14 +1611,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         return output
 
     @staticmethod
-    def _compressor_sp_selector_len(plan: CompressorSPMetadata, name: str) -> int:
-        selector_slice = getattr(plan, f"{name}_slice")
-        if selector_slice is not None:
-            return int(selector_slice[1])
-        selector = getattr(plan, f"{name}_indices")
-        return 0 if selector is None else int(selector.numel())
-
-    @staticmethod
     def _select_compressor_sp_rows(
         tensor: torch.Tensor,
         plan: CompressorSPMetadata,
@@ -1548,39 +1621,109 @@ class AscendDSACPImpl(DSAAttentionImpl):
             start, length = int(selector_slice[0]), int(selector_slice[1])
             return tensor.narrow(0, start, length)
         selector = getattr(plan, f"{name}_indices")
-        if selector is None:
-            return tensor[:0]
         return tensor.index_select(0, selector)
 
-    def _gather_compressor_sp_buffer(
+    def _gather_compressor_sp_rows(
         self,
         local_rows: torch.Tensor,
-        plan: CompressorSPMetadata,
-    ) -> torch.Tensor:
-        row_counts = plan.sp_row_counts_per_rank
-        if (
-            not row_counts
-            or plan.tp_size != self.tp_size
-            or plan.tp_rank != self.tp_rank
-            or any(count <= 0 for count in row_counts)
-        ):
-            raise RuntimeError("invalid Compressor SP collective plan")
-        expected_local = row_counts[plan.tp_rank]
-        if local_rows.ndim < 2 or local_rows.shape[0] != expected_local:
-            raise RuntimeError(
-                "Compressor SP local output shape does not match the collective plan: "
-                f"shape={tuple(local_rows.shape)}, expected_rows={expected_local}"
-            )
-
+        row_counts: tuple[int, ...],
+        comm_stream: torch.npu.Stream | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, Any | None]:
         max_rows = max(row_counts)
         if local_rows.shape[0] < max_rows:
             padded_local = local_rows.new_zeros((max_rows, *local_rows.shape[1:]))
             padded_local[: local_rows.shape[0]].copy_(local_rows)
         else:
             padded_local = local_rows
-        gathered = local_rows.new_empty((plan.tp_size * max_rows, *local_rows.shape[1:]))
-        dist.all_gather_into_tensor(gathered, padded_local, group=self.tp_group.device_group)
-        return gathered
+        gathered = local_rows.new_empty((self.tp_size * max_rows, *local_rows.shape[1:]))
+        if comm_stream is None:
+            dist.all_gather_into_tensor(gathered, padded_local, group=self.tp_group.device_group)
+            return gathered, padded_local, None
+
+        comm_stream.wait_stream(torch.npu.current_stream())
+        with torch_npu.npu.stream(comm_stream):
+            work = dist.all_gather_into_tensor(
+                gathered,
+                padded_local,
+                group=self.tp_group.device_group,
+                async_op=True,
+            )
+        return gathered, padded_local, work
+
+    def _sync_compressor_sp_state_cache(
+        self,
+        state_cache: torch.Tensor,
+        state_slot_mapping: torch.Tensor,
+        state_block_size: int,
+        plan: CompressorSPMetadata,
+    ) -> None:
+        if not plan.requires_state_sync:
+            return
+        local_token_indices = plan.state_sync_token_indices
+        global_token_indices = plan.state_sync_global_token_indices
+        row_counts = plan.state_sync_row_counts_per_rank
+
+        state_rows = state_cache.squeeze(-2)
+        local_mapping = state_slot_mapping.index_select(0, local_token_indices)
+        local_slots = flatten_slot_mapping(local_mapping, state_block_size)
+        local_states = select_block_cache_rows(state_rows, local_slots, state_block_size)
+        gathered, _, _ = self._gather_compressor_sp_rows(
+            local_states,
+            row_counts,
+        )
+        compact_states = self._select_compressor_sp_rows(gathered, plan, "state_sync_gather_compact")
+
+        global_mapping = state_slot_mapping.index_select(0, global_token_indices)
+        global_slots = flatten_slot_mapping(global_mapping, state_block_size)
+        update_block_cache_rows_(state_rows, global_slots, compact_states, state_block_size)
+
+    def _replay_c4_compressor_sp_state(
+        self,
+        *,
+        x: torch.Tensor,
+        state_cache: torch.Tensor,
+        state_block_table: torch.Tensor,
+        compressed_sin: torch.Tensor,
+        compressed_cos: torch.Tensor,
+        coff: int,
+        plan: CompressorSPMetadata,
+    ) -> None:
+        replay_x = self._select_compressor_sp_rows(x, plan, "state_replay_token")
+        replay_block_table = self._select_compressor_sp_rows(
+            state_block_table,
+            plan,
+            "state_replay_req",
+        )
+        replay_sin = self._select_compressor_sp_rows(
+            compressed_sin.view(-1, compressed_sin.shape[-1]),
+            plan,
+            "state_replay_rope_row",
+        )
+        replay_cos = self._select_compressor_sp_rows(
+            compressed_cos.view(-1, compressed_cos.shape[-1]),
+            plan,
+            "state_replay_rope_row",
+        )
+        torch.ops._C_ascend.compressor(
+            replay_x,
+            self.compressor_wkv.weight,
+            self.compressor_wgate.weight,
+            state_cache.squeeze(-2),
+            self.compressor_ape,
+            self.compressor_norm.weight,
+            replay_sin,
+            replay_cos,
+            state_block_table=replay_block_table,
+            cu_seqlens=plan.state_replay_cu_seqlens,
+            seqused=None,
+            start_pos=plan.state_replay_start_pos,
+            rope_head_dim=self.rope_head_dim,
+            cmp_ratio=self.compress_ratio,
+            coff=coff,
+            norm_eps=self.compressor_norm_eps,
+            rotary_mode=2,
+            cache_mode=1,
+        )
 
     def _try_update_compressor_cache_sp(
         self,
@@ -1588,48 +1731,28 @@ class AscendDSACPImpl(DSAAttentionImpl):
         x: torch.Tensor,
         kv_cache: torch.Tensor,
         state_cache: torch.Tensor,
-        attn_metadata: AscendDSAMetadata,
-        state_metadata: AscendDSAMetadata,
+        req_metadata: AscendDSAReqMetadata,
+        state_req_metadata: AscendDSAReqMetadata,
         compressed_sin: torch.Tensor,
         compressed_cos: torch.Tensor,
         coff: int,
         need_gather_q_kv: bool,
-        has_prefill: bool,
         full_slot_mapping: torch.Tensor,
     ) -> bool:
-        req_metadata = attn_metadata.req_metadata
-        state_req_metadata = state_metadata.req_metadata
         if (
-            not self.enable_compressor_sp
-            or req_metadata is None
-            or state_req_metadata is None
-            or not need_gather_q_kv
-            or not has_prefill
-            or self.compress_ratio not in (4, 128)
+            not need_gather_q_kv
             or (self.compress_ratio == 4 and coff != 2)
             or (self.compress_ratio == 128 and coff != 1)
         ):
             return False
 
         plan = req_metadata.compressor_sp
-        if plan is None or not plan.enabled:
+        if plan is None or not plan.enabled or state_req_metadata.slot_mapping is None:
             return False
         row_counts = plan.sp_row_counts_per_rank
         expected_global = sum(row_counts)
-        expected_local = row_counts[plan.tp_rank] if row_counts and 0 <= plan.tp_rank < len(row_counts) else 0
-        if (
-            plan.tp_size != self.tp_size
-            or plan.tp_rank != self.tp_rank
-            or expected_local <= 0
-            or any(count <= 0 for count in row_counts)
-            or full_slot_mapping.shape[0] != expected_global
-            or self._compressor_sp_selector_len(plan, "token") == 0
-            or self._compressor_sp_selector_len(plan, "req") == 0
-            or self._compressor_sp_selector_len(plan, "rope_row") == 0
-            or self._compressor_sp_selector_len(plan, "output_keep") != expected_local
-            or plan.cu_seqlens is None
-            or plan.start_pos is None
-        ):
+        expected_local = row_counts[plan.tp_rank]
+        if full_slot_mapping.shape[0] < expected_global:
             return False
 
         local_x = self._select_compressor_sp_rows(x, plan, "token")
@@ -1657,8 +1780,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode=2,
             cache_mode=1,
         )
-        if local_compressed_kv.numel() == 0:
-            raise RuntimeError("Compressor SP returned an empty output for an enabled plan")
         local_compressed_kv = self._select_compressor_sp_rows(local_compressed_kv, plan, "output_keep")
         if local_compressed_kv.shape[0] != expected_local:
             raise RuntimeError(
@@ -1666,31 +1787,70 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 f"actual={local_compressed_kv.shape[0]}, expected={expected_local}"
             )
 
-        gathered = self._gather_compressor_sp_buffer(local_compressed_kv, plan)
-        if is_block_offset_slot_mapping(full_slot_mapping):
-            if len(set(row_counts)) == 1:
-                if gathered.shape[0] != expected_global:
-                    raise RuntimeError("balanced Compressor SP gather has unexpected padding")
-                DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, full_slot_mapping)
-            else:
-                if plan.gather_compact_indices is None:
-                    raise RuntimeError("ragged Compressor SP plan is missing its gather selector")
-                padded_slot_mapping, self._compressor_sp_slot_buffer = build_padded_destination_for_scatter(
-                    full_slot_mapping,
-                    plan.gather_compact_indices,
-                    gathered.shape[0],
-                    req_metadata.block_size,
-                    self._compressor_sp_slot_buffer,
-                )
-                DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, padded_slot_mapping)
+        overlap_output_gather = (
+            self.compress_ratio == 4
+            and self.compressor_sp_hccl_overlap
+            and plan.num_input_tokens >= self.compressor_sp_hccl_overlap_min_tokens
+            and expected_global > 0
+            and not torch.npu.is_current_stream_capturing()
+        )
+        if overlap_output_gather:
+            comm_stream = _compressor_sp_comm_stream()
+            gathered, gather_input, gather_work = self._gather_compressor_sp_rows(
+                local_compressed_kv,
+                row_counts,
+                comm_stream=comm_stream,
+            )
+
+        if self.compress_ratio == 4:
+            self._replay_c4_compressor_sp_state(
+                x=x,
+                state_cache=state_cache,
+                state_block_table=state_req_metadata.block_table,
+                compressed_sin=compressed_sin,
+                compressed_cos=compressed_cos,
+                coff=coff,
+                plan=plan,
+            )
+        else:
+            self._sync_compressor_sp_state_cache(
+                state_cache,
+                state_req_metadata.slot_mapping,
+                state_req_metadata.block_size,
+                plan,
+            )
+        if expected_global == 0:
+            return True
+
+        if overlap_output_gather:
+            gather_work.wait()
+            torch.npu.current_stream().wait_stream(comm_stream)
+            del gather_input
+        else:
+            gathered, _, _ = self._gather_compressor_sp_rows(
+                local_compressed_kv,
+                row_counts,
+            )
+        valid_slot_mapping = full_slot_mapping[:expected_global]
+        if plan.gather_compact_slice is not None:
+            start, length = plan.gather_compact_slice
+            compact_rows = gathered.narrow(0, start, length)
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, valid_slot_mapping)
+        elif is_block_offset_slot_mapping(valid_slot_mapping):
+            padded_slot_mapping, self._compressor_sp_slot_buffer = build_padded_destination_for_scatter(
+                valid_slot_mapping,
+                plan.gather_compact_indices,
+                gathered.shape[0],
+                req_metadata.block_size,
+                self._compressor_sp_slot_buffer,
+            )
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, padded_slot_mapping)
         else:
             # A5 compressor metadata returns flat slot IDs for kv_compress_epilog.
             # The block-offset invalid destination used above is not part of
             # that contract, so remove rank padding before scattering.
             compact_rows = self._select_compressor_sp_rows(gathered, plan, "gather_compact")
-            if compact_rows.shape[0] != expected_global:
-                raise RuntimeError("compacted Compressor SP gather has an unexpected row count")
-            DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, full_slot_mapping)
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, valid_slot_mapping)
         return True
 
     def _forward(
@@ -1808,6 +1968,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if self.compress_ratio > 1:
             assert compressor_attn_metadata.req_metadata is not None
             assert compressor_kv_state_metadata.req_metadata is not None
+
             if self.compress_ratio == 4:
                 self._update_indexer_cache(
                     x=hidden_states_cache,
@@ -1835,13 +1996,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 x=hidden_states_cache,
                 kv_cache=compress_kv_cache,
                 state_cache=state_cache,
-                attn_metadata=compressor_attn_metadata,
-                state_metadata=compressor_kv_state_metadata,
+                req_metadata=compressor_attn_metadata.req_metadata,
+                state_req_metadata=compressor_kv_state_metadata.req_metadata,
                 compressed_sin=compress_sin,
                 compressed_cos=compress_cos,
                 coff=coff,
                 need_gather_q_kv=need_gather_q_kv,
-                has_prefill=has_prefill,
                 full_slot_mapping=compress_slot_mapping,
             )
             if not sp_updated:
