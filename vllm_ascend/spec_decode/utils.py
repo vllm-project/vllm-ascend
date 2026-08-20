@@ -378,7 +378,37 @@ class DynamicSpecScheduler:
         if not 0.0 <= self.hardware_min_budget_ratio <= 1.0:
             raise ValueError("hardware_min_budget_ratio must be in [0, 1]")
 
+        # Hybrid hardware-aware scheduling keeps the cheap full-width path
+        # for small/high-acceptance batches, and only pays for confidence plus
+        # profile allocation when a larger or low-acceptance batch can benefit
+        # from a shorter logical K. It is opt-in so existing deployments keep
+        # the exact hardware-aware behavior unless explicitly enabled.
+        self.hybrid_policy_enabled = bool(
+            method_params.get("hybrid_policy_enabled", False)
+        )
+        self.hybrid_min_batch_size = int(
+            method_params.get("hybrid_min_batch_size", 8)
+        )
+        if self.hybrid_min_batch_size <= 0:
+            raise ValueError("hybrid_min_batch_size must be > 0")
+        self.hybrid_acceptance_threshold = float(
+            method_params.get("hybrid_acceptance_threshold", 0.6)
+        )
+        if not 0.0 <= self.hybrid_acceptance_threshold <= 1.0:
+            raise ValueError("hybrid_acceptance_threshold must be in [0, 1]")
+        self.hybrid_probe_interval = int(
+            method_params.get("hybrid_probe_interval", 16)
+        )
+        if self.hybrid_probe_interval <= 0:
+            raise ValueError("hybrid_probe_interval must be > 0")
+
         self._steps_since_budget_update = 0
+
+        self._hybrid_last_acceptance: float | None = None
+        self._hybrid_last_num_reqs: int | None = None
+        self._hybrid_last_num_draft_tokens: int | None = None
+        self._hybrid_steps_since_probe = 0
+        self._hybrid_full_width_active = False
 
         # Shared buffers
 
@@ -471,6 +501,34 @@ class DynamicSpecScheduler:
             raise ValueError("allocation_interval must be > 0")
         return configured
 
+    def _hybrid_should_hold_full_width(
+        self,
+        *,
+        num_reqs: int,
+        physical_k: int,
+    ) -> bool:
+        """Decide whether to use the low-overhead full-width branch.
+
+        Small batches do not amortize the confidence/policy host overhead.
+        For larger batches, use the previous confidence estimate as an
+        acceptance signal and periodically probe the dynamic path so the
+        decision can recover when acceptance changes.
+        """
+        if not self.hybrid_policy_enabled or physical_k > self.budget_k:
+            return False
+        if num_reqs < self.hybrid_min_batch_size:
+            return True
+        if self._hybrid_last_acceptance is None:
+            return False
+        if (
+            self._hybrid_last_num_reqs != num_reqs
+            or self._hybrid_last_num_draft_tokens != physical_k
+        ):
+            return False
+        if self._hybrid_steps_since_probe >= self.hybrid_probe_interval:
+            return False
+        return self._hybrid_last_acceptance >= self.hybrid_acceptance_threshold
+
     def update(
         self,
         *,
@@ -489,15 +547,36 @@ class DynamicSpecScheduler:
         # returning the same full-width decision.
         if (
             self.hardware_policy is not None
-            and self.hardware_min_budget_ratio >= 1.0
             and num_reqs is not None
             and draft_token_ids is not None
         ):
             physical_k = max(int(draft_token_ids.shape[1]) - 1, 0)
-            if physical_k <= self.budget_k:
+            use_hybrid_fast_path = self._hybrid_should_hold_full_width(
+                num_reqs=int(num_reqs),
+                physical_k=physical_k,
+            )
+            use_legacy_saturated_fast_path = (
+                not self.hybrid_policy_enabled
+                and self.hardware_min_budget_ratio >= 1.0
+                and physical_k <= self.budget_k
+            )
+            if use_hybrid_fast_path or use_legacy_saturated_fast_path:
+                same_shape = (
+                    self._hybrid_full_width_active
+                    and self._hybrid_last_num_reqs == int(num_reqs)
+                    and self._hybrid_last_num_draft_tokens == physical_k
+                )
                 self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
                 self.num_verify_tokens.fill_(physical_k)
+                self.reused_last_result = same_shape
+                self._hybrid_last_num_reqs = int(num_reqs)
+                self._hybrid_last_num_draft_tokens = physical_k
+                self._hybrid_full_width_active = True
+                if int(num_reqs) >= self.hybrid_min_batch_size:
+                    self._hybrid_steps_since_probe += 1
                 return self.num_verify_tokens
+
+        self._hybrid_full_width_active = False
 
         # The confidence head and the cumulative-prefix policy are device
         # work.  For a hardware-aware profile, holding the last safe prefix
@@ -551,6 +630,16 @@ class DynamicSpecScheduler:
             raise RuntimeError(f"Unsupported dynamic speculative method: {self.method}")
 
         result = self._update_from_token_probs(token_probs)
+        if self.hybrid_policy_enabled and self.hardware_policy is not None:
+            # The mean conditional acceptance is a cheap batch-level proxy for
+            # the acceptance rate. One scalar sync is paid only when the
+            # confidence path is actually evaluated; held full-width steps do
+            # not re-enter this branch.
+            self._hybrid_last_acceptance = float(token_probs.mean().item())
+            self._hybrid_last_num_reqs = int(num_reqs or 0)
+            self._hybrid_last_num_draft_tokens = int(num_draft_tokens or 0)
+            self._hybrid_steps_since_probe = 0
+            self._hybrid_full_width_active = False
         if (
             self.hardware_policy is not None
             and self.confidence_update_interval > 1

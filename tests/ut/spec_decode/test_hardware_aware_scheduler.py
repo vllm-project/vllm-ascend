@@ -159,6 +159,128 @@ def test_hardware_scheduler_can_hold_confidence_result() -> None:
     assert model.confidence_calls == 2
 
 
+def test_hybrid_policy_skips_confidence_for_small_batch() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "profile": {
+                "fingerprint": {"device": "Ascend", "graph_mode": "FULL_DECODE_ONLY"},
+                "latency_ms": {"1": 1.0, "2": 1.0, "3": 1.0, "4": 1.0},
+            },
+            "hardware_min_budget_ratio": 0.0,
+            "hybrid_policy_enabled": True,
+            "hybrid_min_batch_size": 8,
+        },
+        max_batch_size=8,
+        num_speculative_tokens=3,
+        device=torch.device("cpu"),
+    )
+    model = _FakeDSparkModel()
+    draft_ids = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]])
+    hidden = torch.zeros((6, 1))
+
+    first = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=2,
+    )
+    second = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=2,
+    )
+
+    assert first.tolist() == [3, 3]
+    assert second.tolist() == [3, 3]
+    assert model.confidence_calls == 0
+    assert scheduler.reused_last_result
+
+
+def test_hybrid_policy_enters_dynamic_path_for_large_low_acceptance_batch() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    latency_ms = {str(size): (1.0 if size <= 8 else 100.0) for size in range(1, 33)}
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "profile": {
+                "fingerprint": {"device": "Ascend", "graph_mode": "FULL_DECODE_ONLY"},
+                "latency_ms": latency_ms,
+            },
+            "hardware_min_budget_ratio": 0.0,
+            "hybrid_policy_enabled": True,
+            "hybrid_min_batch_size": 8,
+            "hybrid_acceptance_threshold": 0.99,
+        },
+        max_batch_size=8,
+        num_speculative_tokens=3,
+        device=torch.device("cpu"),
+    )
+    model = _FakeDSparkModel()
+    draft_ids = torch.tensor([[1, 2, 3, 4]] * 8)
+    hidden = torch.zeros((24, 1))
+
+    lengths = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=8,
+    )
+
+    assert model.confidence_calls == 1
+    assert int(lengths.sum().item()) < 8 * 3
+
+
+def test_hybrid_policy_holds_large_high_acceptance_batch_until_probe() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "profile": {
+                "fingerprint": {"device": "Ascend", "graph_mode": "FULL_DECODE_ONLY"},
+                "latency_ms": {str(size): 1.0 for size in range(1, 33)},
+            },
+            "hardware_min_budget_ratio": 0.0,
+            "hybrid_policy_enabled": True,
+            "hybrid_min_batch_size": 8,
+            "hybrid_acceptance_threshold": 0.6,
+            "hybrid_probe_interval": 4,
+        },
+        max_batch_size=8,
+        num_speculative_tokens=3,
+        device=torch.device("cpu"),
+    )
+    model = _FakeDSparkModel()
+    draft_ids = torch.tensor([[1, 2, 3, 4]] * 8)
+    hidden = torch.full((24, 1), 10.0)
+
+    first = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=8,
+    )
+    second = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=8,
+    )
+
+    assert first.tolist() == [3] * 8
+    assert second.tolist() == [3] * 8
+    assert model.confidence_calls == 1
+    assert scheduler.reused_last_result
+
+
 def test_hardware_policy_uses_nearest_profiled_shape() -> None:
     model = HardwareCostModel.from_dict(
         {
