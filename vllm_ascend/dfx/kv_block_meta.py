@@ -18,7 +18,22 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
+
+from vllm_ascend.logger import init_logger_ascend
+
+logger = init_logger_ascend(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class BlockWriteViolation:
+    block_id: int
+    violation: str
+    prev_wave: int | None
+    new_wave: int
+    prev_writer: str | None
+    new_writer: str
 
 
 def block_ids_for_request(
@@ -27,6 +42,7 @@ def block_ids_for_request(
     req_idx: int | None = None,
     *,
     kv_cache_group: int = 0,
+    input_batch: Any = None,
 ) -> list[int]:
     """Return logical GPU block ids for ``req_id`` (group 0 by default)."""
     if not req_id or runner is None:
@@ -41,7 +57,10 @@ def block_ids_for_request(
             if parsed:
                 return parsed
 
-    input_batch = getattr(runner, "input_batch", None)
+    if input_batch is None:
+        # V2: runner.input_batch stays None; prefer execute_model_state batch
+        # so report enrichment (and callers without an explicit batch) still work.
+        input_batch = _runner_input_batch(runner)
     if input_batch is None:
         return []
     idx = req_idx
@@ -50,19 +69,34 @@ def block_ids_for_request(
         if isinstance(mapping, dict) and req_id in mapping:
             idx = int(mapping[req_id])
         else:
-            return []
+            req_ids = list(getattr(input_batch, "req_ids", None) or [])
+            try:
+                idx = req_ids.index(req_id)
+            except ValueError:
+                return []
     idx = int(idx)
     table = _block_table_for_group(input_batch, kv_cache_group)
-    if table is None:
+    if table is not None:
+        try:
+            num_blocks = int(table.num_blocks_per_row[idx])
+            if num_blocks <= 0:
+                return []
+            row = table.block_table.np[idx, :num_blocks]
+            return [int(x) for x in row.tolist()]
+        except Exception:
+            return []
+
+    # ModelRunner V2 stores block rows by persistent request-state index.
+    block_tables = getattr(runner, "block_tables", None)
+    idx_mapping = getattr(input_batch, "idx_mapping_np", None)
+    if block_tables is None or idx_mapping is None:
         return []
     try:
-        num_blocks = int(table.num_blocks_per_row[idx])
-    except Exception:
-        return []
-    if num_blocks <= 0:
-        return []
-    try:
-        row = table.block_table.np[idx, :num_blocks]
+        state_idx = int(idx_mapping[idx])
+        num_blocks = int(block_tables.num_blocks.np[kv_cache_group, state_idx])
+        if num_blocks <= 0:
+            return []
+        row = block_tables.block_tables[kv_cache_group].np[state_idx, :num_blocks]
         return [int(x) for x in row.tolist()]
     except Exception:
         return []
@@ -82,8 +116,18 @@ def touched_block_ids(
     end = start + int(num_scheduled)
     first = start // int(block_size)
     last = (end - 1) // int(block_size)
-    if first >= len(block_ids):
-        return [block_ids[-1]] if block_ids else []
+    # Do not fall back to the table tail: that can mark shared prefix blocks
+    # as writes and false-trigger same_wave_writer_conflict.
+    if first >= len(block_ids) or last < first:
+        logger.debug(
+            "touched_block_ids: write range [%s, %s) maps to block indices [%s, %s] outside table len=%s",
+            start,
+            end,
+            first,
+            last,
+            len(block_ids),
+        )
+        return []
     last = min(last, len(block_ids) - 1)
     if last < first:
         return []
@@ -315,6 +359,55 @@ class KvBlockMetaTracker:
     @classmethod
     def reset_for_tests(cls) -> None:
         cls._instance = None
+
+    def preview_write_checks(
+        self,
+        req_id: str,
+        block_ids: list[int],
+        wave: int,
+        *,
+        check_wave_regression: bool = True,
+        check_same_wave_writer: bool = True,
+    ) -> list[BlockWriteViolation]:
+        """Return violations that would occur if ``record_writes`` ran (non-mutating)."""
+        if not req_id or not block_ids:
+            return []
+        w = int(wave)
+        rid = str(req_id)
+        out: list[BlockWriteViolation] = []
+        for bid in block_ids:
+            b = int(bid)
+            prev_w = self._wave.get(b)
+            prev_writer = self._writer.get(b)
+            if check_wave_regression and prev_w is not None and w < prev_w:
+                out.append(
+                    BlockWriteViolation(
+                        block_id=b,
+                        violation="wave_regression",
+                        prev_wave=prev_w,
+                        new_wave=w,
+                        prev_writer=prev_writer,
+                        new_writer=rid,
+                    )
+                )
+            if (
+                check_same_wave_writer
+                and prev_w is not None
+                and prev_w == w
+                and prev_writer is not None
+                and prev_writer != rid
+            ):
+                out.append(
+                    BlockWriteViolation(
+                        block_id=b,
+                        violation="same_wave_writer_conflict",
+                        prev_wave=prev_w,
+                        new_wave=w,
+                        prev_writer=prev_writer,
+                        new_writer=rid,
+                    )
+                )
+        return out
 
     def record_writes(self, req_id: str, block_ids: list[int], wave: int) -> None:
         if not req_id or not block_ids:

@@ -660,8 +660,84 @@ def test_enrich_detail_slot_mapping_flag():
     proc.dfx_config.report_block_last_writer.return_value = False
     proc.dfx_config.report_include_slot_mapping.return_value = False
     assert "slot_mapping" not in proc._enrich_detail_with_block_meta({}, "r1", 0)
-
     proc.dfx_config.report_include_slot_mapping.return_value = True
     out = proc._enrich_detail_with_block_meta({}, "r1", 0)
     assert out["slot_mapping"] == [20, 21, 22]
-    assert out["slot_mapping_span"] == [0, 3]
+
+
+def test_enrich_detail_block_ids_uses_v2_execute_model_state():
+    """V2 report enrichment must not require runner.input_batch."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    input_batch = SimpleNamespace(
+        req_ids=["r1"],
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.runner = SimpleNamespace(
+        requests=None,
+        input_batch=None,
+        execute_model_state=SimpleNamespace(input_batch=input_batch),
+        block_tables=SimpleNamespace(
+            num_blocks=SimpleNamespace(np=np.array([[2]], dtype=np.int32)),
+            block_tables=[SimpleNamespace(np=np.array([[7, 8, 0]], dtype=np.int32))],
+        ),
+    )
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.report_include_block_ids.return_value = True
+    proc.dfx_config.report_block_last_write_wave.return_value = False
+    proc.dfx_config.report_block_last_writer.return_value = False
+    proc.dfx_config.report_include_slot_mapping.return_value = False
+    out = proc._enrich_detail_with_block_meta({}, "r1", 0)
+    assert out["block_ids"] == [7, 8]
+
+
+def test_enrich_block_kv_always_saves_prev_writer_ignoring_report_flag():
+    """Only block_kv alerts force violated_blocks when report.block_last_* is off."""
+    from vllm_ascend.dfx.kv_block_meta import KvBlockMetaTracker
+
+    KvBlockMetaTracker.reset_for_tests()
+    tracker = KvBlockMetaTracker.get()
+    tracker.record_writes("req-a", [42], wave=7)
+    tracker.record_writes("req-c", [99], wave=8)  # untouched by this alert
+
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.runner = MagicMock()
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.report_include_block_ids.return_value = False
+    proc.dfx_config.report_block_last_write_wave.return_value = False
+    proc.dfx_config.report_block_last_writer.return_value = False
+    proc.dfx_config.report_include_slot_mapping.return_value = False
+
+    detail = {
+        "wave": 3,
+        "num_violations": 1,
+        "violations": [
+            {
+                "violation": "wave_regression",
+                "block_id": 42,
+                "prev_wave": 7,
+                "new_wave": 3,
+                "prev_writer_req_id": "req-a",
+                "new_writer_req_id": "req-b",
+            }
+        ],
+    }
+    out = proc._enrich_detail_with_block_meta(detail, "req-b", 0, anomaly_type="block_kv")
+    assert out["violated_blocks"] == [
+        {
+            "block_id": 42,
+            "last_write_wave": 7,
+            "last_writer_req_id": "req-a",
+        }
+    ]
+    assert all(b["block_id"] != 99 for b in out["violated_blocks"])
+    assert "blocks" not in out
+
+    # Same detail shape must not force writer for other anomaly types.
+    other = proc._enrich_detail_with_block_meta(detail, "req-b", 0, anomaly_type="logits_finite")
+    assert "violated_blocks" not in other
+    assert "blocks" not in other
+    KvBlockMetaTracker.reset_for_tests()

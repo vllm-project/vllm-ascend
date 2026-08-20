@@ -2302,6 +2302,16 @@ class NPUModelRunner(GPUModelRunner):
         # Clear ephemeral state.
         self.execute_model_state = None
 
+        total_scheduled = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0)
+        self.dfx.check_before_sample(
+            scheduler_output=scheduler_output,
+            logits=logits,
+            positions=positions,
+            total_scheduled_tokens=total_scheduled,
+            logits_indices=getattr(self, "logits_indices", None),
+            input_batch=self.input_batch,
+        )
+
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
             # here we are different from gpu_model_runner,
@@ -2441,7 +2451,10 @@ class NPUModelRunner(GPUModelRunner):
         # forward; disable waits until a start after enable (see Dumper flags).
         self.dfx.finalize_dump_data()
 
-        self.dfx.note_kv_block_writes(scheduler_output)
+        self.dfx.note_kv_block_writes(
+            scheduler_output,
+            input_batch=self.input_batch,
+        )
 
         finished_req_ids = getattr(scheduler_output, "finished_req_ids", None)
         self.dfx.mark_finished(finished_req_ids)

@@ -3,6 +3,7 @@
   // DFX runtime config EXAMPLE (JSONC). Not loaded by runtime.
   // Runtime defaults: vllm_ascend/dfx/runtime_config.py (_DEFAULTS) → strict JSON.
   // Hot-reload: additional_config.dfx_config_reload_interval > 0 at start.
+  // Startup without a file: additional_config.dfx_config = { same schema as this file }.
   // Ops: docs/zh/design/dfx_ops.md | Design: docs/zh/design/dfx_design.md
   // =============================================================================
   //
@@ -85,6 +86,8 @@
     "block_last_write_wave": false,
     // Per physical block: last writer request_id. Off by default.
     // When either block_last_* is true, detail also has blocks[{block_id, ...}].
+    // block_kv alerts only: always add violated_blocks (writer/wave) even if both are false.
+    // Other anomaly types still respect these flags for report.blocks[].
     "block_last_writer": false
   },
 
@@ -140,6 +143,31 @@
       "min_tokens": 32,
       "consecutive_hits": 1,
       "ignore_token_ids": []
+    },
+
+    // KV block write integrity (wave regression / same-wave writer clash).
+    // Uses KvBlockMetaTracker; independent of report.block_last_* flags.
+    // Only kv_cache_group=0 (first block table); hybrid multi-group not covered.
+    // msprobe: alert only — same dump arm path as other detectors when dump.enabled.
+    "block_kv": {
+      "enabled": false,
+      "check_wave_regression": true,
+      "check_same_wave_writer": true
+    },
+
+    // 1-D position_ids alignment for tokens scheduled this step.
+    // Text RoPE only (ndim==1). M-RoPE / multimodal positions are skipped.
+    // msprobe: detect-only native check; dump is optional via dump.enabled.
+    "position_alignment": {
+      "enabled": false
+    },
+
+    // Pre-sample logits NaN/Inf on sampling rows (GPU isfinite reduce).
+    // ill_type=4 (nan) for both NaN and ±Inf (msprobe ILL table has no Inf code);
+    // detail.finite_kind distinguishes nan / pos_inf / neg_inf.
+    // msprobe: no ILLDetector; optional msprobe tensor dump after alert arms dump.
+    "logits_finite": {
+      "enabled": false
     }
   },
 

@@ -28,6 +28,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm_ascend.dfx.detector.alert import AnomalyAlert
 from vllm_ascend.dfx.detector.base import AnomalyDetector
 from vllm_ascend.dfx.detector.manager import DetectorManager
+from vllm_ascend.dfx.detector.position_alignment import num_computed_before
 from vllm_ascend.dfx.dumper import Dumper
 from vllm_ascend.dfx.input_filters import InputFilterManager, iter_batch_prompt_token_ids
 from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
@@ -55,6 +56,29 @@ if TYPE_CHECKING:
     from vllm_ascend.dfx.runtime_config import DfxRuntimeConfig
 
 logger = init_logger_ascend(__name__)
+
+
+def _block_kv_violated_block_ids(detail: dict[str, Any]) -> list[int]:
+    """Block ids that actually appear in ``block_kv`` ``violations`` (errored only)."""
+    raw = detail.get("violations")
+    if not isinstance(raw, list):
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        if "block_id" not in row or not row.get("violation"):
+            continue
+        try:
+            bid = int(row["block_id"])
+        except (TypeError, ValueError):
+            continue
+        if bid in seen:
+            continue
+        seen.add(bid)
+        out.append(bid)
+    return out
 
 
 class DfxProcessor:
@@ -433,6 +457,27 @@ class DfxProcessor:
         if dumper is not None and hasattr(dumper, "record_sample_waves"):
             dumper.record_sample_waves(req_ids)
 
+    def check_before_sample(
+        self,
+        *,
+        scheduler_output: Any,
+        logits: Any,
+        positions: Any = None,
+        total_scheduled_tokens: int = 0,
+        logits_indices: Any = None,
+        input_batch: Any = None,
+    ) -> None:
+        """Pre-sample hook: logits finite + position alignment."""
+        for alert in self.detectors.check_before_sample(
+            scheduler_output=scheduler_output,
+            logits=logits,
+            positions=positions,
+            total_scheduled_tokens=total_scheduled_tokens,
+            logits_indices=logits_indices,
+            input_batch=input_batch,
+        ):
+            self._handle_alert(alert, detector=self.detectors.get(alert.anomaly_type))
+
     def check_after_sample(
         self,
         sampled_token_ids: Any,
@@ -586,7 +631,12 @@ class DfxProcessor:
             scheduler_output=getattr(self, "_scheduler_output_for_step", None),
         )
         detail = io_mgr.merge_into_detail(detail, snap)
-        detail = self._enrich_detail_with_block_meta(detail, alert.req_id, alert.req_idx)
+        detail = self._enrich_detail_with_block_meta(
+            detail,
+            alert.req_id,
+            alert.req_idx,
+            anomaly_type=alert.anomaly_type,
+        )
 
         dump_count, dump_max_times = self.dumper.dump_count_snapshot(dump_armed=dump_armed)
         dump_arm_wave = None
@@ -669,14 +719,22 @@ class DfxProcessor:
             dump_arm_wave=dump_arm_wave,
         )
 
-    def note_kv_block_writes(self, scheduler_output: Any | None = None) -> None:
+    def note_kv_block_writes(
+        self,
+        scheduler_output: Any | None = None,
+        *,
+        input_batch: Any = None,
+    ) -> None:
         """Record per-block last-write wave/writer after a real forward wrote KV.
 
         No-op when both ``report.block_last_write_wave`` and
-        ``report.block_last_writer`` are false. Uses scheduled token counts to
-        mark only the blocks touched this step.
+        ``report.block_last_writer`` are false and ``detector.block_kv.enabled``
+        is false. Uses scheduled token counts to mark only the blocks touched
+        this step.
         """
-        if not self.dfx_config.report_block_meta_enabled():
+        need_meta = self.dfx_config.report_block_meta_enabled()
+        need_block_det = bool(self.dfx_config.detector_get("block_kv", "enabled", False))
+        if not need_meta and not need_block_det:
             return
         runner = self.runner
         so = scheduler_output if scheduler_output is not None else getattr(self, "_scheduler_output_for_step", None)
@@ -699,8 +757,10 @@ class DfxProcessor:
         if block_size <= 0:
             block_size = 16
         tracker = KvBlockMetaTracker.get()
-        input_batch = getattr(runner, "input_batch", None)
+        if input_batch is None:
+            input_batch = getattr(runner, "input_batch", None)
         req_id_to_index = getattr(input_batch, "req_id_to_index", None) if input_batch else None
+        req_ids = list(getattr(input_batch, "req_ids", None) or [])
         for req_id, n_sched in num_scheduled.items():
             if not req_id:
                 continue
@@ -713,18 +773,31 @@ class DfxProcessor:
             req_idx = None
             if isinstance(req_id_to_index, dict) and req_id in req_id_to_index:
                 req_idx = int(req_id_to_index[req_id])
-            all_ids = block_ids_for_request(runner, str(req_id), req_idx)
+            elif req_id in req_ids:
+                req_idx = req_ids.index(req_id)
+            all_ids = block_ids_for_request(
+                runner,
+                str(req_id),
+                req_idx,
+                input_batch=input_batch,
+            )
             if not all_ids:
                 continue
-            # Prefer range from computed_before when the counter looks like
-            # "after this step" (computed >= scheduled); otherwise treat
-            # computed as before and use the scheduled span. Fallback: last
-            # ceil(scheduled/block_size) blocks (decode / chunked tail).
-            computed = self._num_computed_tokens(runner, str(req_id), req_idx)
-            if computed >= scheduled:
-                computed_before = computed - scheduled
-            else:
-                computed_before = computed
+            # Wave-before count: at note_kv_block_writes time (after forward,
+            # before next scheduler update) this is still pre-step computed.
+            computed_before = num_computed_before(
+                runner,
+                str(req_id),
+                req_idx,
+                scheduled,
+                input_batch,
+            )
+            if computed_before is None:
+                logger.debug(
+                    "[Anomaly block_kv] skip req_id=%s: num_computed_before unknown (kv_cache_group=0 only)",
+                    req_id,
+                )
+                continue
             touched = touched_block_ids(
                 all_ids,
                 block_size=block_size,
@@ -732,44 +805,36 @@ class DfxProcessor:
                 num_scheduled=scheduled,
             )
             if not touched:
-                n_tail = max(1, (scheduled + block_size - 1) // block_size)
-                touched = all_ids[-n_tail:]
+                continue
+            for alert in self.detectors.check_kv_block_writes(str(req_id), touched, wave):
+                self._handle_alert(alert, detector=self.detectors.get(alert.anomaly_type))
             tracker.record_writes(str(req_id), touched, wave)
-
-    @staticmethod
-    def _num_computed_tokens(runner: Any, req_id: str, req_idx: int | None) -> int:
-        requests = getattr(runner, "requests", None)
-        if requests is not None:
-            state = requests.get(req_id)
-            if state is not None:
-                n = getattr(state, "num_computed_tokens", None)
-                if n is not None:
-                    try:
-                        return int(n)
-                    except (TypeError, ValueError):
-                        pass
-        input_batch = getattr(runner, "input_batch", None)
-        if input_batch is not None and req_idx is not None:
-            arr = getattr(input_batch, "num_computed_tokens_cpu", None)
-            if arr is not None:
-                try:
-                    return int(arr[int(req_idx)])
-                except Exception:
-                    pass
-        return 0
 
     def _enrich_detail_with_block_meta(
         self,
         detail: dict[str, Any],
         req_id: str,
         req_idx: int | None = None,
+        *,
+        anomaly_type: str | None = None,
     ) -> dict[str, Any]:
-        """Attach ``block_ids`` / ``blocks`` / ``slot_mapping`` per report.* flags."""
+        """Attach ``block_ids`` / ``blocks`` / ``slot_mapping`` per report.* flags.
+
+        Only ``block_kv`` alerts force ``violated_blocks`` (last writer/wave) for
+        **errored blocks only** (ids listed in ``detail.violations``), ignoring
+        ``report.block_last_writer`` / ``report.block_last_write_wave``.
+        Full-request ``blocks[]`` still follows those report flags.
+        All other anomaly types / manual reports follow report flags strictly.
+        """
         include_ids = self.dfx_config.report_include_block_ids()
         include_slots = self.dfx_config.report_include_slot_mapping()
         include_wave = self.dfx_config.report_block_last_write_wave()
         include_writer = self.dfx_config.report_block_last_writer()
-        if not include_ids and not include_slots and not include_wave and not include_writer:
+        force_kv_writer = anomaly_type == "block_kv"
+        violated_ids = _block_kv_violated_block_ids(detail) if force_kv_writer else []
+        if force_kv_writer and not violated_ids:
+            force_kv_writer = False
+        if not include_ids and not include_slots and not include_wave and not include_writer and not force_kv_writer:
             return detail
         out = dict(detail)
         ids = block_ids_for_request(self.runner, req_id, req_idx)
@@ -780,6 +845,13 @@ class DfxProcessor:
                 ids,
                 include_wave=include_wave,
                 include_writer=include_writer,
+            )
+        if force_kv_writer:
+            # Errored blocks only — not the full request block table.
+            out["violated_blocks"] = KvBlockMetaTracker.get().blocks_detail(
+                violated_ids,
+                include_wave=True,
+                include_writer=True,
             )
         if include_slots:
             got = slot_mapping_for_request(

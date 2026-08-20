@@ -70,9 +70,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
-| `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option). At DFX bootstrap, the path is written to `dump.msprobe_config_path`. If DFX JSON does not set `dump.enabled` / `dump.manual_trigger` and msprobe `dump_enable` is true or omitted (msprobe default on), DFX also seeds `dump.enabled=true` and `dump.manual_trigger=true`. Explicit DFX dump keys are not overwritten. `dump_enable=false` does not seed. |
+| `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option). At DFX bootstrap, the path is written to `dump.msprobe_config_path`. If DFX JSON / `additional_config.dfx_config` does not set `dump.enabled` and msprobe `dump_enable` is true or omitted (msprobe default on), DFX seeds `dump.enabled=true` and (if also unset) `dump.manual_trigger=true`. If DFX **explicitly** sets `dump.enabled` to a value that disagrees with msprobe `dump_enable`, startup raises and aborts. `dump_enable=false` with DFX `enabled` omitted does not seed. |
 | `dump_config_isolate_by_dp`         | bool | `False` | Whether to materialize a per-DP msprobe config when `VLLM_DP_RANK` exists. Default `False`: all DPs share the same `dump_config_path` / inline dump config. When `True`, each DP uses its own copy under `<source_dir>/dp<rank>/...` and `dump_path` is auto-suffixed with `dp<rank>` to avoid cross-DP dump_enable interference and mixed dump outputs. Operate on the `dp<rank>` copy for hot updates. If the source `dump_config_path` is missing, startup fails (no silent fallback to shared path). Enable for multi-DP dump unless you intentionally share one msprobe config/path. |
 | `dfx_config_path` / `dfx-config`    | str  | `None`  | Path to DFX runtime JSON (`dump` / `ascend_log` / `log` / `report` / `detector` / `input_filter`). Default: `<cwd>/dfx/config/dfx_config.json`. Hot reload: per-DP leader read + in-DP broadcast, or local file poll. `report.save_sensitive_info` defaults to `false` (lengths only in anomaly / dump_finish reports). `log.print_sampling_meta` / `log.print_output_on_finish` default `false` (ops logs only). `print_output_on_finish` accumulates only while enabled (no backfill); mid-request enable may yield a partial or empty finish log. |
+| `dfx_config`                        | dict | `None`  | Inline DFX config overlay (**same schema** as the DFX JSON file). Deep-merged at startup after defaults / `dfx_config_path`. Typical use: enable detectors without editing a file, e.g. `{"detector": {"block_kv": {"enabled": true}}}`. Does not replace `dfx_config_path`; hot-reload still reads the JSON file (overlay is bootstrap-only unless persisted by leader `ensure_persisted`). |
 | `dfx_config_isolate_by_dp`          | bool | `False` | Whether to materialize a per-DP DFX config when `VLLM_DP_RANK` exists. Default `False`: all DPs share one DFX JSON path. When `True`, with explicit `dfx_config_path`/`dfx-config` each DP uses `<source_dir>/dp<rank>/<dfx_config_name>`; with default path, each DP uses `<cwd>/dfx/config/dp<rank>/dfx_config.json`. Operate on the `dp<rank>` copy for hot updates. If an explicit source config path is missing, startup fails (no silent fallback to shared path). |
 | `dfx_config_reload_interval`        | float| `0`     | DFX JSON hot-reload period in seconds. Default `0` (disabled). Set `> 0` to enable periodic refresh. Also written into JSON as `reload_interval_seconds` for visibility; the startup value remains authoritative. **Required `> 0` for `dump.manual_trigger`.** |
 | `dfx_report_dir`                    | str  | `None`  | Directory for short anomaly reports. Default: sibling `dfx/report` next to the config dir. |
@@ -231,7 +232,40 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 Path to the DFX runtime JSON controlling dump, `ascend_log`, report, and anomaly detectors
 (nested `detector.<name>.enabled`, shared `detector.stop_after_alert`,
 `detector.output_substring.match_prefix`, report `max_*` truncation, etc.).
+Built-in detectors: `spec_acceptance`, `token_logprob` (msprobe ILLDetector),
+`output_substring`, `token_repeat`, `block_kv`, `position_alignment`, `logits_finite`.
+Only `token_logprob` requires msprobe; the others are native DFX checks. On alert with
+`dump.enabled=true`, all use the same msprobe dump arm path (`Dumper.handle_anomaly_alert`).
+`logits_finite` and `position_alignment` add a per-sample device sync when enabled
+(debug-only; leave off in production). `position_alignment` is 1-D text RoPE only.
 If omitted, vLLM-Ascend uses `<cwd>/dfx/config/dfx_config.json` (created with defaults on first start).
+
+**dfx_config**
+
+Inline overlay with the **same object schema** as the DFX JSON file (`detector` / `dump` /
+`log` / `report` / `ascend_log` / `input_filter`, …). Applied once at process start:
+
+`defaults ← dfx_config_path (if explicit) ← additional_config.dfx_config`
+
+Example (enable detectors without a hand-edited JSON):
+
+```json
+{
+  "dfx_config": {
+    "detector": {
+      "block_kv": { "enabled": true },
+      "logits_finite": { "enabled": true }
+    },
+    "dump": { "enabled": false }
+  }
+}
+```
+
+Can be combined with `dfx_config_path`. Hot-reload (`dfx_config_reload_interval > 0`) re-reads
+the JSON file only; it does **not** re-apply this overlay. Leader `ensure_persisted` writes the
+merged effective config to disk, so a subsequent hot-reload keeps the overlay values unless you
+edit them out of the file. `reload_interval_seconds` inside the overlay is ignored (startup
+`dfx_config_reload_interval` remains authoritative).
 
 **dfx_config_reload_interval**
 

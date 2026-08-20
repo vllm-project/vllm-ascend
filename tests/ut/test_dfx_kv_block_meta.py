@@ -30,6 +30,7 @@ def test_touched_block_ids_decode_and_prefill():
     assert touched_block_ids(ids, block_size=16, num_computed_before=48, num_scheduled=1) == [13]
     assert touched_block_ids(ids, block_size=16, num_computed_before=0, num_scheduled=48) == [10, 11, 12]
     assert touched_block_ids([], block_size=16, num_computed_before=0, num_scheduled=1) == []
+    assert touched_block_ids(ids, block_size=16, num_computed_before=64, num_scheduled=1) == []
 
 
 def test_block_ids_for_request_from_req_state():

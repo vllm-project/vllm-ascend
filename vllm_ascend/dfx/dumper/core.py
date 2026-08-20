@@ -537,27 +537,29 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             source="manual_trigger",
         )
 
-    def anomaly_check_skip_reason(self) -> str | None:
+    def anomaly_check_skip_reason(self, *, ignore_dump_busy: bool = False) -> str | None:
         """None if detectors may run; otherwise a short skip reason for logs.
 
         Detect is independent of ``dump.enabled``. While dump is armed /
-        active, skip further detect to avoid overlapping arms.
+        active, skip further detect by default to avoid overlapping arms.
+        Pass ``ignore_dump_busy=True`` for checks that should still run in the
+        same step after another detector already armed dump (e.g. block_kv).
         """
         if not self.dfx_config.any_detector_enabled():
             return "no detector enabled in live DFX config"
         rank_reason = anomaly_check_rank_skip_reason(getattr(self, "runner", None))
         if rank_reason is not None:
             return rank_reason
-        if self.dfx_config.dump_enabled():
+        if not ignore_dump_busy and self.dfx_config.dump_enabled():
             if self._pending_dump:
                 return "pending_dump already armed"
             if self._msprobe_dump_active:
                 return "msprobe dump already active"
         return None
 
-    def can_run_anomaly_detection(self) -> bool:
+    def can_run_anomaly_detection(self, *, ignore_dump_busy: bool = False) -> bool:
         """Whether this rank should invoke detectors this step."""
-        return self.anomaly_check_skip_reason() is None
+        return self.anomaly_check_skip_reason(ignore_dump_busy=ignore_dump_busy) is None
 
     def _dump_state_tag(self) -> str:
         return (

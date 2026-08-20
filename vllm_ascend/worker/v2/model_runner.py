@@ -44,7 +44,6 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
-    sort_batch_req_ids,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -117,6 +116,39 @@ def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
         yield
     finally:
         vllm_model_runner.dispatch_cg_and_sync_dp = original_dispatch
+
+
+@contextmanager
+def _dfx_wrap_compute_logits_for_pre_sample(runner: "NPUModelRunner", input_batch: Any):
+    """Temporarily wrap ``model.compute_logits`` so DFX runs before grammar.
+
+    Parent ``GPUModelRunner.sample`` does ``compute_logits`` then grammar then
+    sampler with no mid-hook. Wrapping the bound method inserts
+    ``check_before_sample`` on the return path (still before grammar) without
+    copying the upstream ``sample()`` body. Restored in ``finally`` so
+    prompt-logprobs / draft paths are unaffected outside this call.
+    """
+    model = runner.model
+    # Prefer deleting the instance override so the class method is restored
+    # (assigning a bound method back leaves a stale instance attribute).
+    had_instance_attr = "compute_logits" in getattr(model, "__dict__", {})
+    orig = model.compute_logits
+
+    def wrapped(hidden_states, *args, **kwargs):
+        logits = orig(hidden_states, *args, **kwargs)
+        runner._dfx_check_before_sample(logits, input_batch)
+        return logits
+
+    model.compute_logits = wrapped
+    try:
+        yield
+    finally:
+        if had_instance_attr:
+            model.compute_logits = orig
+        elif "compute_logits" in getattr(model, "__dict__", {}):
+            del model.compute_logits
+        else:
+            model.compute_logits = orig
 
 
 class AscendAsyncOutput(AsyncModelRunnerOutput):
@@ -259,6 +291,9 @@ class NPUModelRunner(GPUModelRunner):
         self.need_accepted_tokens = False
 
         self.dfx = DfxProcessor(self)
+        # Stashed for V2 ``sample()`` DFX pre-sample hooks (ExecuteModelState
+        # does not carry scheduler_output / logits / positions).
+        self._dfx_scheduler_output: SchedulerOutput | None = None
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -301,6 +336,8 @@ class NPUModelRunner(GPUModelRunner):
             allow_arm=not dummy_run,
             scheduler_output=scheduler_output,
         )
+        # Visible to ``sample()`` DFX hooks after execute_model returns.
+        self._dfx_scheduler_output = None if dummy_run else scheduler_output
         # start/finalize wrap the forward path; sample_tokens runs afterwards.
         self.dfx.start_dump_data()
         try:
@@ -312,11 +349,24 @@ class NPUModelRunner(GPUModelRunner):
                     skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                     is_profile=is_profile,
                 )
+        except Exception:
+            # Do not record KV writes for a failed forward (avoids stale
+            # execute_model_state + new scheduler_output false positives).
+            self._dfx_scheduler_output = None
+            raise
+        else:
+            # Only after a successful forward: KV slots for this step exist.
+            if not dummy_run:
+                state = self.execute_model_state
+                self.dfx.note_kv_block_writes(
+                    scheduler_output,
+                    input_batch=getattr(state, "input_batch", None),
+                )
         finally:
             # dummy/capture must not consume the pending dump-forward window.
             self.dfx.finalize_dump_data(dump=not dummy_run)
-            if not dummy_run:
-                self.dfx.note_kv_block_writes(scheduler_output)
+            if dummy_run:
+                self._dfx_scheduler_output = None
 
         state = self.execute_model_state
         if (
@@ -344,15 +394,65 @@ class NPUModelRunner(GPUModelRunner):
 
         return output
 
+    def sample(self, hidden_states, input_batch, grammar_output):
+        """Delegate to upstream ``sample``; optionally wrap ``compute_logits`` for DFX.
+
+        When ``logits_finite`` / ``position_alignment`` are enabled **and**
+        anomaly detection is not gated off this step, temporarily wrap
+        ``model.compute_logits`` so ``check_before_sample`` runs on the
+        returned logits (still before grammar ``-inf``). Avoids copying the
+        upstream ``sample()`` body. No-op when detectors are off or the
+        detection gate skips (wrong rank / dump busy / no detector).
+        """
+        if self._dfx_need_pre_sample_hook():
+            with _dfx_wrap_compute_logits_for_pre_sample(self, input_batch):
+                return super().sample(hidden_states, input_batch, grammar_output)
+        return super().sample(hidden_states, input_batch, grammar_output)
+
+    def _dfx_need_pre_sample_hook(self) -> bool:
+        """True when pre-sample wrap is useful this call (detector on + gate open)."""
+        cfg = getattr(self.dfx, "dfx_config", None)
+        if cfg is None:
+            return False
+        if not (
+            bool(cfg.detector_get("logits_finite", "enabled", False))
+            or bool(cfg.detector_get("position_alignment", "enabled", False))
+        ):
+            return False
+        dumper = getattr(self.dfx, "dumper", None)
+        can = getattr(dumper, "can_run_anomaly_detection", None)
+        return not (callable(can) and not bool(can()))
+
+    def _dfx_check_before_sample(self, logits: torch.Tensor, input_batch: Any) -> None:
+        so = self._dfx_scheduler_output
+        positions = getattr(input_batch, "positions", None)
+        total = 0
+        if so is not None:
+            total = int(getattr(so, "total_num_scheduled_tokens", 0) or 0)
+        if total <= 0:
+            total = int(getattr(input_batch, "num_tokens", 0) or 0)
+        self.dfx.check_before_sample(
+            scheduler_output=so,
+            logits=logits,
+            positions=positions,
+            total_scheduled_tokens=total,
+            logits_indices=getattr(input_batch, "logits_indices", None),
+            input_batch=input_batch,
+        )
+
     def sample_tokens(self, grammar_output=None):
         finished_req_ids = None
-        if self.execute_model_state is not None:
-            finished_req_ids = self.execute_model_state.finished_req_ids
+        state = self.execute_model_state
+        if state is not None:
+            finished_req_ids = getattr(state, "finished_req_ids", None)
 
         # TokenLogprobDetector needs top-k logprobs even when the client
         # did not set sampling_params.logprobs.
         self.dfx.ensure_logprobs_for_detection()
-        output = super().sample_tokens(grammar_output)
+        try:
+            output = super().sample_tokens(grammar_output)
+        finally:
+            self._dfx_scheduler_output = None
         self.dfx.mark_finished(finished_req_ids)
 
         if isinstance(output, AsyncOutput):
@@ -429,7 +529,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
 
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 

@@ -131,6 +131,13 @@ class AscendConfig:
             )
         from vllm_ascend.dfx.runtime_config import DfxRuntimeConfig
 
+        raw_dfx_overlay = additional_config.get("dfx_config")
+        if raw_dfx_overlay is not None and not isinstance(raw_dfx_overlay, dict):
+            raise ValueError(
+                f"additional_config.dfx_config must be a dict (same schema as DFX JSON), "
+                f"got {type(raw_dfx_overlay).__name__}."
+            )
+
         # Do not persist here: API / EngineCore / every worker would race the same
         # JSON. Worker ``DfxProcessor`` calls ``ensure_persisted()`` on the leader.
         self.dfx_config = DfxRuntimeConfig(
@@ -139,6 +146,7 @@ class AscendConfig:
             reload_interval_seconds=self.dfx_config_reload_interval,
             ensure_file=False,
             msprobe_config_path=self.dump_config_path,
+            startup_overlay=raw_dfx_overlay,
         )
         # Path / hot-reload / persisted flags already logged by DfxRuntimeConfig.
         # Apply ascend_log immediately (API/EngineCore and workers). Workers also

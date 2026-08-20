@@ -148,9 +148,14 @@ def test_anomaly_check_skip_when_dump_pending(tmp_path):
     with patch("vllm_ascend.dfx.dumper.core.anomaly_check_rank_skip_reason", return_value=None):
         dumper._pending_dump = True
         assert "pending_dump" in (dumper.anomaly_check_skip_reason() or "")
+        assert dumper.can_run_anomaly_detection() is False
+        # Same-step follow-on (block_kv): ignore dump-busy.
+        assert dumper.can_run_anomaly_detection(ignore_dump_busy=True) is True
+        assert dumper.anomaly_check_skip_reason(ignore_dump_busy=True) is None
         dumper._pending_dump = False
         dumper._msprobe_dump_active = True
         assert "already active" in (dumper.anomaly_check_skip_reason() or "")
+        assert dumper.can_run_anomaly_detection(ignore_dump_busy=True) is True
 
 
 def test_manual_trigger_manager_paths(tmp_path):

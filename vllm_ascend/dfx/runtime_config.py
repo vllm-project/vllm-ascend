@@ -177,6 +177,20 @@ _DEFAULTS: dict[str, Any] = {
             # Token ids skipped for the content window (e.g. punctuation fillers).
             "ignore_token_ids": [],
         },
+        # KV block write integrity (uses KvBlockMetaTracker; no msprobe).
+        "block_kv": {
+            "enabled": False,
+            "check_wave_regression": True,
+            "check_same_wave_writer": True,
+        },
+        # 1-D position_ids alignment for newly scheduled tokens (no msprobe).
+        "position_alignment": {
+            "enabled": False,
+        },
+        # Pre-sample logits NaN/Inf on sampling rows (no msprobe; ill_type=nan).
+        "logits_finite": {
+            "enabled": False,
+        },
     },
     # Detect-time InputFilterManager (+ one-shot prompt print for authoring).
     "input_filter": {
@@ -417,6 +431,7 @@ class DfxRuntimeConfig:
         sync_mode: str | None = None,
         reload_interval_seconds: float | int | None = None,
         msprobe_config_path: str | None = None,
+        startup_overlay: dict[str, Any] | None = None,
     ) -> None:
         # None → default ``<cwd>/dfx/config/dfx_config.json`` (not an "explicit" path).
         self._explicit_config_path = config_path is not None
@@ -444,6 +459,11 @@ class DfxRuntimeConfig:
         self._bg_thread: threading.Thread | None = None
         # Seed into bootstrap merge when dump.msprobe_config_path is still null.
         self._startup_msprobe_config_path = (str(msprobe_config_path).strip() if msprobe_config_path else None) or None
+        # ``additional_config.dfx_config`` (same schema as JSON file); applied once
+        # at bootstrap after defaults/file. Not re-applied on hot-reload.
+        if startup_overlay is not None and not isinstance(startup_overlay, dict):
+            raise ValueError(f"additional_config.dfx_config must be a dict, got {type(startup_overlay).__name__}.")
+        self._startup_overlay = deepcopy(startup_overlay) if startup_overlay else None
 
         # In-memory merge always. ``ensure_file=True`` persists immediately (tests /
         # rare callers). Production AscendConfig uses False; worker leader calls
@@ -498,6 +518,7 @@ class DfxRuntimeConfig:
         - No explicit ``dfx_config_path``: **overwrite** default-path JSON
           with ``_DEFAULTS`` only (ignore prior file on that path).
         - Explicit path: ``_DEFAULTS ← JSON`` (user-owned file).
+        - Then ``← additional_config.dfx_config`` overlay (same schema), if set.
         Missing keys always come from ``_DEFAULTS``.
         """
         loaded = _normalize_config_sections(loaded) if loaded else loaded
@@ -507,6 +528,19 @@ class DfxRuntimeConfig:
             merged = deepcopy(_DEFAULTS)
         else:
             merged = _deep_merge(_DEFAULTS, loaded)
+        if self._startup_overlay:
+            overlay = _normalize_config_sections(deepcopy(self._startup_overlay))
+            # Startup path/interval still win over overlay copies of those keys.
+            overlay.pop("reload_interval_seconds", None)
+            pre = deepcopy(merged)
+            merged = _deep_merge(merged, overlay)
+            overlay_changes = _leaf_changes(pre, merged)
+            if overlay_changes:
+                logger.info(
+                    "[DFX runtime_config] applied additional_config.dfx_config overlay (%d keys) %s",
+                    len(overlay_changes),
+                    "; ".join(overlay_changes[:12]) + (" ..." if len(overlay_changes) > 12 else ""),
+                )
         if self._ctor_sync_mode is not None:
             merged["sync_mode"] = self._ctor_sync_mode
         # Persist startup hot-reload interval for visibility (runtime gate is still
@@ -605,33 +639,75 @@ class DfxRuntimeConfig:
         merged: dict[str, Any],
         loaded: dict[str, Any] | None,
     ) -> None:
-        """Seed DFX dump switches from msprobe ``dump_enable`` (bootstrap only).
+        """Align / seed DFX dump switches from msprobe ``dump_enable`` (bootstrap).
 
-        When effective dump_enable is true (including omitted), set
-        ``dump.enabled`` and ``dump.manual_trigger`` unless the user JSON
-        already defined those keys. Does not enable detectors or change
-        ``max_times``.
+        - If the user **explicitly** set ``dump.enabled`` (DFX JSON and/or
+          ``additional_config.dfx_config``) to a value that disagrees with the
+          effective msprobe ``dump_enable``, raise ``ValueError`` and abort
+          startup (do not silently prefer one side).
+        - If ``dump.enabled`` was omitted and msprobe dump_enable is effectively
+          true (including omitted key), seed ``dump.enabled`` and
+          ``dump.manual_trigger`` unless those keys were already set by the user.
         """
         dump = merged.setdefault("dump", {})
         path = dump.get("msprobe_config_path")
         if not (isinstance(path, str) and path.strip()):
             path = self._startup_msprobe_config_path
-        effective = self._read_msprobe_dump_enable_effective(path if isinstance(path, str) else None)
+        path_s = path.strip() if isinstance(path, str) else None
+        effective = self._read_msprobe_dump_enable_effective(path_s)
+        user_enabled = self._user_explicit_dump_enabled(loaded, self._startup_overlay)
+
+        if user_enabled is not None and effective is not None and bool(user_enabled) != bool(effective):
+            raise ValueError(
+                "Conflicting dump enable at startup: "
+                f"DFX dump.enabled={bool(user_enabled)} vs "
+                f"msprobe dump_enable={bool(effective)} "
+                f"(msprobe path={path_s!r}). "
+                "Align both values, or omit DFX dump.enabled to inherit from msprobe."
+            )
+
         if effective is not True:
             return
         seeded: list[str] = []
-        if self._dump_omits_key(loaded, "enabled"):
+        if user_enabled is None:
             dump["enabled"] = True
             seeded.append("dump.enabled=true")
-        if self._dump_omits_key(loaded, "manual_trigger"):
+        # manual_trigger: seed only when neither file nor overlay set the key.
+        if self._dump_omits_key(loaded, "manual_trigger") and self._dump_omits_key(
+            self._startup_overlay, "manual_trigger"
+        ):
             dump["manual_trigger"] = True
             seeded.append("dump.manual_trigger=true")
         if seeded:
             logger.info(
                 "[DFX runtime_config] seeded from msprobe dump_enable path=%s [%s]",
-                path,
+                path_s,
                 ", ".join(seeded),
             )
+
+    @staticmethod
+    def _user_explicit_dump_enabled(
+        loaded: dict[str, Any] | None,
+        overlay: dict[str, Any] | None,
+    ) -> bool | None:
+        """User-specified ``dump.enabled`` from file and/or overlay; overlay wins.
+
+        ``None`` means the key was omitted in both sources (eligible for seed).
+        """
+        file_val = DfxRuntimeConfig._explicit_dump_bool(loaded, "enabled")
+        overlay_val = DfxRuntimeConfig._explicit_dump_bool(overlay, "enabled")
+        if overlay_val is not None:
+            return overlay_val
+        return file_val
+
+    @staticmethod
+    def _explicit_dump_bool(data: dict[str, Any] | None, key: str) -> bool | None:
+        if not isinstance(data, dict):
+            return None
+        dump = data.get("dump")
+        if not isinstance(dump, dict) or key not in dump:
+            return None
+        return bool(dump[key])
 
     def _write_data_unlocked(self, data: dict[str, Any]) -> None:
         """Atomic write; caller must hold config lock / own the path."""
@@ -850,6 +926,9 @@ class DfxRuntimeConfig:
         "token_logprob",
         "output_substring",
         "token_repeat",
+        "block_kv",
+        "position_alignment",
+        "logits_finite",
     )
     # Allowed keys under ``dump`` (reject typos such as legacy dump_once).
     DUMP_KEYS: frozenset[str] = frozenset(_DEFAULTS["dump"])
@@ -877,6 +956,12 @@ class DfxRuntimeConfig:
             names.append("output_substring")
         if bool(self.detector_get("token_repeat", "enabled", False)):
             names.append("token_repeat")
+        if bool(self.detector_get("block_kv", "enabled", False)):
+            names.append("block_kv")
+        if bool(self.detector_get("position_alignment", "enabled", False)):
+            names.append("position")
+        if bool(self.detector_get("logits_finite", "enabled", False)):
+            names.append("logits_finite")
         dump_on = self.dump_enabled()
         max_times = self.dump_max_times()
         if names and dump_on and max_times > 0:

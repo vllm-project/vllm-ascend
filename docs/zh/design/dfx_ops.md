@@ -13,6 +13,22 @@ vllm serve <model> --additional-config '{
 }'
 ```
 
+也可在 **不改 JSON 文件** 时，用与 DFX JSON **相同结构** 的 `additional_config.dfx_config` 在启动时开 detector：
+
+```bash
+vllm serve <model> --additional-config '{
+  "dfx_config": {
+    "detector": {
+      "block_kv": { "enabled": true },
+      "logits_finite": { "enabled": true }
+    },
+    "dump": { "enabled": false }
+  }
+}'
+```
+
+合并顺序：`defaults ← dfx_config_path（显式路径时）← additional_config.dfx_config`。热更只重读 JSON，不再套一层 overlay；leader 落盘后文件里会带上启动 overlay 的结果。
+
 | 项 | 说明 |
 |----|------|
 | `dfx_config_reload_interval > 0` | **必须**，否则改 JSON / `manual_trigger` 不生效 |
@@ -31,7 +47,7 @@ vllm serve <model> --additional-config '{
 | 字段 | 作用 |
 |------|------|
 | `dump.msprobe_config_path` | 当前生效的 msprobe JSON；bootstrap 从 `dump_config_path`/`dump_config` 写入。改路径 → 下一拍热更 **重建 debugger** |
-| `dump.enabled` / `dump.manual_trigger`（bootstrap seed） | **path seed 之外**：若用户 JSON **未写**这两键，且 msprobe `dump_enable` 为 true 或缺省（当开），bootstrap 会 seed `enabled=true` + `manual_trigger=true`。显式 DFX 键不覆盖；文件不可读或 `dump_enable=false` 不 seed。不自动开 detector。 |
+| `dump.enabled` / `dump.manual_trigger`（bootstrap seed） | **path seed 之外**：若用户 JSON / `additional_config.dfx_config` **未写** `dump.enabled`，且 msprobe `dump_enable` 为 true 或缺省（当开），bootstrap 会 seed `enabled=true` +（若也未写）`manual_trigger=true`。若用户**显式**写了 `dump.enabled` 且与 msprobe `dump_enable` **不一致** → **启动报错退出**（不静默覆盖）。`dump_enable=false` 且 DFX 未写 `enabled` 时不 seed。不自动开 detector。 |
 | `dump.reload_msprobe` | 一次性：`true` → 用当前路径重建 debugger，然后清回 `false`（同路径改算子名单时用） |
 
 ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只改磁盘 msprobe 文件、两个字段都不变 → **不会**自动重建。
@@ -78,6 +94,7 @@ ACLGraph：重建可能采空，深度改配置仍建议 **重启 worker**。只
 - `dump.enabled=true` 且无 detector：合法；auto 不会触发；可用 `manual_trigger`（日志 warn）。
 - `max_times: 0`：不 auto-arm dump；detect / `manual_trigger` 仍可。
 - token 检测开启后 worker 会强制 top-k logprobs，请求侧可不设 `logprobs`。
+- **`logits_finite` / `position_alignment`（默认关）**：打开后每个 sample 步有一次 device→CPU 同步（`.item()`），会拉长 `sample_tokens`。只排查时开。`position_alignment` 仅 1-D 文本 RoPE；M-RoPE / 多模态会跳过。`block_kv.check_same_wave_writer` 只检查本 step **写入区间** 的 block，不含未写入的共享前缀。
 - **输出关键词**（`detector.output_substring.enabled`）：`patterns` 可混用字符串与 token id 列表，例如 `["ERR", [1,2,3]]`。热更后日志打印每条 pattern 的 text↔token_ids；默认**子序列**匹配（输出任意位置），设 `match_prefix: true` 改为**前缀**匹配（从输出开头）；命中后该 req 不再检；report 含 `matched_text` / `matched_token_ids` / `match_mode`（`prefix` / `subsequence`）。
 - **局部重读**（`detector.token_repeat.enabled`）：**不**要 logprobs / msprobe。对累计 output 做滑窗：每新 token 的 score = 它在先前 `window` 个 content token 里出现的次数，`repeat_sum` = 最近 `window` 个 score 之和；`repeat_sum > repeat_sum_threshold`（且过 `min_tokens` warmup、满足 `consecutive_hits`）则告警。与 `output_substring` 同读 `RequestIoSnapshotManager`（含 speculative accepted）。默认 `window=32` / `threshold=64` / `min_tokens=32`；`ignore_token_ids` 可跳过标点等 filler。日志：`[Anomaly token_repeat]`；report 含 `repeat_sum` / `window` / `recent_token_ids`。详见 [anomaly_detection_design.md](./anomaly_detection_design.md) §5。
 

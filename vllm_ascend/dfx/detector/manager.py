@@ -29,7 +29,10 @@ from typing import TYPE_CHECKING, Any
 
 from vllm_ascend.dfx.detector.alert import AnomalyAlert
 from vllm_ascend.dfx.detector.base import AnomalyDetector
+from vllm_ascend.dfx.detector.block_kv import BlockKvDetector
+from vllm_ascend.dfx.detector.logits_finite import LogitsFiniteDetector
 from vllm_ascend.dfx.detector.output_substring import OutputSubstringDetector
+from vllm_ascend.dfx.detector.position_alignment import PositionAlignmentDetector
 from vllm_ascend.dfx.detector.registry import DetectorRegistry
 from vllm_ascend.dfx.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.dfx.detector.token_logprob import TokenLogprobDetector
@@ -48,7 +51,8 @@ class DetectorManager:
     """Owns detectors and exposes stage hooks only.
 
     Callers (``DfxProcessor`` / runners) use ``check_after_spec`` /
-    ``check_after_sample`` / ``clear_finished`` (reap path) only.
+    ``check_before_sample`` / ``check_after_sample`` / ``check_kv_block_writes`` /
+    ``clear_finished`` (reap path) only.
     Concrete detectors stay private (``_spec_det`` & co.); ``get`` exists solely
     for alert routing in ``DfxProcessor._handle_alert``.
     """
@@ -88,6 +92,18 @@ class DetectorManager:
             dfx_config=dfx_config,
             runner=runner,
         )
+        self._block_kv_det = BlockKvDetector(
+            dfx_config=dfx_config,
+            runner=runner,
+        )
+        self._position_det = PositionAlignmentDetector(
+            dfx_config=dfx_config,
+            runner=runner,
+        )
+        self._logits_finite_det = LogitsFiniteDetector(
+            dfx_config=dfx_config,
+            runner=runner,
+        )
         # Internal ordered registry: iterate for clear_finished; not public.
         self._registry = DetectorRegistry()
         for det in (
@@ -95,6 +111,9 @@ class DetectorManager:
             self._token_det,
             self._output_substring_det,
             self._token_repeat_det,
+            self._block_kv_det,
+            self._position_det,
+            self._logits_finite_det,
         ):
             self._registry.register(det)
         # stop_after_alert flags live on RequestDfxStore (RequestDfxState).
@@ -138,23 +157,59 @@ class DetectorManager:
         ``token_logprob`` needs msprobe; if missing, force ``enabled=false`` and
         persist on the JSON writer. Must run on every rank (including early PP
         writers that never sample), not only on the detect / sample path.
+        Also refresh the newer native detectors so hot-reload flips take effect.
         """
         self._token_det.refresh_from_config()
+        self._block_kv_det.refresh_from_config()
+        self._position_det.refresh_from_config()
+        self._logits_finite_det.refresh_from_config()
+        # Spec / substring / repeat also pull knobs from JSON on enable flips.
+        self._spec_det.refresh_from_config()
+        self._output_substring_det.refresh_from_config()
+        self._token_repeat_det.refresh_from_config()
 
     # ---- detection gating -------------------------------------------------
 
-    def _gated(self, stage: str) -> bool:
+    def _gated(self, stage: str, *, ignore_dump_busy: bool = False) -> bool:
         """True when anomaly detection is gated off this step; logs skip reason once.
 
-        ``stage`` is a short tag (``after_spec`` / ``after_sample``) for the
-        once-per-process skip log. Gate checks live here so callers never
+        ``stage`` is a short tag (``after_spec`` / ``after_sample`` / ``kv_block``)
+        for the once-per-process skip log. Gate checks live here so callers never
         re-implement them per hook.
+
+        ``ignore_dump_busy``: still run when pending/active dump (same-step
+        follow-on detectors such as block_kv after logits/position already armed).
         """
-        if self._detection_gate is None or self._detection_gate():
+        if self._detection_gate is None:
             return False
-        reason = self._detection_skip_reason() if self._detection_skip_reason is not None else None
-        # Once per process on TP0 only: default-off / rank gate must not 2s-flood,
-        # and must not spam every TP rank with the same skip reason.
+
+        def _call_gate() -> bool:
+            try:
+                return bool(self._detection_gate(ignore_dump_busy=ignore_dump_busy))  # type: ignore[misc]
+            except TypeError:
+                if not ignore_dump_busy:
+                    return bool(self._detection_gate())
+                # Legacy gate without kwarg: treat dump-busy as not gated.
+                if self._detection_skip_reason is not None:
+                    try:
+                        reason = self._detection_skip_reason()
+                    except TypeError:
+                        reason = None
+                    if reason in (
+                        "pending_dump already armed",
+                        "msprobe dump already active",
+                    ):
+                        return True
+                return bool(self._detection_gate())
+
+        if _call_gate():
+            return False
+        reason = None
+        if self._detection_skip_reason is not None:
+            try:
+                reason = self._detection_skip_reason(ignore_dump_busy=ignore_dump_busy)  # type: ignore[misc]
+            except TypeError:
+                reason = self._detection_skip_reason()
         if reason and int(getattr(self._runner, "tp_rank", 0)) == 0:
             logger.info_once(
                 "[Anomaly detect short] skip gate (%s): %s (any_detector=%s dump.enabled=%s)",
@@ -282,6 +337,74 @@ class DetectorManager:
                 skip_req_ids=skip,
             )
         )
+        if skip is not None:
+            self._mark_alerted(alerts)
+        return alerts
+
+    def check_before_sample(
+        self,
+        *,
+        scheduler_output: Any,
+        logits: Any,
+        positions: Any = None,
+        total_scheduled_tokens: int = 0,
+        logits_indices: Any = None,
+        input_batch: Any = None,
+    ) -> list[AnomalyAlert]:
+        """Run pre-sample detectors (logits finite, then position alignment).
+
+        With ``stop_after_alert``, a req that alerts in logits is marked before
+        position runs in the same call, so the same step does not double-report.
+        """
+        if self._gated("before_sample"):
+            return []
+        stop = self._stop_after_alert()
+        skip = RequestDfxStore.get().stopped_req_ids() if stop else None
+        alerts: list[AnomalyAlert] = []
+        logits_alerts: list[AnomalyAlert] = []
+        for alert in self._logits_finite_det.check_all(
+            logits=logits,
+            logits_indices=logits_indices,
+            input_batch=input_batch,
+        ):
+            if skip is not None and alert.req_id in skip:
+                continue
+            logits_alerts.append(alert)
+            alerts.append(alert)
+        if stop and logits_alerts:
+            self._mark_alerted(logits_alerts)
+            skip = RequestDfxStore.get().stopped_req_ids()
+        for alert in self._position_det.check_all(
+            scheduler_output=scheduler_output,
+            positions=positions,
+            total_scheduled=total_scheduled_tokens,
+            input_batch=input_batch,
+        ):
+            if skip is not None and alert.req_id in skip:
+                continue
+            alerts.append(alert)
+        if stop:
+            # Position-only hits (logits already marked above).
+            self._mark_alerted(alerts)
+        return alerts
+
+    def check_kv_block_writes(
+        self,
+        req_id: str,
+        block_ids: list[int],
+        wave: int,
+    ) -> list[AnomalyAlert]:
+        """Run block KV integrity checks before ``record_writes``.
+
+        Ignores dump-busy gate so same-step pending dump (armed by
+        logits/position) does not skip KV checks.
+        """
+        if self._gated("kv_block", ignore_dump_busy=True):
+            return []
+        skip = RequestDfxStore.get().stopped_req_ids() if self._stop_after_alert() else None
+        if skip is not None and req_id in skip:
+            return []
+        alerts = self._block_kv_det.check_writes(req_id, block_ids, wave)
         if skip is not None:
             self._mark_alerted(alerts)
         return alerts

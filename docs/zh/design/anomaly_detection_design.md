@@ -288,8 +288,8 @@ check_after_sample
             └─ 命中 → AnomalyAlert(anomaly_type="token_repeat", ill_type=REPEAT)
 ```
 
-- **为何不吃本步 `sampled_token_ids`  alone**：MTP / 投机下本步 sample 行与「实际 accepted + 累计 output」可能不一致；与 substring 同流才能覆盖 spec 已写入的 id。
-- `append_output` 对**连续相同 chunk** 去重（spec + sample 同一步误写两次时不双计）；检测侧游标按累计长度推进。
+- **为何不吃本步 `sampled_token_ids` alone**：TokenRepeat / OutputSubstring 要看**跨步累计**流（含此前各步 accepted tokens），不能只看本 step 一行；manager 在 `check_after_sample` **单次** `append_batch` 后再以 `sampled_token_ids=None` 读累计 IO。
+- **MTP / async**：accepted tokens 只由 `check_after_sample` 写入（`check_after_spec` 不再 append）。`append_output` 对连续相同 chunk 的同波去重仍保留作兜底；检测侧游标按累计长度推进。
 
 ### 5.4 Report 字段
 
@@ -306,7 +306,72 @@ check_after_sample
 
 `ill_type` 固定为 `ILL_TYPE_REPEAT`（与 msprobe repetition 类别码一致，便于 report 汇总）。
 
-## 6. 代码落点
+## 6. BlockKv（KV block 写入完整性）
+
+实现类：`vllm_ascend/dfx/detector/block_kv.py`
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `detector.block_kv.enabled` | `false` | KV block 写入 wave / writer 一致性检测 |
+| `detector.block_kv.check_wave_regression` | `true` | 同一 physical block 的 `last_write_wave` 不得回退 |
+| `detector.block_kv.check_same_wave_writer` | `true` | 同一 wave 内同一 block 不得被两个 req 写入 |
+
+- 钩子：`DfxProcessor.note_kv_block_writes` → `DetectorManager.check_kv_block_writes`（在 `KvBlockMetaTracker.record_writes` **之前** 预检）。
+- V2：`note_kv_block_writes` 仅在 `execute_model` **成功返回**后调用（不在 `finally`），避免失败 forward 用 stale `execute_model_state` 误记账；`finalize_dump_data` 仍在 `finally`。
+- **仅 `kv_cache_group=0`**：只检查第一组 KV block table（纯文本 FullAttention 通常只有一组）。Hybrid / Sliding Window / Mamba / draft 等多 group 模型，group≥1 上的写冲突 **不会** 被检测；需要时再扩展为按 group 循环 + `(group, block_id)` tracker key。
+- **写入区间**：`touched_block_ids` 只含 `[num_computed_before, computed+scheduled)` 映射到的 physical block。共享前缀若本 step 未写入，不应进入 `touched`。写范围超出 block table 时返回空列表（**不**回退到表尾，以免把前缀块当成写入）。`num_computed_before` 读不到时 **跳过该 req**（debug 日志），不告警。
+- `check_same_wave_writer`：同一 wave 内两个 req 写入**同一** touched block 才报；decode 通常只碰尾块，长 prefill 跨多 block 时更常见。
+- **同 step pending dump**：logits/position 若已 arm dump，`can_run_anomaly_detection` 默认会因 dump-busy 跳过后续 detect；`check_kv_block_writes` 使用 `ignore_dump_busy=True`，仍执行检测（report 照写；二次 arm dump 为 no-op）。
+- **同 step stop_after_alert**：`check_before_sample` 内 logits 告警后立即 mark，再跑 position；随后 `check_kv_block_writes` 也会跳过已停 req。
+- **多 block 一份 report**：同一次 `check_writes` 若有多个 block 违规，合并为 **一条** `AnomalyAlert`，`detail.violations=[...]` + `num_violations`。
+- **告警必带上次写者（仅 block_kv，且仅出错 block）**：`violations[].prev_writer_req_id` / `new_writer_req_id`，以及 `detail.violated_blocks`（**只含** `violations` 里的 block，不含该请求其它 block）。仅此类忽略 `report.block_last_writer`；其它 anomaly 与全量 `blocks[]` 仍受 `report.block_last_*` 控制。
+- 不依赖 `report.block_last_*`；detector 开时会仍更新 tracker（与 report 字段独立）。
+- **msprobe**：纯 DFX 原生检测；命中后与其它 detector 相同：`AnomalyAlert` → `Dumper.handle_anomaly_alert`（`dump.enabled=true` 时在后续 forward 采 msprobe 张量）。不调用 ILLDetector。
+
+## 7. PositionAlignment（position_ids 对齐）
+
+实现类：`vllm_ascend/dfx/detector/position_alignment.py`
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `detector.position_alignment.enabled` | `false` | 本 step 新调度 token 的 1-D `position_ids` 连续性 / 起点对齐 |
+
+- 钩子：`check_before_sample`（v1：`sample_tokens` 内、grammar bitmask **之前**；v2：临时 wrap `model.compute_logits`，在返回 logits 时调用 `check_before_sample`，仍位于上游 `sample()` 的 grammar / sampler **之前**）。
+- 期望：每个 req 本 step 的 positions 为 `[num_computed_before, num_computed_before+1, …]`，其中 `num_computed_before` 是 **本 wave 执行前** 已计算 token 数（与 runner 建 `positions = computed + offset` 一致）。**不要**用 `computed - scheduled` 猜测。读不到 computed（batch / requests 都没有）则 **跳过该 req**；`0` 是合法首 prefill，不当成缺失。优先 `input_batch.num_computed_tokens_np|cpu`。
+- 开启后每个 sample 步做 **一次** device reduce + `.item()` 同步；仅 mismatch 时再把 positions D2H 写 report。默认关。
+- V2：`ExecuteModelState` 无 logits/scheduler 字段；Ascend **override** `sample()` 为「可选 wrap `compute_logits` + `super().sample()`」，不二次 LM head、不复制上游采样分支。仅 `logits_finite` / `position_alignment` 开启 **且** `can_run_anomaly_detection()` 为真时才替换方法，`finally` 还原，避免 gated 步（错 rank / dump busy）仍包一层开销，也不影响 prompt-logprobs / draft。
+- 非 1-D `positions`（M-RoPE / 多模态）直接跳过，不告警。默认关闭；仅文本 1-D RoPE 场景启用。
+- **msprobe**：原生检测；异常时 report 带 `expected_positions` / `actual_positions` 摘要；可选 dump。
+
+## 8. LogitsFinite（采样前 logits 有限性）
+
+实现类：`vllm_ascend/dfx/detector/logits_finite.py`
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `detector.logits_finite.enabled` | `false` | 采样行 logits 上 GPU `isfinite` reduce（NaN/Inf） |
+
+- 钩子：同 `check_before_sample`（须在 **grammar bitmask 之前**，避免把合法 `-inf` 当成异常）；只扫 **采样行** `[num_sample_rows, vocab]`，不全网、不全量 D2H。
+- 开启后每个 sample 步 `isfinite.all().item()` **一次** NPU→CPU 同步（拉长 `sample_tokens`）。全 finite 时不再拷 vocab；仅异常行再 `tolist()` / `logits_indices.cpu()`。默认关，排查用。
+- **NaN 与 ±Inf**：`torch.isfinite` 均会命中。msprobe ILL 码表无独立 Inf 类型，report 的 `ill_type` 仍为 `4`（`nan`）；`detail.finite_kind` 区分 `nan` / `pos_inf` / `neg_inf`。
+- V2：见 §7（wrap `compute_logits` + `super().sample()`，复用已算 logits，不二次 LM head）。
+- report：`ill_type=4`（`nan`），与 `token_logprob.ill_nan` 类别码一致；前者看 **logits**，后者看 **top-k logprob**（msprobe ILLDetector）。
+- **msprobe**：不依赖 msprobe 包；若 `dump.enabled=true`，alert 后下一波 forward 由 msprobe `PrecisionDebugger` / `AclGraphDumper` 落盘（与 manual_trigger / auto dump 相同通路）。
+### msprobe 适配总表（全部 detector）
+
+| detector | 依赖 msprobe | 命中后 dump |
+|----------|-------------|-------------|
+| `token_logprob` | **是**（ILLDetector） | `dump.enabled` + quota/cooldown |
+| `spec_acceptance` | 否 | 同上 |
+| `output_substring` | 否 | 同上 |
+| `token_repeat` | 否 | 同上 |
+| `block_kv` | 否 | 同上 |
+| `position_alignment` | 否 | 同上 |
+| `logits_finite` | 否 | 同上 |
+
+共性：`detect-only`（`dump.enabled=false`）仅写 report；`detect+auto_dump` 需 `dump.enabled=true` 且 `max_times>0`（或 `manual_trigger`）。msprobe JSON `dump_enable` 由 DFX dumper 写/读；bootstrap 兼容见 `runtime_config` msprobe seed。
+
+## 9. 代码落点
 
 | 模块 | 说明 |
 |------|------|
@@ -317,15 +382,19 @@ check_after_sample
 | `vllm_ascend/dfx/detector/token_logprob.py` | token/logprob（ILLDetector） |
 | `vllm_ascend/dfx/detector/output_substring.py` | 输出子串命中 |
 | `vllm_ascend/dfx/detector/token_repeat.py` | 局部重读（滑窗 repeat_sum） |
+| `vllm_ascend/dfx/detector/block_kv.py` | KV block wave / writer 完整性 |
+| `vllm_ascend/dfx/detector/position_alignment.py` | position_ids 对齐 |
+| `vllm_ascend/dfx/detector/logits_finite.py` | 采样前 logits 有限性 |
 | `vllm_ascend/dfx/input_filters.py` | detect 输入过滤（`InputFilterManager`） |
 | `vllm_ascend/dfx/request_state.py` | `RequestDfxStore` / `RequestDfxState`：per-req 共享态；`mark_finished` + deferred `clear` |
 | `vllm_ascend/dfx/io_snapshot.py` | `RequestIoSnapshotManager`：report I/O 视图（normalize→Store + snapshot） |
 | `vllm_ascend/dfx/dumper/` | dump 生命周期、pending-OR（无检测转发） |
 | `vllm_ascend/dfx/report.py` | 短报告落盘 |
-| `vllm_ascend/worker/model_runner_v1.py` / `v2` | sync / async 调用点 |
+| `vllm_ascend/worker/model_runner_v1.py` / `v2` | sync / async 调用点；v2 wrap `compute_logits` + `super().sample()` |
+| `tests/ut/test_dfx_detectors_integrity.py` | detector 逻辑 + mock V1/V2 钩子；无真 NPU e2e |
 | `docs/source/user_guide/configuration/additional_config.md` | 用户配置表 |
 
-## 7. 相关文档
+## 10. 相关文档
 
 - 总览与配置：[dfx_design.md](./dfx_design.md)
 - 运维与排障：[dfx_ops.md](./dfx_ops.md)

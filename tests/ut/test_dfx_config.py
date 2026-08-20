@@ -36,6 +36,54 @@ def test_leaf_changes_reports_only_diffs():
     assert _leaf_changes(old, new) == ["dump.max_times: 0 -> 3"]
 
 
+def test_startup_overlay_dfx_config_enables_detectors(tmp_path: Path):
+    """additional_config.dfx_config uses the same schema as the JSON file."""
+    cfg = DfxRuntimeConfig(
+        tmp_path / "dfx_config.json",
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        startup_overlay={
+            "detector": {
+                "block_kv": {"enabled": True},
+                "logits_finite": {"enabled": True},
+            },
+            "dump": {"enabled": False},
+        },
+    )
+    assert cfg.detector_get("block_kv", "enabled", False) is True
+    assert cfg.detector_get("logits_finite", "enabled", False) is True
+    assert cfg.detector_get("position_alignment", "enabled", False) is False
+    assert cfg.dump_enabled() is False
+    assert cfg.any_detector_enabled() is True
+
+
+def test_startup_overlay_overrides_explicit_json(tmp_path: Path):
+    cfg_path = tmp_path / "dfx_config.json"
+    cfg_path.write_text(
+        json.dumps({"detector": {"block_kv": {"enabled": False}, "logits_finite": {"enabled": True}}}),
+        encoding="utf-8",
+    )
+    cfg = DfxRuntimeConfig(
+        cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        startup_overlay={"detector": {"block_kv": {"enabled": True}}},
+    )
+    assert cfg.detector_get("block_kv", "enabled", False) is True
+    # Unmentioned sections keep file values.
+    assert cfg.detector_get("logits_finite", "enabled", False) is True
+
+
+def test_startup_overlay_must_be_dict(tmp_path: Path):
+    with pytest.raises(ValueError, match="dfx_config must be a dict"):
+        DfxRuntimeConfig(
+            tmp_path / "dfx_config.json",
+            report_dir=tmp_path / "report",
+            ensure_file=True,
+            startup_overlay=["not", "a", "dict"],  # type: ignore[arg-type]
+        )
+
+
 def test_dfx_config_hot_reload_and_defaults(tmp_path: Path):
     cfg_path = tmp_path / "dfx_config.json"
     report_dir = tmp_path / "report"
@@ -125,18 +173,59 @@ def test_msprobe_dump_enable_false_does_not_seed(tmp_path: Path):
 
 
 def test_msprobe_dump_enable_respects_user_dump_enabled(tmp_path: Path):
+    """Explicit DFX dump.enabled that disagrees with msprobe must abort startup."""
     msprobe = tmp_path / "msprobe.json"
     msprobe.write_text(json.dumps({"dump_enable": True, "dump_path": str(tmp_path / "out")}), encoding="utf-8")
     cfg_path = tmp_path / "dfx_config.json"
     cfg_path.write_text(json.dumps({"dump": {"enabled": False, "manual_trigger": False}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="Conflicting dump enable"):
+        DfxRuntimeConfig(
+            cfg_path,
+            report_dir=tmp_path / "report",
+            ensure_file=True,
+            msprobe_config_path=str(msprobe),
+        )
+
+
+def test_msprobe_dump_enable_conflict_dfx_true_msprobe_false(tmp_path: Path):
+    msprobe = tmp_path / "msprobe.json"
+    msprobe.write_text(json.dumps({"dump_enable": False, "dump_path": str(tmp_path / "out")}), encoding="utf-8")
+    with pytest.raises(ValueError, match="Conflicting dump enable"):
+        DfxRuntimeConfig(
+            tmp_path / "dfx_config.json",
+            report_dir=tmp_path / "report",
+            ensure_file=True,
+            msprobe_config_path=str(msprobe),
+            startup_overlay={"dump": {"enabled": True}},
+        )
+
+
+def test_msprobe_dump_enable_aligned_explicit_ok(tmp_path: Path):
+    msprobe = tmp_path / "msprobe.json"
+    msprobe.write_text(json.dumps({"dump_enable": True, "dump_path": str(tmp_path / "out")}), encoding="utf-8")
     cfg = DfxRuntimeConfig(
-        cfg_path,
+        tmp_path / "dfx_config.json",
         report_dir=tmp_path / "report",
         ensure_file=True,
         msprobe_config_path=str(msprobe),
+        startup_overlay={"dump": {"enabled": True, "manual_trigger": False}},
     )
-    assert cfg.dump_enabled() is False
+    assert cfg.dump_enabled() is True
     assert cfg.manual_trigger() is False
+
+
+def test_overlay_dump_enabled_false_not_overwritten_by_msprobe_seed(tmp_path: Path):
+    """Overlay dump.enabled=false vs msprobe on → conflict error (not silent seed)."""
+    msprobe = tmp_path / "msprobe.json"
+    msprobe.write_text(json.dumps({"dump_enable": True, "dump_path": str(tmp_path / "out")}), encoding="utf-8")
+    with pytest.raises(ValueError, match="Conflicting dump enable"):
+        DfxRuntimeConfig(
+            tmp_path / "dfx_config.json",
+            report_dir=tmp_path / "report",
+            ensure_file=True,
+            msprobe_config_path=str(msprobe),
+            startup_overlay={"dump": {"enabled": False}},
+        )
 
 
 def test_msprobe_dump_enable_unreadable_path_does_not_seed(tmp_path: Path):

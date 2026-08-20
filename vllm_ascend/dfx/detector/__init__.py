@@ -15,9 +15,12 @@
 
 from vllm_ascend.dfx.detector.alert import AnomalyAlert
 from vllm_ascend.dfx.detector.base import AnomalyDetector
+from vllm_ascend.dfx.detector.block_kv import BlockKvDetector
 from vllm_ascend.dfx.detector.config_backed import ConfigBackedDetector
+from vllm_ascend.dfx.detector.logits_finite import LogitsFiniteDetector
 from vllm_ascend.dfx.detector.manager import DetectorManager
 from vllm_ascend.dfx.detector.output_substring import OutputSubstringDetector
+from vllm_ascend.dfx.detector.position_alignment import PositionAlignmentDetector
 from vllm_ascend.dfx.detector.registry import DetectorRegistry
 from vllm_ascend.dfx.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.dfx.detector.token_logprob import TokenLogprobDetector
@@ -26,10 +29,13 @@ from vllm_ascend.dfx.detector.token_repeat import TokenRepeatDetector
 __all__ = [
     "AnomalyAlert",
     "AnomalyDetector",
+    "BlockKvDetector",
     "ConfigBackedDetector",
     "DetectorManager",
     "DetectorRegistry",
+    "LogitsFiniteDetector",
     "OutputSubstringDetector",
+    "PositionAlignmentDetector",
     "SpecAcceptanceDetector",
     "TokenLogprobDetector",
     "TokenRepeatDetector",
