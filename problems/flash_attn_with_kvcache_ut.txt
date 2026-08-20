@@ -1,32 +1,20 @@
-MODE=sync python tests/standalone/fa3/test_fa3_graph_sync.py 
-[W820 09:45:32.501862108 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_multibatch.py 
+[W820 09:58:40.506169409 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C21 sync-structure   MODE=sync  kv=2048  nblk=16
+C22 multi-batch non-split   batch=4  seqlens=[512, 1024, 2048, 4096]
+    width=128  pool=128  max_block_needed=32
 ========================================================================
-[W820 09:45:37.821536186 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-  [mode=sync] FA3 -> manual_ref (implicit sync) between cells:
-    A identity   : diff = 0.000405
-    B reorder    : diff = 0.000351
-    C reversed   : diff = 0.000405
-    D swap       : diff = 0.000464
-    E identity   : diff = 0.000405
+[W820 09:58:45.823349673 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+------------------------------------------------------------------------
+per-batch max-abs-diff (FA3 non-split vs float32 ref):
+  batch 0  seqlen=  512  : 0.471888  <-- WRONG
+  batch 1  seqlen= 1024  : 0.419918  <-- WRONG
+  batch 2  seqlen= 2048  : 0.395184  <-- WRONG
+  batch 3  seqlen= 4096  : 0.353149  <-- WRONG
+  overall               : 0.471888
 ------------------------------------------------------------------------
 Read:
-  sync B large / nosync B small => inter-cell sync is the trigger.
-  both small                    => sync is NOT it; C15/C18 error was one-off.
-------------------------------------------------------------------------
-root@node-37-167:/home/code/vllm_ascend/ascend/zty/vllm-ascend# MODE=nosync python tests/standalone/fa3/test_fa3_graph_sync.py 
-[W820 09:46:30.019754560 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
-[import] FA3 loaded from flash_attn_npu_3
-========================================================================
-C21 sync-structure   MODE=nosync  kv=2048  nblk=16
-========================================================================
-[W820 09:46:36.293518809 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-  [mode=nosync] back-to-back FA3, no inter-cell sync:
-    B reorder     : diff = 0.000351
-------------------------------------------------------------------------
-Read:
-  sync B large / nosync B small => inter-cell sync is the trigger.
-  both small                    => sync is NOT it; C15/C18 error was one-off.
+  any batch LARGE => non-split multi-batch long-KV bug CONFIRMED.
+  all ~1e-4       => multi-batch non-split is fine; look elsewhere.
 ------------------------------------------------------------------------
