@@ -731,6 +731,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # running the CANN task-group update below would use DECODE data to update
         # those PREFILL handles, corrupting the prefill graph.  Skip it.
         if fa3_tensors is not None:
+            # FA3 is a plain torch op captured inside the aclgraph — it has no
+            # CANN task group, so unlike the CANN V1 path above (which records an
+            # event on update_stream that the graph waits on via
+            # graph_task_update_begin/end), the aclgraph replay does NOT wait for
+            # the copies we just issued on update_stream.  Without this wait the
+            # replay can read stale/partial cache_seqlens/block_table buffers,
+            # producing wrong decode output.  Make the current (replay) stream
+            # wait for the update stream so the next replay sees fresh buffers.
+            torch.npu.current_stream().wait_stream(update_stream)
             return
 
         if using_paged_attention(num_tokens, vllm_config):
