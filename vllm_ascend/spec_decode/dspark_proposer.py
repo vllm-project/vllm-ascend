@@ -13,6 +13,8 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
+from vllm_ascend.models.glm5_dspark import normalize_glm5_dspark_config
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
@@ -32,8 +34,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         device: torch.device,
         runner=None,
     ):
-        super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
+        normalize_glm5_dspark_config(vllm_config.speculative_config)
+        super().__init__(vllm_config, device, runner=runner)
         if vllm_config.speculative_config.draft_sample_method == "probabilistic":
             raise ValueError(
                 "DSpark probabilistic draft sampling is not supported on the v1 "
@@ -185,6 +188,13 @@ class AscendDSparkProposer(AscendDflashProposer):
             for attention_groups in attention_groups_list
             for attention_group in attention_groups.values()
         ]
+        if hasattr(self.model, "get_draft_rope_cos_sin_cache"):
+            cos_cache, sin_cache = self.model.get_draft_rope_cos_sin_cache()
+            for attn_group in self.draft_attn_groups:
+                for builder in attn_group.metadata_builders:
+                    if isinstance(builder, AscendMLAMetadataBuilder):
+                        builder.cos_cache = cos_cache
+                        builder.sin_cache = sin_cache
         self.kv_cache_gid = 0
         if not self.draft_attn_groups:
             raise RuntimeError(
