@@ -29,7 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD
+from vllm_ascend.utils import FP8_METHOD, _should_trans_nz, maybe_trans_nz
 
 from ..base import (
     AscendLinearScheme,
@@ -171,6 +171,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         layer.weight.data = layer._mxfp8_weight_buf
         layer.weight_scale.data = layer._mxfp8_scale_buf
+        if not getattr(layer, "_fused_preprocess_managed", False):
+            layer.weight.data = maybe_trans_nz(layer.weight.data, customize_dtype=torch.float8_e4m3fn)
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -317,8 +319,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         """Process weights after loading for MXFP8 inference.
 
         This method transforms weights for NPU MXFP8 computation:
-        - w13_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size)
-        - w2_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size)
+        - w13_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size) in FRACTAL_NZ
+        - w2_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size) in FRACTAL_NZ
         - w13_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
         - w2_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
 
@@ -346,10 +348,19 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        if _should_trans_nz(layer.w13_weight.data):
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data, customize_dtype=torch.float8_e4m3fn)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data, customize_dtype=torch.float8_e4m3fn)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+        else:
+            # NZ disabled: keep the pre-NZ non-contiguous transpose layout.
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -399,7 +410,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             orig_scale_shape = orig_shapes[scale_key]
 
             target_scale = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape).contiguous()
-            scale_tensor.data = scale_tensor.data.transpose(1, 2).view(orig_scale_shape)
+            scale_tensor.data = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape)
             scale_tensor.data.copy_(target_scale)
 
         _restore("w13_weight", "w13_weight_scale")
