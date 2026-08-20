@@ -236,6 +236,7 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `hybrid_min_batch_size` | int | `8` | Minimum request batch size before the hybrid policy considers profile-based dynamic K. Smaller batches use the full-width fast path when the confidence budget covers the physical K. |
 | `hybrid_acceptance_threshold` | float | `0.6` | Mean conditional acceptance threshold for holding the full-width path after a confidence probe. Must be in `[0, 1]`. |
 | `hybrid_probe_interval` | int | `16` | Number of held full-width steps before probing confidence and the hardware policy again. |
+| `hybrid_full_width_goodput_margin` | float | `0.0` | Extra relative goodput margin required before holding full width. The profile-selected dynamic K path is used when it is predicted to be better than full width; set a positive value to prefer full width within a tolerance. |
 
 **scheduler_config.short_request_first_config**
 
