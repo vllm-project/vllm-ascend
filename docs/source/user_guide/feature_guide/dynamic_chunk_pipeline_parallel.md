@@ -19,7 +19,7 @@ Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic chunking st
 
 - **PD disaggregation P node**: Enables CPP on the Prefiller node to optimize long-sequence prefill with Pipeline Parallelism. The Decoder node does not need CPP.
 - **Variable-length sequence serving**: PP does not introduce degradation on short sequences, and gains benefits through dynamic chunks on long sequences.
-- **Ultra-long sequence inference**: For sequences exceeding single-machine memory capacity (e.g., 1M tokens), dynamic chunking significantly reduces pipeline idle time.
+- **Long sequence inference**: For sequences exceeding single-machine memory capacity, dynamic chunking significantly reduces pipeline idle time.
 
 ## Supported Scenarios
 
