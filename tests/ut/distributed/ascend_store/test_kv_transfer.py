@@ -93,6 +93,23 @@ class FakeTokenDatabase:
         return keys, addrs, sizes
 
 
+class MaskedFakeTokenDatabase(FakeTokenDatabase):
+    def __init__(self, block_size=16, store_mask=None, load_mask=None):
+        super().__init__(block_size)
+        self._store_mask = store_mask
+        self._load_mask = load_mask
+        self.store_mask_calls = []
+        self.load_mask_calls = []
+
+    def store_mask(self, token_len, num_prompt_tokens=None):
+        self.store_mask_calls.append((token_len, num_prompt_tokens))
+        return self._store_mask
+
+    def load_mask(self, block_hashes, token_len):
+        self.load_mask_calls.append((block_hashes, token_len))
+        return self._load_mask
+
+
 class TestKVTransferThread(unittest.TestCase):
     def _make_thread(self, exists_result=None):
         store = FakeStore(exists_result or [])
@@ -186,6 +203,37 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(store.put_calls), 1)
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 2)
+
+    def test_handle_request_applies_store_mask_before_put(self):
+        store = FakeStore([0, 0])
+        db = MaskedFakeTokenDatabase(store_mask=([False, True, False, True],))
+        t = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+        )
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            current_event=None,
+            num_prompt_tokens=64,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        self.assertEqual(db.store_mask_calls, [(64, 64)])
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        self.assertTrue(keys[0].endswith("@k1"))
+        self.assertTrue(keys[1].endswith("@k3"))
 
     def test_handle_request_all_exist_no_put(self):
         t, store = self._make_thread([1, 1])
@@ -330,6 +378,33 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(len(store.get_calls), 1)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
+
+    def test_handle_request_applies_load_mask_before_get(self):
+        store = FakeStore()
+        db = MaskedFakeTokenDatabase(load_mask=([False, True],))
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        self.assertEqual(db.load_mask_calls, [([b"h0", b"h1"], 32)])
+        keys, _, _ = store.get_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys[0].endswith("@k1"))
 
 
 class TestKVCacheStoreLayerSendingThread(unittest.TestCase):

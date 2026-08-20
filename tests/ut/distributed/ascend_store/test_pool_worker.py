@@ -73,6 +73,27 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         result = cls.find_min_first_non_one_index(None, [])
         self.assertEqual(result, -1)
 
+    def test_external_coordinator_lookup_disables_eagle_drop(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_kv_cache_groups = 1
+        worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
+        worker.m_store = MagicMock()
+        worker.m_store.exists.return_value = [1]
+
+        key = MagicMock()
+        key.chunk_hash = "ab" * 32
+        key.to_string.return_value = "key"
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens.return_value = [(0, 128, key)]
+
+        hit = worker._lookup_with_coordinator(128, [b"h0"], [0], use_layerwise=False, include_all_ranks=False)
+
+        self.assertEqual(hit, 128)
+        worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
+        self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
+
 
 class TestKVPoolWorkerInit(unittest.TestCase):
     """Test KVPoolWorker initialization with mocked dependencies."""
@@ -516,6 +537,30 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
+
+    def test_start_load_kv_sync_uses_tail_block_id(self):
+        worker = self._make_worker()
+        worker.m_store.get = MagicMock()
+        worker.token_database.set_kv_caches_base_addr([1000])
+        worker.token_database.set_block_len([160])
+        worker.token_database.load_mask = MagicMock(return_value=([False, False, False, True],))
+
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=64, can_load=True, token_len=64)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[99],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            load_spec=load_spec,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        _, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(addrs, [[1000 + 99 * 160]])
+        self.assertEqual(sizes, [[160]])
 
     def test_start_load_kv_no_load(self):
         worker = self._make_worker()

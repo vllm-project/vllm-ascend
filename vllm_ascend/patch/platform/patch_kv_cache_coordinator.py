@@ -20,8 +20,18 @@ from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.patch.platform.patch_prefix_cache_retention import (
+    get_prefix_cache_retention_interval,
+)
 
 USE_MULTI_GROUPS_KV_CACHE = True
+
+
+def _compress_ratio(kv_cache_spec: KVCacheSpec) -> int:
+    kv_cache_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if isinstance(kv_cache_specs, dict):
+        return max((getattr(spec, "compress_ratio", 1) or 1) for spec in kv_cache_specs.values())
+    return getattr(kv_cache_spec, "compress_ratio", 1) or 1
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -65,11 +75,19 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             metrics_collector,
         )
 
-        # KV cache group indices that get the EAGLE last-block drop.
-        self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
-        # Conservatively fall back to flag all groups when no group is flagged.
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        has_compressed_group = any(
+            _compress_ratio(group.kv_cache_spec) > 1 for group in kv_cache_config.kv_cache_groups
+        )
+        if use_eagle and has_compressed_group:
+            # DSV4 local hits are aligned to compressed chunks (for example 16K).
+            # Dropping one c4/c128 chunk can erase the whole aligned hit.
+            self.eagle_group_ids: set[int] = set()
+        else:
+            self.eagle_group_ids = {
+                i for i, g in enumerate(kv_cache_config.kv_cache_groups) if getattr(g, "is_eagle_group", False)
+            }
+            if use_eagle and not self.eagle_group_ids:
+                self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
@@ -151,6 +169,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # NOTE: use 16k as the alignment tokens for model with compress ratio
         block_sizes = [self._logical_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
+        self.retention_interval = get_prefix_cache_retention_interval(self.kv_cache_config, self.lcm_block_size)
+
+    def cache_blocks(self, request, num_computed_tokens: int) -> None:
+        for manager in self.single_type_managers:
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                retention_interval=self.retention_interval,
+                alignment_tokens=self.lcm_block_size,
+                use_eagle=manager.kv_cache_group_id in self.eagle_group_ids,
+            )
 
     def find_longest_cache_hit(
         self,

@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -246,6 +248,33 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(need, 48)
         self.assertTrue(is_async)
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_get_num_new_matched_tokens_lookup_async_defers_then_reports(self, mock_client_cls):
+        """lookup_async returns (None, False) until ready, then the hit count."""
+        config = self._make_config(extra_config={"lookup_async": True})
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        self.assertTrue(scheduler.lookup_async)
+        mock_client = mock_client_cls.return_value
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.num_tokens = 64
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        # Lookup not ready -> defer.
+        mock_client.lookup.return_value = None
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (None, False))
+        self.assertNotIn("r1", scheduler.load_specs)
+        # The lookup was issued in non-blocking mode.
+        self.assertTrue(mock_client.lookup.call_args.kwargs["non_block"])
+
+        # Lookup ready with a hit -> report need_to_allocate.
+        mock_client.lookup.return_value = 48
+        need, _ = scheduler.get_num_new_matched_tokens(request, 0)
+        self.assertEqual(need, 48)
+        self.assertIn("r1", scheduler.load_specs)
+
 
 class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", block_size=16):
@@ -387,9 +416,86 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
 
         client = LookupKeyClient(config)
-        result = client.lookup(64, [b"\xaa\xbb"])
+        # Blocking lookup (non_block defaults to False) runs on the executor
+        # and returns the resolved hit length.
+        result = client.lookup("req0", 64, [b"\xaa\xbb"])
         self.assertEqual(result, 32)
         mock_socket.send_multipart.assert_called_once()
+        # Future is consumed on read.
+        self.assertNotIn("req0", client.futures)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_non_block_lookup_async(self, mock_zmq, mock_make_socket):
+        """Non-blocking lookup defers to the executor: None first, hit once
+        the Future resolves."""
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        # Hold the executor's lookup pending until we release the gate.
+        gate = threading.Event()
+
+        def gated_recv():
+            gate.wait()
+            return (7).to_bytes(4, "big")
+
+        mock_socket.recv.side_effect = gated_recv
+
+        client = LookupKeyClient(config)
+        # First query submits the lookup and returns None while in flight.
+        self.assertIsNone(client.lookup("req1", 64, [], non_block=True))
+        # Release the executor; a later poll returns the hit length.
+        gate.set()
+        deadline = time.monotonic() + 5.0
+        result = None
+        while time.monotonic() < deadline:
+            result = client.lookup("req1", 64, [], non_block=True)
+            if result is not None:
+                break
+            time.sleep(0.005)
+        self.assertEqual(result, 7)
+        # Future is consumed (popped) on read.
+        self.assertNotIn("req1", client.futures)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_discard_clears_state(self, mock_zmq, mock_make_socket):
+        """discard() drops an in-flight/completed lookup so it is not served
+        stale."""
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        gate = threading.Event()
+
+        def gated_recv():
+            gate.wait()
+            return (9).to_bytes(4, "big")
+
+        mock_socket.recv.side_effect = gated_recv
+
+        client = LookupKeyClient(config)
+        # Submit while gated so the call returns None and the Future stays in
+        # `futures` once it resolves.
+        self.assertIsNone(client.lookup("req2", 64, [], non_block=True))
+        gate.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if client.futures["req2"].done():
+                break
+            time.sleep(0.005)
+        # discard() drops the completed result before any lookup consumes it.
+        client.discard("req2")
+        self.assertNotIn("req2", client.futures)
+        # A fresh query re-submits rather than returning a stale value.
+        gate.clear()
+        self.assertIsNone(client.lookup("req2", 64, [], non_block=True))
+        gate.set()  # release the executor so the worker thread can drain
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
