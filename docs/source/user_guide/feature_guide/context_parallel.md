@@ -70,4 +70,4 @@ vllm serve <glm-5.2-model> \
         --kv-transfer-config '{...}'
     ```
 
-For implementation details, see the [Decode Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
+For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
