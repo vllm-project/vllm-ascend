@@ -25,7 +25,7 @@ from vllm_ascend.utils import (
     maybe_trans_nz,
 )
 
-from .base import AscendLinearScheme
+from .base import AscendLinearScheme, TPWeightGatherSpec, TPWeightRepeatSpec
 from .registry import register_scheme
 
 
@@ -39,6 +39,21 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
 
     def __init__(self) -> None:
         pass
+
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("quant_bias"),
+        TPWeightGatherSpec("deq_scale"),
+        TPWeightGatherSpec("weight_scale"),
+        TPWeightGatherSpec("weight_offset"),
+    )
+    supports_tp_weight_switch = True
+    tp_weight_repeat_specs = (
+        TPWeightRepeatSpec("aclnn_input_scale"),
+        TPWeightRepeatSpec("aclnn_input_scale_reciprocal"),
+        TPWeightRepeatSpec("aclnn_input_offset"),
+    )
 
     def get_weight(
         self,
