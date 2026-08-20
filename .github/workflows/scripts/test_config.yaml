@@ -144,6 +144,8 @@
     - tests/e2e/pull_request/two_card/aclgraph
     - tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py
     - tests/e2e/pull_request/four_card/test_graph_mode.py
+    - tests/e2e/pull_request/four_card/test_graph_mode_deterministic.py
+    - tests/e2e/pull_request/four_card/test_graph_mode_diagnostics.py
 
 - name: compilation_passes_base
   optional: false
@@ -230,6 +232,8 @@
     - tests/e2e/pull_request/two_card/test_data_parallel.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
+    - tests/e2e/pull_request/two_card/test_shared_expert_dp_deterministic.py
+    - tests/e2e/pull_request/two_card/test_shared_expert_dp_diagnostics.py
     - tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
     - tests/e2e/pull_request/two_card/test_disaggregated_encoder.py
 
@@ -838,6 +842,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 290
   tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py: 60
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 1060
+  tests/e2e/pull_request/two_card/test_shared_expert_dp_deterministic.py: 340
+  tests/e2e/pull_request/two_card/test_shared_expert_dp_diagnostics.py: 340
   tests/e2e/pull_request/two_card/test_sp_pass.py: 280
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 130
   tests/e2e/pull_request/two_card/test_xlite.py: 740
@@ -861,6 +867,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 670
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1160
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/four_card/test_graph_mode_deterministic.py: 510
+  tests/e2e/pull_request/four_card/test_graph_mode_diagnostics.py: 900
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
