@@ -503,6 +503,10 @@ class NPUWorker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
 
+        from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
+
+        kernel_warmup(self)
+
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
