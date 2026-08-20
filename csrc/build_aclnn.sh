@@ -144,7 +144,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         git checkout "${CATLASS_COMMIT}" || exit 1
         cd - || exit 1
     fi
+    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
+    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
     CUSTOM_OPS_ARRAY=(
+        "matmul_allreduce_add_rmsnorm_910c"
         "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
@@ -273,6 +277,7 @@ log_selected_ops
 
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
+  rm -f -- "${ROOT_DIR}/csrc/build/binary/${SOC_ARG}/bin/binary_info_config.json"
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
 

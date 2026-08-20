@@ -401,28 +401,44 @@ class AscendConfig:
         vllm_config = self.vllm_config
         if self.ascend_compilation_config.enable_npugraph_ex:
             if self.ascend_compilation_config.fuse_allreduce_rms:
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import (
+                    ALLREDUCE_NORM_FUSE_THRESHOLD,
+                    MATMUL_ALLREDUCE_RMSNORM_910C_MAX_M,
+                    should_use_910c_op,
+                )
 
                 new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                if should_use_910c_op(vllm_config):
+                    new_compile_ranges_split_points.append(MATMUL_ALLREDUCE_RMSNORM_910C_MAX_M)
+                else:
+                    new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
-                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
+                    "Set compile ranges to %s and compile sizes to %s for matmul and allreduce fusion",
                     new_compile_ranges_split_points,
+                    vllm_config.compilation_config.compile_sizes,
                 )
 
         else:
             new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
             if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import (
+                    ALLREDUCE_NORM_FUSE_THRESHOLD,
+                    MATMUL_ALLREDUCE_RMSNORM_910C_MAX_M,
+                    should_use_910c_op,
+                )
 
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                if should_use_910c_op(vllm_config):
+                    new_compile_ranges_split_points.append(MATMUL_ALLREDUCE_RMSNORM_910C_MAX_M)
+                else:
+                    new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
-                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
+                    "Set compile ranges to %s and compile sizes to %s for matmul and allreduce fusion",
                     new_compile_ranges_split_points,
+                    vllm_config.compilation_config.compile_sizes,
                 )
 
             if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
