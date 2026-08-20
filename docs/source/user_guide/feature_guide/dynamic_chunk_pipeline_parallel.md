@@ -199,7 +199,7 @@ The `--max-num-batched-tokens` and `smooth_factor` parameters need to be adjuste
 
 #### --max-num-batched-tokens
 
-**Notably, the TTFT of CPP is very sensitive to `--max-num-batched-tokens` (considered as the initial chunk size for dynamic chunk calculation).** Because if it is too large, it will introduce significant computational waste, and if it is too small, it will lead to a decrease in operator efficiency. 
+**Notably, the TTFT of CPP is very sensitive to `--max-num-batched-tokens` (considered as the initial chunk size for dynamic chunk calculation).** Because if it is too large, it will introduce significant computational waste, and if it is too small, it will lead to a decrease in operator efficiency.
 
 We recommend first optimizing with a fixed chunk size without enabling dynamic chunking. The typical optimization search space is [8192, 16384, 24576, 32768]. The optimal `--max-num-batched-tokens` for enabling dynamic chunking is generally 2 to 4 times that of fixed chunks.
 
@@ -213,6 +213,7 @@ Meanwhile, to leave enough room for dynamic adjustments, we recommend that the l
 #### smooth_factor
 
 Controls trust level in dynamic prediction
+
 - `1.0`: Strictly follow model prediction
 - `0.6~0.85`: Balance dynamic adjustment and scheduling overhead
 - `0.0`: No dynamic adjustment (degrades to fixed chunking)
@@ -226,8 +227,6 @@ Generally doesn't need adjustment. Should be smaller than `max-num-batched-token
 #### max_fit_chunk
 
 Generally doesn't need adjustment.
-
-
 
 ## Online Calibration
 
