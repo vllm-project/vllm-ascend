@@ -35,6 +35,7 @@ from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_allgather,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
+    reset_lora_indices,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
@@ -51,6 +52,11 @@ class QuantMoELoRAImpl:
 
 
 _QUANT_MOE_LORA_IMPLS: dict[QuantType, QuantMoELoRAImpl] = {}
+
+MOE_LORA_GMM_MAX_LORAS = 3
+MOE_LORA_GMM_RANK = 16
+MOE_LORA_GMM_TOP_K = 6
+MOE_LORA_GMM_MIN_ROWS_PER_EXPERT = 8
 
 
 def register_quant_moe_lora_impl(
@@ -144,6 +150,90 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
+def _can_use_homogeneous_lora_gmm(
+    lora_context,
+    *,
+    hidden_states: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int,
+) -> bool:
+    """Return whether the fixed homogeneous-LoRA GMM path is safe."""
+    punica_wrapper = getattr(lora_context, "punica_wrapper", None)
+    if punica_wrapper is None:
+        return False
+    if (
+        not getattr(punica_wrapper, "has_homogeneous_lora", False)
+        or not getattr(punica_wrapper, "is_prefill", False)
+        or lora_context.fully_sharded
+        or group_list_type != 1
+        or lora_context.top_k != MOE_LORA_GMM_TOP_K
+        or hidden_states.dtype != torch.bfloat16
+    ):
+        return False
+
+    w13_a = lora_context.w13_lora_a_stacked
+    w13_b = lora_context.w13_lora_b_stacked
+    w2_a = lora_context.w2_lora_a_stacked
+    w2_b = lora_context.w2_lora_b_stacked
+    weights = (*w13_a, *w13_b, *w2_a, *w2_b)
+    num_experts = group_list.numel()
+    return not (
+        not weights
+        or any(weight.shape[0] != MOE_LORA_GMM_MAX_LORAS for weight in weights)
+        or any(weight.shape[1] != num_experts for weight in weights)
+        or any(weight.dtype != hidden_states.dtype for weight in weights)
+        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in (*w13_a, *w2_a))
+        or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
+        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_EXPERT * num_experts
+    )
+
+
+def _grouped_lora_matmul(
+    inputs: torch.Tensor,
+    weight: torch.Tensor,
+    group_list: torch.Tensor,
+) -> torch.Tensor:
+    """Apply one BF16 expert-grouped LoRA projection.
+
+    LoRA factors are stored for BGMV as ``[E, N, K]``.  GMM consumes
+    ``[E, K, N]``; the transpose is a view, matching the existing unquantized
+    MoE GMM path and avoiding a full weight copy on every forward.
+    """
+    return torch_npu.npu_grouped_matmul(
+        x=[inputs],
+        weight=[weight.transpose(-1, -2)],
+        split_item=2,
+        group_type=0,
+        group_list=group_list,
+        group_list_type=1,
+    )[0]
+
+
+def _add_homogeneous_lora_gmm(
+    output: torch.Tensor,
+    inputs: torch.Tensor,
+    lora_a_stacked: tuple[torch.Tensor, ...],
+    lora_b_stacked: tuple[torch.Tensor, ...],
+    *,
+    lora_slot: torch.Tensor,
+    group_list: torch.Tensor,
+) -> None:
+    """Add one homogeneous adapter with two grouped matmuls per slice.
+
+    ``lora_slot`` stays on device so ACLGraph replay selects the adapter used
+    by the current batch instead of retaining the slot captured initially.
+    """
+    output_offset = 0
+    for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
+        selected_lora_a = torch.index_select(lora_a, 0, lora_slot).squeeze(0)
+        selected_lora_b = torch.index_select(lora_b, 0, lora_slot).squeeze(0)
+        shrink = _grouped_lora_matmul(inputs, selected_lora_a, group_list)
+        delta = _grouped_lora_matmul(shrink, selected_lora_b, group_list)
+        output_size = delta.shape[-1]
+        output.narrow(-1, output_offset, output_size).add_(delta)
+        output_offset += output_size
+
+
 @register_quant_moe_lora_impl(
     QuantType.W8A8,
     validate_activation_input=_validate_dynamic_int8_activations,
@@ -211,7 +301,35 @@ def _apply_dynamic_int8_moe_lora(
         output_dtype=input_dtype,
     )[0]
 
+    use_homogeneous_lora_gmm = False
     if comm_type == MoECommType.ALLGATHER:
+        use_homogeneous_lora_gmm = _can_use_homogeneous_lora_gmm(
+            lora_context,
+            hidden_states=hidden_states,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+        )
+
+    lora_routing = None
+    if use_homogeneous_lora_gmm:
+        # The host only decides whether this graph-safe fast path is eligible.
+        # Select the concrete adapter from the device mapping so a graph
+        # captured with slot N can be replayed with slot M.
+        graph_lora_slot = torch.narrow(
+            lora_context.punica_wrapper.token_lora_indices,
+            0,
+            0,
+            1,
+        )
+        _add_homogeneous_lora_gmm(
+            gate_up_out,
+            hidden_states,
+            lora_context.w13_lora_a_stacked,
+            lora_context.w13_lora_b_stacked,
+            lora_slot=graph_lora_slot,
+            group_list=mlp_compute_input.group_list,
+        )
+    elif comm_type == MoECommType.ALLGATHER:
         lora_routing = _recover_moe_lora_routing_allgather(
             lora_context,
             mlp_compute_input.expanded_row_idx,
@@ -222,12 +340,13 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             group_list=mlp_compute_input.group_list,
         )
-    moe_lora_apply_w13(
-        lora_context,
-        gate_up_out=gate_up_out,
-        hidden_states=hidden_states,
-        lora_routing=lora_routing,
-    )
+    if lora_routing is not None:
+        moe_lora_apply_w13(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=hidden_states,
+            lora_routing=lora_routing,
+        )
 
     activated = _apply_moe_activation(
         gate_up_out,
@@ -245,7 +364,6 @@ def _apply_dynamic_int8_moe_lora(
         act_quant_type=torch.int8,
         use_mxfp_quant=False,
     )
-    before_gmm2_evt = torch.npu.current_stream().record_event()
     down_out = DeviceOperator.npu_grouped_matmul_gmm2(
         hidden_states=quantized_activated,
         weight=w2,
@@ -264,13 +382,26 @@ def _apply_dynamic_int8_moe_lora(
         fallback_output_dtype=w2_scale[0].dtype,
         mxfp_quant_dtype=None,
     )
-    moe_lora_apply_w2(
-        lora_context,
-        down_out=down_out,
-        silu_out=activated,
-        lora_routing=lora_routing,
-    )
-    return down_out, before_gmm2_evt
+    if use_homogeneous_lora_gmm:
+        # activated already includes topk_scales, so the W2 LoRA delta must
+        # not multiply routed weights a second time.
+        _add_homogeneous_lora_gmm(
+            down_out,
+            activated,
+            lora_context.w2_lora_a_stacked,
+            lora_context.w2_lora_b_stacked,
+            lora_slot=graph_lora_slot,
+            group_list=mlp_compute_input.group_list,
+        )
+        reset_lora_indices(lora_context)
+    else:
+        moe_lora_apply_w2(
+            lora_context,
+            down_out=down_out,
+            silu_out=activated,
+            lora_routing=lora_routing,
+        )
+    return down_out, None
 
 
 __all__ = [
