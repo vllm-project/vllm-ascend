@@ -374,21 +374,43 @@ def test_processor_construct_wires_components(tmp_path):
     proc.sync_for_step(allow_arm=False)
 
 
-def test_detector_manager_record_spec_step_outputs():
+def test_mtp_spec_then_sample_does_not_double_append_io(tmp_path):
+    """Regression: MTP used to append in check_after_spec *and* check_after_sample.
+
+    Under async scheduling, clear_wave_cache between those hooks defeated
+    same-wave chunk dedupe, so report output_text was ~2x the API response.
+    """
     from vllm_ascend.dfx.detector.manager import DetectorManager
     from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
+    from vllm_ascend.dfx.request_state import RequestDfxStore
+    from vllm_ascend.dfx.runtime_config import DfxRuntimeConfig
 
     RequestIoSnapshotManager.reset_for_tests()
-    mgr = DetectorManager.__new__(DetectorManager)
-    mgr._runner = SimpleNamespace(input_batch=SimpleNamespace(req_ids=["r1", "r2"]))
-    sampled = torch.tensor([[10, 11, 12], [20, 21, 22]])
-    accepted = torch.tensor([2, 0])
-    mgr._record_spec_step_outputs(sampled, accepted)
-    io = RequestIoSnapshotManager.get()
-    assert io.cumulative_output_ids("r1") == [10, 11]
-    assert io.cumulative_output_ids("r2") == []
-    mgr._record_spec_step_outputs(None, accepted)
+    RequestDfxStore.reset_for_tests()
+    cfg = DfxRuntimeConfig(tmp_path / "dfx.json", report_dir=tmp_path / "r", ensure_file=True)
+    cfg._data["detector"]["token_repeat"]["enabled"] = True
+    cfg._data["detector"]["spec_acceptance"]["enabled"] = False
+    runner = SimpleNamespace(
+        tp_rank=0,
+        input_batch=SimpleNamespace(req_ids=["r1"]),
+        speculative_config=object(),
+    )
+    mgr = DetectorManager(dfx_config=cfg, runner=runner, detection_gate=lambda: True)
+    sampled = torch.tensor([[10, 11, 12, -1]])
+    accepted = torch.tensor([3])
+    # Spec hook must not touch IO.
+    assert mgr.check_after_spec(sampled, accepted) == []
+    assert RequestIoSnapshotManager.get().cumulative_output_ids("r1") == []
+    # Sample hook owns the single append (validated accepted ids).
+    mgr.check_after_sample(sampled_token_ids=[[10, 11, 12]], logprobs_lists=None, req_ids=["r1"])
+    assert RequestIoSnapshotManager.get().cumulative_output_ids("r1") == [10, 11, 12]
+    # Simulate async: next wave clears dedupe frontier; a second sample must
+    # still not re-add the previous step (only new tokens).
+    RequestIoSnapshotManager.get().clear_wave_cache()
+    mgr.check_after_sample(sampled_token_ids=[[13]], logprobs_lists=None, req_ids=["r1"])
+    assert RequestIoSnapshotManager.get().cumulative_output_ids("r1") == [10, 11, 12, 13]
     RequestIoSnapshotManager.reset_for_tests()
+    RequestDfxStore.reset_for_tests()
 
 
 def test_pending_activate_and_clear(tmp_path):
