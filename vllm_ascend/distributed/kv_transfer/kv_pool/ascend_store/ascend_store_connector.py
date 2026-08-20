@@ -38,7 +38,6 @@ from vllm.v1.worker import mamba_utils
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     is_block_key_layerwise,
-    is_kv_save_role,
     validate_mooncake_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (

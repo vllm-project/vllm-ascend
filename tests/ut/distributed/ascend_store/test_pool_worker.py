@@ -838,7 +838,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_called_with("r1")
+        worker.kv_send_thread.add_stored_request.assert_called_with(req)
         worker.kv_send_thread.add_request.assert_called_once()
         worker.kv_send_thread.request_queue.join.assert_called_once()
 
@@ -1882,15 +1882,16 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 
     def test_store_kv_tp_mismatch_skips_when_not_stored(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.m_store = MagicMock()
         worker.kv_send_thread = MagicMock()
-        worker.kv_send_thread.is_stored_request.return_value = False
+        worker.kv_send_thread.is_live_store_job.return_value = False
         req = ReqMeta(
             req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
         )
         worker._store_kv_tp_mismatch(req)
-        worker.kv_send_thread.dec_stored_request.assert_not_called()
+        worker.m_store.put.assert_not_called()
 
-    def test_store_kv_tp_mismatch_decrements_on_success_and_error(self):
+    def test_store_kv_tp_mismatch_leaves_lifecycle_to_sending_thread(self):
         for put_error in (None, RuntimeError("put failed")):
             with self.subTest(put_error=put_error):
                 worker = self._make_strided_worker()
@@ -1898,7 +1899,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 worker.m_store.put.side_effect = put_error
                 worker.enable_kv_events = False
                 send_thread = MagicMock()
-                send_thread.is_stored_request.return_value = True
+                send_thread.is_live_store_job.return_value = True
+                send_thread.get_saved_offset.return_value = 0
                 send_thread.lookup.return_value = [False, True]
                 worker.kv_send_thread = send_thread
                 req = ReqMeta(
@@ -1915,7 +1917,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 else:
                     worker._store_kv_tp_mismatch(req)
                     self.assertEqual(len(worker.m_store.put.call_args.args[0]), 1)
-                send_thread.dec_stored_request.assert_called_once_with("r1")
+                send_thread.finish_store_job.assert_not_called()
 
 
 class TestKVPoolWorkerReachableMasks(unittest.TestCase):
