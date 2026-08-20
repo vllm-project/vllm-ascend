@@ -48,6 +48,44 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 2. File: platform/patch_deepseek_v4_frontend.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tokenizers.deepseek_v4.get_deepseek_v4_tokenizer`
+#      `vllm.parser.deepseek_v4.DeepSeekV4Parser.__init__`
+#    Why:
+#       The supported vLLM inserts request tools before an existing system
+#       message and initializes the parser in content mode when thinking
+#       controls are omitted. Both differ from the DeepSeek V4 tokenizer
+#       default and checkpoint renderer.
+#    How:
+#       Attach tools to a shallow copy of the first system message, or insert
+#       a system message only when one is absent. Default the parser to
+#       thinking only when neither thinking control is present.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/51829
+#       https://github.com/vllm-project/vllm/pull/51856
+#       https://github.com/vllm-project/vllm/pull/52255
+#       https://github.com/vllm-project/vllm/pull/51296
+#    Future Plan:
+#       Remove this patch once both behaviors are in the supported vLLM.
+#
+# ** 3. File: platform/patch_deepseek_v4_tool_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.deepseek_v4.DeepSeekV4Parser._compute_arg_delta`
+#    Why:
+#       The supported vLLM skips argument conversion for DeepSeek V4 parameter-body
+#       deltas without `>`. A long string is consequently emitted only when
+#       `</parameter>` arrives instead of streaming incrementally.
+#    How:
+#       After the original converter confirms an in-progress, schema-stable
+#       string parameter, JSON-escape and emit plain body deltas directly.
+#       Structural deltas and final conversion remain on the original path.
+#       Skip installation once upstream removes the structural-character filter.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/52865
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #52865.
+#
 # ** 2. File: platform/patch_deepseek_v4_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
