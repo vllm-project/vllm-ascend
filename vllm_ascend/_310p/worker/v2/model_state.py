@@ -73,9 +73,7 @@ class _Ascend310PModelStateMixin:
         except ImportError:
             self.mm_pruner = None
         else:
-            self.mm_pruner = maybe_create_mm_pruner(
-                self.model_config, self.model, self.rope_state, encoder_cache
-            )
+            self.mm_pruner = maybe_create_mm_pruner(self.model_config, self.model, self.rope_state, encoder_cache)
 
     def _record_capture_seq_lens(self, seq_lens: torch.Tensor) -> None:
         """Keep the largest captured view for each static tensor address."""
@@ -171,9 +169,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
     ) -> None:
         # Initialize the complete upstream/Ascend hybrid contract first. This is
         # important because vLLM may add hybrid-only state such as `_align_mode`.
-        AscendMambaHybridModelState.__init__(
-            self, vllm_config, model, encoder_cache, device
-        )
+        AscendMambaHybridModelState.__init__(self, vllm_config, model, encoder_cache, device)
         self._capture_seq_lens_by_ptr = {}
         # The upstream RoPE state is safe to construct but its Triton position
         # preparation cannot run on 310P. Replace it before the first request.

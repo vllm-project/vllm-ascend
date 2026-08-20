@@ -15,6 +15,7 @@
 
 import math
 from unittest.mock import MagicMock, patch
+
 import torch
 
 from tests.ut.base import TestBase

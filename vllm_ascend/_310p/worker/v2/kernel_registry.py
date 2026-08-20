@@ -47,9 +47,7 @@ def register_310p_kernels() -> tuple[str, ...]:
     if not KERNEL_IMPLS:
         return ()
     if not HAS_TRITON_DISPATCHER:
-        logger.debug(
-            "vLLM has no Triton kernel dispatcher; 310P keeps its class-level Triton-free implementations."
-        )
+        logger.debug("vLLM has no Triton kernel dispatcher; 310P keeps its class-level Triton-free implementations.")
         return ()
 
     for kernel_name, impl in KERNEL_IMPLS.items():

@@ -43,15 +43,10 @@ def test_310p_v2_has_no_required_kernel_dispatcher_registration() -> None:
 def test_310p_block_tables_do_not_import_triton_or_shared_v2_kernel() -> None:
     tree = ast.parse(inspect.getsource(block_table_module))
     imported_modules = {
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module is not None
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     imported_modules.update(
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
+        alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
     )
 
     assert not any("triton" in module for module in imported_modules)

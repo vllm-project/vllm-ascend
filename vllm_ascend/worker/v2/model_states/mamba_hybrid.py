@@ -46,9 +46,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         # Avoid using upstream Triton scatter kernels on 310P by making the
         # accepted-token counter tensor device-resident and updating it via
         # NPU indexing in our postprocess_state().
-        self.num_accepted_tokens_gpu = torch.ones(
-            self.max_num_reqs, dtype=torch.int32, device=self.device
-        )
+        self.num_accepted_tokens_gpu = torch.ones(self.max_num_reqs, dtype=torch.int32, device=self.device)
 
     def prepare_attn(
         self,
@@ -133,8 +131,5 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
         valid = idx_mapping >= 0
         valid_indices = idx_mapping.masked_select(valid)
-        accepted = (
-            torch.clamp(num_sampled.masked_select(valid), min=1)
-            .to(self.num_accepted_tokens_gpu.dtype)
-        )
+        accepted = torch.clamp(num_sampled.masked_select(valid), min=1).to(self.num_accepted_tokens_gpu.dtype)
         self.num_accepted_tokens_gpu.index_copy_(0, valid_indices, accepted)
