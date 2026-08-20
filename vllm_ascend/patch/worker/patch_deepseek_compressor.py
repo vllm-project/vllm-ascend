@@ -9,8 +9,9 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.models.layer.attention.layer import get_dsv4_cache_sizes_for_config
 from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 if vllm_version_is("0.20.2"):
     from vllm.model_executor.layers import (
@@ -53,7 +54,8 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.block_size = block_size
 
     def get_kv_cache_spec(self, vllm_config) -> KVCacheSpec:
-        page_size_padded = 16640 if self.state_dim == 2 * 256 and self.compress_ratio == 4 else 131072
+        pads = get_dsv4_cache_sizes_for_config(vllm_config.cache_config)[1]
+        page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
@@ -82,8 +84,12 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            self.dtype = torch.float8_e4m3fn
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+
         return AscendMLAAttentionSpec(  # Only has one vector instead of K + V
-            block_size=128,
+            block_size=get_dsv4_cache_sizes_for_config(vllm_config.cache_config)[0][0],
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
@@ -91,7 +97,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
-            scale_dtype=torch.float16,
+            scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
         )
 
     def forward(self): ...
@@ -111,20 +117,17 @@ class AscendDeepseekV4SWACache(DeepseekV4SWACache):
     ):
         super().__init__(head_dim, window_size, torch.uint8, prefix, cache_config)
         self.dtype = dtype
-
-        # Block size is constrained by tensor sharing between SWA and C4A KV blocks.
-        # Since both block types share the same physical tensor, they must use the
-        # same page size. The C4A KV block shape [256//4, head_dim] = [64, head_dim]
-        # determines the SWA block size of 64 tokens per block.
-        # TODO(cmq): make SWA block size automatically determined and configurable.
-        self.block_size = 128
+        self.block_size = get_dsv4_cache_sizes_for_config(cache_config)[0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # TODO(cmq): alignment = 0 if A3 else 128
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            self.dtype = torch.float8_e4m3fn
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
-            head_size=self.head_dim,
+            head_size=cached_head_size,
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,

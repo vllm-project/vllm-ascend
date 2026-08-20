@@ -48,6 +48,9 @@ ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
+DSV4_USER_BLOCK_SIZE_ATTR = "_ascend_dsv4_user_block_size"
+DSV4_SUPPORTED_BLOCK_SIZES = {32, 64, 128}
+DSV4_DEFAULT_BLOCK_SIZE = 32
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -679,7 +682,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
         logger.info(
-            "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
+            "Adjusted ACL graph batch sizes for %s model (layers: %d): %d -> %d sizes",
             arch_name,
             num_hidden_layers,
             len(original_sizes),
@@ -1008,7 +1011,7 @@ def is_vl_model(vllm_config: VllmConfig = None):
         vllm_config = get_current_vllm_config_or_none()
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
         model_config = vllm_config.model_config
-        # Primary: vllm's own VL detection — hf_config is the top-level
+        # Primary: vllm's own VL detection - hf_config is the top-level
         # (multimodal) config; hf_text_config is the language-model sub-config.
         # They are the same object for pure-text models.
         if model_config.hf_config is not model_config.hf_text_config:
@@ -1302,6 +1305,27 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
     return reorgnized_batch_ids
 
 
+def get_dsv4_configured_block_size(cache_config: Any) -> int:
+    """Return the user-level DeepSeek V4 block size.
+
+    vLLM may later replace ``cache_config.block_size`` with the minimum
+    block size across KV cache groups. DSv4 cache layout tables still need
+    the original user-level 32/64/128 value.
+    """
+    if cache_config is None:
+        return DSV4_DEFAULT_BLOCK_SIZE
+
+    saved_block_size = getattr(cache_config, DSV4_USER_BLOCK_SIZE_ATTR, None)
+    if saved_block_size in DSV4_SUPPORTED_BLOCK_SIZES:
+        return saved_block_size
+
+    block_size = getattr(cache_config, "block_size", None)
+    if block_size in DSV4_SUPPORTED_BLOCK_SIZES:
+        return block_size
+
+    return DSV4_DEFAULT_BLOCK_SIZE
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.
@@ -1313,11 +1337,60 @@ def refresh_block_size(vllm_config):
     if not cache_config:
         return
 
-    if cache_config.block_size is None:
-        cache_config.block_size = 128
+    model_type = getattr(getattr(model_config, "hf_config", None), "model_type", None)
+    if model_type == "deepseek_v4":
+        original_block_size = cache_config.block_size
+        saved_block_size = getattr(cache_config, DSV4_USER_BLOCK_SIZE_ATTR, None)
+        if saved_block_size in DSV4_SUPPORTED_BLOCK_SIZES:
+            logger.warning(
+                "DeepSeek V4 block size refresh skip: pid=%s, "
+                "runtime_block_size=%r, user_block_size=%r, "
+                "enable_prefix_caching=%r, enable_chunked_prefill=%r.",
+                os.getpid(),
+                original_block_size,
+                saved_block_size,
+                getattr(cache_config, "enable_prefix_caching", None),
+                getattr(scheduler_config, "enable_chunked_prefill", None),
+            )
+            return
 
-    if model_config.hf_config.model_type == "deepseek_v4":
-        # TODO(qcs): generalize the block_size
+        logger.warning(
+            "DeepSeek V4 block size refresh enter: pid=%s, "
+            "vllm_config_id=%s, cache_config_id=%s, input=%r (type=%s), "
+            "enable_prefix_caching=%r, enable_chunked_prefill=%r.",
+            os.getpid(),
+            id(vllm_config),
+            id(cache_config),
+            original_block_size,
+            type(original_block_size).__name__,
+            getattr(cache_config, "enable_prefix_caching", None),
+            getattr(scheduler_config, "enable_chunked_prefill", None),
+        )
+
+        if original_block_size is None:
+            user_block_size = DSV4_DEFAULT_BLOCK_SIZE
+        elif original_block_size in DSV4_SUPPORTED_BLOCK_SIZES:
+            user_block_size = original_block_size
+        else:
+            logger.warning(
+                "For deepseek_v4 model, block size should be 32, 64 or 128. "
+                "Setting block size to 32 for better performance."
+            )
+            user_block_size = DSV4_DEFAULT_BLOCK_SIZE
+
+        setattr(cache_config, DSV4_USER_BLOCK_SIZE_ATTR, user_block_size)
+        cache_config.block_size = user_block_size
+        logger.warning(
+            "DeepSeek V4 block size refresh: input=%r (type=%s), output=%r, "
+            "user_block_size=%r.",
+            original_block_size,
+            type(original_block_size).__name__,
+            cache_config.block_size,
+            user_block_size,
+        )
+        return
+
+    if cache_config.block_size is None:
         cache_config.block_size = 128
 
     if not scheduler_config or not model_config:
