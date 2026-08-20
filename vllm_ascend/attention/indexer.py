@@ -183,16 +183,10 @@ def validate_indexer_pp_partition(
                 raise
 
             suggestions = [
-                f'VLLM_PP_LAYER_PARTITION="{",".join(map(str, partition))}"'
-                for partition in nearest_partitions
+                f'VLLM_PP_LAYER_PARTITION="{",".join(map(str, partition))}"' for partition in nearest_partitions
             ]
-            partition_label = (
-                "partition is" if len(suggestions) == 1 else "partitions are"
-            )
-            raise ValueError(
-                f"{error} The nearest valid layer {partition_label} "
-                f'{" or ".join(suggestions)}.'
-            ) from None
+            partition_label = "partition is" if len(suggestions) == 1 else "partitions are"
+            raise ValueError(f"{error} The nearest valid layer {partition_label} {' or '.join(suggestions)}.") from None
 
 
 def _get_nearest_valid_indexer_pp_partitions(
@@ -217,10 +211,7 @@ def _get_nearest_valid_indexer_pp_partitions(
     except ValueError:
         return []
 
-    current_boundaries = [
-        get_pp_indices(num_hidden_layers, pp_rank, pp_size)[0]
-        for pp_rank in range(1, pp_size)
-    ]
+    current_boundaries = [get_pp_indices(num_hidden_layers, pp_rank, pp_size)[0] for pp_rank in range(1, pp_size)]
     valid_boundaries = []
     for boundary in range(1, num_hidden_layers):
         try:
@@ -270,10 +261,7 @@ def _get_nearest_valid_indexer_pp_partitions(
 
         _, nearest_boundaries = min(states.values())
         boundaries = (0, *nearest_boundaries, num_hidden_layers)
-        return [
-            boundaries[index + 1] - boundaries[index]
-            for index in range(pp_size)
-        ]
+        return [boundaries[index + 1] - boundaries[index] for index in range(pp_size)]
 
     return [
         partition
