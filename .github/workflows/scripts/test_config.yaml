@@ -306,6 +306,7 @@
   tests:
     - tests/ut/models/test_deepseek_v4_compressor.py
     - tests/ut/models/test_deepseek_v4_indexer.py
+    - tests/ut/models/test_deepseek_v4_mtp_hidden_states.py
     - tests/ut/models/test_deepseek_v4_moe.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
@@ -936,4 +937,3 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
-
