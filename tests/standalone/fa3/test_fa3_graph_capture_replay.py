@@ -185,9 +185,9 @@ def main():
     print("-" * 72)
     print("[T1] replay, no refresh (capture-time buffers)")
     torch.npu.synchronize()
-    out = graph.replay()
+    graph.replay()
     torch.npu.synchronize()
-    _report("T1", out, q, k, v, bt, seqlens, batch)
+    _report("T1", out_capture, q, k, v, bt, seqlens, batch)
 
     # ---- T2: refresh on the SAME stream, then replay -> should be CORRECT if
     # capture/replay + refresh is sound.
@@ -197,9 +197,9 @@ def main():
     cache_seqlens_buf.copy_(seq_call)
     block_table_buf.copy_(bt.npu())
     torch.npu.synchronize()
-    out = graph.replay()
+    graph.replay()
     torch.npu.synchronize()
-    _report("T2", out, q, k, v, bt, seqlens, batch)
+    _report("T2", out_capture, q, k, v, bt, seqlens, batch)
 
     # ---- T3: refresh on a SIDE stream + wait_stream (production pattern) ----
     print("-" * 72)
@@ -214,9 +214,9 @@ def main():
         block_table_buf.copy_(bt.npu(), non_blocking=True)
     torch.npu.current_stream().wait_stream(update_stream)
     torch.npu.synchronize()
-    out = graph.replay()
+    graph.replay()
     torch.npu.synchronize()
-    _report("T3", out, q, k, v, bt, seqlens, batch)
+    _report("T3", out_capture, q, k, v, bt, seqlens, batch)
 
     # ---- T4: a second, DIFFERENT batch to confirm refresh keeps working ----
     seqlens2 = [256, 768, 1536, 3072]
@@ -229,9 +229,9 @@ def main():
     cache_seqlens_buf.copy_(seq_call2)
     block_table_buf.copy_(bt2.npu())
     torch.npu.synchronize()
-    out = graph.replay()
+    graph.replay()
     torch.npu.synchronize()
-    _report("T4", out, q2, k, v, bt2, seqlens2, batch)
+    _report("T4", out_capture, q2, k, v, bt2, seqlens2, batch)
 
     print("-" * 72)
     print("Read:")
