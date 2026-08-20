@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -206,6 +207,61 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     if with_gate:
         expected = expected * 0.5
     torch.testing.assert_close(output, expected)
+
+
+def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+        down_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+    )
+    runner.multistream_overlap_shared_expert = False
+    runner.quant_type = QuantType.W8A8
+    hidden_states = torch.randn(2, 4)
+    part1_out = torch.randn(2, 8)
+    shared_out = torch.randn(2, 4)
+    runner._shared_experts_part1 = MagicMock(return_value=part1_out)
+    runner._shared_experts_part2 = MagicMock(return_value=shared_out)
+    current_stream = MagicMock()
+    lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+    events = SimpleNamespace(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
+    )
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+    )
+    runner.routed_experts = SimpleNamespace()
+    runner.set_lora_context(lora_context)
+
+    with patch.object(fused_moe_module.torch_npu, "npu_dynamic_quant", create=True) as dynamic_quant:
+        output = runner._forward_shared_experts(hidden_states, events)
+
+    assert output is shared_out
+    dynamic_quant.assert_not_called()
+    runner._shared_experts_part1.assert_called_once_with(hidden_states)
+    runner._shared_experts_part2.assert_called_once_with(hidden_states, part1_out)
+
+
+def test_set_lora_context_updates_runner():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.routed_experts = SimpleNamespace()
+    lora_context = object()
+
+    runner.set_lora_context(lora_context)
+
+    assert runner.routed_experts._ascend_moe_lora_context is lora_context
+    assert runner.lora_context is lora_context
 
 
 @pytest.mark.parametrize("has_shared_experts", [False, True])

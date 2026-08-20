@@ -274,6 +274,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             num_experts=num_logical_experts,
             tid2eid=tid2eid,
         )
+        lora_context = getattr(layer, "_ascend_moe_lora_context", None)
         assert topk_ids is not None
         assert topk_weights is not None
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -348,6 +349,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
                 swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
                 swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
+                lora_context=lora_context,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
