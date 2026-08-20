@@ -260,9 +260,10 @@ jobs:
             --head-sha "${HEAD_SHA}"
 
       - name: Comment recommended tests on PR
+        continue-on-error: true
         uses: peter-evans/create-or-update-comment@v5
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.repository }}
           issue-number: ${{ github.event.pull_request.number }}
           body: ${{ steps.comment-body.outputs.comment_body }}
