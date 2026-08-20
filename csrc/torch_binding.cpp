@@ -687,6 +687,26 @@ std::vector<at::Tensor> moe_grouped_matmul(
     return y;
 }
 
+at::Tensor npu_apply_top_k_top_p(
+    const at::Tensor& logits,
+    const c10::optional<at::Tensor>& p,
+    const c10::optional<at::Tensor>& k)
+{
+    TORCH_CHECK(p.has_value() || k.has_value(),
+                "apply_top_k_top_p: p and k cannot be None at the same time.");
+
+    at::Tensor out = at::empty_like(logits);
+
+    EXEC_NPU_CMD(
+        aclnnApplyTopKTopPCustom,
+        logits,
+        p,
+        k,
+        out);
+
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     const at::Tensor& x,
     int64_t k,
@@ -2121,6 +2141,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor expert_idx, Tensor out)"
         );
     ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
+
+    ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
+    ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
 
     ops.def(
         "npu_add_rms_norm_bias(Tensor x1, "
