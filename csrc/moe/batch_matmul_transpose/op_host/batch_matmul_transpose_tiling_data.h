@@ -1,5 +1,5 @@
-#ifndef PP_MATMUL_TILING_DATA
-#define PP_MATMUL_TILING_DATA
+#ifndef BATCH_MATMUL_TRANSPOSE_TILING_DATA_H
+#define BATCH_MATMUL_TRANSPOSE_TILING_DATA_H
 #include <cstdint>
 
 namespace pp_matmul {
@@ -87,4 +87,4 @@ struct PpMatmulTilingData {
 void GetPpMatmulTiling(const MatMulInfo &mmInfo, const HardwareInfo &hwInfo, uint32_t &blockDim,
                        PpMatmulTilingData &tilingData);
 }  // namespace pp_matmul
-#endif
+#endif  // BATCH_MATMUL_TRANSPOSE_TILING_DATA_H
