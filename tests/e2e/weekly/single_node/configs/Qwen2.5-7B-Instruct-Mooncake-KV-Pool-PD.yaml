@@ -1,0 +1,140 @@
+test_cases:
+  - name: "Qwen2.5-7B-Instruct Mooncake KV pool PD"
+    model: "/mnt/share/weights/Qwen2.5-7B-Instruct/Qwen2.5-7B-Instruct"
+    service_mode: "epd"
+
+    envs:
+      ENCODE_PORT: "DEFAULT_PORT"
+      PD_PORT: "DEFAULT_PORT"
+      PROXY_PORT: "DEFAULT_PORT"
+      LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
+      PYTHONHASHSEED: "0"
+      ACL_OP_INIT_MODE: "1"
+      ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+      HCCL_RDMA_TIMEOUT: "17"
+      ASCEND_CONNECT_TIMEOUT: "10000"
+      ASCEND_TRANSFER_TIMEOUT: "10000"
+
+    kv_pool:
+      type: "mooncake"
+      master_port: 50088
+      metrics_port: 50089
+      config:
+        metadata_server: "P2PHANDSHAKE"
+        protocol: "ascend"
+        device_name: ""
+        global_segment_size: "1GB"
+        preferred_segment: false
+        prefer_alloc_in_same_node: true
+
+    epd_server_cmds:
+      - - "--port"
+        - "$ENCODE_PORT"
+        - "--model"
+        - "/mnt/share/weights/Qwen2.5-7B-Instruct/Qwen2.5-7B-Instruct"
+        - "--trust-remote-code"
+        - "--enforce-eager"
+        - "--no-enable-prefix-caching"
+        - "--tensor-parallel-size"
+        - "1"
+        - "--data-parallel-size"
+        - "1"
+        - "--max-model-len"
+        - "32768"
+        - "--block-size"
+        - "128"
+        - "--max-num-batched-tokens"
+        - "16384"
+        - "--kv-transfer-config"
+        - >-
+          {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_producer",
+            "kv_load_failure_policy": "recompute",
+            "kv_connector_extra_config": {
+              "connectors": [
+                {
+                  "kv_connector": "MooncakeConnectorV1",
+                  "kv_role": "kv_producer",
+                  "kv_port": "20001",
+                  "kv_connector_extra_config": {
+                    "prefill": {"dp_size": 1, "tp_size": 1},
+                    "decode": {"dp_size": 1, "tp_size": 1}
+                  }
+                },
+                {
+                  "kv_connector": "AscendStoreConnector",
+                  "kv_role": "kv_producer",
+                  "kv_connector_extra_config": {
+                    "lookup_rpc_port": "0",
+                    "backend": "mooncake"
+                  }
+                }
+              ]
+            }
+          }
+
+      - - "--port"
+        - "$PD_PORT"
+        - "--model"
+        - "/mnt/share/weights/Qwen2.5-7B-Instruct/Qwen2.5-7B-Instruct"
+        - "--trust-remote-code"
+        - "--enforce-eager"
+        - "--no-enable-prefix-caching"
+        - "--tensor-parallel-size"
+        - "1"
+        - "--data-parallel-size"
+        - "1"
+        - "--max-model-len"
+        - "32768"
+        - "--block-size"
+        - "128"
+        - "--max-num-batched-tokens"
+        - "16384"
+        - "--kv-transfer-config"
+        - >-
+          {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_consumer",
+            "kv_load_failure_policy": "recompute",
+            "kv_connector_extra_config": {
+              "connectors": [
+                {
+                  "kv_connector": "MooncakeConnectorV1",
+                  "kv_role": "kv_consumer",
+                  "kv_port": "20002",
+                  "kv_connector_extra_config": {
+                    "prefill": {"dp_size": 1, "tp_size": 1},
+                    "decode": {"dp_size": 1, "tp_size": 1}
+                  }
+                },
+                {
+                  "kv_connector": "AscendStoreConnector",
+                  "kv_role": "kv_consumer",
+                  "kv_connector_extra_config": {
+                    "lookup_rpc_port": "0",
+                    "backend": "mooncake"
+                  }
+                }
+              ]
+            }
+          }
+
+    epd_proxy_args:
+      - "--host"
+      - "127.0.0.1"
+      - "--port"
+      - "$PROXY_PORT"
+      - "--encode-servers-urls"
+      - "http://127.0.0.1:$ENCODE_PORT"
+      - "--decode-servers-urls"
+      - "http://127.0.0.1:$PD_PORT"
+      - "--prefill-servers-urls"
+      - "disable"
+
+    prompts:
+      - "San Francisco is a"
+    api_keyword_args:
+      max_tokens: 32
+    test_content:
+      - "completion"
