@@ -173,7 +173,7 @@ Before starting the service:
 
 === "Ascend950DT series"
 
-    The following example is for Ascend950DT series. Quantized versions need `--quantization ascend`.
+    The following example is for Ascend950DT series.
 
     ```bash
     #!/bin/sh
@@ -224,7 +224,7 @@ Before starting the service:
 
 === "Atlas 800 A3 / Atlas 800 A2"
 
-    The following example is for Atlas 800 A3 / Atlas 800 A2. Quantized versions need `--quantization ascend`.
+    The following example is for Atlas 800 A3 / Atlas 800 A2.
 
     ```bash
     #!/bin/sh
