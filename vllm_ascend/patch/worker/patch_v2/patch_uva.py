@@ -28,17 +28,18 @@ from vllm.logger import logger
 
 def check_triton_ascend_version_valid() -> bool:
     """
-    Check triton-ascend version and warn about UVA feature disablement.
-    If the installed version isn't affected by the UVA issue, return True.
+    Check triton-ascend version and warn about UVA feature disablement in 3.2.1.
+    If version isn't 3.2.1, return True.
     """
-    # Triton Ascend versions affected by the UVA pointer validation issue.
-    UVA_INCOMPATIBLE_VERSIONS = ("3.2.1", "3.2.2")
+    # Target version that disables UVA feature
+    DISABLE_UVA_VERSION = "3.2.1"
     installed_version = version("triton-ascend")
-    if installed_version in UVA_INCOMPATIBLE_VERSIONS:
+    # Check if current version is the one with UVA disabled
+    if installed_version == DISABLE_UVA_VERSION:
         logger.warning(
             "triton-ascend %s disables the UVA feature.\n"
             "Related bug issue: https://github.com/triton-lang/triton-ascend/issues/783",
-            installed_version,
+            DISABLE_UVA_VERSION,
         )
         return False
     return True
@@ -46,8 +47,8 @@ def check_triton_ascend_version_valid() -> bool:
 
 def is_uva_available() -> bool:
     """check if uva feature is supported in this environment"""
-    # FIXME(chenboxun): Some triton-ascend versions reject pinned CPU tensors.
-    # Thus UVA is disabled for affected versions.
+    # FIXME(chenboxun): There is an issue with using the UVA feature alongside triton-ascend3.2.1.
+    # Thus UVA feature is disabled when using version 3.2.1
     # (Related bug issue link: https://github.com/triton-lang/triton-ascend/issues/783)
     return (
         "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
