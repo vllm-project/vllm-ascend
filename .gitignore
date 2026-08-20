@@ -222,3 +222,5 @@ csrc/third_party/
 .codegraph/
 
 .vllm_ascend/
+csrc/build/
+csrc/build_out/
