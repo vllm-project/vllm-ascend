@@ -567,16 +567,6 @@ jobs:
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
-  generate-hitest:
-    name: Generate hitest recommendations
-    needs: select-tests
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
-    uses: ./.github/workflows/_manual-hitest.yaml
-    secrets:
-      HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
-      HITEST_KEY: ${{ secrets.HITEST_KEY }}
-      HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
-
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
     if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
