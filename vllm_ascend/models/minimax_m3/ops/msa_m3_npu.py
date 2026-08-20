@@ -64,26 +64,23 @@ def _npu_k2q_csr(
 
 
 def _as_ascendc_index_kv_cache(
-    index_kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+    index_kv_cache: tuple[torch.Tensor],
 ) -> torch.Tensor:
-    """Normalize the index-key cache to the AscendC BBND input layout.
+    """Convert the runtime index K cache to the AscendC BBND layout.
 
-    Ascend's cache allocator may expose an index cache as a split K/V tuple,
-    even though the indexer only consumes the key tensor.  Keep this identical
-    to the normalization used by the Triton implementation, then restore the
-    singleton head dimension required by the BBND AscendC operator.
+    The model runner binds this K-only cache as a one-element tuple containing
+    a tensor shaped ``[num_blocks, 128, head_dim]``.  MsaIndexScore expects the
+    BBND shape ``[num_blocks, 128, 1, head_dim]`` instead.
     """
-    if isinstance(index_kv_cache, (tuple, list)):
-        if not index_kv_cache:
-            raise ValueError("Index KV cache tuple must contain a key tensor")
-        index_kv_cache = index_kv_cache[0]
-    if index_kv_cache.ndim == 5 and index_kv_cache.shape[0] == 2:
-        index_kv_cache = index_kv_cache[0]
-    if index_kv_cache.ndim == 3:
-        index_kv_cache = index_kv_cache.unsqueeze(2)
-    if index_kv_cache.ndim != 4 or index_kv_cache.shape[2] != 1:
-        raise ValueError(f"Unexpected index KV cache shape: {tuple(index_kv_cache.shape)}")
-    return index_kv_cache
+    if not isinstance(index_kv_cache, tuple) or len(index_kv_cache) != 1:
+        raise ValueError("M3 index cache must be a one-tensor tuple containing K")
+    (index_key_cache,) = index_kv_cache
+    if index_key_cache.ndim != 3 or index_key_cache.shape[1] != _MSA_INDEX_BLOCK_SIZE:
+        raise ValueError(
+            "M3 index K cache must have shape "
+            f"[num_blocks, {_MSA_INDEX_BLOCK_SIZE}, head_dim], got {tuple(index_key_cache.shape)}"
+        )
+    return index_key_cache.unsqueeze(2)
 
 
 def _split_main_kv_cache(
@@ -134,7 +131,7 @@ def _build_cu_block_lens(
 @torch.no_grad()
 def minimax_m3_index_score(
     idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+    index_kv_cache: tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -275,7 +272,7 @@ def _index_score_topk_candidates(
 @torch.no_grad()
 def minimax_m3_index_decode(
     idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor,
+    index_kv_cache: tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
