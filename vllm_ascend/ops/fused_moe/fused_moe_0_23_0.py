@@ -23,6 +23,7 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -59,7 +60,6 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     torch_npu,
     wraps,
 )
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import enable_sp
 
 
@@ -367,13 +367,6 @@ class AscendFusedMoE(FusedMoE):
         if method is not None:
             quant_type = getattr(method, "quant_type", QuantType.NONE)
 
-        logger.info_once(
-            "MoE runner quant type resolved: runner=%s, quant_method=%s, inner_method=%s, quant_type=%s",
-            type(self).__name__,
-            type(self.quant_method).__name__,
-            type(method).__name__ if method is not None else None,
-            quant_type,
-        )
         return quant_type
 
     def update_expert_map(self, new_expert_map):
@@ -684,9 +677,7 @@ class AscendFusedMoE(FusedMoE):
             gate = self.gate
             assert gate is not None
             before_routed_experts = torch.npu.current_stream().record_event()
-            router_logits = DeviceOperator.compute_gate_logits(
-                hidden_states, gate.weight, gate.weight_fp32
-            )
+            router_logits = DeviceOperator.compute_gate_logits(hidden_states, gate.weight, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
         else:
             before_routed_experts = torch.npu.current_stream().record_event()

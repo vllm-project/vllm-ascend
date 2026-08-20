@@ -633,7 +633,6 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
     def _complete_wave(self) -> None:
         if self.dp_rank == 0 or not self.has_coordinator:
             # Notify client that we are pausing the loop.
-            logger.info("Wave %d finished, pausing engine loop.", self.current_wave)
             # In the coordinator case, dp rank 0 sends updates to the
             # coordinator. Otherwise (offline spmd case), each rank
             # sends the update to its colocated front-end process.

@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -322,33 +321,6 @@ def test_select_moe_comm_method_a5_reads_quant_type_from_model_instance(monkeypa
         == MoECommType.FUSED_MC2
     )
     assert not hasattr(vllm_config, "ascend_moe_quant_type")
-
-
-def test_select_moe_comm_method_a5_logs_mega_moe_decisions_at_info(monkeypatch):
-    _patch_select_moe_comm_method_deps(
-        monkeypatch,
-        device_type=afc.AscendDeviceType.A5,
-        capacity=128,
-        enable_fused_mc2=1,
-    )
-    matched_config = _make_vllm_config(
-        world_size=8,
-        top_k_experts=4,
-        resolved_moe_quant_type=QuantType.W4A8MXFP,
-    )
-    fallback_config = _make_vllm_config(
-        world_size=8,
-        top_k_experts=4,
-    )
-
-    with patch.object(afc.logger, "info") as mock_info:
-        assert afc.select_moe_comm_method(64, matched_config) == MoECommType.FUSED_MC2
-        assert afc.select_moe_comm_method(64, fallback_config) == MoECommType.MC2
-
-    messages = [call.args[0] for call in mock_info.call_args_list]
-    assert sum(message.startswith("A5 MegaMoE condition check") for message in messages) == 2
-    assert any(message.startswith("A5 MoE comm selected FUSED_MC2/MegaMoE") for message in messages)
-    assert any(message.startswith("A5 MoE comm selected fallback") for message in messages)
 
 
 def test_select_moe_comm_method_a5_uses_mega_moe_for_draft_model(monkeypatch):
