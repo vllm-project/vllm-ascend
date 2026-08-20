@@ -592,20 +592,35 @@ class AscendAttentionBackendImpl(AttentionImpl):
             max_blocks_per_seq = (max_seqlen_k + block_size - 1) // block_size
 
         # Fixed-size NPU buffers whose addresses are captured by NPUGraph.
-        cache_seqlens_buf = torch.zeros(max_batch_size, dtype=torch.int32, device=device)
-        cu_seqlens_q_buf = torch.zeros(max_batch_size + 1, dtype=torch.int32, device=device)
-        block_table_buf = torch.zeros(
-            max_batch_size, max_blocks_per_seq, dtype=torch.int32, device=device
-        )
+        #
+        # These hold BATCH-LEVEL data (cache_seqlens / cu_seqlens_q /
+        # block_table) that is identical for every layer.  They MUST be shared
+        # across layers: `update_graph_params` refreshes only the single tuple
+        # stored in the global `_FA3_GRAPH_TENSORS[num_tokens]`, so if each layer
+        # allocated its own buffers, every layer except the last one would keep
+        # reading its own stale (capture-time, block_table=zeros) buffers and
+        # produce wrong decode output.
+        global _FA3_GRAPH_TENSORS
+        if num_tokens in _FA3_GRAPH_TENSORS:
+            cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf = _FA3_GRAPH_TENSORS[num_tokens]
+        else:
+            cache_seqlens_buf = torch.zeros(max_batch_size, dtype=torch.int32, device=device)
+            cu_seqlens_q_buf = torch.zeros(max_batch_size + 1, dtype=torch.int32, device=device)
+            block_table_buf = torch.zeros(
+                max_batch_size, max_blocks_per_seq, dtype=torch.int32, device=device
+            )
 
-        # Decode: cu_seqlens_q is always [0, 1, ..., num_tokens] (each request
-        # has exactly 1 query token).  Fixed at allocation time.
-        cu_seqlens_q_buf.copy_(
-            torch.arange(max_batch_size + 1, dtype=torch.int32, device=device)
-        )
-        # cache_seqlens: warmup batch's real KV lengths.
-        n = min(attn_metadata.seq_lens.numel(), max_batch_size)
-        cache_seqlens_buf[:n].copy_(attn_metadata.seq_lens[:n].to(device=device))
+            # Decode: cu_seqlens_q is always [0, 1, ..., num_tokens] (each request
+            # has exactly 1 query token).  Fixed at allocation time.
+            cu_seqlens_q_buf.copy_(
+                torch.arange(max_batch_size + 1, dtype=torch.int32, device=device)
+            )
+            # cache_seqlens: warmup batch's real KV lengths.
+            n = min(attn_metadata.seq_lens.numel(), max_batch_size)
+            cache_seqlens_buf[:n].copy_(attn_metadata.seq_lens[:n].to(device=device))
+            _FA3_GRAPH_TENSORS[num_tokens] = (
+                cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf,
+            )
 
         # Scheduler metadata for the decode max config — valid for any decode
         # batch padded to num_tokens requests.
@@ -625,10 +640,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         fa3_graph = (meta, cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf)
         self._fa3_scheduler_metadata[num_tokens] = fa3_graph
-        global _FA3_GRAPH_TENSORS
-        _FA3_GRAPH_TENSORS[num_tokens] = (
-            cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf,
-        )
         # S2 diagnostic: expose the capture key and the block_table width so a
         # decode-replay key mismatch (or a truncated block_table) is visible in
         # the log.  num_tokens here is actual_seq_lengths_q[-1] == num_tokens_padded.
