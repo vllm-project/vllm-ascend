@@ -167,51 +167,27 @@ async def run_check_rank0_process_count(
 
 
 async def run_spec_decode_acceptance_test(
-    config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy"
+    config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy",
+    spec_baseline: tuple[int, list[int]] | None = None,
 ) -> None:
-    from tools.spec_decode_metrics import calc_acceptance_rate, validate_acceptance_rate
+    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rate
 
     spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
     num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
 
     acceptance_cfg = config.extra_config.get("acceptance_rate", {})
-    baseline = acceptance_cfg.get("baseline")
+    baseline_val = acceptance_cfg.get("baseline")
     tolerance = acceptance_cfg.get("tolerance", 0.05)
 
-    if baseline is None:
+    if baseline_val is None:
         logger.warning("acceptance_rate.baseline not set in config, skipping validation")
-        baseline = 0.0
+        baseline_val = 0.0
 
-    chat_url = server.url_for("v1", "chat", "completions")
+    if spec_baseline is None:
+        spec_baseline = (0, [0] * num_speculative_tokens)
 
-    def warmup_fn():
-        requests.post(
-            chat_url,
-            json={
-                "model": config.model,
-                "messages": [{"role": "user", "content": "Hello!"}],
-                "max_tokens": 16,
-            },
-            timeout=120,
-        )
-
-    def test_fn():
-        prompts = config.prompts if config.prompts else ["Tell me a story about a brave knight."]
-        for p in prompts:
-            requests.post(
-                chat_url,
-                json={
-                    "model": config.model,
-                    "messages": [{"role": "user", "content": p}],
-                    "max_tokens": 128,
-                },
-                timeout=300,
-            )
-
-    pos0_rate, _ = calc_acceptance_rate(
-        server, num_speculative_tokens, warmup_fn=warmup_fn, test_fn=test_fn
-    )
-    validate_acceptance_rate(pos0_rate, float(baseline), float(tolerance))
+    pos0_rate, _ = measure_acceptance_rate(server, num_speculative_tokens, spec_baseline)
+    validate_acceptance_rate(pos0_rate, float(baseline_val), float(tolerance))
 # test_content:
 #   - chat_completion
 #   - spec_decode_acceptance
@@ -232,7 +208,7 @@ TEST_HANDLERS = {
 async def _dispatch_tests(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     """Dispatches requested tests defined in yaml."""
     for test_name in config.test_content:
-        if test_name == "benchmark_comparisons":
+        if test_name in ("benchmark_comparisons", "spec_decode_acceptance"):
             continue
 
         handler = TEST_HANDLERS.get(test_name)
@@ -500,7 +476,33 @@ async def test_single_node(config: SingleNodeConfig) -> None:
             DisaggEpdProxy(proxy_args=config.epd_proxy_args, env_dict=config.envs) as proxy,
         ):
             await _dispatch_tests(config, proxy)
+
+            spec_baseline = None
+            if "spec_decode_acceptance" in config.test_content:
+                from tools.spec_decode_metrics import capture_baseline
+
+                spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+                num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+                chat_url = proxy.url_for("v1", "chat", "completions")
+
+                def warmup_fn():
+                    requests.post(
+                        chat_url,
+                        json={
+                            "model": config.model,
+                            "messages": [{"role": "user", "content": "Hello!"}],
+                            "max_tokens": 16,
+                        },
+                        timeout=120,
+                    )
+
+                spec_baseline = capture_baseline(proxy, num_spec_tokens, warmup_fn)
+
             _run_benchmarks(config, proxy.port)
+
+            if "spec_decode_acceptance" in config.test_content:
+                await run_spec_decode_acceptance_test(config, proxy, spec_baseline)
         return
 
     # Standard OpenAI service mode
@@ -512,4 +514,32 @@ async def test_single_node(config: SingleNodeConfig) -> None:
         auto_port=False,
     ) as server:
         await _dispatch_tests(config, server)
+
+        # Capture spec decode baseline before benchmarks
+        spec_baseline = None
+        if "spec_decode_acceptance" in config.test_content:
+            from tools.spec_decode_metrics import capture_baseline
+
+            spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+            num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+            chat_url = server.url_for("v1", "chat", "completions")
+
+            def warmup_fn():
+                requests.post(
+                    chat_url,
+                    json={
+                        "model": config.model,
+                        "messages": [{"role": "user", "content": "Hello!"}],
+                        "max_tokens": 16,
+                    },
+                    timeout=120,
+                )
+
+            spec_baseline = capture_baseline(server, num_spec_tokens, warmup_fn)
+
         _run_benchmarks(config, config.server_port)
+
+        # Measure spec decode acceptance rate after benchmarks
+        if "spec_decode_acceptance" in config.test_content:
+            await run_spec_decode_acceptance_test(config, server, spec_baseline)

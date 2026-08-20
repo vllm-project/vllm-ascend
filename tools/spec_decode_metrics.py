@@ -28,43 +28,37 @@ def analysis_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[in
     return int(num_drafts), num_accepted_tokens_per_pos
 
 
-def calc_acceptance_rate(
+def capture_baseline(
     server,
     num_speculative_tokens: int,
     warmup_fn: Optional[Callable] = None,
-    test_fn: Optional[Callable] = None,
-) -> tuple[float, list[float]]:
-    """Calculate spec decode acceptance rate.
+) -> tuple[int, list[int]]:
+    """Run warmup and capture baseline (num_drafts, num_accepted_tokens_per_pos).
 
-    Flow:
-      1. warmup_fn()  — optional warmup request(s)
-      2. fetch baseline metrics (arr)
-      3. test_fn()    — actual test request(s) that produce spec decode drafts
-      4. fetch final metrics, subtract baseline
-      5. compute acceptance_per_pos
-
-    Returns (pos0_rate, all_rates).
+    Call this BEFORE the actual benchmark/test requests. The returned tuple
+    should be passed to measure_acceptance_rate() afterwards.
     """
-    arr = [0, 0, 0, 0, 0, 0, 0, 0]
     if warmup_fn is not None:
         warmup_fn()
-        baseline_text = fetch_metrics(server)
-        base_drafts, base_accepted = analysis_metrics(baseline_text, num_speculative_tokens)
-        arr[0] = base_drafts
-        for i, v in enumerate(base_accepted):
-            if i + 1 < len(arr):
-                arr[i + 1] = v
+    metrics_text = fetch_metrics(server)
+    return analysis_metrics(metrics_text, num_speculative_tokens)
 
-    if test_fn is not None:
-        test_fn()
+
+def measure_acceptance_rate(
+    server,
+    num_speculative_tokens: int,
+    baseline: tuple[int, list[int]],
+) -> tuple[float, list[float]]:
+    """Fetch final metrics, subtract baseline, return (pos0_rate, all_rates)."""
+    base_drafts, base_accepted = baseline
 
     metrics_text = fetch_metrics(server)
     num_drafts, num_accepted_tokens_per_pos = analysis_metrics(metrics_text, num_speculative_tokens)
 
-    num_drafts -= arr[0]
+    num_drafts -= base_drafts
     for i in range(len(num_accepted_tokens_per_pos)):
-        if i + 1 < len(arr):
-            num_accepted_tokens_per_pos[i] -= arr[i + 1]
+        if i < len(base_accepted):
+            num_accepted_tokens_per_pos[i] -= base_accepted[i]
 
     if num_drafts > 0:
         acceptance_per_pos = [
