@@ -23,7 +23,8 @@ import torch
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import compute_mega_moe_buffer_tokens_per_rank, get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_a5_mega_moe_buffer_tokens_per_rank
 from vllm_ascend.distributed.parallel_state import get_mega_moe_group
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEFusedExpertsInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -235,11 +236,7 @@ class MegaMoEBackend:
     def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput, projected_hidden: int):
         mega_moe_group = get_mega_moe_group()
         ascend_config = get_ascend_config()
-        buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
-            ascend_config.mega_moe_max_tokens,
-            ascend_config.vllm_config.scheduler_config.max_num_batched_tokens,
-            mega_moe_group.world_size,
-        )
+        buffer_tokens_per_rank = get_a5_mega_moe_buffer_tokens_per_rank(ascend_config.vllm_config)
         key = self._make_buffer_key(
             fused_experts_input,
             projected_hidden,
