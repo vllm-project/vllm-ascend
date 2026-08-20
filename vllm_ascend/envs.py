@@ -114,6 +114,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Whether to fuse DSV4 compressor with ScatterNdUpdateV2 for compressed KV cache update.
+    "VLLM_ASCEND_ENABLE_FUSED_COMPRESSOR_SCATTER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_COMPRESSOR_SCATTER", "0"))
+    ),
 }
 
 # end-env-vars-definition

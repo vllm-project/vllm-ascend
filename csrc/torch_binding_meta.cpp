@@ -797,6 +797,25 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
     return output;
 }
 
+std::tuple<at::Tensor>
+fused_CompressorAndScatterNdUpdateV2_meta(
+    const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate, at::Tensor &state_cache,
+    const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &rope_sin, const at::Tensor &rope_cos,
+    const at::Tensor &slot_mapping, at::Tensor &paged_kv_cache, const c10::optional<at::Tensor> &state_block_table,
+    const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+    const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
+    double norm_eps, int64_t rotary_mode, int64_t cache_mode, int64_t scatter_block_size)
+{
+    // construct the output tensor
+    auto x_dim = x.dim();
+    auto norm_weight_dim = norm_weight.dim();
+    auto rope_sin_dim = rope_sin.dim();
+
+    std::tuple<at::Tensor> output = construct_compressor_output_tensor(x, norm_weight, rope_sin, cmp_ratio, coff);
+
+    return output;
+}
+
 std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
                                                            int64_t sparse_count, std::string query_layout_str,
                                                            std::string key_layout_str, bool return_value)
@@ -1617,6 +1636,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("fused_CompressorAndScatterNdUpdateV2",
+             &vllm_ascend::meta::fused_CompressorAndScatterNdUpdateV2_meta);
     ops.impl("npu_quant_lightning_indexer", &vllm_ascend::meta::npu_quant_lightning_indexer_meta);
     ops.impl("npu_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);

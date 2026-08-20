@@ -12,6 +12,7 @@ add_op_to_compiled_list()
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnn PRIVATE
         compressor_def.cpp
+        fused_compressor_and_scatter_nd_update_v2_def.cpp
     )
 endif()
 
@@ -24,6 +25,18 @@ add_ops_compile_options(
                 --op_relocatable_kernel_binary=true
 )
 
+add_ops_compile_options(
+        OP_NAME FusedCompressorAndScatterNdUpdateV2
+                OPTIONS --cce-auto-sync=off
+                -Wno-deprecated-declarations
+                -Werror
+                -mllvm -cce-aicore-hoist-movemask=false
+                --op_relocatable_kernel_binary=true
+)
+
 if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE compressor ACLNNTYPE aclnn)
+    add_modules_sources(
+        OPTYPE compressor fused_compressor_and_scatter_nd_update_v2
+        ACLNNTYPE aclnn aclnn
+    )
 endif()

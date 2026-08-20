@@ -114,6 +114,8 @@ struct COMPType {
 };
 
 struct ConstInfo {
+    uint32_t expectedRows = 0;
+    uint32_t validRows = 0;
     // 整个AICORE的任务信息, 左闭右开区间[ (bStart, s2Start), (bEnd, s2End) )
     uint32_t bStart = 0U;
     uint32_t sStart = 0U;
@@ -161,6 +163,9 @@ struct ConstInfo {
     uint32_t vec1TailCacheSize = 0;
     uint32_t vec1ResSize = 0;
     uint32_t mm1ResSize = 0;    // 所有cube输出kv/score结果的总大小
+
+    // fused scatter
+    uint32_t scatterBlockSize = 0;
 
     uint32_t aiCoreIdx = 0;
     uint32_t nSize = 0;

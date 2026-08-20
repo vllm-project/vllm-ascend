@@ -88,6 +88,8 @@ public:
         __gm__ uint8_t *cuSeqlens,
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
+        __gm__ uint8_t *slotMapping,
+        __gm__ uint8_t *pagedKvCache,
         __gm__ uint8_t *cmpKvOut);
     // =================================资源管理=================================
     __aicore__ inline void InitBuffers(TPipe *pipe);
@@ -245,6 +247,14 @@ private:
     GlobalTensor<ROPE_T> ropeSinGm_;
     GlobalTensor<ROPE_T> ropeCosGm_;
     GlobalTensor<X_T> cmpKvOutGm_;
+    GlobalTensor<X_T> pagedKvCacheGm_;
+    GlobalTensor<int32_t> slotMappingGm_;
+    bool fusedScatter_ = false;
+    uint32_t scatterBlockSize_ = 0;
+    uint32_t scatterSlotStride_ = 0;
+
+    // fused scatter: slot_mapping UB prefetch buffer
+    TBuf<TPosition::VECCALC> slotMappingBuf_;
 
     // ================================Local Buffer区====================================
     // TBuf<TPosition::VECIN> mm1ResUb;
@@ -290,6 +300,8 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     __gm__ uint8_t *cuSeqlens,
     __gm__ uint8_t *seqUsed,
     __gm__ uint8_t *startPos,
+    __gm__ uint8_t *slotMapping,
+    __gm__ uint8_t *pagedKvCache,
     __gm__ uint8_t *cmpKvOut)
 {
     stateBlockTableGm_.SetGlobalBuffer((__gm__ int32_t *)stateBlockTable);
@@ -299,6 +311,14 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     ropeSinGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeSin);
     ropeCosGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeCos);
     cmpKvOutGm_.SetGlobalBuffer((__gm__ X_T *)cmpKvOut);
+    scatterBlockSize_ = constInfo_.scatterBlockSize;
+    scatterSlotStride_ = scatterBlockSize_ * constInfo_.headDim;
+    fusedScatter_ = (slotMapping != nullptr && pagedKvCache != nullptr && scatterBlockSize_ > 0 &&
+                     constInfo_.validRows > 0);
+    if (fusedScatter_) {
+        slotMappingGm_.SetGlobalBuffer((__gm__ int32_t *)slotMapping);
+        pagedKvCacheGm_.SetGlobalBuffer((__gm__ X_T *)pagedKvCache);
+    }
     isExistSeqUsed = (seqUsed != nullptr);
     isExistStartPos = (startPos != nullptr);
     if constexpr (COMP::xLayout == X_LAYOUT::TH) {
@@ -323,6 +343,9 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::InitBuffers(TPipe *pipe)
     pipe->InitBuffer(normWeightBuf, BUFFER_SIZE_BYTE_4K);
     pipe->InitBuffer(gatherOffsetBuf, BUFFER_SIZE_BYTE_1K);
     pipe->InitBuffer(apeBuf, BUFFER_SIZE_BYTE_32K);
+    if (fusedScatter_) {
+        pipe->InitBuffer(slotMappingBuf_, BUFFER_SIZE_BYTE_2K);
+    }
     normWeightUb = normWeightBuf.Get<T>();
     apeUb = apeBuf.Get<T>();
     LocalTensor<X_T> normweightInUb = inputQue1.AllocTensor<X_T>();
@@ -1464,6 +1487,37 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CopyFinalResultOut(const
     uint64_t outOffset = globalScStart * constInfo_.headDim;
     uint32_t copySize = dealRowCount * constInfo_.headDim;
 
+    if (fusedScatter_) {
+        uint32_t scatterStart = static_cast<uint32_t>(globalScStart);
+        uint32_t scatterRowCount = 0;
+        if (scatterStart < constInfo_.validRows) {
+            scatterRowCount = min(dealRowCount, constInfo_.validRows - scatterStart);
+        }
+        if (scatterRowCount > 0) {
+        LocalTensor<int32_t> slotLocal = slotMappingBuf_.Get<int32_t>();
+        DataCopyExtParams slotCopyParams{1, static_cast<uint32_t>(scatterRowCount * 2 * sizeof(int32_t)), 0, 0, 0};
+        DataCopyPadExtParams<int32_t> slotPadParams{true, 0, 0, 0};
+        DataCopyPad(slotLocal, slotMappingGm_[scatterStart * 2], slotCopyParams, slotPadParams);
+        {
+            event_t eventIdMte2ToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+            SetFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
+            WaitFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
+        }
+
+        for (uint32_t i = 0; i < scatterRowCount; ++i) {
+            int32_t blockIdx = slotLocal.GetValue(i * 2);
+            int32_t offsetInBlock = slotLocal.GetValue(i * 2 + 1);
+            if (blockIdx >= 0 && static_cast<uint32_t>(blockIdx) < constInfo_.blockNum && offsetInBlock >= 0 &&
+                static_cast<uint32_t>(offsetInBlock) < scatterBlockSize_) {
+                uint64_t pagedOffset = (uint64_t)blockIdx * scatterSlotStride_ +
+                    (uint64_t)offsetInBlock * constInfo_.headDim;
+                DataCopyExtParams scatterParams{1, static_cast<uint32_t>(constInfo_.headDim * sizeof(X_T)), 0, 0, 0};
+                DataCopyPad(pagedKvCacheGm_[pagedOffset], cmpKvOutUb[i * constInfo_.headDim], scatterParams);
+            }
+        }
+        }
+    }
+
     uint32_t dealScSize = dealRowCount;
     uint32_t curDealScSize = 0;
     if constexpr (COMP::xLayout == X_LAYOUT::TH) {
@@ -1472,12 +1526,10 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CopyFinalResultOut(const
             UpdateOutputIdx(OutputBStartIdx, OutputSStartIdx, dealScSize, curDealScSize);
         }
     } else {
-        // 处理BSH有效数据在内存上不连续（可能存在pad）
         uint32_t ubProcessedCount = 0;
         uint32_t preOutputBStartIdx = 0;
         uint32_t preOutputSStartIdx = 0;
         while (dealScSize > 0) {
-            // 逐batch计算写出索引
             preOutputBStartIdx = OutputBStartIdx;
             preOutputSStartIdx = OutputSStartIdx;
             UpdateOutputIdx(OutputBStartIdx, OutputSStartIdx, dealScSize, curDealScSize);
