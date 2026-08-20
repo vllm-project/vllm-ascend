@@ -104,8 +104,12 @@ class WyCubeGemm {
       WaitMte3ToMte2();
       PipeBarrier<PIPE_ALL>();
 
-      mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
-      mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
+      // Re-configuring shapes between IterateAll calls wedges the 310P matmul;
+      // full 64-slices keep Init's 64^3 config untouched.
+      if (kCur != WY_CUBE_CHUNK) {
+        mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
+        mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
+      }
       mmAttn_.SetTensorA(aGm_, false);
       mmAttn_.SetTensorB(bGm_, true);
       if (k0 == 0) {
@@ -186,14 +190,18 @@ class WyCubeGemm {
       PipeBarrier<PIPE_ALL>();
 
       if (useU) {
-        mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
-        mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        if (nCur != WY_CUBE_CHUNK) {
+          mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+          mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        }
         mmApplyU_.SetTensorA(aGm_, false);
         mmApplyU_.SetTensorB(bGm_, false);
         mmApplyU_.IterateAll(floatScratch);
       } else {
-        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
-        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        if (nCur != WY_CUBE_CHUNK) {
+          mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+          mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        }
         mmApplyW_.SetTensorA(aGm_, false);
         mmApplyW_.SetTensorB(bGm_, false);
         mmApplyW_.IterateAll(floatScratch);
