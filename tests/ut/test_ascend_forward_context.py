@@ -170,6 +170,7 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
+        (4097, 64, MoECommType.ALLTOALL),
         (128, 128, MoECommType.MC2),
         (4097, 8, MoECommType.FUSED_MC2),
         (4097, 128, MoECommType.ALLTOALL),

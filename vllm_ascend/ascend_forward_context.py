@@ -1,4 +1,3 @@
-import importlib.util
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -40,7 +39,9 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "quanttype.w4a8",
 }
 
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+# Keep v0.25 on the legacy dispatch_ffn_combine path. Installing CANN 9.1
+# must not implicitly enable MegaMoe on this release branch.
+_MEGA_MOE_SUPPORTED = False
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
