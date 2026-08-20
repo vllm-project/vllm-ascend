@@ -17,6 +17,7 @@
 #include <numeric>
 #include <functional>
 #include <algorithm>
+#include <type_traits>
 #include <unordered_map>
 #include <graph/utils/type_utils.h>
 #include "err/ops_err.h"
@@ -429,7 +430,7 @@ ge::graphStatus CompressorTiling::CheckAttrValueSupport(const T *attrValue,
 
 template <typename T>
 std::string to_string(const T &value) {
-    if (std::is_same_v<T, bool>) {
+    if (std::is_same<T, bool>::value) {
         return value ? "true" : "false";
     } else {
         return std::to_string(value);

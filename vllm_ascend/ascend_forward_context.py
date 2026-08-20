@@ -1,4 +1,5 @@
 import math
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -257,6 +258,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
+    force_moe_comm_type = os.getenv("VLLM_ASCEND_FORCE_MOE_COMM_METHOD")
+    if force_moe_comm_type:
+        try:
+            return MoECommType[force_moe_comm_type.upper()]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported VLLM_ASCEND_FORCE_MOE_COMM_METHOD: {force_moe_comm_type}") from exc
+
     if not is_moe_model(vllm_config):
         return None
     mc2_tokens_capacity = get_mc2_tokens_capacity()

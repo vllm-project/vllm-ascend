@@ -10,6 +10,7 @@
 
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
+#include "error/ops_error.h"
 #include "log/ops_log.h"
 
 using namespace ge;
@@ -219,7 +220,7 @@ ge::graphStatus SetCompressorShapeDim(const CompressorProtoShapeParam &shapePara
 
 ge::graphStatus InferDataTypeCompressor(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("Compressor", "Context is nullptr."),
+    OPS_ERR_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("Compressor", "Context is nullptr."),
                return ge::GRAPH_FAILED);
     OPS_LOG_I(context->GetNodeName(), "Enter Compressor inferDataType impl.");
 
@@ -230,7 +231,7 @@ ge::graphStatus InferDataTypeCompressor(gert::InferDataTypeContext* context)
 
 ge::graphStatus InferShapeCompressor(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("Compressor", "Context is nullptr."),
+    OPS_ERR_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("Compressor", "Context is nullptr."),
                return ge::GRAPH_FAILED);
     OPS_LOG_I(context->GetNodeName(), "Enter Compressor infershape impl.");
 

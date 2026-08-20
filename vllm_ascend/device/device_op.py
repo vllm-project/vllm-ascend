@@ -26,6 +26,12 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
+def _normalize_grouped_matmul_swiglu_quant_output(output):
+    if isinstance(output, tuple) and len(output) == 2:
+        return output[0], output[1], None
+    return output
+
+
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -46,7 +52,19 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        if hasattr(torch.ops._C_ascend, "npu_moe_init_routing_custom"):
+            return torch.ops._C_ascend.npu_moe_init_routing_custom(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -77,19 +95,35 @@ class BaseDeviceAdaptor:
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
-            x,
-            k=k,
-            k_group=k_group,
-            group_count=group_count,
-            group_select_mode=group_select_mode,
-            renorm=renorm,
-            norm_type=norm_type,
-            out_flag=out_flag,
-            routed_scaling_factor=routed_scaling_factor,
-            eps=eps,
-            bias_opt=bias_opt,
-        )
+        if hasattr(torch.ops._C_ascend, "moe_gating_top_k"):
+            topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+                x,
+                k=k,
+                k_group=k_group,
+                group_count=group_count,
+                group_select_mode=group_select_mode,
+                renorm=renorm,
+                norm_type=norm_type,
+                out_flag=out_flag,
+                routed_scaling_factor=routed_scaling_factor,
+                eps=eps,
+                bias_opt=bias_opt,
+            )
+        else:
+            topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
+                x,
+                k=k,
+                bias=bias_opt,
+                k_group=k_group,
+                group_count=group_count,
+                group_select_mode=group_select_mode,
+                renorm=0,
+                norm_type=norm_type,
+                routed_scaling_factor=routed_scaling_factor,
+                eps=eps,
+            )
+            if norm_type == 0 and renorm == 1:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
         return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
@@ -112,9 +146,9 @@ class BaseDeviceAdaptor:
     def npu_grouped_matmul_swiglu_quant(
         *,
         x: torch.Tensor,
-        weight: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
         group_list: torch.Tensor,
-        weight_scale: torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
         swiglu_limit: int = 0,
@@ -125,14 +159,54 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
-            x=x,
-            weight=weight,
-            weight_scale=weight_scale,
-            x_scale=x_scale,
-            group_list=group_list,
-            bias=bias,
-            swiglu_limit=swiglu_limit,
+        if isinstance(weight, list) or isinstance(weight_scale, list):
+            if hasattr(torch.ops._C_ascend, "grouped_matmul_swiglu_quant_weight_nz_tensor_list"):
+                return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+                    x=x,
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    x_scale=x_scale,
+                    group_list=group_list,
+                    bias=bias,
+                    offset=None,
+                    swiglu_limit=swiglu_limit,
+                )
+            return _normalize_grouped_matmul_swiglu_quant_output(
+                torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                    x=x,
+                    weight=weight,
+                    group_list=group_list,
+                    weight_scale=weight_scale,
+                    x_scale=x_scale,
+                    bias=bias,
+                    swiglu_limit=swiglu_limit,
+                    use_mxfp_quant=False,
+                )
+            )
+
+        if hasattr(torch.ops._C_ascend, "grouped_matmul_swiglu_quant_weight_nz"):
+            return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
+                x=x,
+                weight=weight,
+                weight_scale=weight_scale,
+                x_scale=x_scale,
+                group_list=group_list,
+                bias=bias,
+                offset=None,
+                swiglu_limit=swiglu_limit,
+            )
+
+        return _normalize_grouped_matmul_swiglu_quant_output(
+            torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                x=x,
+                weight=weight,
+                group_list=group_list,
+                weight_scale=weight_scale,
+                x_scale=x_scale,
+                bias=bias,
+                swiglu_limit=swiglu_limit,
+                use_mxfp_quant=False,
+            )
         )
 
     @staticmethod
@@ -411,9 +485,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_grouped_matmul_swiglu_quant(
         *,
         x: torch.Tensor,
-        weight: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
         group_list: torch.Tensor,
-        weight_scale: torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
         swiglu_limit: int = 0,
@@ -422,15 +496,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
     ):
         if not use_mxfp_quant:
-            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                x=x,
-                weight=weight,
-                group_list=group_list,
-                weight_scale=weight_scale,
-                x_scale=x_scale,
-                bias=bias,
-                swiglu_limit=swiglu_limit,
-                use_mxfp_quant=False,
+            return _normalize_grouped_matmul_swiglu_quant_output(
+                torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                    x=x,
+                    weight=weight,
+                    group_list=group_list,
+                    weight_scale=weight_scale,
+                    x_scale=x_scale,
+                    bias=bias,
+                    swiglu_limit=swiglu_limit,
+                    use_mxfp_quant=False,
+                )
             )
 
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(

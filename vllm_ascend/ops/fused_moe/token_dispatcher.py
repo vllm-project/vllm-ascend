@@ -108,7 +108,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
-        self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
+        self.enable_dispatch_v2 = (
+            get_ascend_device_type() == AscendDeviceType.A5
+            and hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
+        )
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
@@ -180,9 +183,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "global_bs": self.global_bs,
             "expert_token_nums_type": expert_token_nums_type,
         }
-        if self.global_bs == 0:
-            kwargs_mc2["x_active_mask"] = token_dispatch_input.routing.mc2_mask
-
         stage1_kwargs = {
             "scales": None,
             "quant_mode": quant_mode,
@@ -228,11 +228,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         token_dispatch_input: MoETokenDispatchInput,
     ):
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
-        output = (
-            torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
-        )
+        if self.enable_dispatch_v2:
+            try:
+                output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
+            except Exception:
+                output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
+        else:
+            output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
         # comm_stream.wait_stream(torch.npu.current_stream())
         (
             expand_x,
@@ -292,9 +294,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
         }
-        if self.global_bs == 0:
-            kwargs_mc2["x_active_mask"] = combine_metadata.mc2_mask
-
         if combine_metadata.quant.dispatch_with_quant:
             tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
 

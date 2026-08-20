@@ -250,7 +250,7 @@ def _select_experts_with_fusion_ops(
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
     renorm = int(renormalize)
-    if scoring_func == "sqrtsoftplus":
+    if scoring_func == "sqrtsoftplus" and hasattr(torch.ops._C_ascend, "moe_gating_top_k_hash"):
         if tid2eid is not None:
             forward_context = get_forward_context()
             input_ids = forward_context.input_ids.to(torch.int64)
