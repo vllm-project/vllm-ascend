@@ -1952,6 +1952,19 @@ class NPUModelRunner(GPUModelRunner):
         dynamic_spec = getattr(self.drafter, "dynamic_spec", None)
         if dynamic_spec is None or dynamic_spec.num_verify_tokens is None:
             return
+
+        # The hardware-aware scheduler can explicitly hold the previous
+        # verify lengths for a cadence.  Once the per-request host mapping is
+        # known, avoid synchronizing the same small device tensor back to CPU
+        # on every decode step.  New request IDs force the normal copy path so
+        # cached lengths are never assigned to an unrelated request.
+        if getattr(dynamic_spec, "reused_last_result", False):
+            lengths_by_req = getattr(self, "_proposal_lengths_by_req", None)
+            if lengths_by_req is not None and all(
+                req_id in lengths_by_req for req_id in self.input_batch.req_ids
+            ):
+                return
+
         lengths = dynamic_spec.num_verify_tokens
         if torch.is_tensor(lengths):
             lengths = lengths.detach().to("cpu").tolist()

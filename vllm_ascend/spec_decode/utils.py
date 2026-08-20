@@ -423,6 +423,7 @@ class DynamicSpecScheduler:
 
         # Latest result consumed by the model runner.
         self.num_verify_tokens: torch.Tensor | None = None
+        self.reused_last_result = False
         self._cached_num_verify_tokens: torch.Tensor | None = None
         self._confidence_steps = 0
         self._last_confidence_num_reqs: int | None = None
@@ -479,6 +480,8 @@ class DynamicSpecScheduler:
         draft_token_ids: torch.Tensor | None = None,
         num_reqs: int | None = None,
     ) -> torch.Tensor:
+        self.reused_last_result = False
+
         # A full hardware budget does not need confidence estimation.  This
         # is the saturated, non-adaptive mode: the configured confidence
         # budget already covers the current physical draft width, so running
@@ -520,6 +523,7 @@ class DynamicSpecScheduler:
             self._confidence_steps += 1
             if self._confidence_steps < self.confidence_update_interval:
                 self.num_verify_tokens = self._cached_num_verify_tokens[:num_reqs]
+                self.reused_last_result = True
                 return self.num_verify_tokens
 
         if self.hardware_policy is not None and self.confidence_update_interval > 1:
