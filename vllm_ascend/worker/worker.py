@@ -246,6 +246,35 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    @staticmethod
+    def _raise_if_world_size_exceeds_devices(local_world_size: int, visible_device_count: int) -> None:
+        """Validate NPU device sufficiency and raise a friendly error if not.
+
+        Extracted as a pure static method so it can be unit-tested without
+        instantiating the full worker (which requires NPU hardware and
+        distributed init). When ``visible_device_count == 0`` (driver-less or
+        CI environment), suggestion 5 (reducing TP/DP) is omitted because it
+        is not actionable in that scenario.
+        """
+        if local_world_size <= visible_device_count:
+            return
+        suggestions = [
+            "1. NPU driver is installed (run 'npu-smi info' to verify)",
+            "2. NPU devices are properly mounted (check /dev/davinci*)",
+            "3. CANN toolkit is installed and environment variables are set",
+            "4. You have permission to access NPU devices",
+        ]
+        if visible_device_count > 0:
+            suggestions.append(
+                f"5. Reduce --tensor-parallel-size or --data-parallel-size "
+                f"to match the {visible_device_count} available device(s)"
+            )
+        raise RuntimeError(
+            f"Insufficient NPU devices: requested local_world_size="
+            f"{local_world_size}, but only {visible_device_count} NPU device(s) "
+            f"are visible.\n\nPlease check:\n" + "\n".join(suggestions)
+        )
+
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
@@ -268,13 +297,13 @@ class NPUWorker(WorkerBase):
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
             raise ValueError(
-                f"Free memory on device "
+                f"Free memory on NPU device "
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
-                f"is less than desired GPU memory utilization "
+                f"is less than desired NPU memory utilization "
                 f"({self.cache_config.gpu_memory_utilization}, "
-                f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
-                f"utilization or reduce GPU memory used by other processes."
+                f"{GiB(self.requested_memory)} GiB). Decrease --gpu-memory-utilization "
+                f"or reduce NPU memory used by other processes."
             )
 
         if (
@@ -285,11 +314,7 @@ class NPUWorker(WorkerBase):
             and self.vllm_config.parallel_config.nnodes_within_dp == 1
         ):
             visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
-            assert self.parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({self.parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
-            )
+            NPUWorker._raise_if_world_size_exceeds_devices(self.parallel_config.local_world_size, visible_device_count)
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
