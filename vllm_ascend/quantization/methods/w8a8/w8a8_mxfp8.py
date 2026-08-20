@@ -20,7 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -28,14 +28,15 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.utils import FP8_METHOD
 
-from .base import (
+from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
     QuantType,
     TPWeightGatherSpec,
 )
-from .registry import register_scheme
+from ..registry import register_scheme
 
 
 @register_scheme("W8A8_MXFP8", "linear")
@@ -226,10 +227,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            and not vllm_config.model_config.enforce_eager
-        )
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
 
     @staticmethod
@@ -402,3 +399,66 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
+
+
+@register_scheme(FP8_METHOD, "ds_linear")
+class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
+
+    scales are reorganize as blocksize 32 * 1 in process_weights_after_loading
+    """
+
+    model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    supports_tp_weight_switch = True
+
+    def __init__(self, weight_block_size):
+        super().__init__()
+        self.block_size = weight_block_size[0]
+        vllm_config = get_current_vllm_config()
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        hf_config = vllm_config.model_config.hf_config
+        self.n_groups = hf_config.o_groups
+        self.n_local_groups = self.n_groups // tp_size
+        self.o_lora_rank = hf_config.o_lora_rank
+
+    def get_pergroup_param(
+        self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
+    ) -> dict[str, Any]:
+        params_dict = {}
+        params_dict["weight_scale"] = torch.empty(
+            output_size // self.block_size, input_size // self.block_size, dtype=torch.float32
+        )
+        params_dict["_packed_dim"] = 0
+        params_dict["_packed_factor"] = self.block_size
+        return params_dict
+
+    def process_weights_after_loading(self, layer):
+        if layer.weight_scale.data.dtype == torch.float8_e8m0fnu:
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.uint8)
+        else:
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
+            layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(4, dim=1).repeat_interleave(128, dim=0)
+        n_dim, k_dim = layer.weight_scale.data.shape
+        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        layer.weight.data = layer.weight.data.transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
+
+        if layer.prefix.endswith("wo_a"):
+            layer.weight.data = (
+                layer.weight.data.T.reshape(self.n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+            )
+            layer.weight_scale.data = (
+                layer.weight_scale.data.transpose(0, 1)
+                .reshape(self.n_local_groups, self.o_lora_rank, -1, 2)
+                .transpose(1, 2)
+                .contiguous()
+            )

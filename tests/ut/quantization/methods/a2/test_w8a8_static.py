@@ -1,15 +1,20 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_linear_layer, identity
-from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
+from vllm_ascend.quantization.methods.w8a8.w8a8_static import AscendW8A8LinearMethod
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW8A8LinearMethod(TestBase):
-    def setUp(self):
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.get_current_vllm_config")
+    def setUp(self, get_current_vllm_config):
+        mock_vllm_config = Mock()
+        mock_vllm_config.quant_config = Mock()
+        mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
+        get_current_vllm_config.return_value = mock_vllm_config
         self.method = AscendW8A8LinearMethod()
 
     def test_get_weight(self):
@@ -81,7 +86,6 @@ class TestAscendW8A8LinearMethod(TestBase):
         layer.aclnn_input_offset = 0.2
         layer.weight = torch.randn(128, 256)
         layer.deq_scale = 0.3
-        layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
 
         x = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
         bias = torch.randn(256)
@@ -89,6 +93,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
 
+        self.method.quant_method = COMPRESSED_TENSORS_METHOD
         output = self.method.apply(layer, x, bias)
         self.assertTrue(torch.equal(output, expected_y_output))
         mock_quantize.assert_not_called()
@@ -136,9 +141,9 @@ class TestAscendW8A8LinearMethod(TestBase):
         layer.input_offset.data = torch.tensor([0])
         layer.weight_scale.data = torch.randn(128, 1)
         layer.weight_offset.data = torch.randn(128, 1)
-        layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
 
         mock_npu_format_cast.side_effect = identity
+        self.method.quant_method = COMPRESSED_TENSORS_METHOD
         self.method.process_weights_after_loading(layer)
 
         expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
@@ -153,7 +158,12 @@ class TestAscendW8A8LinearMethod(TestBase):
 
 
 class TestAscendW8A8LinearMethodWithNpu(TestBase):
-    def setUp(self):
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.get_current_vllm_config")
+    def setUp(self, get_current_vllm_config):
+        mock_vllm_config = Mock()
+        mock_vllm_config.quant_config = Mock()
+        mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
+        get_current_vllm_config.return_value = mock_vllm_config
         self.method = AscendW8A8LinearMethod()
         self.mock_get_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_config.start()

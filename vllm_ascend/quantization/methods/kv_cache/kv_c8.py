@@ -5,8 +5,8 @@ from vllm.logger import logger
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-from .base import AscendAttentionScheme
-from .registry import register_scheme
+from ..base import AscendAttentionScheme
+from ..registry import register_scheme
 
 
 def _fa_quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):

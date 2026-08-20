@@ -22,8 +22,8 @@ import torch_npu
 
 from vllm_ascend.utils import maybe_trans_nz
 
-from .base import AscendLinearScheme
-from .registry import register_scheme
+from ..base import AscendLinearScheme
+from ..registry import register_scheme
 
 
 @register_scheme("W8A16", "linear")

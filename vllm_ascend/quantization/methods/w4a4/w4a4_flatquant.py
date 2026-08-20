@@ -22,8 +22,8 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
-from .base import AscendLinearScheme
-from .registry import register_scheme
+from ..base import AscendLinearScheme
+from ..registry import register_scheme
 
 KRONECKER_QUANT_MAX_BATCH_SIZE = 32768
 
@@ -36,8 +36,12 @@ def pack_int4_weights(weight_tensor: torch.Tensor) -> torch.Tensor:
     return weight_int4_packed.to(original_device)
 
 
-def get_decompose_dim(n):
-    """Get decomposed dimensions for Kronecker quantization."""
+def solve_kronecker_decompose(n: int) -> tuple[int, int]:
+    """Find (a-b, a+b) such that a² - b² = n.
+
+    This is the core solver for Kronecker quantization transform matrix
+    dimension decomposition.
+    """
     a = int(math.sqrt(n))
     if a * a < n:
         a += 1
@@ -89,7 +93,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
     input_size = 0
 
     def __init__(self):
-        self.sym = True
+        pass
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         if input_size % 8 != 0:
@@ -102,7 +106,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
 
     def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         params_dict = {}
-        left_trans_dim, right_trans_dim = get_decompose_dim(AscendW4A4FlatQuantDynamicLinearMethod.input_size)
+        left_trans_dim, right_trans_dim = solve_kronecker_decompose(AscendW4A4FlatQuantDynamicLinearMethod.input_size)
         params_dict["left_trans"] = torch.empty(left_trans_dim, left_trans_dim, dtype=params_dtype)
         params_dict["right_trans"] = torch.empty(right_trans_dim, right_trans_dim, dtype=params_dtype)
         params_dict["clip_ratio"] = torch.empty(1, dtype=torch.float32)

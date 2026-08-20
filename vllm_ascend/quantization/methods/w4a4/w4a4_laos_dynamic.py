@@ -20,8 +20,8 @@ from typing import Any
 import torch
 import torch_npu
 
-from .base import AscendLinearScheme
-from .registry import register_scheme
+from ..base import AscendLinearScheme
+from ..registry import register_scheme
 
 
 @register_scheme("W4A4_DYNAMIC", "linear")

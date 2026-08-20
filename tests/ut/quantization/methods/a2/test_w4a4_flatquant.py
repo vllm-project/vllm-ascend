@@ -5,12 +5,12 @@ import torch
 import torch.nn as nn
 
 from tests.ut.quantization.conftest_quantization import create_linear_layer
-from vllm_ascend.quantization.methods.w4a4_flatquant import (
+from vllm_ascend.quantization.methods.w4a4.w4a4_flatquant import (
     KRONECKER_QUANT_MAX_BATCH_SIZE,
     AscendW4A4FlatQuantDynamicLinearMethod,
     batched_kronecker_quant,
-    get_decompose_dim,
     pack_int4_weights,
+    solve_kronecker_decompose,
 )
 
 
@@ -29,16 +29,16 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
     ## Test Helper Functions
     ## --------------------
 
-    def test_get_decompose_dim(self):
+    def test_solve_kronecker_decompose(self):
         """
-        Tests the get_decompose_dim function with various inputs.
+        Tests the solve_kronecker_decompose function with various inputs.
         """
-        self.assertEqual(get_decompose_dim(1024), (32, 32))
-        self.assertEqual(get_decompose_dim(768), (24, 32))
-        self.assertEqual(get_decompose_dim(100), (10, 10))
-        self.assertEqual(get_decompose_dim(99), (9, 11))
+        self.assertEqual(solve_kronecker_decompose(1024), (32, 32))
+        self.assertEqual(solve_kronecker_decompose(768), (24, 32))
+        self.assertEqual(solve_kronecker_decompose(100), (10, 10))
+        self.assertEqual(solve_kronecker_decompose(99), (9, 11))
 
-    @patch("vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.torch_npu")
     def test_pack_int4_weights_npu_success(self, mock_torch_npu):
         """
         Tests weight packing using the mocked NPU kernel.
@@ -54,7 +54,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         mock_torch_npu.npu_convert_weight_to_int4pack.assert_called_once()
         self.assertTrue(torch.equal(result, mock_packed_tensor))
 
-    @patch("vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.torch_npu")
     def test_large_batch_multiple_calls(self, mock_npu):
         batch_size = 50000
         x = torch.randn(batch_size, 24, 32)
@@ -76,7 +76,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         batched_kronecker_quant(x, left_trans, right_trans, 0.95)
         self.assertEqual(mock_npu.npu_kronecker_quant.call_count, num_chunks)
 
-    @patch("vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.torch_npu")
     def test_exact_max_batch_size(self, mock_npu):
         batch_size = KRONECKER_QUANT_MAX_BATCH_SIZE
         x = torch.randn(batch_size, 24, 32)
@@ -109,7 +109,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         """Tests the get_pertensor_param static method."""
         self.method.get_weight(self.input_size, self.output_size, self.params_dtype)
         params = self.method.get_pertensor_param(self.params_dtype)
-        left_dim, right_dim = get_decompose_dim(self.input_size)
+        left_dim, right_dim = solve_kronecker_decompose(self.input_size)
         self.assertIn("left_trans", params)
         self.assertIn("right_trans", params)
         self.assertIn("clip_ratio", params)
@@ -137,7 +137,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
     def _prepare_apply_mocks_and_layer(self, batch_size):
         """Helper to create a mock layer and input tensor for apply tests."""
         layer = nn.Module()
-        m, n = get_decompose_dim(self.input_size)
+        m, n = solve_kronecker_decompose(self.input_size)
         layer.left_trans = torch.randn(m, m, dtype=self.params_dtype)
         layer.right_trans = torch.randn(n, n, dtype=self.params_dtype)
         layer.aclnn_clip_ratio = 0.95
@@ -146,7 +146,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         x = torch.randn(batch_size, self.input_size, dtype=self.params_dtype)
         return layer, x, m, n
 
-    @patch("vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.torch_npu")
     def test_apply_small_batch(self, mock_torch_npu):
         """Tests the apply method with a batch size smaller than MAX_BATCH_SIZE."""
         batch_size = 128
@@ -163,8 +163,8 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         self.assertTrue(torch.allclose(output, mock_output + bias.to(self.params_dtype)))
         self.assertEqual(output.shape, (batch_size, self.output_size))
 
-    @patch("vllm_ascend.quantization.methods.w4a4_flatquant.KRONECKER_QUANT_MAX_BATCH_SIZE", 10)
-    @patch("vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.KRONECKER_QUANT_MAX_BATCH_SIZE", 10)
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.torch_npu")
     def test_apply_large_batch(self, mock_torch_npu):
         """Tests the apply method with a batch size larger than MAX_BATCH_SIZE."""
         batch_size = 25
@@ -192,7 +192,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "FlatQuant transform matrices dimension mismatch"):
             self.method.apply(layer, x)
 
-    @patch("vllm_ascend.quantization.methods.w4a4_flatquant.pack_int4_weights")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_flatquant.pack_int4_weights")
     def test_process_weights_after_loading(self, mock_pack_weights):
         """Tests weight processing after loading, without transpose."""
         layer = nn.Module()

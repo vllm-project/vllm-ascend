@@ -5,7 +5,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.quantization.methods.w4a16 import AscendW4A16FusedMoEMethod, pack_to_int32, unpack_from_int32
+from vllm_ascend.quantization.methods.wna16.w4a16 import AscendW4A16FusedMoEMethod, pack_to_int32, unpack_from_int32
 
 
 class TestUnpackFromInt32(TestBase):
@@ -87,7 +87,7 @@ class TestUnpackFromInt32(TestBase):
 
 
 class TestPackToInt32(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16.torch_npu.npu_convert_weight_to_int4pack")
     def test_pack_to_int32_int8(self, mock_npu_convert_weight_to_int4pack):
         mock_npu_convert_weight_to_int4pack.return_value = torch.zeros((2, 4), dtype=torch.int32)
 
@@ -99,7 +99,7 @@ class TestPackToInt32(TestBase):
 
         self.assertEqual(result.shape, torch.Size([2, 8, 4]))
 
-    @patch("vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16.torch_npu.npu_convert_weight_to_int4pack")
     def test_pack_to_int32_int32(self, mock_npu_convert_weight_to_int4pack):
         def mock_convert_weight(weight):
             return weight
@@ -149,8 +149,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
     output_size = 128
     group_size = 32
 
-    @patch("vllm_ascend.quantization.methods.w4a16.get_ascend_config")
-    @patch("vllm_ascend.quantization.methods.w4a16.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16.get_current_vllm_config")
     def setUp(self, mock_get_current_vllm_config, mock_get_ascend_config):
         mock_ascend_config = Mock()
         mock_ascend_config.eplb_config.dynamic_eplb = False
@@ -262,7 +262,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
 
         return layer
 
-    @patch("vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16.torch_npu.npu_convert_weight_to_int4pack")
     def test_process_weights_after_loading_with_transpose(self, mock_npu_convert_weight_to_int4pack):
         def mock_convert_weight(weight):
             new_shape = list(weight.shape)
@@ -279,7 +279,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         self.assertEqual(layer.w2_weight_offset.data.shape, torch.Size([8, 1, 128]))
         self.assertTrue(layer.w13_weight_scale.data.is_contiguous())
 
-    @patch("vllm_ascend.quantization.methods.w4a16._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16._EXTRA_CTX")
     def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_extra_ctx):
         tokens = 3
         hidden_size = self.output_size

@@ -19,7 +19,7 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
@@ -29,13 +29,13 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_expert
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_dsa_cp, maybe_trans_nz
 
-from .base import (
+from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
     QuantType,
     TPWeightGatherSpec,
 )
-from .registry import register_scheme
+from ..registry import register_scheme
 
 
 def scale_from_float_to_int64(scale):
@@ -173,10 +173,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def __init__(self):
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            and not vllm_config.model_config.enforce_eager
-        )
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
