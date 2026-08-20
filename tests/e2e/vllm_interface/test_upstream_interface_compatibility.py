@@ -31,6 +31,8 @@ from tests.e2e.vllm_interface.vllm_interface_contracts.upstream_ci import (
 VLLM_UPSTREAM_CHECKOUT = Path("/workspace/vllm")
 PR_SUMMARY_NAME = "vllm-interface-pr-summary.md"
 METADATA_NAME = "vllm-interface-analysis-metadata.json"
+DOWNSTREAM_INDEX_CACHE_DIR = Path.home() / ".cache" / "vllm-interface" / "repository-index"
+UPSTREAM_FILE_INDEX_CACHE_DIR = Path.home() / ".cache" / "vllm-interface" / "file-fragments"
 
 
 def test_upstream_interface_compatibility(tmp_path: Path) -> None:
@@ -51,6 +53,10 @@ def test_upstream_interface_compatibility(tmp_path: Path) -> None:
         new_sha=new_sha,
         ascend_sha=ascend_sha,
         output_dir=output_dir,
+        analysis_workers=3,
+        downstream_index_cache_dir=DOWNSTREAM_INDEX_CACHE_DIR,
+        upstream_file_index_cache_dir=UPSTREAM_FILE_INDEX_CACHE_DIR,
+        index_workers=4,
     )
 
     print("\n+++ vLLM interface compatibility inputs")
@@ -74,6 +80,16 @@ def test_upstream_interface_compatibility(tmp_path: Path) -> None:
     print("\n+++ vLLM interface compatibility capabilities")
     for name, capability in capabilities.items():
         print(f"{name}={capability['state']}")
+
+    execution = metadata["metadata"]["execution"]
+    downstream_cache = metadata["metadata"]["repository_index_cache"]["downstream"]
+    upstream_cache = metadata["metadata"]["repository_index_cache"]["upstream_file_fragments"]
+    print("\n+++ vLLM interface compatibility execution")
+    print(f"analysis_workers={execution['analysis_workers_used']}")
+    print(f"parallel_branches={execution['parallel_branches']}")
+    print(f"downstream_index_cache={downstream_cache['status']}")
+    print(f"upstream_file_index_cache={upstream_cache['status']}")
+    print(f"upstream_file_cache_hits={upstream_cache['cache_hits']}")
 
     summary = summary_path.read_text(encoding="utf-8")
     print("\n+++ vLLM interface compatibility result")
