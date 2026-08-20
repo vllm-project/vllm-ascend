@@ -84,6 +84,15 @@ DONE_SENDING_MSG = b"done_sending_msg"
 FAILED_SENDING_MSG = b"failed_sending_msg"
 
 
+def _get_mooncake_protocol(vllm_config: VllmConfig) -> str:
+    """Resolve Mooncake protocol from kv connector extra config."""
+    mooncake_cfg = vllm_config.kv_transfer_config.get_from_extra_config("mooncake", {})
+    protocol = mooncake_cfg.get("protocol", "ascend")
+    if protocol not in {"ascend", "ubshmem"}:
+        raise ValueError(f"Unsupported mooncake protocol: {protocol!r}")
+    return protocol
+
+
 @dataclass
 class LayerMetadata:
     tensor_group_idx: list[int]
@@ -1171,7 +1180,11 @@ class MooncakeLayerwiseConnectorWorker:
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
         logger.info("Initializing Mooncake work %s", engine_id)
-        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        self.engine = global_te.get_transfer_engine(
+            self.side_channel_host,
+            device_name=None,
+            protocol=_get_mooncake_protocol(vllm_config),
+        )
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.

@@ -4,11 +4,12 @@ import threading
 class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
+        self.transfer_protocol: str | None = None
         self.is_register_buffer: bool = False
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
-    def get_transfer_engine(self, hostname: str, device_name: str | None):
+    def get_transfer_engine(self, hostname: str, device_name: str | None, protocol: str = "ascend"):
         if self.transfer_engine is None:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
@@ -23,9 +24,15 @@ class GlobalTE:
                         ) from e
                     self.transfer_engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
-                    ret_value = self.transfer_engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)
+                    ret_value = self.transfer_engine.initialize(hostname, "P2PHANDSHAKE", protocol, device_name)
                     if ret_value != 0:
                         raise RuntimeError(f"TransferEngine initialization failed with ret_value: {ret_value}")
+                    self.transfer_protocol = protocol
+        elif self.transfer_protocol != protocol:
+            raise RuntimeError(
+                f"TransferEngine protocol mismatch: existing={self.transfer_protocol!r}, requested={protocol!r}."
+                " Rebuild with a single protocol per process."
+            )
         return self.transfer_engine
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
