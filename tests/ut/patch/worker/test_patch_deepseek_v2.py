@@ -88,7 +88,7 @@ def test_glm52_pp2_equal_partition_is_rejected():
             pp_size=2,
         )
     except ValueError as exc:
-        assert "layer 39 is shared" in str(exc)
+        assert "layer 39 uses a shared Indexer" in str(exc)
     else:
         raise AssertionError("Expected GLM-5.2 PP2 equal partition to be rejected")
 
@@ -186,7 +186,7 @@ def test_glm52_pp2_suggests_partitions_in_both_directions():
             pp_size=2,
         )
     except ValueError as exc:
-        assert "layer 39 is shared" in str(exc)
+        assert "layer 39 uses a shared Indexer" in str(exc)
         assert "The nearest valid layer partitions are" in str(exc)
         assert 'VLLM_PP_LAYER_PARTITION="38,40"' in str(exc)
         assert " or " in str(exc)
