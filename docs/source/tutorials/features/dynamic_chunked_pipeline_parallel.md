@@ -358,6 +358,17 @@ Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` (dec
 
     To verify CPP is active on the P node, check the startup logs for profiling-related messages such as `profiling_chunk_config` enabled and chunk size calculation outputs.
 
+> **Key Parameters**
+>
+> - `--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required, P node only)
+> - `--enable-chunked-prefill`: Enables Chunked Prefill (required, P node only)
+> - `--max-num-batched-tokens 32768`: Initial chunk size (recommended for 128K sequences)
+> - `profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline Parallel
+> - `profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more
+> - `profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`
+> - `profiling_chunk_config.need_timing`: Enable/disable Online Calibration
+> - `profiling_chunk_config.max_fit_chunk`: Number of chunk-time data for Online Calibration. Should be more when profiling failed
+
 > **Key points for PD disaggregation with CPP:**
 >
 > - CPP (`profiling_chunk_config.enabled`, `--pipeline-parallel-size > 1`) is configured **only on the P node**.
@@ -366,20 +377,9 @@ Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` (dec
 >     - [PD Disaggregation Single Node](pd_disaggregation_mooncake_single_node.md)
 >     - [PD Disaggregation Multi Node](pd_disaggregation_mooncake_multi_node.md)
 
-### Key Parameters
-
-- `--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required, P node only)
-- `--enable-chunked-prefill`: Enables Chunked Prefill (required, P node only)
-- `--max-num-batched-tokens 32768`: Initial chunk size (recommended for 128K sequences)
-- `profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline Parallel
-- `profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more
-- `profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`
-- `profiling_chunk_config.need_timing`: Enable/disable Online Calibration
-- `profiling_chunk_config.max_fit_chunk`: Number of chunk-time data for Online Calibration. Should be more when profiling failed
-
 For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md).
 
-### Online Calibration
+## Online Calibration
 
 For optimal performance, online calibrate with real data before production:
 

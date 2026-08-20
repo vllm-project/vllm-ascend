@@ -183,7 +183,7 @@ Note:
 >     - [PD Disaggregation Single Node](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)
 >     - [PD Disaggregation Multi Node](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
 
-## Configuration Parameters
+## Configuration Parameters Tuning
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -192,8 +192,6 @@ Note:
 | `min_chunk` | int | 4096 | Minimum chunk size for dynamic calculation |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
-
-### Parameter Tuning
 
 The `--max-num-batched-tokens` and `smooth_factor` parameters need to be adjusted. It is recommended that you adjust the `--max-num-batched-tokens` parameter first and then adjust the `smooth_factor`.
 
