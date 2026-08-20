@@ -41,6 +41,7 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
 }
 
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+_CANN_MEGAMOE_EP_SIZE_LIMIT = 128
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -68,7 +69,11 @@ def get_mrv2_in_profile_run() -> bool:
 
 def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
     hf_text_config = vllm_config.model_config.hf_text_config
-    hidden_size = getattr(hf_text_config, "hidden_size", None)
+    # Latent-MoE models such as Kimi K3 project tokens before dispatch, so
+    # MegaMoe sees routed_expert_hidden_size rather than the model width.
+    hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
+    if hidden_size is None:
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
     if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
         hidden_size = vllm_config.model_config.get_hidden_size()
     if hidden_size is None:
@@ -309,8 +314,10 @@ def _select_a3_moe_comm_method(
     vllm_config: VllmConfig,
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
-        # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
-        mega_moe_enable = get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
+        mega_moe_enable = (
+            get_ep_group().world_size <= _CANN_MEGAMOE_EP_SIZE_LIMIT
+            and _cann_megamoe_supported_by_config(vllm_config)
+        )
         dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
         if (_MEGA_MOE_SUPPORTED and mega_moe_enable) or dispatch_ffn_combine_enable:
             return MoECommType.FUSED_MC2
