@@ -25,7 +25,6 @@ from tests.e2e.weekly.single_node.features.structured_output.cases import (
 )
 
 
-@pytest.mark.timeout(1000)
 @pytest.mark.parametrize("case", STRUCTURED_OUTPUT_CASES, ids=lambda case: case.case_id)
 def test_offline_structured_output(offline_runner: VllmRunner, case: StructuredOutputCase) -> None:
     sampling_params = SamplingParams(
@@ -43,7 +42,6 @@ def test_offline_structured_output(offline_runner: VllmRunner, case: StructuredO
         assert_structured_output(output.outputs[0].text, case)
 
 
-@pytest.mark.timeout(1000)
 def test_offline_switches_constraints_without_state_leak(offline_runner: VllmRunner) -> None:
     for case in STRUCTURED_OUTPUT_CASES:
         sampling_params = SamplingParams(

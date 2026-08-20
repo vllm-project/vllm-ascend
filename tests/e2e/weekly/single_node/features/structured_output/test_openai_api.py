@@ -44,7 +44,6 @@ CONCURRENT_REQUEST_COUNT = 32
 CONCURRENT_WORKERS = 8
 
 
-@pytest.mark.timeout(1000)
 @pytest.mark.parametrize("case", STRUCTURED_OUTPUT_CASES, ids=lambda case: case.case_id)
 def test_openai_structured_output(openai_client: Any, case: StructuredOutputCase) -> None:
     text = create_structured_chat_completion(openai_client, SERVED_MODEL_NAME, case)
@@ -52,7 +51,6 @@ def test_openai_structured_output(openai_client: Any, case: StructuredOutputCase
     assert_structured_output(text, case)
 
 
-@pytest.mark.timeout(1000)
 def test_openai_unbounded_array_does_not_repeat_until_token_limit(openai_client: Any) -> None:
     schema = {
         "type": "object",
@@ -83,6 +81,11 @@ def test_openai_unbounded_array_does_not_repeat_until_token_limit(openai_client:
     )
 
     choice = response.choices[0]
+    completion_tokens = response.usage.completion_tokens if response.usage is not None else None
+    print(f"finish_reason: {choice.finish_reason}")
+    print(f"completion_tokens: {completion_tokens}")
+    print(f"generated content:\n{choice.message.content}")
+
     assert choice.finish_reason == "stop"
     assert choice.message.content is not None
 
@@ -97,7 +100,6 @@ def test_openai_unbounded_array_does_not_repeat_until_token_limit(openai_client:
     assert len(tags) < 8 or len(set(tags)) > 1
 
 
-@pytest.mark.timeout(1000)
 @pytest.mark.parametrize("case", STRUCTURED_OUTPUT_CASES, ids=lambda case: case.case_id)
 def test_openai_streaming_structured_output(openai_client: Any, case: StructuredOutputCase) -> None:
     text = create_structured_chat_completion(openai_client, SERVED_MODEL_NAME, case, stream=True)
@@ -105,7 +107,6 @@ def test_openai_streaming_structured_output(openai_client: Any, case: Structured
     assert_structured_output(text, case)
 
 
-@pytest.mark.timeout(1000)
 def test_openai_mixed_concurrent_structured_outputs(openai_client: Any) -> None:
     request_cases = list(islice(cycle((*STRUCTURED_OUTPUT_CASES, None)), CONCURRENT_REQUEST_COUNT))
 
@@ -125,7 +126,6 @@ def test_openai_mixed_concurrent_structured_outputs(openai_client: Any) -> None:
             assert_structured_output(text, case)
 
 
-@pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
     "case_id,structured_outputs",
     INVALID_STRUCTURED_OUTPUTS,
