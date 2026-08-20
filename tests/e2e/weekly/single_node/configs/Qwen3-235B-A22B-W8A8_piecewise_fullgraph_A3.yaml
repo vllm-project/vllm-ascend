@@ -33,7 +33,7 @@ _server_cmd: &server_cmd
   - "16384"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "--enable-expert-parallel "
+  - "--enable-expert-parallel"
   - "--port"
   - "$SERVER_PORT"
   - "--no-enable-prefix-caching"
