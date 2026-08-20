@@ -5,7 +5,7 @@ from typing import Any
 
 import regex as re
 
-from tests.e2e.kv_pool import (
+from tests.e2e.nightly.kv_pool.config import (
     KVPoolConfig,
     parse_kv_pool_config,
     validate_kv_pool_config,

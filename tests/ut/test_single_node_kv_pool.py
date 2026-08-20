@@ -2,7 +2,10 @@ import json
 from contextlib import nullcontext
 from pathlib import Path
 
-from tests.e2e.kv_pool import MemcacheKVPoolConfig, MooncakeKVPoolConfig
+from tests.e2e.nightly.kv_pool.config import (
+    MemcacheKVPoolConfig,
+    MooncakeKVPoolConfig,
+)
 from tests.e2e.nightly.single_node.models.scripts import kv_pool_runtime
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfigLoader,

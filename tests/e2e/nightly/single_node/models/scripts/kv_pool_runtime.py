@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from tests.e2e.kv_pool import (
+from tests.e2e.nightly.kv_pool.config import (
     KVPoolConfig,
     MemcacheKVPoolConfig,
     MooncakeKVPoolConfig,

@@ -12,7 +12,10 @@ from typing import Any
 
 import regex as re
 
-from tests.e2e.kv_pool import MemcacheKVPoolConfig, MooncakeKVPoolConfig
+from tests.e2e.nightly.kv_pool.config import (
+    MemcacheKVPoolConfig,
+    MooncakeKVPoolConfig,
+)
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ROUTING_DISAGGREGATED_PREFILL,
     ExternalDPConfig,
