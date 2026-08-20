@@ -51,6 +51,14 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @property
     def page_size_bytes(self) -> int:
+        real_page_size = self.real_page_size_bytes
+        if self.page_size_padded is not None:
+            assert self.page_size_padded >= real_page_size
+            return self.page_size_padded
+        return real_page_size
+
+    @property
+    def real_page_size_bytes(self) -> int:
         if self.cache_sparse_c8:
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
@@ -149,6 +157,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
             cache_sparse_c8=specs[0].cache_sparse_c8,
+            page_size_padded=specs[0].page_size_padded,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

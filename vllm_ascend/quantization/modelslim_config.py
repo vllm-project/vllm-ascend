@@ -47,6 +47,11 @@ from .methods import get_scheme_class
 
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
+BAILING_HYBRID_MODEL_TYPES = (
+    "bailing_hybrid",
+    "bailing_hybrid_v3_mtp",
+)
+BAILING_MTP_SHARED_HEAD_PATTERN = re.compile(r"^model\.layers\.\d+\.shared_head\.head$")
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
@@ -493,6 +498,13 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
+        if (
+            model_type in BAILING_HYBRID_MODEL_TYPES
+            and BAILING_MTP_SHARED_HEAD_PATTERN.fullmatch(prefix)
+            and prefix + ".weight" not in self.quant_description
+            and "lm_head.weight" in self.quant_description
+        ):
+            prefix = "lm_head"
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
         substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
         if prefix_mapping:
@@ -525,7 +537,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
         if model_type in ["qwen3_vl"] and prefix == "lm_head":
             prefix = "language_model.lm_head"
-        if model_type in ["bailing_hybrid"]:
+        if model_type in BAILING_HYBRID_MODEL_TYPES:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")
             prefix = prefix.replace("self_attn", "attention")

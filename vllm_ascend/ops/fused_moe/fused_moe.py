@@ -249,6 +249,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 log2phy=log2phy,
                 pertoken_scale=pertoken_scale,
                 activation=activation,
+                gemm1_clamp_limit=getattr(self.moe, "gemm1_clamp_limit", None),
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,

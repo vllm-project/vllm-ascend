@@ -127,8 +127,14 @@ def causal_conv1d_fn(
 
     for i in range(len(seqlens)):
         x_s = splits[i]
-        if cache_indices[i] == PAD_SLOT_ID:
+        cache_index = int(cache_indices[i].item())
+        if cache_index == PAD_SLOT_ID:
             continue
+        initial_state = (
+            conv_states[cache_index][..., : (width - 1)]
+            if has_initial_state is None or bool(has_initial_state[i].item())
+            else None
+        )
         out_ref_b.append(
             causal_conv1d_ref(
                 x_s,
@@ -136,8 +142,8 @@ def causal_conv1d_fn(
                 bias,
                 activation=activation,
                 return_final_states=True,
-                final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]][..., : (width - 1)],
+                final_states_out=conv_states[cache_index][..., : (width - 1)].unsqueeze(0),
+                initial_states=initial_state,
             )
         )
 

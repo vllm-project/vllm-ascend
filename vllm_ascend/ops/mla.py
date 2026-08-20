@@ -83,6 +83,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
+        self.num_heads = num_heads
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.q_lora_rank = q_lora_rank
@@ -95,6 +96,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
+        self.skip_o_proj = not hasattr(mla_modules.o_proj, "weight")
         if mla_modules.indexer is not None:
             ascend_indexer = IndexerWrapper(mla_modules.indexer)
         else:
@@ -124,6 +126,10 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            g_proj=getattr(mla_modules, "g_proj", None),
+            gated_attention_proj_granularity_type=getattr(
+                mla_modules, "gated_attention_proj_granularity_type", None
+            ),
             layer_name=f"{prefix}.attn",
         )
 
@@ -160,17 +166,28 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         hidden_dim = hidden_states.shape[-1]
+        output_hidden_dim = (
+            self.num_heads * self.v_head_dim if self.skip_o_proj else hidden_dim
+        )
 
         if _EXTRA_CTX.flash_comm_v1_enabled and self.tp_size > 1 and self.is_vl_first_layer:
             need_gather_q_kv = False
             n_out = hidden_states.shape[0] // self.tp_size
-            output = torch.empty((n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
+            output = torch.empty(
+                (n_out, output_hidden_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
         else:
             need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled
-            output = torch.empty(hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device)
+            output = torch.empty(
+                (hidden_states.shape[0], output_hidden_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
 
         torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output, self.prefix)
-        output = output.view(-1, hidden_dim)
+        output = output.view(-1, output_hidden_dim)
         return output
 
 
