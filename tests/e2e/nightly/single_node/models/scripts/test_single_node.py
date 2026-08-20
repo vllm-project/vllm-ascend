@@ -165,12 +165,47 @@ async def run_check_rank0_process_count(
     )
 
 
+async def run_spec_decode_acceptance_test(
+    config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy"
+) -> None:
+    from tools.spec_decode_metrics import calc_acceptance_rate, validate_acceptance_rate
+
+    spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+    num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+    acceptance_cfg = config.extra_config.get("acceptance_rate", {})
+    baseline = acceptance_cfg.get("baseline")
+    tolerance = acceptance_cfg.get("tolerance", 0.05)
+
+    if baseline is None:
+        logger.warning("acceptance_rate.baseline not set in config, skipping validation")
+        baseline = 0.0
+
+    def warmup_fn():
+        import requests as _req
+
+        url = server.url_for("v1", "chat", "completions")
+        _req.post(
+            url,
+            json={
+                "model": config.model,
+                "messages": [{"role": "user", "content": "Hello!"}],
+                "max_tokens": 16,
+            },
+            timeout=120,
+        )
+
+    pos0_rate, _ = calc_acceptance_rate(server, num_speculative_tokens, warmup_fn=warmup_fn)
+    validate_acceptance_rate(pos0_rate, float(baseline), float(tolerance))
+
+
 # Extend this dictionary to add new test capabilities
 TEST_HANDLERS = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
     "check_rank0_process_count": run_check_rank0_process_count,
+    "spec_decode_acceptance": run_spec_decode_acceptance_test,
 }
 
 
