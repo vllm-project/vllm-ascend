@@ -418,7 +418,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 **High-Throughput Scenario (DP8 TP4)**
 
-- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for high-throughput scenarios (128k/1k and 198k/1k cases at 50%/90% prefix cache hit rate, and 198k/1k at 99%).
+- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for high-throughput scenarios.
 
 Run the following scripts on two nodes respectively.
 
