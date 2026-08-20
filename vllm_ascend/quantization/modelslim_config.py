@@ -586,6 +586,7 @@ class AscendModelSlimConfig(QuantizationConfig):
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Upstream use staticmethod, but we need to use instance attribute"""
         suffix_map = {}
+        mla_quant_suffixes = []
         if self.enable_c8_quant:
             suffix_map.update(
                 {
@@ -596,26 +597,29 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if self.enable_fa_quant:
-            suffix_map.update(
-                {
-                    ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
-                    ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
-                    ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
-                    ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
-                    ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
-                    ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
-                }
+            mla_quant_suffixes.extend(
+                [
+                    ".fa_q.scale",
+                    ".fa_k.scale",
+                    ".fa_v.scale",
+                    ".fa_q.offset",
+                    ".fa_k.offset",
+                    ".fa_v.offset",
+                ]
             )
         if self.enable_indexer_quant:
-            suffix_map.update(
-                {
-                    ".indexer.q_rot": ".mla_attn.mla_attn.indexer.q_rot",
-                    ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
-                }
-            )
-        if not suffix_map:
+            mla_quant_suffixes.extend([".indexer.q_rot", ".indexer.k_rot"])
+        if not suffix_map and not mla_quant_suffixes:
             return QuantizationConfig.get_cache_scale_mapper()
-        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
+
+        # AutoWeightsLoader can apply this mapper at multiple nested model
+        # levels. Do not prepend the MLA path when it is already present.
+        mla_attn_prefix = ".mla_attn.mla_attn"
+        regex_map = {
+            re.compile(rf"(?<!{re.escape(mla_attn_prefix)}){re.escape(suffix)}$"): f"{mla_attn_prefix}{suffix}"
+            for suffix in mla_quant_suffixes
+        }
+        cache_scale_mapper = WeightsMapper(orig_to_new_regex=regex_map, orig_to_new_suffix=suffix_map)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
