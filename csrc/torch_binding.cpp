@@ -512,39 +512,8 @@ void sfa_remap_sparse_indices(
         return;
     }
 
-    const bool use_power_of_two =
-        (dcp_size & (dcp_size - 1)) == 0 && (interleave_size & (interleave_size - 1)) == 0;
-    uint32_t interleave_shift = 0;
-    for (int64_t value = interleave_size; value > 1; value >>= 1) {
-        ++interleave_shift;
-    }
-    uint32_t dcp_shift = 0;
-    for (int64_t value = dcp_size; value > 1; value >>= 1) {
-        ++dcp_shift;
-    }
-
-    void* input_ptr = input.data_ptr();
-    void* output_ptr = output.data_ptr();
-    const int device_id = input.get_device();
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    at_npu::native::OpCommand cmd;
-    cmd.Name("sfa_remap_sparse_indices");
-    cmd.SetCustomHandler([
-        stream, input_ptr, output_ptr, device_id, rows, top_k, dcp_size, dcp_rank,
-        interleave_size, interleave_shift, dcp_shift, use_power_of_two]() -> int {
-        int64_t vector_core_count = 0;
-        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM,
-                                           &vector_core_count) == ACL_SUCCESS);
-        TORCH_CHECK(vector_core_count > 0, "vector core count must be positive");
-        sfa_remap_sparse_indices_impl(
-            stream, input_ptr, output_ptr, static_cast<uint32_t>(rows),
-            static_cast<uint32_t>(top_k), static_cast<uint32_t>(dcp_size),
-            static_cast<uint32_t>(dcp_rank), static_cast<uint32_t>(interleave_size),
-            interleave_shift, interleave_shift + dcp_shift,
-            static_cast<uint32_t>(use_power_of_two), static_cast<uint32_t>(vector_core_count));
-        return 0;
-    });
-    cmd.Run();
+    EXEC_NPU_CMD(aclnnSfaRemapSparseIndices, input, dcp_size, dcp_rank,
+                 interleave_size, output);
 }
 #endif
 
