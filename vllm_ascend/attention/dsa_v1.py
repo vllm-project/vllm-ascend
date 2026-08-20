@@ -125,6 +125,62 @@ class AscendDSABackend(AttentionBackend):
         return [2, 4, 8, 16, 32, 64, 128]
 
 
+class AscendDSAC4Backend(AscendDSABackend):
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_DSA_C4"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        # Align with upstream's logical block-size contract: Ascend's physical
+        # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
+        return [128, 256, 512]
+
+
+class AscendDSAC128Backend(AscendDSABackend):
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_DSA_C128"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        # Align with upstream's logical block-size contract: Ascend's physical
+        # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
+        return [4096, 8192, 16384]
+
+
+class AscendDSASWABackend(AscendDSABackend):
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_DSA_SWA"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [32, 64, 128]
+
+
+class AscendDSAC4StateBackend(AscendDSABackend):
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_DSA_C4_STATE"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [2, 4, 8]
+
+
+class AscendDSAC128StateBackend(AscendDSABackend):
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_DSA_C128_STATE"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return [4, 8, 16]
+        return [8, 16, 32]
+
+
 @dataclass
 class AscendDSAReqMetadata:
     """Unified metadata for all requests in one attention invocation."""
@@ -132,7 +188,7 @@ class AscendDSAReqMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
     slot_mapping: torch.Tensor | None
-    block_size: int
+    storage_block_size: int
     query_start_loc: torch.Tensor
 
     num_compressed_tokens: int | None = None
@@ -276,6 +332,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
+        self.logical_block_size = kv_cache_spec.block_size
+        self.storage_block_size = kv_cache_spec.storage_block_size
         scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -313,7 +371,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.num_actual_tokens: int | None = None
         self.block_table: torch.Tensor = None
         self.common_ratio_to_sas_metadata: dict | None = None
-        self.block_size: int = 128
         self.seq_lens: torch.Tensor = None
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
@@ -442,8 +499,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_reqs_actual = kwargs.get("num_reqs_actual")
-        self.block_size = kwargs.get("block_size", self.kv_cache_spec.block_size)
-
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert self.common_ratio_to_sas_metadata is not None
         self.set_num_actual_tokens(common_attn_metadata)
@@ -492,8 +547,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos = self.common_ratio_to_sas_metadata["cos"]
             sin = self.common_ratio_to_sas_metadata["sin"]
 
-        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
+        # CommonAttentionMetadata uses logical raw-token slots. They directly
+        # describe only uncompressed SWA/state caches; C4/C128 physical slots
+        # are generated later from the logical block table by compressor_metadata.
+        if self.compressor_ratio <= 1:
+            slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+            self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
+                slot_mapping, self.storage_block_size
+            )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         req_metadata = self.build_req_metadata(
@@ -630,6 +691,26 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
+        dspark_swa_indices = None
+        ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
+        if not has_prefill and not common_attn_metadata.causal:
+            # DSpark non-causal parallel drafting: every draft query attends to
+            # the trailing context window plus the whole current draft block.
+            # Not gated on the SAS metadata cache: the indices depend on the
+            # current step's block table / sequence lengths, so they must be
+            # rebuilt whenever a DSpark draft step runs.
+            assert self.speculative_config is not None
+            dspark_swa_indices, _ = build_dspark_swa_indices(
+                self.block_table[: self.num_decodes],
+                self.speculative_config.num_speculative_tokens,
+                self.model_config.hf_config.sliding_window,
+                self.block_size,
+                query_start_loc[: self.num_decodes + 1],
+                self.seq_lens[: self.num_decodes],
+                self.num_decode_tokens,
+            )
+            dspark_swa_indices = dspark_swa_indices[: self.num_decode_tokens]
+            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
             cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
                 self.common_ratio_to_sas_metadata,
@@ -674,7 +755,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             block_table=self.block_table[:num_reqs, ...],
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
-            block_size=self.block_size,
+            storage_block_size=self.storage_block_size,
             query_start_loc=query_start_loc,
             num_compressed_tokens=num_compressed_tokens,
             sin=sin,
@@ -687,6 +768,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=qli_metadata,
             attn_mask=None,
             cu_cmp_seqlen_list=cu_seqlens_cmp_kv,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            dspark_swa_indices=dspark_swa_indices,
         )
 
     def build_for_drafting(
@@ -697,7 +781,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSAMetadata:
         assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
-        self.block_size = kwargs.get("block_size", self.block_size)
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
@@ -718,7 +801,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         assert self.spec_slot_mapping is not None
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.block_size
+            slot_mapping, self.storage_block_size
         )
         req_metadata = self.build_req_metadata_for_drafting(
             draft_index=draft_index,
@@ -769,7 +852,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
-                self.block_size,
+                self.storage_block_size,
                 query_start_loc,
                 seq_lens,
                 self.num_actual_tokens,
@@ -832,7 +915,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             block_table=self.block_table[:num_reqs, ...],
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
-            block_size=self.block_size,
+            storage_block_size=self.storage_block_size,
             query_start_loc=query_start_loc,
             num_compressed_tokens=self.num_actual_tokens,
             sin=sin,

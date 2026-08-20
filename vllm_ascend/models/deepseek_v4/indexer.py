@@ -99,9 +99,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
-        block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
+        storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=block_size,
+            block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
@@ -115,9 +115,16 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+        # Keep these imports lazy to avoid a model-inspection circular import.
+        if self.compress_ratio == 4:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend
 
-        return AscendDSABackend
+            return AscendDSAC4Backend
+        if self.compress_ratio == 128:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC128Backend
+
+            return AscendDSAC128Backend
+        raise ValueError(f"Unsupported DeepSeek V4 indexer compression ratio: {self.compress_ratio}")
 
 
 @dataclass(frozen=True)
