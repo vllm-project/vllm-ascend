@@ -575,6 +575,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         return False
 
     @property
+    def _allgather_requires_early_routed_reduce(self) -> bool:
+        # Back-ported from fused_moe_0_23_0 (v0.23 semantics). AllGather +
+        # a routed_output_transform (K3 latent MoE: RMSNorm + up_proj)
+        # requires summing the per-rank partials BEFORE the nonlinear
+        # transform: RMSNorm(allreduce(x)) != allreduce(RMSNorm(x)).
+        return (
+            _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER
+            and not _EXTRA_CTX.flash_comm_v1_enabled
+            and getattr(self, "routed_output_transform", None) is not None
+        )
+
+    @property
     def _fused_output_is_reduced(self) -> bool:
         # For MC2/ALLTOALL/FUSED_MC2 comm types, finalize() already includes
         # TP all-reduce for the routed output, and _forward_shared_experts
@@ -582,11 +594,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
         moe_comm_type = _EXTRA_CTX.moe_comm_type
-        return moe_comm_type in {
-            MoECommType.ALLTOALL,
-            MoECommType.MC2,
-            MoECommType.FUSED_MC2,
-        } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+        return (
+            moe_comm_type
+            in {
+                MoECommType.ALLTOALL,
+                MoECommType.MC2,
+                MoECommType.FUSED_MC2,
+            }
+            or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+            or (self._allgather_requires_early_routed_reduce)
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -621,7 +638,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # _forward_shared_experts already handles shared expert TP all-reduce
         # for MC2/ALLTOALL/FUSED_MC2. For AllGather the reduction is done
         # via _maybe_reduce_final_output on the combined (shared + routed)
-        # output. Skip any additional reduction here.
+        # output. Skip any additional reduction here -- UNLESS the routed
+        # output goes through a nonlinear routed_output_transform (K3 latent
+        # MoE), in which case the early-reduce path reduces shared here to
+        # match the pre-transform routed reduce.
+        if shared_output is not None and self._allgather_requires_early_routed_reduce:
+            shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
     def _maybe_reduce_final_output(
@@ -629,8 +651,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         states: torch.Tensor,
         trunc_size: int,
     ) -> torch.Tensor:
-        states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        if not self._allgather_requires_early_routed_reduce:
+            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
+
+    def apply_routed_output_transform(
+        self,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._allgather_requires_early_routed_reduce:
+            # K3 latent MoE: sum the per-rank routed partials BEFORE the
+            # nonlinear RMSNorm+up_proj (v0.23 early-reduce semantics).
+            fused_output = tensor_model_parallel_all_reduce(fused_output)
+        return super().apply_routed_output_transform(fused_output)
 
     @property
     def _flashcomm_uses_tp_shared_experts(self) -> bool:
@@ -870,8 +903,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         dst_type=torch.float8_e4m3fn,
                         quant_mode=2,
                         clamp_value=fused_moe_evts.swiglu_limit,
-                        glu_alpha=fused_moe_evts.swiglu_alpha,
-                        glu_bias=fused_moe_evts.swiglu_beta,
                     )
                 # Execute the down projection concurrently with the combine
                 # communication.
