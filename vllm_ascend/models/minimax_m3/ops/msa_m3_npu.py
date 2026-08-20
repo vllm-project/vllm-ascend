@@ -8,18 +8,15 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    enable_custom_op,
-    get_ascend_device_type,
-)
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import enable_custom_op
 
 _SPARSE_ATTN_INNER_PRECISE = 4
+_PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
-_ASCEND_DEVICE_TYPE = get_ascend_device_type()
 
-if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
+if get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
@@ -143,6 +140,16 @@ def _build_cu_block_lens(
     cu_block_lens[0] = 0
     torch.cumsum(block_lens, dim=0, out=cu_block_lens[1:])
     return cu_block_lens
+
+
+def _pad_invalid_prefill_topk_slots(topk_idx: torch.Tensor) -> torch.Tensor:
+    """Replace unavailable causal/padding slots with logical KV block zero.
+
+    The fixed-slot A3 combine path cannot consume unwritten statistics for
+    unavailable slots. Early causal queries can contain ``-1`` even when the
+    final request length exceeds top-k.
+    """
+    return topk_idx.clamp_min(0)
 
 
 @torch.no_grad()
@@ -490,7 +497,7 @@ def minimax_m3_index_tp_block_parallel_decode(
 
 
 @torch.no_grad()
-def _minimax_m3_sparse_attn_a3(
+def _minimax_m3_sparse_attn_a3_legacy(
     q: torch.Tensor,
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
     topk_idx: torch.Tensor,
@@ -522,6 +529,58 @@ def _minimax_m3_sparse_attn_a3(
     output.copy_(out)
 
 
+def _minimax_m3_sparse_attn_a3_kv_gather_q(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+    topk_idx: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_kv_heads: int,
+    sm_scale: float,
+    output: torch.Tensor,
+    block_size: int,
+    total_kv_blocks: int,
+    max_kv_blocks: int,
+) -> None:
+    key, value = _split_main_kv_cache(kv_cache)
+    topk_idx = _pad_invalid_prefill_topk_slots(topk_idx)
+    cu_block_lens = _build_cu_block_lens(seq_lens, block_size)
+    k2q_row_ptr, k2q_q_indices, k2q_slot_indices = _npu_k2q_csr(
+        topk_idx,
+        cu_seqlens_q,
+        cu_block_lens,
+        order_method=1,
+        total_rows=total_kv_blocks,
+        max_kv=max_kv_blocks,
+        use_simt=0,
+        q_global_offset=True,
+    )
+
+    k2q_row_ptr = k2q_row_ptr.to(dtype=torch.int32).contiguous()
+    k2q_q_indices = k2q_q_indices.to(dtype=torch.int32).contiguous()
+    k2q_slot_indices = k2q_slot_indices.to(dtype=torch.int32).contiguous()
+    q_lens_t = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32).contiguous()
+    kv_lens_t = seq_lens.to(torch.int32).contiguous()
+    out = torch.ops._C_ascend.npu_sparse_attention_score_prefill(
+        q,
+        key,
+        value,
+        block_table,
+        k2q_row_ptr,
+        k2q_q_indices,
+        k2q_slot_indices,
+        num_kv_heads,
+        sm_scale,
+        block_size,
+        topk_idx.shape[-1],
+        _PREFILL_KV_GATHER_Q_INNER_PRECISE,
+        actual_seq_lengths=q_lens_t,
+        actual_seq_lengths_kv=kv_lens_t,
+    )
+    output.copy_(out)
+
+
 def _minimax_m3_sparse_attn_a5(
     q: torch.Tensor,
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
@@ -533,6 +592,8 @@ def _minimax_m3_sparse_attn_a5(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int,
+    total_kv_blocks: int,
+    max_kv_blocks: int,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
     cu_block_lens = _build_cu_block_lens(seq_lens, block_size)
@@ -541,6 +602,8 @@ def _minimax_m3_sparse_attn_a5(
         cu_seqlens_q,
         cu_block_lens,
         order_method=1,
+        total_rows=total_kv_blocks,
+        max_kv=max_kv_blocks,
         use_simt=0,
         q_global_offset=True,
     )
@@ -583,12 +646,11 @@ def minimax_m3_sparse_attn(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int = 128,
+    total_kv_blocks: int = -1,
+    max_kv_blocks: int = -1,
 ) -> None:
     del prefix_lens, max_query_len
-    sparse_attn_impl = (
-        _minimax_m3_sparse_attn_a5 if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5 else _minimax_m3_sparse_attn_a3
-    )
-    sparse_attn_impl(
+    common_args = (
         q,
         kv_cache,
         topk_idx,
@@ -599,6 +661,20 @@ def minimax_m3_sparse_attn(
         sm_scale,
         output,
         block_size,
+    )
+    hardware_profile = get_current_hardware_profile()
+    if hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_TOPK_PADDING):
+        sparse_attn_impl = _minimax_m3_sparse_attn_a3_kv_gather_q
+    elif hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q):
+        sparse_attn_impl = _minimax_m3_sparse_attn_a5
+    else:
+        _minimax_m3_sparse_attn_a3_legacy(*common_args)
+        return
+
+    sparse_attn_impl(
+        *common_args,
+        total_kv_blocks,
+        max_kv_blocks,
     )
 
 

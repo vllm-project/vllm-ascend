@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import _scatter_index_cache
@@ -39,6 +40,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
 )
+from vllm_ascend.models.minimax_m3.ops import msa_m3_npu as msa_m3_npu_module
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     MiniMaxM3TPDecodeScoreMetadata,
     _as_ascendc_index_kv_cache,
@@ -274,6 +276,8 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.decode is None
         assert metadata.prefill is not None
         assert metadata.prefill.cu_seqlens_k.shape[0] == batch_spec.batch_size + 1
+        assert metadata.prefill.total_kv_blocks == 5
+        assert metadata.prefill.max_kv_blocks == 3
 
 
 @pytest.mark.parametrize(
@@ -1491,6 +1495,8 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
             block_table=torch.tensor([[2, 3]], dtype=torch.int32),
             max_query_len=2,
             max_seq_len=7,
+            total_kv_blocks=1,
+            max_kv_blocks=1,
         ),
     )
     mock_get_forward_context.return_value = SimpleNamespace(attn_metadata={"layer.attn": metadata})
@@ -1515,6 +1521,83 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
     assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
+    assert mock_sparse_attn_prefill.call_args.kwargs["total_kv_blocks"] == 1
+    assert mock_sparse_attn_prefill.call_args.kwargs["max_kv_blocks"] == 1
+
+
+@pytest.mark.parametrize(
+    ("sparse_attn_impl", "pad_invalid_slots"),
+    [
+        ("_minimax_m3_sparse_attn_a3_kv_gather_q", True),
+        ("_minimax_m3_sparse_attn_a5", False),
+    ],
+)
+@patch.object(
+    torch.ops._C_ascend,
+    "npu_sparse_attention_score_prefill",
+    create=True,
+)
+@patch("vllm_ascend.models.minimax_m3.ops.msa_m3_npu._npu_k2q_csr")
+def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
+    mock_k2q_csr: MagicMock,
+    mock_sparse_attention_score_prefill: MagicMock,
+    sparse_attn_impl: str,
+    pad_invalid_slots: bool,
+) -> None:
+    q = torch.zeros(3, 4, 4, dtype=torch.bfloat16)
+    kv_cache = torch.zeros(2, 8, 128, 2, 4, dtype=torch.bfloat16)
+    topk_idx = torch.tensor(
+        [
+            [[0, 1], [0, -1], [2, 1]],
+            [[0, 1], [1, -1], [2, 0]],
+        ],
+        dtype=torch.int32,
+    )
+    block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
+    cu_seqlens_q = torch.tensor([0, 1, 3], dtype=torch.int32)
+    seq_lens = torch.tensor([129, 257], dtype=torch.int32)
+    output = torch.empty_like(q)
+    k2q_row_ptr = torch.zeros(2, 6, dtype=torch.int32)
+    k2q_q_indices = torch.zeros(2, 6, dtype=torch.int32)
+    k2q_slot_indices = torch.zeros(2, 6, dtype=torch.int32)
+    mock_k2q_csr.return_value = (k2q_row_ptr, k2q_q_indices, k2q_slot_indices)
+    mock_sparse_attention_score_prefill.return_value = torch.ones_like(output)
+
+    getattr(msa_m3_npu_module, sparse_attn_impl)(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        num_kv_heads=2,
+        sm_scale=0.5,
+        output=output,
+        block_size=128,
+        total_kv_blocks=5,
+        max_kv_blocks=3,
+    )
+
+    mock_k2q_csr.assert_called_once()
+    k2q_kwargs = mock_k2q_csr.call_args.kwargs
+    assert k2q_kwargs["order_method"] == 1
+    assert k2q_kwargs["total_rows"] == 5
+    assert k2q_kwargs["max_kv"] == 3
+    assert k2q_kwargs["use_simt"] == 0
+    assert k2q_kwargs["q_global_offset"] is True
+    expected_topk_idx = topk_idx.clamp_min(0) if pad_invalid_slots else topk_idx
+    assert torch.equal(mock_k2q_csr.call_args.args[0], expected_topk_idx)
+
+    mock_sparse_attention_score_prefill.assert_called_once()
+    args = mock_sparse_attention_score_prefill.call_args.args
+    kwargs = mock_sparse_attention_score_prefill.call_args.kwargs
+    assert args[0] is q
+    assert args[3] is block_table
+    assert args[4] is k2q_row_ptr
+    assert args[7:12] == (2, 0.5, 128, 2, 1)
+    assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([1, 2], dtype=torch.int32))
+    assert torch.equal(kwargs["actual_seq_lengths_kv"], seq_lens)
+    assert torch.equal(output, torch.ones_like(output))
 
 
 @patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
@@ -1559,3 +1642,57 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     assert kwargs["block_size"] == 128
     assert kwargs["top_k"] == 2
     assert torch.equal(output, torch.ones_like(output))
+
+
+@pytest.mark.parametrize(
+    ("device_type", "expected_impl"),
+    [
+        (AscendDeviceType.A5, "a5"),
+        (AscendDeviceType.A3, "kv_gather_q"),
+        (AscendDeviceType.A2, "legacy"),
+    ],
+)
+@patch.object(msa_m3_npu_module, "_minimax_m3_sparse_attn_a5")
+@patch.object(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3_legacy")
+@patch.object(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3_kv_gather_q")
+def test_sparse_attn_prefill_dispatches_by_device_type(
+    mock_kv_gather_q: MagicMock,
+    mock_legacy: MagicMock,
+    mock_a5: MagicMock,
+    device_type: AscendDeviceType,
+    expected_impl: str,
+) -> None:
+    with patch.object(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        return_value=get_hardware_profile(device_type),
+    ):
+        msa_m3_npu_module.minimax_m3_sparse_attn(
+            q=torch.empty(0),
+            kv_cache=torch.empty(0),
+            topk_idx=torch.empty(0),
+            block_table=torch.empty(0),
+            cu_seqlens_q=torch.empty(0),
+            seq_lens=torch.empty(0),
+            prefix_lens=torch.empty(0),
+            max_query_len=0,
+            num_kv_heads=2,
+            sm_scale=0.5,
+            output=torch.empty(0),
+            total_kv_blocks=5,
+            max_kv_blocks=3,
+        )
+
+    implementations = {
+        "a5": mock_a5,
+        "kv_gather_q": mock_kv_gather_q,
+        "legacy": mock_legacy,
+    }
+    for name, implementation in implementations.items():
+        if name == expected_impl:
+            implementation.assert_called_once()
+        else:
+            implementation.assert_not_called()
+
+    if expected_impl != "legacy":
+        assert implementations[expected_impl].call_args.args[-2:] == (5, 3)

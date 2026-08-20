@@ -697,6 +697,8 @@ class AscendMiniMaxM3SparsePrefillMetadata:
     block_table: torch.Tensor
     max_query_len: int
     max_seq_len: int
+    total_kv_blocks: int
+    max_kv_blocks: int
 
 
 @dataclass
@@ -733,6 +735,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.block_size = kv_cache_spec.block_size
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self.context_len_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -764,13 +767,21 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             active_prefills = _active_prefill_num_reqs(num_prefills, num_prefill_tokens, qsl_cpu, num_decodes)
             prefill_end = num_decodes + active_prefills
             prefill_kv_lens = seq_lens[num_decodes:prefill_end]
+            prefill_kv_lens_cpu = prefill_kv_lens.detach().cpu()
+            prefill_block_lens_cpu = torch.div(
+                prefill_kv_lens_cpu + self.block_size - 1,
+                self.block_size,
+                rounding_mode="floor",
+            )
+            total_kv_blocks = int(prefill_block_lens_cpu.sum().item())
+            max_kv_blocks = int(prefill_block_lens_cpu.max().item()) if prefill_block_lens_cpu.numel() else 0
             prefill_cu_seqlens_k = torch.empty(active_prefills + 1, dtype=torch.int32, device=seq_lens.device)
             prefill_cu_seqlens_k[0] = 0
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
             prefill_query_lens_cpu = qsl_cpu[num_decodes + 1 : prefill_end + 1] - qsl_cpu[num_decodes:prefill_end]
             prefill_context_lens = self.context_len_buffer[num_decodes:prefill_end]
             prefill_context_lens.copy_(
-                (prefill_kv_lens.detach().cpu() - prefill_query_lens_cpu).to(
+                (prefill_kv_lens_cpu - prefill_query_lens_cpu).to(
                     device=self.context_len_buffer.device,
                     dtype=torch.int32,
                     non_blocking=True,
@@ -786,6 +797,8 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 block_table=block_table[num_decodes:prefill_end],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
+                total_kv_blocks=total_kv_blocks,
+                max_kv_blocks=max_kv_blocks,
             )
 
         decode_metadata: AscendMiniMaxM3SparseDecodeMetadata | None = None
@@ -889,6 +902,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.scale,
                 out[num_decode_tokens:],
                 block_size=self.block_size,
+                total_kv_blocks=p.total_kv_blocks,
+                max_kv_blocks=p.max_kv_blocks,
             )
         return output
 
