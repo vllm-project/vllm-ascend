@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.models.utils import StageMissingLayer
 
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
@@ -138,7 +139,9 @@ def test_kimi_k3_enables_projector_rotation_only_when_weight_is_loaded(
             return loaded_weights
 
     monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
-    wrapper = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
+    wrapper = AscendKimiK3ForConditionalGeneration.__new__(
+        AscendKimiK3ForConditionalGeneration
+    )
     nn.Module.__init__(wrapper)
     wrapper.mm_projector = nn.Module()
     wrapper.mm_projector.rot_proj = nn.Linear(1, 1, bias=False)
@@ -148,6 +151,31 @@ def test_kimi_k3_enables_projector_rotation_only_when_weight_is_loaded(
     assert actual == loaded_weights
     assert hasattr(wrapper.mm_projector, "rot_proj") is has_rot_proj
     assert ("mm_projector.rot_proj.weight" in dict(wrapper.named_parameters())) is has_rot_proj
+
+
+def test_kimi_k3_skips_forwarded_projector_rotation_on_non_vision_pp_stage(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class StubLoader:
+        def __init__(self, model, *, skip_prefixes):
+            assert model is wrapper
+            assert skip_prefixes == ["mm_projector.rot_proj."]
+
+        def load_weights(self, weights, *, mapper):
+            assert list(weights) == []
+            assert mapper is wrapper.hf_to_vllm_mapper
+            return set()
+
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
+    wrapper = AscendKimiK3ForConditionalGeneration.__new__(
+        AscendKimiK3ForConditionalGeneration
+    )
+    nn.Module.__init__(wrapper)
+    wrapped_projector = nn.Module()
+    wrapped_projector.rot_proj = nn.Linear(1, 1, bias=False)
+    wrapper.mm_projector = StageMissingLayer("vision_tower", wrapped_projector)
+
+    assert wrapper.load_weights(iter(())) == set()
 
 
 def test_kimi_k3_projector_applies_rotation_only_after_weight_load():

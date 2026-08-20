@@ -954,8 +954,31 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
+        device_type = get_ascend_device_type()
+        # A3's generic FA-quant gate is restricted to KV consumers because it
+        # normally takes the fused MLA-prolog path. No-RoPE MLA layers bypass
+        # that prolog because their positional slice must not be reordered.
+        if (
+            not self.fa_quant_layer
+            and not self.use_mla_rope
+            and device_type == AscendDeviceType.A3
+            and self.vllm_config.quant_config is not None
+            and getattr(self.vllm_config.quant_config, "enable_fa_quant", False)
+        ):
+            self.fa_quant_layer = self.vllm_config.quant_config.is_fa_quant_layer(self.layer_name)
+        # A5 supports its no-RoPE MLAPO path. Other devices must retain the
+        # explicit no-RoPE layout to avoid fused rotary reordering.
+        if not self.use_mla_rope and self.enable_mlapo and device_type != AscendDeviceType.A5:
+            logger.warning_once("MLAPO is disabled for MLA layers with RoPE disabled outside A5.")
+            self.enable_mlapo = False
+        if not self.use_mla_rope and self.fa_quant_layer and device_type not in {
+            AscendDeviceType.A3,
+            AscendDeviceType.A5,
+        }:
+            logger.warning_once("FA quant for no-RoPE MLA layers is supported only on A3/A5; falling back to BF16.")
+            self.fa_quant_layer = False
         if self.fa_quant_layer:
-            self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+            self.dtype = torch.float8_e4m3fn if device_type == AscendDeviceType.A5 else torch.int8
         else:
             self.dtype = self.vllm_config.model_config.dtype
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
@@ -1222,6 +1245,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
             self.quant_kscale = layer.quant_kscale
             self.fak_descale_float = layer.fak_descale_float
+            self.fak_descale_reciprocal = layer.fak_descale_reciprocal
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         assert self.fused_qkv_a_proj is not None
@@ -1363,6 +1387,74 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return kv_c_normed, k_pe
 
+    def _uses_a3_mla_fa_quant_cache(self) -> bool:
+        """Whether A3 MLA uses separate 8-bit latent and model-dtype caches."""
+        return (
+            bool(self.fa_quant_layer)
+            and not self.use_mla_rope
+            and get_ascend_device_type() == AscendDeviceType.A3
+        )
+
+    @staticmethod
+    def _compact_block_table_for_nz_gather(
+        cache: torch.Tensor,
+        block_table: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return referenced cache blocks and a block table indexed into them.
+
+        A3 MLA FA quant writes PA-NZ bytes into the regular vLLM cache pool. The
+        Gather wrapper determines PA-NZ from the source tensor's format, so
+        chunked prefill works on a temporary compact cache segment rather than
+        format-casting the complete layer cache.
+        """
+        table_long = block_table.to(torch.long)
+        block_ids = torch.unique(table_long[table_long >= 0], sorted=True)
+        if block_ids.numel() == 0:
+            raise ValueError("Chunked-context block table does not reference any KV cache block.")
+        if int(block_ids[-1]) >= cache.shape[0]:
+            raise ValueError(
+                f"Block table references block {int(block_ids[-1])}, but cache has only {cache.shape[0]} blocks."
+            )
+
+        remap = torch.full((cache.shape[0],), -1, dtype=torch.long, device=cache.device)
+        remap[block_ids] = torch.arange(block_ids.numel(), dtype=torch.long, device=cache.device)
+        safe_table = table_long.clamp_min(0)
+        compact_table = remap[safe_table]
+        compact_table = torch.where(table_long >= 0, compact_table, table_long)
+        return block_ids, compact_table.to(dtype=block_table.dtype)
+
+    @staticmethod
+    def _format_compact_a3_mla_c8_cache_for_gather(
+        cache: torch.Tensor,
+        block_ids: torch.Tensor,
+        *,
+        num_kv_heads: int,
+        head_dim: int,
+        nz_width: int,
+    ) -> torch.Tensor:
+        """Convert referenced PA-NZ cache blocks back to logical ND for Gather.
+
+        A3 C8 Scatter writes PA-NZ bytes through a 5-D view of the shared ND
+        cache allocation.  Selecting from the registered 4-D tensor directly
+        therefore treats physical PA-NZ bytes as logical ND values.  Reinterpret
+        the storage with the same PA-NZ view used by Scatter before compacting,
+        then transpose it back to the Normal-cache layout expected by Gather.
+        """
+        block_size = cache.shape[1]
+        physical_pa_nz = cache.view(
+            cache.shape[0],
+            num_kv_heads,
+            head_dim // nz_width,
+            block_size,
+            nz_width,
+        )
+        compact_pa_nz = physical_pa_nz.index_select(0, block_ids)
+        return (
+            compact_pa_nz.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(block_ids.numel(), block_size, num_kv_heads, head_dim)
+        )
+
     def _compute_prefill_context(
         self,
         q_nope: torch.Tensor,
@@ -1381,8 +1473,32 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(2)
-        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        is_a3_c8_cache = self._uses_a3_mla_fa_quant_cache()
+        if is_a3_c8_cache:
+            num_heads = self.num_kv_heads
+            latent_kv_dim = self.kv_lora_rank
+            block_ids, gather_block_table = self._compact_block_table_for_nz_gather(
+                cache_kv_c,
+                prefill_metadata.block_table,
+            )
+            cache_kv_c_for_load = self._format_compact_a3_mla_c8_cache_for_gather(
+                cache_kv_c,
+                block_ids,
+                num_kv_heads=num_heads,
+                head_dim=latent_kv_dim,
+                nz_width=32,
+            )
+            cache_k_pe_for_load = self._format_compact_a3_mla_c8_cache_for_gather(
+                cache_k_pe,
+                block_ids,
+                num_kv_heads=num_heads,
+                head_dim=rope_dim,
+                nz_width=16,
+            )
+        else:
+            num_heads = cache_k_pe.size(2)
+            latent_kv_dim = cache_kv_c.size(-1)
+            gather_block_table = prefill_metadata.block_table
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
@@ -1419,18 +1535,72 @@ class AscendMLAImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device)
-            k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
+            if is_a3_c8_cache:
+                # The compact caches were converted back to Normal layout, so
+                # Gather uses the standard 3-D [tokens, heads, dim] outputs.
+                # Load the two caches separately because their dtypes differ.
+                kv_c_normed = torch.empty(
+                    toks,
+                    num_heads,
+                    latent_kv_dim,
+                    dtype=cache_kv_c.dtype,
+                    device=cache_kv_c.device,
+                )
+                k_pe = torch.empty(
+                    toks,
+                    num_heads,
+                    rope_dim,
+                    dtype=q_pe.dtype,
+                    device=q_pe.device,
+                )
+            else:
+                cache_kv_c_for_load = cache_kv_c
+                cache_k_pe_for_load = cache_k_pe
+                kv_c_normed = torch.empty(
+                    toks,
+                    num_heads,
+                    latent_kv_dim,
+                    dtype=cache_kv_c.dtype,
+                    device=cache_kv_c.device,
+                )
+                k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
-            DeviceOperator.kv_cache_load(
-                cache_kv_c,
-                cache_k_pe,
-                prefill_metadata.block_table,
-                context_seq_len_npu,
-                prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
+            if is_a3_c8_cache:
+                # npu_gather_pa_kv_cache requires matching dtypes for the
+                # key/value cache pair. A3 C8 stores latent cache in INT8 and
+                # RoPE cache in BF16, so gather the two Normal compact caches
+                # separately. Normal Gather consumes the token offset directly.
+                chunk_token_offset = prefill_metadata.chunked_context.starts[i]
+                kv_c_unused = torch.empty_like(kv_c_normed)
+                k_pe_unused = torch.empty_like(k_pe)
+                DeviceOperator.kv_cache_load(
+                    cache_kv_c_for_load,
+                    cache_kv_c_for_load,
+                    gather_block_table,
+                    context_seq_len_npu,
+                    chunk_token_offset,
+                    key=kv_c_normed,
+                    value=kv_c_unused,
+                )
+                DeviceOperator.kv_cache_load(
+                    cache_k_pe_for_load,
+                    cache_k_pe_for_load,
+                    gather_block_table,
+                    context_seq_len_npu,
+                    chunk_token_offset,
+                    key=k_pe,
+                    value=k_pe_unused,
+                )
+            else:
+                DeviceOperator.kv_cache_load(
+                    cache_kv_c_for_load,
+                    cache_k_pe_for_load,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
@@ -1439,9 +1609,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 toks=toks,
             )
             kv_c_normed = kv_c_normed.squeeze()
-            if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
-                kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
+            if self.fa_quant_layer:
+                target_dtype = (
                     torch.bfloat16
+                    if get_ascend_device_type() == AscendDeviceType.A5
+                    else self.vllm_config.model_config.dtype
+                )
+                kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
+                    target_dtype
                 )
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
@@ -1550,7 +1725,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize/cache MLA KV while preserving K3's raw q/k slice."""
+        """Normalize and cache MLA KV while preserving a no-RoPE q/k slice."""
         assert self.kv_a_layernorm is not None
         assert len(kv_cache) > 1, "MLA requires separate latent and positional KV caches"
         num_tokens = kv_no_split.shape[0]
@@ -1566,13 +1741,85 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
-        DeviceOperator.reshape_and_cache(
-            key=kv_c_normed,
-            value=k_pe,
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots,
-        )
+        cache_kv_c = kv_c_normed
+        if self.fa_quant_layer:
+            device_type = get_ascend_device_type()
+            assert device_type in {AscendDeviceType.A3, AscendDeviceType.A5}
+            quant_scale = self.fak_descale_reciprocal
+            quant_dtype = torch.qint8
+            if device_type == AscendDeviceType.A5:
+                quant_scale = quant_scale.to(torch.bfloat16)
+                quant_dtype = torch.float8_e4m3fn
+            # Keep the A3 cache format identical to npu_mla_prolog_v2's
+            # symmetric FAK cache mode: FIA receives only descales, so no
+            # per-channel zero point is consumed by the decode kernel.
+            cache_kv_c = torch_npu.npu_quantize(
+                kv_c_normed,
+                quant_scale,
+                None,
+                quant_dtype,
+                -1,
+                False,
+            )
+            if device_type == AscendDeviceType.A3:
+                # Decode FIA's INT8 MLA path requires PA-NZ KV layout.  The
+                # registered vLLM pool remains ND; expose matching 5D views
+                # while Scatter writes PA-NZ bytes into it.
+                block_size = kv_cache[0].shape[1]
+                latent_cache_nz = kv_cache[0].view(
+                    -1,
+                    self.num_kv_heads,
+                    self.kv_lora_rank // 32,
+                    block_size,
+                    32,
+                )
+                rope_cache_nz = kv_cache[1].view(
+                    -1,
+                    self.num_kv_heads,
+                    self.qk_rope_head_dim // 16,
+                    block_size,
+                    16,
+                )
+                torch_npu.npu_scatter_pa_kv_cache(
+                    key=cache_kv_c.contiguous(),
+                    value=cache_kv_c.contiguous(),
+                    key_cache=latent_cache_nz,
+                    value_cache=latent_cache_nz,
+                    slot_mapping=slots.contiguous(),
+                    cache_mode="PA_NZ",
+                )
+                torch_npu.npu_scatter_pa_kv_cache(
+                    key=k_pe.contiguous(),
+                    value=k_pe.contiguous(),
+                    key_cache=rope_cache_nz,
+                    value_cache=rope_cache_nz,
+                    slot_mapping=slots.contiguous(),
+                    cache_mode="PA_NZ",
+                )
+            else:
+                # reshape_and_cache requires key and value to have the same dtype.
+                DeviceOperator.reshape_and_cache(
+                    key=cache_kv_c,
+                    value=cache_kv_c,
+                    key_cache=kv_cache[0],
+                    value_cache=kv_cache[0],
+                    slot_mapping=slots,
+                )
+                DeviceOperator.reshape_and_cache(
+                    key=k_pe,
+                    value=k_pe,
+                    key_cache=kv_cache[1],
+                    value_cache=kv_cache[1],
+                    slot_mapping=slots,
+                )
+        else:
+            DeviceOperator.reshape_and_cache(
+                key=cache_kv_c,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=slots,
+            )
         return k_pe, kv_c_normed
 
     def exec_kv_decode(
@@ -1658,8 +1905,8 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         if not self.use_mla_rope:
             # npu_interleave_rope with cos=1/sin=0 still reorders dimensions
-            # from [0, 1, 2, 3, ...] to [0, 2, ..., 1, 3, ...]. K3 has no
-            # rotary transform at all, so its positional slice must bypass it.
+            # from [0, 1, 2, 3, ...] to [0, 2, ..., 1, 3, ...]. A no-RoPE
+            # layer has no rotary transform, so its positional slice bypasses it.
             return x
         B, N, D = x.shape
         S = 1
@@ -1759,6 +2006,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
+                if self.head_padding > 0:
+                    # query_quant_mode=3 is per-token, per-head. FIA sees the
+                    # padded query heads, so its scale must have the identical
+                    # head axis. A zero scale keeps the synthetic zero query
+                    # heads zero after dequantization.
+                    dequant_scale_q_nope = F.pad(dequant_scale_q_nope, (0, self.head_padding), "constant", 0)
         elif self.fa_quant_layer:
             attn_mask = None
             sparse_mode = 0
@@ -1771,6 +2024,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
+                if self.head_padding > 0:
+                    dequant_scale_q_nope = F.pad(
+                        dequant_scale_q_nope,
+                        (0, 0, 0, self.head_padding),
+                        "constant",
+                        0,
+                    )
                 attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
             else:
                 input_layout = "BSND_NBSD"
@@ -1780,6 +2040,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
+                if self.head_padding > 0:
+                    dequant_scale_q_nope = F.pad(dequant_scale_q_nope, (0, self.head_padding), "constant", 0)
                 attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
@@ -2019,9 +2281,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
-        if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+        if self.fa_quant_layer and get_ascend_device_type() in {AscendDeviceType.A3, AscendDeviceType.A5}:
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
-                decode_ql_nope, dst_type=torch.float8_e4m3fn
+                decode_ql_nope,
+                dst_type=self.dtype,
             )
             decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(torch.bfloat16)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
@@ -2140,8 +2403,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(gate_input)[0]
 
         # MLA Preprocess
-        if (self.fa_quant_layer or self.enable_mlapo) and (
-            attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0
+        if (
+            self.use_mla_rope
+            and (self.fa_quant_layer or self.enable_mlapo)
+            and (attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0)
         ):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv

@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -226,6 +227,470 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
+    def test_hybrid_c8_double_token_block_is_contiguous_and_slot_aligned(self):
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.hybrid_with_attn_and_mamba = True
+        runner.model_config.dtype = torch.bfloat16
+
+        num_blocks = 4
+        # 768-token INT8 K + 768-token BF16 V + one conv-state block.
+        common_page_size = 393216 + 98304 + 13824
+        attn_layer = "model.layers.3.self_attn.attn"
+        mamba_layer = "model.layers.2.self_attn"
+        attn_spec = AscendMLAAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=640,
+            dtype=torch.int8,
+            page_size_padded=common_page_size,
+        )
+        mamba_spec = MambaSpec(
+            block_size=768,
+            shapes=((2304, 3), (6, 128, 128)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=common_page_size,
+            mamba_cache_mode="align",
+        )
+        raw = torch.zeros(num_blocks * common_page_size, dtype=torch.int8)
+        raw_caches = {attn_layer: raw, mamba_layer: raw}
+        kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+        runner._get_layer_kv_cache_specs = lambda _config: {
+            attn_layer: attn_spec,
+            mamba_layer: mamba_spec,
+        }
+        backend = MagicMock()
+        backend.get_supported_kernel_block_sizes.return_value = [128]
+        backend.get_kv_cache_shape.side_effect = lambda blocks, block_size, heads, head_size: (
+            blocks,
+            block_size,
+            heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=attn_spec,
+                backend=backend,
+                layer_names=[attn_layer],
+            ),
+            SimpleNamespace(
+                kv_cache_spec=mamba_spec,
+                backend=backend,
+                layer_names=[mamba_layer],
+            ),
+        ]
+        runner._get_attention_kv_cache_dims = lambda _name, _spec: (512, 64)
+        runner._get_mla_fa_quant_cache_dtypes = lambda _name, _spec: (
+            torch.int8,
+            torch.bfloat16,
+        )
+
+        caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)
+        k_cache, v_cache = caches[attn_layer]
+        conv_state, recurrent_state = caches[mamba_layer]
+
+        self.assertEqual(k_cache.shape, (num_blocks * 6, 128, 1, 512))
+        self.assertEqual(v_cache.shape, (num_blocks * 6, 128, 1, 64))
+        self.assertTrue(k_cache.is_contiguous())
+        self.assertTrue(v_cache.is_contiguous())
+        self.assertEqual(conv_state.shape, (num_blocks, 2304, 3))
+        self.assertEqual(recurrent_state.shape, (num_blocks, 6, 128, 128))
+
+        # Six 128-token chunks form one 768-token K block. Its byte span is
+        # exactly one recurrent-state slot, so both caches share block IDs.
+        for block_id in range(num_blocks):
+            self.assertEqual(
+                k_cache[block_id * 6].data_ptr(),
+                recurrent_state[block_id].data_ptr(),
+            )
+        self.assertEqual(
+            k_cache[6].data_ptr() - k_cache[0].data_ptr(),
+            recurrent_state[1].data_ptr() - recurrent_state[0].data_ptr(),
+        )
+        self.assertEqual(
+            v_cache.numel() * v_cache.element_size(),
+            num_blocks * 98304,
+        )
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.enable_fa_quant",
+        return_value=True,
+    )
+    def test_k3_hybrid_layout_keeps_standalone_draft_contiguous_for_any_tensor_order(
+        self,
+        _mock_enable_fa_quant,
+    ):
+        num_blocks = 2
+        target_page_size = 537600
+        draft_page_size = 884736
+        target_layer = "model.layers.3.self_attn.attn"
+        mamba_layer = "model.layers.2.linear_attn"
+        draft_layer = "draft_model.layers.0.self_attn.attn"
+
+        target_spec = AscendMLAAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=640,
+            dtype=torch.int8,
+            page_size_padded=target_page_size,
+        )
+        draft_spec = AscendMLAAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        self.assertEqual(draft_spec.page_size_bytes, draft_page_size)
+        mamba_spec = MambaSpec(
+            block_size=768,
+            shapes=((7680, 3), (6, 128, 128)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=target_page_size,
+            mamba_cache_mode="align",
+        )
+        attention_group_spec = UniformTypeKVCacheSpecs(
+            block_size=768,
+            kv_cache_specs={
+                target_layer: target_spec,
+                draft_layer: draft_spec,
+            },
+        )
+
+        hybrid_tensor = KVCacheTensor(
+            size=num_blocks * target_page_size,
+            shared_by=[target_layer, mamba_layer],
+        )
+        draft_tensor = KVCacheTensor(
+            size=num_blocks * draft_page_size,
+            shared_by=[draft_layer],
+        )
+
+        for reverse_tensor_order in (False, True):
+            with self.subTest(reverse_tensor_order=reverse_tensor_order):
+                runner = self._build_runner()
+                runner.use_hybrid_blocks = True
+                runner.model_config.dtype = torch.bfloat16
+                backend = MagicMock()
+                backend.get_supported_kernel_block_sizes.return_value = [128]
+                backend.get_kv_cache_shape.side_effect = lambda blocks, block_size, heads, head_size: (
+                    blocks,
+                    block_size,
+                    heads,
+                    head_size,
+                )
+                tensors = [hybrid_tensor, draft_tensor]
+                if reverse_tensor_order:
+                    tensors.reverse()
+                kv_cache_config = KVCacheConfig(
+                    num_blocks=num_blocks,
+                    kv_cache_tensors=tensors,
+                    kv_cache_groups=[
+                        KVCacheGroupSpec(
+                            layer_names=[target_layer, draft_layer],
+                            kv_cache_spec=attention_group_spec,
+                            is_eagle_group=True,
+                        ),
+                        KVCacheGroupSpec(
+                            layer_names=[mamba_layer],
+                            kv_cache_spec=mamba_spec,
+                        ),
+                    ],
+                )
+                runner._get_attention_kv_cache_dims = lambda _name, _spec: (512, 64)
+                runner._get_mla_fa_quant_cache_dtypes = lambda name, _spec: (
+                    (torch.int8, torch.bfloat16) if name == target_layer else None
+                )
+
+                raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+                target_raw = raw_caches[target_layer]
+                self.assertIsInstance(target_raw, torch.Tensor)
+                self.assertIs(target_raw, raw_caches[mamba_layer])
+                self.assertIsInstance(raw_caches[draft_layer], tuple)
+                draft_k_raw, draft_v_raw = raw_caches[draft_layer]
+                self.assertTrue(draft_k_raw.is_contiguous())
+                self.assertTrue(draft_v_raw.is_contiguous())
+                self.assertEqual(draft_k_raw.numel(), num_blocks * 786432)
+                self.assertEqual(draft_v_raw.numel(), num_blocks * 98304)
+                self.assertNotEqual(
+                    target_raw.untyped_storage().data_ptr(),
+                    draft_k_raw.untyped_storage().data_ptr(),
+                )
+                self.assertNotEqual(
+                    target_raw.untyped_storage().data_ptr(),
+                    draft_v_raw.untyped_storage().data_ptr(),
+                )
+                self.assertEqual(
+                    runner._hybrid_attn_mamba_layout_layers,
+                    {target_layer, mamba_layer},
+                )
+                runner.vllm_config.quant_config.get_kv_quant_split_factor.assert_not_called()
+
+                runner._kv_cache_spec_attn_group_iterator = lambda backend=backend: [
+                    SimpleNamespace(
+                        kv_cache_spec=target_spec,
+                        backend=backend,
+                        layer_names=[target_layer],
+                    ),
+                    SimpleNamespace(
+                        kv_cache_spec=draft_spec,
+                        backend=backend,
+                        layer_names=[draft_layer],
+                    ),
+                    SimpleNamespace(
+                        kv_cache_spec=mamba_spec,
+                        backend=backend,
+                        layer_names=[mamba_layer],
+                    ),
+                ]
+                caches = runner._reshape_kv_cache_tensors(
+                    kv_cache_config,
+                    raw_caches,
+                )
+                target_k, target_v = caches[target_layer]
+                draft_k, draft_v = caches[draft_layer]
+                _, recurrent_state = caches[mamba_layer]
+
+                self.assertEqual(
+                    target_k.shape,
+                    (num_blocks * 6, 128, 1, 512),
+                )
+                self.assertEqual(
+                    target_v.shape,
+                    (num_blocks * 6, 128, 1, 64),
+                )
+                self.assertEqual(
+                    draft_k.shape,
+                    (num_blocks * 6, 128, 1, 512),
+                )
+                self.assertEqual(
+                    draft_v.shape,
+                    (num_blocks * 6, 128, 1, 64),
+                )
+                self.assertTrue(draft_k.is_contiguous())
+                self.assertTrue(draft_v.is_contiguous())
+                self.assertEqual(draft_k.dtype, torch.bfloat16)
+                self.assertEqual(draft_v.dtype, torch.bfloat16)
+                self.assertEqual(
+                    draft_k[6].data_ptr() - draft_k[0].data_ptr(),
+                    786432,
+                )
+                self.assertEqual(
+                    draft_v[6].data_ptr() - draft_v[0].data_ptr(),
+                    98304,
+                )
+                for block_id in range(num_blocks):
+                    self.assertEqual(
+                        target_k[block_id * 6].data_ptr(),
+                        recurrent_state[block_id].data_ptr(),
+                    )
+                self.assertNotEqual(
+                    target_k.untyped_storage().data_ptr(),
+                    draft_k.untyped_storage().data_ptr(),
+                )
+                self.assertNotEqual(
+                    target_k.untyped_storage().data_ptr(),
+                    draft_v.untyped_storage().data_ptr(),
+                )
+                runner.vllm_config.quant_config.get_kv_quant_dtype.assert_not_called()
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.enable_fa_quant",
+        return_value=True,
+    )
+    def test_pp_target_only_tensor_uses_planar_layout_from_empty_mamba_group(
+        self,
+        _mock_enable_fa_quant,
+    ):
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.model_config.dtype = torch.bfloat16
+        num_blocks = 2
+        common_page_size = 537600
+        target_layer = "model.layers.3.self_attn.attn"
+        target_spec = AscendMLAAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=640,
+            dtype=torch.int8,
+            page_size_padded=common_page_size,
+        )
+        mamba_spec = MambaSpec(
+            block_size=768,
+            shapes=((7680, 3), (6, 128, 128)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=common_page_size,
+            mamba_cache_mode="align",
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=num_blocks * common_page_size,
+                    shared_by=[target_layer],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[target_layer],
+                    kv_cache_spec=target_spec,
+                ),
+                KVCacheGroupSpec(
+                    layer_names=[],
+                    kv_cache_spec=mamba_spec,
+                ),
+            ],
+        )
+        backend = MagicMock()
+        backend.get_supported_kernel_block_sizes.return_value = [128]
+        backend.get_kv_cache_shape.side_effect = lambda blocks, block_size, heads, head_size: (
+            blocks,
+            block_size,
+            heads,
+            head_size,
+        )
+        runner._get_attention_kv_cache_dims = lambda _name, _spec: (512, 64)
+        runner._get_mla_fa_quant_cache_dtypes = lambda _name, _spec: (
+            torch.int8,
+            torch.bfloat16,
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        target_raw = raw_caches[target_layer]
+        self.assertIsInstance(target_raw, torch.Tensor)
+        self.assertEqual(
+            runner._hybrid_attn_mamba_layout_layers,
+            {target_layer},
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=target_spec,
+                backend=backend,
+                layer_names=[target_layer],
+            )
+        ]
+        target_k, target_v = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+        )[target_layer]
+
+        self.assertTrue(target_k.is_contiguous())
+        self.assertTrue(target_v.is_contiguous())
+        self.assertEqual(
+            target_k.shape,
+            (num_blocks * 6, 128, 1, 512),
+        )
+        self.assertEqual(
+            target_v.shape,
+            (num_blocks * 6, 128, 1, 64),
+        )
+        self.assertEqual(
+            target_k.data_ptr() - target_raw.data_ptr(),
+            num_blocks * 46080,
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=True)
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_a3_fa_quant_mla_cache_accounts_for_mixed_dtype_bytes(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+        _mock_enable_fa_quant,
+    ):
+        runner = self._build_runner()
+        runner.block_size = 16
+        runner.shared_kv_cache_layers = {}
+        runner.model_config.dtype = torch.bfloat16
+        runner.attn_backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+
+        layer_name = "model.layers.5.self_attn.attn"
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.head_size = 576
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        attn_module.impl = SimpleNamespace(
+            fa_quant_layer=True,
+            dtype=torch.int8,
+        )
+        attn_module.get_kv_cache_spec = MagicMock(
+            return_value=AscendMLAAttentionSpec(
+                block_size=runner.block_size,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                cache_dtype_str="auto",
+            )
+        )
+        mock_get_layers.return_value = {layer_name: attn_module}
+        layer_spec = runner.get_kv_cache_spec()[layer_name]
+        spec = AscendMLAAttentionSpec.merge([layer_spec])
+        expected_bytes_per_token = 512 + 64 * 2
+        self.assertEqual(spec.dtype, torch.int8)
+        self.assertEqual(spec.head_size, expected_bytes_per_token)
+        self.assertEqual(spec.page_size_bytes, runner.block_size * expected_bytes_per_token)
+
+        num_blocks = 2
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_k_cache, raw_v_cache = raw_caches[layer_name]
+        runner.vllm_config.quant_config.get_kv_quant_split_factor.assert_not_called()
+        self.assertEqual(raw_k_cache.numel(), num_blocks * runner.block_size * 512)
+        self.assertEqual(raw_v_cache.numel(), num_blocks * runner.block_size * 64 * 2)
+
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+        )[layer_name]
+        runner.vllm_config.quant_config.get_kv_quant_dtype.assert_not_called()
+        self.assertEqual(k_cache.dtype, torch.int8)
+        self.assertEqual(k_cache.shape, (num_blocks, runner.block_size, 1, 512))
+        self.assertEqual(v_cache.dtype, torch.bfloat16)
+        self.assertEqual(v_cache.shape, (num_blocks, runner.block_size, 1, 64))
+        runner.use_hybrid_blocks = True
+        runner.hybrid_with_attn_and_mamba = True
+        runner.attn_backend.get_supported_kernel_block_sizes.return_value = [runner.block_size]
+        hybrid_raw_cache = torch.zeros(
+            spec.page_size_bytes * num_blocks,
+            dtype=torch.int8,
+        )
+        hybrid_k_cache, hybrid_v_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            {layer_name: hybrid_raw_cache},
+        )[layer_name]
+        self.assertEqual(hybrid_k_cache.dtype, torch.int8)
+        self.assertEqual(hybrid_k_cache.shape, (num_blocks, runner.block_size, 1, 512))
+        self.assertEqual(hybrid_v_cache.dtype, torch.bfloat16)
+        self.assertEqual(hybrid_v_cache.shape, (num_blocks, runner.block_size, 1, 64))
+
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_sparse_layer_without_indexer_allocates_only_mla_kv_cache(
@@ -422,6 +887,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.c8_k_cache_dtype = torch.int8
         runner.c8_k_scale_cache_dtype = torch.float16
         runner._get_attention_kv_cache_dims = lambda _layer_name, _spec: (512, 64)
+        runner._get_mla_fa_quant_cache_dtypes = MagicMock(return_value=None)
         runner.sparse_kv_offload_enabled = False
 
         attn_layer_name = "model.layers.1.self_attn.attn"

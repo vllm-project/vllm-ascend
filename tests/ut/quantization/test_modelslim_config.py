@@ -19,6 +19,7 @@ from vllm_ascend.quantization.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
@@ -191,6 +192,66 @@ class TestAscendModelSlimConfig(TestBase):
             "experts.0.up_proj",
             "experts.0.down_proj",
         ]
+
+    def test_per_channel_shared_expert_w4a8_uses_grouped_matmul_scheme(self):
+        prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+        config = AscendModelSlimConfig(
+            {
+                "group_size": 0,
+                f"{prefix}.weight": "W4A8_DYNAMIC",
+            }
+        )
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_config.model_type = "future_hybrid_moe"
+        vllm_config.model_config.hf_text_config = MagicMock()
+        linear = MagicMock(spec=LinearBase)
+        scheme = MagicMock(spec=AscendW4A8DynamicLinearMethod)
+        scheme.is_per_channel_weight = True
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=scheme,
+            ),
+            patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            config.get_quant_method(linear, prefix)
+
+        scheme.enable_per_channel_shared_expert.assert_called_once_with()
+
+    def test_per_group_shared_expert_does_not_use_grouped_matmul_scheme(self):
+        prefix = "model.layers.0.block_sparse_moe.shared_experts.gate_up_proj"
+        config = AscendModelSlimConfig(
+            {
+                "group_size": 256,
+                f"{prefix}.weight": "W4A8_DYNAMIC",
+            }
+        )
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_config.model_type = "future_hybrid_moe"
+        vllm_config.model_config.hf_text_config = MagicMock()
+        linear = MagicMock(spec=LinearBase)
+        scheme = MagicMock(spec=AscendW4A8DynamicLinearMethod)
+        scheme.is_per_channel_weight = False
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=scheme,
+            ),
+            patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            config.get_quant_method(linear, prefix)
+
+        scheme.enable_per_channel_shared_expert.assert_not_called()
 
     def test_missing_linear_weight_without_gate_capability_does_not_fall_back(self):
         config = AscendModelSlimConfig({})
@@ -597,6 +658,15 @@ class TestGetCacheScaleMapper(TestBase):
             mapper._map_name("model.layers.1.fa_v.offset"),
             "model.layers.1.mla_attn.mla_attn.fa_v.offset",
         )
+        # Kimi K3 multimodal loading invokes AutoWeightsLoader for both the
+        # outer model and language_model. A second application must preserve
+        # the parameter name registered on the inner MLAAttention module.
+        checkpoint_name = "language_model.model.layers.23.self_attn.fa_q.offset"
+        mapped_name = mapper._map_name(checkpoint_name)
+        self.assertEqual(
+            mapper._map_name(mapped_name),
+            "language_model.model.layers.23.self_attn.mla_attn.mla_attn.fa_q.offset",
+        )
 
     def test_indexer_quant_returns_mapper(self):
         config = AscendModelSlimConfig(
@@ -614,6 +684,11 @@ class TestGetCacheScaleMapper(TestBase):
         self.assertEqual(
             mapper._map_name("model.layers.1.indexer.k_rot"),
             "model.layers.1.mla_attn.mla_attn.indexer.k_rot",
+        )
+        mapped_name = mapper._map_name("model.layers.1.indexer.q_rot")
+        self.assertEqual(
+            mapper._map_name(mapped_name),
+            "model.layers.1.mla_attn.mla_attn.indexer.q_rot",
         )
 
 

@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
@@ -839,6 +840,63 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
             call.kwargs["kernel_block_size"]
             for call in create_builders.call_args_list
         ] == [128, 64]
+
+    def test_initialization_selects_draft_from_shared_uniform_group(self, monkeypatch):
+        target_spec = MagicMock()
+        target_spec.block_size = 768
+        draft_spec = MagicMock()
+        draft_spec.block_size = 768
+        uniform_spec = UniformTypeKVCacheSpecs(
+            block_size=768,
+            kv_cache_specs={
+                "target.0": target_spec,
+                "draft.0": draft_spec,
+            },
+        )
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.mla.backend"
+        draft_layer = MagicMock()
+        draft_layer.get_attn_backend.return_value = backend
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *a, **k: {"draft.0": draft_layer},
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"draft.0"}
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=["target.0", "draft.0"],
+                    kv_cache_spec=uniform_spec,
+                )
+            ],
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders") as create_builders:
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128],
+            )
+
+        assert len(proposer.draft_attn_groups) == 1
+        draft_group = proposer.draft_attn_groups[0]
+        assert draft_group.layer_names == ["draft.0"]
+        assert draft_group.kv_cache_spec is draft_spec
+        assert draft_group.kv_cache_group_id == 0
+        assert proposer._layer_group_idx == [0]
+        assert proposer.kv_cache_gid == 0
+        assert proposer.kernel_block_size == 128
+        create_builders.assert_called_once_with(
+            proposer.vllm_config,
+            proposer.device,
+            kernel_block_size=128,
+        )
 
     def test_k3_initialization_enables_rope_on_mla_builders(self, monkeypatch):
         class FakeK3Config:
