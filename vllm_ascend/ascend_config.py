@@ -35,6 +35,11 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        if "enable_sleep_mode_extra_cleanup" in additional_config:
+            raise ValueError(
+                "additional_config.enable_sleep_mode_extra_cleanup has been removed. "
+                "Use additional_config.rl_config.sleep_mode_extra_cleanup instead."
+            )
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -148,7 +153,6 @@ class AscendConfig:
                 "only guaranteed when the recompute scheduler is enabled."
             )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
-        self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
@@ -324,6 +328,9 @@ class AscendConfig:
             additional_config.get("sparse_kv_offload_config", {}),
         )
         self._validate_sparse_c8_kv_offload_compatibility()
+
+        self.rl_config = RlConfig(additional_config.get("rl_config", {}))
+        self.rl_config.apply(self)
 
     def _validate_mc2_hierarchy_comm(self) -> None:
         if not self.enable_mc2_hierarchy_comm:
@@ -537,6 +544,64 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+
+class RlConfig:
+    """Unified defaults for reinforcement-learning workloads."""
+
+    enabled: bool
+    sleep_mode_extra_cleanup: bool
+    enable_training_consistency: bool
+    enable_batch_invariant: bool
+
+    _DEFAULTS = {
+        "enabled": False,
+        "sleep_mode_extra_cleanup": False,
+        "enable_training_consistency": False,
+        "enable_batch_invariant": False,
+    }
+
+    def __init__(self, config: dict[str, Any] | None = None):
+        config = {} if config is None else config
+        if not isinstance(config, dict):
+            raise ValueError(f"additional_config.rl_config must be a dict, got {type(config).__name__}.")
+
+        unknown_keys = set(config) - self._DEFAULTS.keys()
+        if unknown_keys:
+            raise ValueError(f"Unknown rl_config keys: {sorted(unknown_keys)}")
+
+        for key, default in self._DEFAULTS.items():
+            setattr(self, key, config.get(key, default))
+        self._validate()
+
+    def _validate(self) -> None:
+        for key in self._DEFAULTS:
+            value = getattr(self, key)
+            if not isinstance(value, bool):
+                raise ValueError(f"rl_config.{key} must be a bool, got {type(value).__name__}: {value}.")
+
+    def apply(self, ascend_config: "AscendConfig") -> None:
+        if not self.enabled:
+            return
+
+        if ascend_config.weight_nz_mode != 0:
+            logger.warning(
+                "RL config requires weight_nz_mode=0; overriding AscendConfig.weight_nz_mode from %s to 0.",
+                ascend_config.weight_nz_mode,
+            )
+        ascend_config.weight_nz_mode = 0
+        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+
+        from vllm_ascend.platform import _disable_expandable_segments
+
+        _disable_expandable_segments()
+
+        # rl_config provides an additional way to enable batch invariance. It
+        # must not disable a value explicitly supplied through the environment.
+        if self.enable_batch_invariant:
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
+        os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
 class DynamicSpecConfig:
@@ -1253,6 +1318,9 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
+    rl_config = additional_config.get("rl_config", {})
+    if isinstance(rl_config, dict) and rl_config.get("enabled", False):
+        refresh = True
     global _ASCEND_CONFIG
     if (
         _ASCEND_CONFIG is not None
