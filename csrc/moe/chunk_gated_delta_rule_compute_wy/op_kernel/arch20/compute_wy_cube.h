@@ -58,18 +58,22 @@ class WyCubeGemm {
     localWs_ = localWs;
     (void)localWsBytes;
 
-    // Shapes are fixed for the launch; configure once. SetTensorA/B stay at call sites.
-    // Attn SingleShape stays in the K-loop: the last slice may be a partial kCur.
-    mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kHeadDim));
+    // Every cube call runs at <=64-wide tiles (larger single-shapes wedge the
+    // 310P matmul); per-call SetOrgShape/SetSingleShape in the helpers below
+    // re-set partial slices, so Init only ever configures 64^3.
+    (void)kHeadDim;
+    (void)vHeadDim;
+    mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmAttn_.SetLocalWorkspace(localWs_);
     mmSquare_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmSquare_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmSquare_.SetLocalWorkspace(localWs_);
-    mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(vHeadDim), WY_CUBE_CHUNK);
-    mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(vHeadDim), WY_CUBE_CHUNK);
+    mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyU_.SetLocalWorkspace(localWs_);
-    mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(kHeadDim), WY_CUBE_CHUNK);
-    mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(kHeadDim), WY_CUBE_CHUNK);
+    mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetLocalWorkspace(localWs_);
 
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
