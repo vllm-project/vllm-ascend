@@ -49,7 +49,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 apply_kda_rms_norm_sigmoid_gate: (
@@ -146,12 +145,12 @@ def _load_a_log(
 
 
 def _require_ascendc_prefill_ops() -> None:
-    required_ops = ("kda_gate_cumsum", "chunk_kda_fwd")
+    required_ops = ("chunk_kda_fwd",)
     missing_ops = [name for name in required_ops if not hasattr(torch.ops._C_ascend, name)]
     if missing_ops:
         qualified_ops = ", ".join(f"torch.ops._C_ascend.{name}" for name in missing_ops)
         raise RuntimeError(
-            "Kimi KDA prefill requires the PR141 AscendC operators, but the "
+            "Kimi KDA prefill requires the fused AscendC operator, but the "
             f"following schemas are missing: {qualified_ops}. Rebuild and install "
             "the vllm-ascend custom operators with KDA support."
         )
@@ -388,18 +387,6 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
     def _conv_weights_t(self) -> torch.Tensor:
         return self.q_conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME)
 
-    def _recurrent_gate(self, raw_gate: torch.Tensor) -> torch.Tensor:
-        flat_gate = rearrange(raw_gate, "1 n h d -> n (h d)")
-        gate = fused_kda_gate(
-            flat_gate,
-            self.A_log,
-            self.head_dim,
-            g_bias=self.dt_bias,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=self.gate_lower_bound if self.gate_lower_bound is not None else -5.0,
-        )
-        return gate.unsqueeze(0)
-
     def _run_recurrent(
         self,
         q: torch.Tensor,
@@ -470,12 +457,11 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 "state_indices, and has_initial_state must describe the same number of sequences."
             )
 
-        # The recurrent cache uses [H,V,K].  PR141's AscendC prefill operator
-        # uses [H,K,V], so transpose only at that operator boundary.
+        # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
+        # that state layout directly through state_v_first.
         initial_state_vk = recurrent_state[state_indices].contiguous()
         clear_ssm_states(initial_state_vk, has_initial_state)
 
-        initial_state_kv = initial_state_vk.transpose(-1, -2).contiguous()
         cu_seqlens_ascendc = (
             tuple(cu_seqlens.detach().cpu().tolist()) if isinstance(cu_seqlens, torch.Tensor) else cu_seqlens
         )
@@ -483,43 +469,29 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         q = l2norm_fwd(q.contiguous())
         k = l2norm_fwd(k.contiguous())
 
-        if self.gate_lower_bound is not None:
-            gate_cumsum = torch.ops._C_ascend.kda_gate_cumsum(
-                raw_gate.contiguous(),
-                _KDA_CHUNK_SIZE,
-                A_log=self.A_log.reshape(-1).contiguous(),
-                dt_bias=self.dt_bias.contiguous(),
-                cu_seqlens=cu_seqlens_ascendc,
-                use_gate_in_kernel=True,
-                safe_gate=True,
-                lower_bound=self.gate_lower_bound,
-                layout="BSND",
-            )
-        else:
-            gate = self._recurrent_gate(raw_gate)
-            gate_cumsum = torch.ops._C_ascend.kda_gate_cumsum(
-                gate.contiguous(),
-                _KDA_CHUNK_SIZE,
-                cu_seqlens=cu_seqlens_ascendc,
-                layout="BSND",
-            )
-
         result = torch.ops._C_ascend.chunk_kda_fwd(
             q,
             k,
             v.contiguous(),
-            gate_cumsum,
+            raw_gate.contiguous(),
             beta.contiguous(),
             self.head_dim**-0.5,
             _KDA_CHUNK_SIZE,
             layout="BSND",
-            initial_state=initial_state_kv,
+            initial_state=initial_state_vk,
             output_final_state=True,
             cu_seqlens=cu_seqlens_ascendc,
             chunk_indices=prebuilt_metadata.chunk_indices_chunk64_host,
-            return_intermediate=False,
+            safe_gate=self.gate_lower_bound is not None,
+            lower_bound=self.gate_lower_bound if self.gate_lower_bound is not None else -5.0,
+            use_gate_in_kernel=True,
+            A_log=self.A_log.reshape(-1).contiguous(),
+            dt_bias=self.dt_bias.contiguous(),
+            disable_recompute=False,
+            return_intermediate_states=False,
+            state_v_first=True,
         )
-        recurrent_state[state_indices] = result[1].transpose(-1, -2).contiguous().to(recurrent_state.dtype)
+        recurrent_state[state_indices] = result[1].to(recurrent_state.dtype)
         return result[0]
 
     def _forward(
