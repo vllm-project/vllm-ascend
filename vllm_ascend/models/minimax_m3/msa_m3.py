@@ -166,7 +166,7 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig | None = None,
     ) -> None:
         super().__init__()
-        self.kv_cache = torch.tensor([])
+        self.kv_cache: tuple[torch.Tensor] = (torch.tensor([]),)
         self.head_dim = head_dim
         self.dtype = torch.bfloat16
         self.prefix = prefix
@@ -345,7 +345,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
     def _decode_topk_tp_sharded(
         self,
         idx_q: torch.Tensor,
-        index_kv_cache: torch.Tensor,
+        index_kv_cache: tuple[torch.Tensor],
         block_table: torch.Tensor,
         seq_lens: torch.Tensor,
         max_seq_len: int,

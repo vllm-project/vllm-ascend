@@ -39,6 +39,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     minimax_m3_sparse_forward,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    _as_ascendc_index_kv_cache,
     _index_score_topk_candidates,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
@@ -571,6 +572,22 @@ def test_indexer_linear_weight_loader_uses_first_index_k_shard_for_all_ranks() -
     layer.weight_loader(param, loaded_weight, "index_k")
 
     assert torch.equal(param.data[2:3], loaded_weight[:1])
+
+
+def test_ascendc_index_cache_converts_runtime_shape_to_bbnd() -> None:
+    index_key_cache = torch.zeros(4, 128, 128)
+
+    actual = _as_ascendc_index_kv_cache((index_key_cache,))
+
+    assert actual.shape == (4, 128, 1, 128)
+    assert actual.data_ptr() == index_key_cache.data_ptr()
+
+
+def test_ascendc_index_cache_rejects_non_runtime_shape() -> None:
+    index_key_cache = torch.zeros(4, 128, 1, 128)
+
+    with pytest.raises(ValueError, match=r"\[num_blocks, 128, head_dim\]"):
+        _as_ascendc_index_kv_cache((index_key_cache,))
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
