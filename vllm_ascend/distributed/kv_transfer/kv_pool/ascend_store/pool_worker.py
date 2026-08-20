@@ -303,7 +303,7 @@ class KVPoolWorker:
             )
 
         self.token_database = ChunkedTokenDatabase(
-            self.metadata, self.grouped_block_size, partitions, self.use_hybrid, self.hash_block_size
+            self.metadata, self.grouped_block_size, partitions, hash_block_size=self.hash_block_size
         )
         self.cache_coordinator = self._build_cache_coordinator(vllm_config)
         self.token_database.cache_coordinator = self.cache_coordinator
