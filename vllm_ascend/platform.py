@@ -116,9 +116,7 @@ def _configure_ascend_store_mamba_cache(vllm_config: VllmConfig) -> None:
         cache_config.mamba_cache_mode = "align"
     else:
         if cache_config.mamba_cache_mode != "align":
-            raise ValueError(
-                "mamba_cache_mode only supports 'align' when AscendStore is enabled."
-            )
+            raise ValueError("mamba_cache_mode only supports 'align' when AscendStore is enabled.")
 
 
 class NPUPlatform(Platform):
