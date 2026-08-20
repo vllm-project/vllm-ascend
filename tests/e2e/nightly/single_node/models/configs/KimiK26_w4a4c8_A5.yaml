@@ -69,7 +69,7 @@ test_cases:
       <<: *envs
       server_cmd_extra:
           - "--speculative-config"
-          - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Eco-Tech/kimi-k2.6-eagle3","num_speculative_tokens":1}'
+          - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg//kimi-k2.6-eagle3","num_speculative_tokens":1}'
     server_cmd: *server_cmd
 
   - name: "KimiK26_A5_Single_EAgle3_Step_02"
@@ -78,7 +78,7 @@ test_cases:
       <<: *envs
       server_cmd_extra:
         - "--speculative-config"
-        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Eco-Tech/kimi-k2.6-eagle3","num_speculative_tokens":1}'
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg/kimi-k2.6-eagle3","num_speculative_tokens":1}'
     server_cmd: *server_cmd
 
   - name: "KimiK26_A5_Single_Eagle3_mla_Step_01"
@@ -87,7 +87,7 @@ test_cases:
       <<: *envs
       server_cmd_extra:
         - "--speculative-config"
-        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Eco-Tech/kimi-k2.6-eagle3-mla","num_speculative_tokens":1}'
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg/kimi-k2.6-eagle3-mla","num_speculative_tokens":1}'
     server_cmd: *server_cmd
 
   - name: "KimiK26_A5_Single_Eagle3_mla_Step_02"
@@ -96,7 +96,7 @@ test_cases:
       <<: *envs
       server_cmd_extra:
         - "--speculative-config"
-        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Eco-Tech/kimi-k2.6-eagle3-mla","num_speculative_tokens":1}'
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg/kimi-k2.6-eagle3-mla","num_speculative_tokens":1}'
     server_cmd: *server_cmd
 
   - name: "KimiK26_A5_Single_Dflash_Step_01"
@@ -105,7 +105,7 @@ test_cases:
       <<: *envs
       server_cmd_extra:
         - "--speculative-config"
-        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Eco-Tech/kimi-k2.5-Dflash","num_speculative_tokens":1}'
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/z-lab/kimi-k2.5-Dflash","num_speculative_tokens":1}'
     server_cmd: *server_cmd
 
   - name: "KimiK26_A5_Single_Dflash_Step_02"
@@ -114,5 +114,5 @@ test_cases:
       <<: *envs
       server_cmd_extra:
         - "--speculative-config"
-        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Eco-Tech/kimi-k2.5-Dflash","num_speculative_tokens":1}'
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/z-lab/kimi-k2.5-Dflash","num_speculative_tokens":1}'
     server_cmd: *server_cmd
