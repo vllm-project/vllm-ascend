@@ -276,8 +276,19 @@ def _mean_ttft_ms(result: dict[str, Any], case: str, label: str) -> float:
 
 
 def _mean_tpot_ms(result: dict[str, Any], case: str, label: str) -> float:
-    itls = [float(v) for v in result["itls"]]
-    value = sum(itls) / len(itls) * 1000.0
+    # ``itls`` is a list of per-request inter-token latency values; each value
+    # is a list (per-token latencies of that request) in current vLLM versions,
+    # so average each request's list first, then average across requests.
+    tpots = []
+    for itl in result["itls"]:
+        if isinstance(itl, (list, tuple)):
+            values = [float(v) for v in itl]
+            if not values:
+                continue
+            tpots.append(sum(values) / len(values))
+        else:
+            tpots.append(float(itl))
+    value = sum(tpots) / len(tpots) * 1000.0
     print(f"[{case}] {label} TPOT mean: {value:.2f} ms")
     return value
 
