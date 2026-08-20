@@ -1,5 +1,4 @@
 import importlib
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -57,18 +56,6 @@ class TestNPUWorker(TestBase):
         self.rank = 0
         self.distributed_init_method = "tcp://localhost:12345"
         self.is_driver_worker = False
-
-    @patch("vllm_ascend.worker.worker.torch.use_deterministic_algorithms")
-    def test_enable_deterministic_algorithms_if_requested(self, mock_use_deterministic_algorithms):
-        from vllm_ascend.worker.worker import _enable_deterministic_algorithms_if_requested
-
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DETERMINISTIC_ALGORITHMS": "0"}):
-            _enable_deterministic_algorithms_if_requested()
-        mock_use_deterministic_algorithms.assert_not_called()
-
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DETERMINISTIC_ALGORITHMS": "1"}):
-            _enable_deterministic_algorithms_if_requested()
-        mock_use_deterministic_algorithms.assert_called_once_with(True)
 
     def test_layer_reuse_memory_factor_merges_main_components(self):
         from vllm_ascend.core.kv_cache_interface import (

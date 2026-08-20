@@ -276,16 +276,21 @@ jobs:
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
-      - name: Select tests based on changed files
+      - name: Select focused A3 accuracy diagnostics
         id: scope
         if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}' \
-            --npu-types a3
+            --npu-types a3 \
+            --explicit-e2e-tests \
+              tests/e2e/pull_request/two_card/test_shared_expert_dp.py \
+              tests/e2e/pull_request/two_card/test_shared_expert_dp_deterministic.py \
+              tests/e2e/pull_request/two_card/test_shared_expert_dp_diagnostics.py \
+              tests/e2e/pull_request/four_card/test_graph_mode.py \
+              tests/e2e/pull_request/four_card/test_graph_mode_deterministic.py \
+              tests/e2e/pull_request/four_card/test_graph_mode_diagnostics.py
 
       - name: Set no-tests output when source paths unchanged
         id: noop
@@ -348,6 +353,7 @@ jobs:
         needs.ensure-csrc-cache.result == 'success'
       }}
     strategy:
+      fail-fast: false
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}

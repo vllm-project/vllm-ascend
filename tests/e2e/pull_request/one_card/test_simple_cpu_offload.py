@@ -19,7 +19,7 @@ import pytest
 from vllm import SamplingParams, TokensPrompt
 from vllm.config import KVTransferConfig
 
-from tests.e2e.conftest import DETERMINISTIC_TEST_SEED, VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -38,10 +38,10 @@ def _build_kv_transfer_config(
     )
 
 
-def test_simple_cpu_offload_accuracy(deterministic_accuracy) -> None:
+def test_simple_cpu_offload_accuracy() -> None:
     """Reset GPU prefix cache after a cold run; verify the CPU-loaded KV
     cache reproduces the cold-run output deterministically."""
-    sampling_params = SamplingParams(max_tokens=1, temperature=0, seed=DETERMINISTIC_TEST_SEED)
+    sampling_params = SamplingParams(max_tokens=1, temperature=0)
 
     # Long enough prompt to occupy multiple full KV blocks.
     prompt = "hi " * 500 + "Let's count to ten. One, two, three, "
