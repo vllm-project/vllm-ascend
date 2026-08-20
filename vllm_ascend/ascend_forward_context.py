@@ -543,7 +543,7 @@ def _select_a5_moe_comm_method(
         and supported_eplb
         and supported_placement
     )
-    logger.debug(
+    logger.info(
         "A5 MegaMoE condition check: enabled=%s, fused_mc2_mode_1=%s, "
         "has_expert_parallel_world=%s, within_mega_moe_buffer_capacity=%s, supported_quant=%s, "
         "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, supported_placement=%s, "
@@ -576,7 +576,7 @@ def _select_a5_moe_comm_method(
         sorted(quant_type.name for quant_type in _A5_MEGA_MOE_QUANT_TYPES),
     )
     if a5_mega_moe_enable:
-        logger.debug(
+        logger.info(
             "A5 MoE comm selected FUSED_MC2/MegaMoE: num_tokens=%s, world_size=%s, "
             "top_k=%s, quant_type=%s, activation=%s, group_size=%s, enable_fused_mc2=%s, "
             "mega_moe_max_tokens=%s, max_num_batched_tokens=%s, mega_moe_buffer_tokens_per_rank=%s",
@@ -598,7 +598,7 @@ def _select_a5_moe_comm_method(
         moe_comm_type = MoECommType.ALLGATHER
     else:
         moe_comm_type = MoECommType.ALLTOALL
-    logger.debug(
+    logger.info(
         "A5 MoE comm selected fallback: method=%s, num_tokens=%s, world_size=%s, top_k=%s, "
         "quant_type=%s, activation=%s, enable_fused_mc2=%s, supported_mega_moe_quant=%s, "
         "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, supported_placement=%s, "
