@@ -21,31 +21,66 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
 )
 
 
-def get_dsv4_block_sizes():
+def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
     # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
+    # A5 pad_t2: FP8 packed 128*640=81920; BF16 SparseFlashMla 128*512*2=131072
     _DSV4_BLOCK_SIZES = {
         128: [[128, 128, 8, 32], [16640, 131072]],
         64: [[64, 64, 4, 16], [8320, 65536]],
         32: [[32, 32, 2, 8], [4160, 32768]],
     }
-    _DSV4_BLOCK_SIZES_A5 = {
+    _DSV4_BLOCK_SIZES_A5_FP8 = {
         128: [[128, 128, 8, 16], [16896, 81920]],
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
+    _DSV4_BLOCK_SIZES_A5_BF16 = {
+        128: [[128, 128, 8, 16], [16896, 131072]],
+        64: [[64, 64, 4, 8], [8448, 65536]],
+        32: [[32, 32, 2, 4], [4224, 32768]],
+    }
     if get_ascend_device_type() in {AscendDeviceType.A5}:
-        return _DSV4_BLOCK_SIZES_A5
-    else:
-        return _DSV4_BLOCK_SIZES
+        if attn_kv_dtype == torch.bfloat16:
+            return _DSV4_BLOCK_SIZES_A5_BF16
+        return _DSV4_BLOCK_SIZES_A5_FP8
+    return _DSV4_BLOCK_SIZES
 
 
+# Device-default table (A5 → FP8 pads). Prefer get_dsv4_block_sizes(attn_kv_dtype)
+# when A5 BF16 SparseFlashMla needs pad_t2=131072.
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
+
+
+def dsv4_requested_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """Resolve the user/model-requested KV cache dtype from cache config."""
+    return kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+
+
+def dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
+    """Resolve SWA/compress attention KV dtype (``attn_kv_dtype``).
+
+    On A5, SparseFlashMla is used only for an explicit BF16 request
+    (``--kv-cache-dtype bfloat16``). ``auto`` and other values stay on FP8.
+    Never mutate ``vllm_config.cache_config.cache_dtype`` here.
+    Indexer KV is separate — see ``_dsv4_indexer_kv_dtype`` / indexer_kv_dtype.
+    """
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return non_a5_dtype
+    raw_cache_dtype = vllm_config.cache_config.cache_dtype
+    # "auto" follows model dtype via kv_cache_dtype_str_to_dtype (usually BF16),
+    # but A5 default attention KV must remain FP8 unless the user opts in.
+    if raw_cache_dtype in (None, "auto"):
+        return torch.float8_e4m3fn
+    if dsv4_requested_kv_cache_dtype(vllm_config) == torch.bfloat16:
+        return torch.bfloat16
+    return torch.float8_e4m3fn
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -168,14 +203,12 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
-        kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            kv_cache_dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-
-        cached_head_size = (
-            (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
-        )
+        requested_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        # Prefer the live cache_config request so BF16 SparseFlashMla is not
+        # forced to FP8 just because the device is A5.
+        kv_cache_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_dtype)
+        attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(kv_cache_dtype)
+        cached_head_size = self.head_size + 128 if attn_kv_plan.pack_kv_head_dim_extra else self.head_size
         block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
             block_size=block_size,
@@ -184,5 +217,5 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,
-            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            cache_dtype_str=str(kv_cache_dtype).replace("torch.", ""),
         )

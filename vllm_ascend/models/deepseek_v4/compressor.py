@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
@@ -55,9 +56,13 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.block_size = block_size
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+        from vllm_ascend.models.layer.attention.layer import (
+            dsv4_resolve_attn_kv_dtype,
+            get_dsv4_block_sizes,
+        )
 
-        pads = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][1]
+        attn_kv_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, torch.bfloat16)
+        pads = get_dsv4_block_sizes(attn_kv_dtype)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
         return AscendSlidingWindowMLASpec(
@@ -159,12 +164,18 @@ class Compressor(nn.Module):
                 f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}"
             )
 
+        from vllm_ascend.device.device_op import DeviceOperator
+        from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+
+        requested_kv_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(
+            dsv4_resolve_attn_kv_dtype(vllm_config, requested_kv_dtype)
+        )
+
     def _compute_metadata(
         self,
         metadata: typing.Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        from vllm_ascend.device.device_op import DeviceOperator
-
         assert metadata.full_compress_cos is not None
         assert metadata.full_compress_sin is not None
         assert metadata.num_compressed_tokens is not None
@@ -185,7 +196,7 @@ class Compressor(nn.Module):
             metadata.start_pos,
             metadata.block_table,
             metadata.block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+            self.attn_kv_plan.compressor_slot_mapping_format,
             self.compress_ratio,
             metadata.num_compressed_tokens,
             metadata.num_reqs_actual,

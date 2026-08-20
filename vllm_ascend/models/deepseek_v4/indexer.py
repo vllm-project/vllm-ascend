@@ -50,6 +50,17 @@ from vllm_ascend.utils import (
 )
 
 
+def _dsv4_indexer_kv_dtype() -> torch.dtype:
+    """Indexer KV dtype, independent of attention KV / SparseFlashMla.
+
+    Always quantized on A5 (FP8). Callers must not rewrite
+    ``cache_config.cache_dtype`` when applying this.
+    """
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return torch.float8_e4m3fn
+    return torch.int8
+
+
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
     x_shape = x.shape
     dim = x.shape[-1]
@@ -92,9 +103,10 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+        # Indexer cache stays quantized on A5 even when attention KV is BF16.
+        # Do not rewrite vllm_config.cache_config.cache_dtype here — that would
+        # poison the BF16 SparseFlashMla attention path.
+        self.dtype = _dsv4_indexer_kv_dtype()
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
@@ -107,7 +119,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             dtype=self.dtype,
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,
-            cache_dtype_str=self.cache_config.cache_dtype,
+            cache_dtype_str=str(self.dtype).replace("torch.", ""),
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
         )
