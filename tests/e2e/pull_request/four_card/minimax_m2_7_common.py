@@ -28,18 +28,20 @@ The full MiniMax-M2.7-w8a8-QuaRot checkpoint (62 layers) does not fit on
 surplus ``layers.{16..61}`` weights during loading.
 
 Both scenarios run ModelRunner V1 and V2 on the same machine and assert
-that V2 mean output throughput stays within each case's guardrail
+that V2 output throughput stays within each case's guardrail
 (16k1k: ``V2 >= V1 * 0.97``; 128k1k: ``V2 >= V1 * 0.94``, see
 ``THROUGHPUT_THRESHOLD_128K``). Each side runs a single long benchmark with
 5x the requests (16k1k: 400, 128k1k: 160).
 
-Benchmarks use vLLM's built-in ``vllm bench serve`` CLI with its synthetic
-datasets (``random`` for 16k1k, ``prefix_repetition`` for 128k1k), so no
-external dataset publication is required. The measurement is preceded by 5
-warm-up requests that are excluded from the metrics, mirroring the internal
-methodology of discarding the first complete run. (Nightly single-node
-cases use aisbench instead; this PR E2E case follows the PR E2E toolchain,
-whose only performance precedent is ``tools/vllm_bench.py``.)
+Benchmarks use vLLM's built-in ``vllm bench serve`` CLI through the shared
+``tools/vllm_bench.run_vllm_bench_case`` runner (no baseline, so the raw
+result JSONs are compared here) with its synthetic datasets (``random`` for
+16k1k, ``prefix_repetition`` for 128k1k), so no external dataset publication
+is required. The measurement is preceded by 5 warm-up requests that are
+excluded from the metrics, mirroring the internal methodology of discarding
+the first complete run. (Nightly single-node cases use aisbench instead;
+this PR E2E case follows the PR E2E toolchain, whose only performance
+precedent is ``tools/vllm_bench.py``.)
 
 The 16k1k and 128k1k cases live in separate test files so each runs as its
 own CI job; each case runs a single long round.
@@ -49,14 +51,12 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any
 
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemotePDServer, wait_npu_memory_free
+from tools.vllm_bench import run_vllm_bench_case
 
 # ModelScope repo published by the model owner; override locally with
 # MINIMAX_M2_7_MODEL_PATH for private/internal weight paths.
@@ -122,167 +122,75 @@ def _server_args(port: int) -> list[str]:
     ]
 
 
-BENCH_COMMON_ARGS = [
-    "--backend",
-    "openai-chat",
-    "--endpoint",
-    "/v1/chat/completions",
-    "--served-model-name",
-    MINIMAX_M2_7_MODEL,
-    "--model",
-    MINIMAX_M2_7_MODEL,
-    "--tokenizer",
-    MINIMAX_M2_7_MODEL,
-    "--metric-percentiles",
-    "50,90,99",
-    "--request-rate",
-    "inf",
-    "--num-warmups",
-    "5",
-    "--temperature",
-    "0",
-    "--ignore-eos",
-    "--seed",
-    "0",
-    "--disable-tqdm",
-    "--save-result",
-    "--save-detailed",
-    "--trust-remote-code",
-]
+# Common vllm bench serve settings. VllmbenchRunner adds the fixed flags
+# itself (backend openai-chat, endpoint, model/tokenizer, percentiles,
+# save-result); these are the per-case knobs. Keys map to CLI flags with
+# ``_`` -> ``-``; boolean True becomes a bare flag.
+BENCH_COMMON_CONFIG: dict[str, Any] = {
+    "request_rate": "inf",
+    "num_warmups": 5,
+    "temperature": 0,
+    "ignore_eos": True,
+    "seed": 0,
+    "disable_tqdm": True,
+    "save_detailed": True,
+}
 
-BENCH_16K_ARGS = [
-    "--dataset-name",
-    "random",
-    "--num-prompts",
-    "400",
-    "--max-concurrency",
-    "20",
-    "--random-input-len",
-    "16410",
-    "--random-output-len",
-    "1024",
-]
+BENCH_16K: dict[str, Any] = {
+    **BENCH_COMMON_CONFIG,
+    "dataset_name": "random",
+    "num_prompts": 400,
+    "max_concurrency": 20,
+    "random_input_len": 16410,
+    "random_output_len": 1024,
+}
 
-BENCH_128K_ARGS = [
-    "--dataset-name",
-    "prefix_repetition",
-    "--num-prompts",
-    "160",
-    "--max-concurrency",
-    "8",
-    "--prefix-repetition-prefix-len",
-    "117900",
-    "--prefix-repetition-suffix-len",
-    "13100",
-    "--prefix-repetition-num-prefixes",
-    "1",
-    "--prefix-repetition-output-len",
-    "1024",
-]
+BENCH_128K: dict[str, Any] = {
+    **BENCH_COMMON_CONFIG,
+    "dataset_name": "prefix_repetition",
+    "num_prompts": 160,
+    "max_concurrency": 8,
+    "prefix_repetition_prefix_len": 117900,
+    "prefix_repetition_suffix_len": 13100,
+    "prefix_repetition_num_prefixes": 1,
+    "prefix_repetition_output_len": 1024,
+}
 
 
-def _run_bench(port: int, bench_args: list[str]) -> dict[str, Any]:
-    """Run ``vllm bench serve`` against the already-started server and return
-    the parsed result JSON."""
-    with tempfile.TemporaryDirectory() as result_dir:
-        cmd = [
-            "vllm",
-            "bench",
-            "serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--result-filename",
-            "result.json",
-            "--result-dir",
-            result_dir,
-            *BENCH_COMMON_ARGS,
-            *bench_args,
-        ]
-        print(f"Running vllm bench: {' '.join(cmd)}")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"vllm bench serve failed (rc={proc.returncode}):\n"
-                f"stdout tail:\n{proc.stdout[-4000:]}\n"
-                f"stderr tail:\n{proc.stderr[-4000:]}"
-            )
-        result_file = Path(result_dir) / "result.json"
-        with result_file.open(encoding="utf-8") as f:
-            return json.load(f)
-
-
-def _run_server_and_bench(
-    use_v2: bool,
-    bench_args: list[str],
-    num_repeats: int,
-) -> list[dict[str, Any]]:
-    """Start one server and run the benchmark *num_repeats* times on it."""
+def _run_server_and_bench(use_v2: bool, bench_config: dict[str, Any]) -> dict[str, Any]:
+    """Start one server (V1 or V2) and run the benchmark once on it."""
     port = get_open_port()
     env_dict = {
         **SERVER_ENV,
         "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0",
     }
-    runner = "V2" if use_v2 else "V1"
-    results: list[dict[str, Any]] = []
     with RemotePDServer(_server_args(port), env_dict=env_dict, max_wait_seconds=1800) as server:
-        for round_index in range(1, num_repeats + 1):
-            print(f"[{runner}] bench round {round_index}/{num_repeats}")
-            results.append(_run_bench(server.port, bench_args))
-    return results
-
-
-def _mean_output_throughput(
-    results: list[dict[str, Any]],
-    case: str,
-    label: str,
-) -> float:
-    """Return the mean output throughput over all rounds."""
-    for round_index, result in enumerate(results, 1):
-        assert result["failed"] == 0, f"[{case}] {label} round {round_index} had {result['failed']} failed request(s)"
-    kept = results
-    values = [float(result["output_throughput"]) for result in kept]
-    mean = sum(values) / len(values)
-    print(f"[{case}] {label} output_throughput per kept round: {[f'{v:.2f}' for v in values]} tok/s")
-    print(f"[{case}] {label} output_throughput mean: {mean:.2f} tok/s")
-    return mean
-
-
-def _assert_v2_not_slower(
-    v1_results: list[dict[str, Any]],
-    v2_results: list[dict[str, Any]],
-    case: str,
-    threshold: float,
-) -> None:
-    v1_throughput = _mean_output_throughput(v1_results, case, "V1")
-    v2_throughput = _mean_output_throughput(v2_results, case, "V2")
-    assert v2_throughput >= v1_throughput * threshold, (
-        f"[{case}] V2 mean output throughput {v2_throughput:.2f} tok/s is below "
-        f"V1 mean * {threshold} = {v1_throughput * threshold:.2f} tok/s"
-    )
+        print(f"[{'V2' if use_v2 else 'V1'}] running bench on port {server.port}")
+        return run_vllm_bench_case(
+            MINIMAX_M2_7_MODEL,
+            server.port,
+            bench_config,
+            model_path=MINIMAX_M2_7_MODEL,
+        )
 
 
 def _benchmark_pair(
-    bench_args: list[str],
+    bench_config: dict[str, Any],
     case: str,
-    num_repeats: int,
     threshold: float = THROUGHPUT_THRESHOLD,
 ) -> None:
-    """Run the same scenario on V1 then V2 and assert V2 >= V1 * threshold.
-
-    Each side runs *num_repeats* rounds on a single server and the
-    assertion compares mean throughput.
-    """
-    v1_results = _run_server_and_bench(
-        use_v2=False,
-        bench_args=bench_args,
-        num_repeats=num_repeats,
-    )
+    """Run the same scenario on V1 then V2 and assert V2 >= V1 * threshold."""
+    v1_result = _run_server_and_bench(use_v2=False, bench_config=bench_config)
     wait_npu_memory_free(max_wait_seconds=120)
-    v2_results = _run_server_and_bench(
-        use_v2=True,
-        bench_args=bench_args,
-        num_repeats=num_repeats,
+    v2_result = _run_server_and_bench(use_v2=True, bench_config=bench_config)
+
+    throughputs: dict[str, float] = {}
+    for label, result in (("V1", v1_result), ("V2", v2_result)):
+        failed = result["failed"]
+        assert failed == 0, f"[{case}] {label} benchmark had {failed} failed request(s)"
+        throughputs[label] = float(result["output_throughput"])
+        print(f"[{case}] {label} output_throughput: {throughputs[label]:.2f} tok/s")
+    assert throughputs["V2"] >= throughputs["V1"] * threshold, (
+        f"[{case}] V2 output throughput {throughputs['V2']:.2f} tok/s is below "
+        f"V1 * {threshold} = {throughputs['V1'] * threshold:.2f} tok/s"
     )
-    _assert_v2_not_slower(v1_results, v2_results, case, threshold)
