@@ -108,8 +108,10 @@ def send_v1_completions(prompt, model, server, request_args=None, expected: Opti
     data: dict[str, Any] = {"model": model, "prompt": prompt}
     if request_args:
         data.update(request_args)
-    if expected and "completion_tokens" in expected and "max_tokens" not in data:
-        data["max_tokens"] = expected["completion_tokens"]
+    if expected and "completion_tokens" in expected:
+        ct = expected["completion_tokens"]
+        data["max_tokens"] = ct
+        data["min_tokens"] = ct
     url = server.url_for("v1", "completions")
     response = requests.post(url, json=data)
     print(f"Status Code: {response.status_code}")
@@ -134,8 +136,10 @@ def send_v1_chat_completions(prompt, model, server, request_args=None, expected:
     }
     if request_args:
         data.update(request_args)
-    if expected and "completion_tokens" in expected and "max_tokens" not in data:
-        data["max_tokens"] = expected["completion_tokens"]
+    if expected and "completion_tokens" in expected:
+        ct = expected["completion_tokens"]
+        data["max_tokens"] = ct
+        data["min_tokens"] = ct
     url = server.url_for("v1", "chat", "completions")
     response = requests.post(url, json=data)
     print(f"Status Code: {response.status_code}")
