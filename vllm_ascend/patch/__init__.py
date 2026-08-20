@@ -1027,7 +1027,7 @@
 #       prefill/decode spec decoding, which are not usable on Ascend.
 #    How：
 #       Replace the prefill/decode speculator graph managers on the upstream
-#       module with `PrefillEagleAclGraphManager` / `DecodeEagleAclGraphManager`
+#       module with `AutoRegressiveAclGraphManager`
 #       (ACL graph).
 #    Related PR (if no, explain why):
 #       No, vllm-ascend v2 spec-decode ACL graph integration.

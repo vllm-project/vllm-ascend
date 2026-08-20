@@ -27,15 +27,14 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.worker.v2.aclgraph_utils import (
-    _get_graph_update_backend,
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
-class EagleAclGraphManager(SpeculatorCudaGraphManager):
-    """AclGraphManager for Eagle speculative decoding."""
+class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
+    """ACL graph manager for autoregressive speculative decoding."""
 
     def __init__(
         self,
@@ -130,9 +129,11 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
-            logger.info_once("PrefillEagleAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
+            logger.info_once(
+                "AutoRegressiveAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens
+            )
         else:
-            logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
+            logger.info_once("AutoRegressiveAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
         self.update_stream.wait_stream(torch.npu.current_stream())
@@ -160,7 +161,8 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
 
             forward_context = get_forward_context()
-            attn_backend = _get_graph_update_backend(self.speculator.attn_groups)
+            attn_backend = self.speculator.attn_backend
+            assert attn_backend is not None, "Speculator attention backend is not initialized"
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 attn_backend,

@@ -33,6 +33,20 @@ class AscendDeepSeekMTP(DeepSeekMTP):
             hidden_states = self.rot(hidden_states)
         return super().forward(input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds, spec_step_idx)
 
+    def _set_own_lm_head(self, loaded_weights: set[str]) -> None:
+        """Expose the independently loaded MTP head to the runner."""
+        mtp_layer_idx = self.model.mtp_start_layer_idx
+        own_head_weight = f"model.layers.{mtp_layer_idx}.shared_head.head.weight"
+        if own_head_weight not in loaded_weights:
+            return
+
+        self.has_own_lm_head = True
+        mtp_layer = self.model.layers[str(mtp_layer_idx)]
+        # This is an alias used only by the runner's sharing decision. Bypass
+        # nn.Module registration to avoid a duplicate state-dict entry for the
+        # same per-layer head.
+        object.__setattr__(self, "lm_head", mtp_layer.shared_head.head)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if self.quant_config is not None and (cache_scale_mapper := self.quant_config.get_cache_scale_mapper()):
             weights = cache_scale_mapper.apply(weights)
@@ -41,19 +55,7 @@ class AscendDeepSeekMTP(DeepSeekMTP):
             orig_to_new_prefix={"rot.": f"model.layers.{self.config.num_hidden_layers}.rot."},
         )
         loaded_weights = super().load_weights(weights_mapper.apply(weights))
-
-        # DeepSeekMTP always constructs shared_head modules, even when the
-        # checkpoint does not contain independently trained head weights.
-        mtp_layer_idx = self.model.mtp_start_layer_idx
-        own_head_weight = f"model.layers.{mtp_layer_idx}.shared_head.head.weight"
-        if own_head_weight in loaded_weights:
-            self.has_own_lm_head = True
-            mtp_layer = self.model.layers[str(mtp_layer_idx)]
-            # This alias is only used by the runner's sharing decision.
-            # Bypass nn.Module registration to avoid a duplicate state-dict
-            # entry for the same per-layer head.
-            object.__setattr__(self, "lm_head", mtp_layer.shared_head.head)
-
+        self._set_own_lm_head(loaded_weights)
         return loaded_weights
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
