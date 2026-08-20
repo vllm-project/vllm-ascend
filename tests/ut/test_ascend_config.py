@@ -443,7 +443,9 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.ascend_config.AscendConfig._is_megamoe_supported_by_config", return_value=False,)
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(self, mock_fix_incompatible_config, mock_warning_once, mock_is_megamoe):
+    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(
+        self, mock_fix_incompatible_config, mock_warning_once, mock_is_megamoe
+        ):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "enable_fused_mc2": 1,
