@@ -356,7 +356,7 @@ def _get_moe_quant_type(vllm_config: VllmConfig) -> str | None:
     hf_text_config = vllm_config.model_config.hf_text_config
     quant_config = getattr(vllm_config, "quant_config", None)
     quant_description = getattr(quant_config, "quant_description", None)
-    logger.debug(
+    logger.info(
         "MoE quant type detection input: quant_config_type=%s, quant_description=%s",
         type(quant_config).__name__ if quant_config is not None else None,
         quant_description,
