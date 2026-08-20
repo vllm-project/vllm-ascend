@@ -81,11 +81,14 @@ def test_openai_unbounded_array_does_not_repeat_until_token_limit(openai_client:
     )
 
     choice = response.choices[0]
+<<<<<<< HEAD
     completion_tokens = response.usage.completion_tokens if response.usage is not None else None
     print(f"finish_reason: {choice.finish_reason}")
     print(f"completion_tokens: {completion_tokens}")
     print(f"generated content:\n{choice.message.content}")
 
+=======
+>>>>>>> origin/main-struct-output
     assert choice.finish_reason == "stop"
     assert choice.message.content is not None
 
@@ -100,6 +103,10 @@ def test_openai_unbounded_array_does_not_repeat_until_token_limit(openai_client:
     assert len(tags) < 8 or len(set(tags)) > 1
 
 
+<<<<<<< HEAD
+=======
+@pytest.mark.timeout(1000)
+>>>>>>> origin/main-struct-output
 @pytest.mark.parametrize("case", STRUCTURED_OUTPUT_CASES, ids=lambda case: case.case_id)
 def test_openai_streaming_structured_output(openai_client: Any, case: StructuredOutputCase) -> None:
     text = create_structured_chat_completion(openai_client, SERVED_MODEL_NAME, case, stream=True)
@@ -107,6 +114,10 @@ def test_openai_streaming_structured_output(openai_client: Any, case: Structured
     assert_structured_output(text, case)
 
 
+<<<<<<< HEAD
+=======
+@pytest.mark.timeout(1000)
+>>>>>>> origin/main-struct-output
 def test_openai_mixed_concurrent_structured_outputs(openai_client: Any) -> None:
     request_cases = list(islice(cycle((*STRUCTURED_OUTPUT_CASES, None)), CONCURRENT_REQUEST_COUNT))
 
@@ -126,6 +137,10 @@ def test_openai_mixed_concurrent_structured_outputs(openai_client: Any) -> None:
             assert_structured_output(text, case)
 
 
+<<<<<<< HEAD
+=======
+@pytest.mark.timeout(1000)
+>>>>>>> origin/main-struct-output
 @pytest.mark.parametrize(
     "case_id,structured_outputs",
     INVALID_STRUCTURED_OUTPUTS,
