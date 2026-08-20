@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
@@ -187,6 +187,29 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             ),
             quant_method=self,
         )
+
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        if _EXTRA_CTX.use_mega_moe:
+            # MegaMoe consumes the non-transposed per-expert weight/scale lists
+            # built in process_weights_after_loading (the non-mega path uses the
+            # transposed single tensors below).
+            return MoEWeights(
+                w1=layer.w13_weight.data,
+                w2=layer.w2_weight.data,
+                w1_scale=layer.w13_weight_scale.data,
+                w2_scale=layer.w2_weight_scale.data,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+        else:
+            return MoEWeights(
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = torch_npu.npu_format_cast(

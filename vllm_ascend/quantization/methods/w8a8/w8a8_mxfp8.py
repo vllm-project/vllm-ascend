@@ -25,8 +25,8 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
@@ -306,6 +306,29 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             quant_method=self,
         )
 
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        if _EXTRA_CTX.use_mega_moe:
+            # MegaMoe consumes the non-transposed per-expert weight/scale lists
+            # built in process_weights_after_loading (the non-mega path uses the
+            # transposed single tensors below).
+            return MoEWeights(
+                w1=layer.cann_mega_moe_w13_weight_list,
+                w2=layer.cann_mega_moe_w2_weight_list,
+                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
+                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+        else:
+            return MoEWeights(
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+
     @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
         return [
@@ -348,11 +371,36 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
+        # MegaMoe (FUSED_MC2 on A5) expects the weights in their original
+        # (out, in) layout — weight1=(E, 2*inter, hidden), weight2=(E, hidden,
+        # inter) — and the reshaped (not transposed) E8M0 scales. Capture
+        # per-expert lists before the non-mega path transposes everything below.
+        if use_cann_megamoe(get_current_vllm_config()):
+            layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+
+            layer.cann_mega_moe_w13_weight_scale_list = [
+                w13_weight_scale.clone() for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w2_weight_scale_list = [
+                w2_weight_scale.clone() for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+
+            tensor_names = (
+                "w13_weight",
+                "w2_weight",
+                "w13_weight_scale",
+                "w2_weight_scale",
+            )
+            for tensor_name in tensor_names:
+                delattr(layer, tensor_name)
+
+        else:
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
         # Mark as transformed
         layer._mxfp8_transformed = True
 

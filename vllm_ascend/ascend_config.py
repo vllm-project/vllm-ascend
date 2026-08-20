@@ -26,6 +26,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.device.device_config import is_950
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -757,6 +758,10 @@ class AscendConfig:
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+        if is_950():
+            mega_moe_supported_by_config = AscendConfig._is_a5_megamoe_supported_by_config(vllm_config)
+            logger.debug("mega moe operator is supported by current a5 config: %r", mega_moe_supported_by_config)
+            return mega_moe_supported_by_config
         hf_text_config = vllm_config.model_config.hf_text_config
         hidden_size = getattr(hf_text_config, "hidden_size", None)
         if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
@@ -788,6 +793,60 @@ class AscendConfig:
             "quanttype.w4a8",
         }
         return quant_name in supported_quant_names
+
+    @staticmethod
+    def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
+        # Ascend 950 MegaMoe supports only MXFP quantization (dispatch_quant_mode
+        # == 4) and constrains hidden / intermediate to fixed discrete sets, per
+        # cann_ops_transformer docs/zh/mega_moe.md (Ascend 950 constraints).
+        hf_text_config = vllm_config.model_config.hf_text_config
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+            hidden_size = vllm_config.model_config.get_hidden_size()
+        if hidden_size is None:
+            return False
+        if int(hidden_size) not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}:
+            logger.warning(
+                "mega moe operator is not supported by current a5 config, for hidden_size %s"
+                " is not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}",
+                int(hidden_size),
+            )
+            return False
+
+        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None:
+            return False
+        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
+        intermediate_hidden = 2 * int(moe_intermediate_size)
+        if intermediate_hidden not in {1024, 2048, 3072, 4096, 7168}:
+            logger.warning(
+                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s"
+                " is not in {1024, 2048, 3072, 4096, 7168}",
+                intermediate_hidden,
+            )
+            return False
+
+        # num_experts must divide evenly across the EP group.
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        if ep_world_size < 2:
+            return False
+        if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
+            return False
+
+        num_top_k = getattr(
+            hf_text_config,
+            "num_experts_per_tok",
+            getattr(hf_text_config, "top_k_experts", 1),
+        )
+        if not (1 <= int(num_top_k) <= 32):
+            logger.warning(
+                "mega moe operator is not supported by current a5 config, for num_top_k %s is not between 1 and 32",
+                num_top_k,
+            )
+            return False
+        return True
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
