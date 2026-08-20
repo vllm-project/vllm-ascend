@@ -544,12 +544,20 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
+        # Keep both CPU mirrors synchronized because PCP partitions the next
+        # batch using num_computed_tokens_np.
         # Without MTP, num_computed_tokens_np is already correct from update_requests.
         if self.speculator is not None:
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+                corrected_num_computed_tokens = self.num_computed_tokens_cpu[req_index]
+                self.req_states.num_computed_tokens_cpu[req_index] = (
+                    corrected_num_computed_tokens
+                )
+                self.req_states.num_computed_tokens_np[req_index] = int(
+                    corrected_num_computed_tokens
+                )
         else:
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]

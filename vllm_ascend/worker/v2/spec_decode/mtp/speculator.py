@@ -15,15 +15,13 @@
 # This file is a part of the vllm-ascend project.
 #
 # AscendMTPSpeculator layers the shared Ascend draft loop
-# (AscendAutoRegressiveSpeculator) on upstream MTPSpeculator. All MLA-specific
-# handling lives in the base, gated by is_mla.
+# (AscendAutoRegressiveSpeculator) on upstream MTPSpeculator.
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
 
 
 class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
-    """Ascend MTP speculator (MLA draft). All MLA handling is in the base
-    (AscendAutoRegressiveSpeculator)"""
+    """Ascend MTP speculator."""
 
     pass

@@ -123,6 +123,37 @@ def _make_global_pcp_batch():
     )
 
 
+def test_mtp_rejection_syncs_corrected_num_computed_tokens_to_numpy() -> None:
+    runner = SimpleNamespace(
+        speculator=object(),
+        num_computed_tokens_event=MagicMock(),
+        num_computed_tokens_cpu=torch.tensor([0, 308], dtype=torch.int32),
+        req_states=SimpleNamespace(
+            req_id_to_index={"req": 1},
+            num_computed_tokens_cpu=torch.tensor([0, 309], dtype=torch.int32),
+            num_computed_tokens_np=np.array([0, 309], dtype=np.int32),
+        ),
+        input_buffers=SimpleNamespace(
+            seq_lens_cpu=torch.zeros(1, dtype=torch.int32),
+        ),
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req": 2},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["req"]),
+    )
+
+    NPUModelRunner._update_seq_lens_cpu(
+        runner,
+        scheduler_output,
+        req_ids=["req"],
+    )
+
+    runner.num_computed_tokens_event.synchronize.assert_called_once_with()
+    assert runner.req_states.num_computed_tokens_cpu[1].item() == 308
+    assert runner.req_states.num_computed_tokens_np[1] == 308
+    assert runner.input_buffers.seq_lens_cpu[0].item() == 310
+
+
 def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     """Refresh Ascend metadata after the real PCP local-batch rewrite."""
     vllm_config = object()
@@ -241,6 +272,7 @@ def test_partition_batch_preserves_global_speculative_batch(
     )
     upstream_partition_batch = PCPManager.partition_batch
     upstream_batches = []
+    rebuild_local_mtp_fields = MagicMock(side_effect=lambda _, batch: batch)
 
     def call_upstream(manager, batch):
         upstream_batches.append(batch)
@@ -269,6 +301,11 @@ def test_partition_batch_preserves_global_speculative_batch(
             "partition_batch",
             new=call_upstream,
         ),
+        patch.object(
+            AscendPCPManager,
+            "_rebuild_local_mtp_fields",
+            new=rebuild_local_mtp_fields,
+        ),
     ):
         local_batch = manager.partition_batch(global_batch)
 
@@ -284,6 +321,156 @@ def test_partition_batch_preserves_global_speculative_batch(
     )
     assert local_batch.num_draft_tokens == 0
     assert local_batch.num_draft_tokens_per_req is None
+    if method == "mtp":
+        rebuild_local_mtp_fields.assert_called_once()
+        assert rebuild_local_mtp_fields.call_args.args[0] is global_batch
+    else:
+        rebuild_local_mtp_fields.assert_not_called()
+
+
+def test_mixed_mtp_batch_builds_attention_from_valid_token_counts() -> None:
+    global_batch = _make_local_pcp_batch()
+    global_batch.is_prefilling_np = np.array([True, False])
+    global_batch.num_draft_tokens = 1
+    global_batch.num_draft_tokens_per_req = np.array([0, 1], dtype=np.int32)
+
+    local_batch = replace(
+        global_batch,
+        num_scheduled_tokens=np.array([1, 2], dtype=np.int32),
+        num_computed_tokens_np=np.array([0, 10], dtype=np.int32),
+        num_draft_tokens=1,
+        num_draft_tokens_per_req=np.array([0, 1], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+    )
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        req_states=MagicMock(),
+        max_num_reqs=2,
+        max_num_tokens=6,
+        vllm_config=SimpleNamespace(
+            speculative_config=SimpleNamespace(method="mtp"),
+        ),
+    )
+    attn_state = MagicMock()
+
+    with (
+        patch.object(
+            PCPManager,
+            "partition_batch",
+            return_value=local_batch,
+        ),
+        patch.object(
+            AscendPCPManager,
+            "_rebuild_local_mtp_fields",
+            return_value=local_batch,
+        ),
+        patch.object(
+            pcp_manager_module,
+            "build_attn_state",
+            return_value=attn_state,
+        ) as build_attn_state,
+    ):
+        result = manager.partition_batch(global_batch)
+
+    assert result.attn_state is attn_state
+    args = build_attn_state.call_args.args
+    np.testing.assert_array_equal(args[3], np.array([1, 2], dtype=np.int32))
+    np.testing.assert_array_equal(args[4], np.array([1, 1], dtype=np.int32))
+
+
+def test_rebuild_local_mtp_fields_restores_draft_query() -> None:
+    global_batch = _make_global_pcp_batch()
+    global_batch.req_ids = ["mtp-req"]
+    global_batch.num_draft_tokens = 1
+    global_batch.num_draft_tokens_per_req = np.array([1], dtype=np.int32)
+
+    local_batch = _make_global_pcp_batch()
+    local_batch.req_ids = ["mtp-req"]
+    local_batch.idx_mapping = torch.tensor([3], dtype=torch.int32)
+    local_batch.idx_mapping_np = np.array([3], dtype=np.int32)
+    local_batch.num_scheduled_tokens = np.array([2], dtype=np.int32)
+    local_batch.num_tokens = 2
+    local_batch.num_tokens_after_padding = 2
+    local_batch.query_start_loc_np = np.array([0, 2], dtype=np.int32)
+    local_batch.query_start_loc[:2].copy_(torch.tensor([0, 2], dtype=torch.int32))
+    local_batch.input_ids[:2].copy_(torch.tensor([101, 101], dtype=torch.int32))
+
+    last_sampled_tokens = torch.zeros(4, dtype=torch.int64)
+    last_sampled_tokens[3] = 101
+    draft_tokens = torch.zeros((4, 1), dtype=torch.int64)
+    draft_tokens[3, 0] = 202
+    req_states = SimpleNamespace(
+        last_sampled_tokens=last_sampled_tokens,
+        prefill_len=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+        draft_tokens=draft_tokens,
+    )
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        req_states=req_states,
+        max_num_reqs=1,
+        max_num_tokens=18,
+        vllm_config=SimpleNamespace(num_speculative_tokens=1),
+    )
+
+    def combine_mtp_query(
+        input_ids,
+        idx_mapping,
+        last_sampled,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        drafts,
+        cu_num_logits,
+        total_num_logits,
+        num_new_sampled_tokens,
+    ):
+        del query_start_loc, seq_lens, prefill_len
+        assert cu_num_logits.tolist() == [0, 2]
+        assert total_num_logits == 2
+        assert num_new_sampled_tokens == 1
+        req_state_idx = int(idx_mapping[0])
+        input_ids[0] = last_sampled[req_state_idx]
+        input_ids[1] = drafts[req_state_idx, 0]
+        return torch.tensor([0, 1], dtype=torch.int64)
+
+    with (
+        patch.object(
+            pcp_manager_module,
+            "async_copy_to_gpu",
+            side_effect=_mock_async_copy_to_cpu,
+        ),
+        patch.object(
+            pcp_manager_module,
+            "expand_idx_mapping",
+            return_value=(
+                torch.tensor([3, 3], dtype=torch.int32),
+                torch.tensor([0, 1], dtype=torch.int32),
+            ),
+        ),
+        patch.object(
+            pcp_manager_module,
+            "combine_sampled_and_draft_tokens",
+            side_effect=combine_mtp_query,
+        ),
+    ):
+        result = manager._rebuild_local_mtp_fields(global_batch, local_batch)
+
+    assert result.input_ids[:2].tolist() == [101, 202]
+    assert result.num_draft_tokens == 1
+    np.testing.assert_array_equal(
+        result.num_draft_tokens_per_req,
+        np.array([1], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        result.cu_num_logits_np,
+        np.array([0, 2], dtype=np.int32),
+    )
+    assert result.cu_num_logits.tolist() == [0, 2]
+    assert result.logits_indices.tolist() == [0, 1]
 
 
 def test_partition_batch_restores_global_batch_when_upstream_fails() -> None:
@@ -318,6 +505,104 @@ def test_partition_batch_restores_global_batch_when_upstream_fails() -> None:
     )
 
 
+def test_prepare_attn_uses_partitioned_decode_positions_for_slot_mapping() -> None:
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        req_states=MagicMock(),
+        max_num_reqs=2,
+        max_num_tokens=4,
+        vllm_config=object(),
+    )
+    local_batch = _make_decode_local_batch(manager, num_reqs=2)
+    local_batch.positions.copy_(torch.tensor([471, 472], dtype=torch.int64))
+    local_batch.is_prefilling_np = np.array([False, False])
+
+    stale_global_positions = torch.tensor([467, 468, 0, 0], dtype=torch.int64)
+    manager._global_batch = replace(
+        local_batch,
+        num_tokens_after_padding=4,
+        positions=stale_global_positions,
+    )
+
+    block_tables = MagicMock()
+    gathered_block_tables = (torch.ones(2, 1),)
+    local_slot_mappings = torch.tensor([[3415, 3416]], dtype=torch.int64)
+    block_tables.gather_block_tables.return_value = gathered_block_tables
+    block_tables.compute_slot_mappings.return_value = local_slot_mappings
+    manager._block_tables = block_tables
+    manager._local_block_tables = (torch.empty((2, 1), dtype=torch.int32),)
+    manager._local_block_table_ptrs = torch.empty(1, dtype=torch.int64)
+    manager._global_batch_slot_mappings = torch.empty((1, 4), dtype=torch.int64)
+    manager._gathered_kv_slot_mappings = torch.full(
+        (1, 8),
+        999,
+        dtype=torch.int64,
+    )
+
+    def convert_local_slot_mappings(slot_mappings):
+        assert slot_mappings is local_slot_mappings
+        gathered = manager._gathered_kv_slot_mappings[:, :4]
+        gathered.copy_(torch.tensor([[3415, 3416, 3415, 3416]]))
+        return gathered
+
+    manager._convert_to_gathered_slot_mappings = MagicMock(
+        side_effect=convert_local_slot_mappings
+    )
+
+    result_block_tables, result_slot_mappings = manager.prepare_attn(local_batch)
+
+    assert result_block_tables is gathered_block_tables
+    gather_args = block_tables.gather_block_tables.call_args
+    assert gather_args.args[0] is local_batch.idx_mapping
+    assert gather_args.args[1] == local_batch.num_reqs_after_padding
+    assert gather_args.kwargs["out"] is manager._local_block_tables
+    assert gather_args.kwargs["out_ptrs"] is manager._local_block_table_ptrs
+
+    slot_args = block_tables.compute_slot_mappings.call_args
+    assert slot_args.args[0] is local_batch.idx_mapping
+    assert slot_args.args[1] is local_batch.query_start_loc
+    assert slot_args.args[2] is local_batch.positions
+    assert slot_args.args[2] is not manager._global_batch.positions
+    assert slot_args.args[3] == local_batch.num_tokens
+    assert slot_args.kwargs["out"] is manager._global_batch_slot_mappings
+    assert result_slot_mappings.tolist() == [
+        [3415, 3416, 3415, 3416] + [PAD_SLOT_ID] * 4
+    ]
+
+
+def test_prepare_slot_mappings_uses_global_prefill_layout() -> None:
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        req_states=MagicMock(),
+        max_num_reqs=2,
+        max_num_tokens=4,
+        vllm_config=object(),
+    )
+    local_batch = _make_decode_local_batch(manager, num_reqs=2)
+    local_batch.is_prefilling_np = np.array([False, False])
+    manager._global_batch = replace(
+        local_batch,
+        is_prefilling_np=np.array([True, False]),
+    )
+    manager._block_tables = MagicMock()
+    global_slot_mappings = torch.tensor([[41, 42]], dtype=torch.int64)
+
+    with patch.object(
+        PCPManager,
+        "prepare_slot_mappings",
+        return_value=global_slot_mappings,
+    ) as prepare_global_slot_mappings:
+        result = manager.prepare_slot_mappings(local_batch)
+
+    assert result is global_slot_mappings
+    prepare_global_slot_mappings.assert_called_once_with()
+    manager._block_tables.compute_slot_mappings.assert_not_called()
+
+
 def test_prepare_speculator_attn_rebuilds_global_kv_layout() -> None:
     global_batch = _make_global_pcp_batch()
     manager = AscendPCPManager(
@@ -331,6 +616,7 @@ def test_prepare_speculator_attn_rebuilds_global_kv_layout() -> None:
     )
     block_tables = MagicMock()
     gathered_block_tables = (torch.ones(1, 1),)
+    global_batch.num_reqs_after_padding = 2
     global_batch.num_tokens_after_padding = 20
     slot_mappings = torch.arange(20).unsqueeze(0)
     block_tables.gather_block_tables.return_value = gathered_block_tables
@@ -342,21 +628,12 @@ def test_prepare_speculator_attn_rebuilds_global_kv_layout() -> None:
     result_block_tables, result_slot_mappings = manager.prepare_speculator_attn(global_batch)
 
     assert result_block_tables is gathered_block_tables
-    expected_rank_slots = torch.cat(
-        (
-            torch.arange(18),
-            torch.full((2,), PAD_SLOT_ID),
-        )
-    ).unsqueeze(0)
-    torch.testing.assert_close(
-        result_slot_mappings,
-        expected_rank_slots.repeat(1, 2),
-    )
-    assert manager._gathered_kv_slot_mappings is not None
-    assert result_slot_mappings.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()
+    expected_slots = torch.arange(18).unsqueeze(0)
+    torch.testing.assert_close(result_slot_mappings, expected_slots)
+    assert result_slot_mappings.data_ptr() == slot_mappings.data_ptr()
     block_tables.gather_block_tables.assert_called_once_with(
         global_batch.idx_mapping,
-        num_reqs_padded=global_batch.num_reqs_after_padding,
+        num_reqs_padded=global_batch.num_reqs,
     )
 
 

@@ -106,49 +106,6 @@ def _prepare_pcp_inputs_to_capture(
     )
 
 
-def prepare_pcp_speculator_inputs_to_capture(
-    num_reqs: int,
-    num_tokens: int,
-    model_state: ModelState,
-    input_buffers: InputBuffers,
-    block_tables: BlockTables,
-    attn_groups: list[list[AttentionGroup]],
-    kv_cache_config: KVCacheConfig,
-    pcp_manager: PCPManager,
-    full_cudagraph: bool,
-) -> cudagraph_utils.AttentionState:
-    """Build global draft-prefill metadata with a PCP-expanded KV layout."""
-    if not isinstance(input_buffers, AscendInputBuffers):
-        raise TypeError(
-            f"MRV2 PCP speculator graph capture requires AscendInputBuffers, got {type(input_buffers).__name__}."
-        )
-
-    input_batch = AscendInputBatch.make_dummy(
-        num_reqs,
-        num_tokens,
-        input_buffers,
-    )
-    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
-    slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
-    slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(
-        slot_mappings,
-        kv_cache_config,
-    )
-    attn_metadata = model_state.prepare_attn(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=full_cudagraph,
-    )
-    return cudagraph_utils.AttentionState(
-        attn_metadata,
-        slot_mappings_by_layer,
-    )
-
-
 def _get_graph_update_backend(
     attn_groups: list[list[AttentionGroup]],
 ) -> type[AttentionBackend]:

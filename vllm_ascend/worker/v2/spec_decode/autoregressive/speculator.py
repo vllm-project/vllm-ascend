@@ -22,8 +22,13 @@ from copy import copy
 from typing import Any, cast
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config import (
+    VllmConfig,
+    get_layers_from_vllm_config,
+    replace,
+    set_current_vllm_config,
+)
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -46,7 +51,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm_ascend.worker.v2.input_batch import (
+    AscendInputBatch,
+    AscendInputBuffers,
+)
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 logger = logging.getLogger(__name__)
@@ -72,6 +80,31 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         seq_lens_cpu from input_batch), so we replace input_buffers with
         AscendInputBuffers after super().__init__.
         """
+        speculative_config = vllm_config.speculative_config
+        parallel_config = vllm_config.parallel_config
+        if (
+            speculative_config is not None
+            and speculative_config.method in ("mtp", "eagle3")
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            # PCP restores the global target batch before proposing. Run the
+            # draft as ordinary eager attention on every PCP rank.
+            # Ascend injects runtime-only fields such as ``oot_compiler`` into
+            # CompilationConfig. ``vllm.config.replace`` cannot clone those
+            # undeclared fields, so shallow-copy before changing draft-only
+            # compilation settings.
+            draft_compilation_config = copy(vllm_config.compilation_config)
+            draft_compilation_config.mode = CompilationMode.NONE
+            draft_compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            vllm_config = replace(
+                vllm_config,
+                parallel_config=replace(
+                    parallel_config,
+                    prefill_context_parallel_size=1,
+                ),
+                compilation_config=draft_compilation_config,
+            )
+
         super().__init__(vllm_config, device)
 
         self.attn_architecture: str | None = None
@@ -97,9 +130,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
         self.pcp_manager: AscendPCPManager | None = None
-        self._pcp_draft_prefill_attn_inputs: tuple[tuple[torch.Tensor, ...], torch.Tensor] | None = None
+
+    @property
+    def draft_prefill_attn_groups(self) -> list[list[AttentionGroup]]:
+        if self.pcp_manager is not None:
+            return self.attn_groups
+        return self.target_attn_groups
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph managers are patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
@@ -142,19 +182,45 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
-        self._pcp_draft_prefill_attn_inputs = None
+        proposal_input_batch = input_batch
+        proposal_hidden_states = last_hidden_states
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with build_attn_metadata_wrapper(), torch_gather_wrapper():
-            if self.method in ("mtp", "eagle3") and self.pcp_manager is not None and not dummy_run:
-                self._pcp_draft_prefill_attn_inputs = self.pcp_manager.prepare_speculator_attn(input_batch)
-                block_tables, global_slot_mappings = self._pcp_draft_prefill_attn_inputs
-                attn_metadata = self.model_state.prepare_attn(
+            if (
+                self.method in ("mtp", "eagle3")
+                and self.pcp_manager is not None
+                and not dummy_run
+            ):
+                assert isinstance(input_batch, AscendInputBatch)
+                num_reqs = input_batch.num_reqs
+                num_tokens = input_batch.num_tokens
+                proposal_input_batch = replace(
                     input_batch,
+                    num_reqs_after_padding=num_reqs,
+                    num_tokens_after_padding=num_tokens,
+                    query_start_loc=input_batch.query_start_loc[: num_reqs + 1],
+                    query_start_loc_np=input_batch.query_start_loc_np[: num_reqs + 1],
+                    seq_lens=input_batch.seq_lens[:num_reqs],
+                    seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound[
+                        :num_reqs
+                    ],
+                    input_ids=input_batch.input_ids[:num_tokens],
+                    positions=input_batch.positions[:num_tokens],
+                    is_padding=input_batch.is_padding[:num_tokens],
+                    seq_lens_np=input_batch.seq_lens_np[:num_reqs],
+                )
+                proposal_hidden_states = last_hidden_states[:num_tokens]
+
+                block_tables, global_slot_mappings = (
+                    self.pcp_manager.prepare_speculator_attn(input_batch)
+                )
+                attn_metadata = self.model_state.prepare_attn(
+                    proposal_input_batch,
                     CUDAGraphMode.NONE,
                     block_tables,
                     global_slot_mappings,
-                    self.target_attn_groups,
+                    self.draft_prefill_attn_groups,
                     self.kv_cache_config,
                 )
                 slot_mappings = build_slot_mappings_by_layer(
@@ -169,13 +235,18 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                         aux_hidden_states,
                         dim=-1,
                     )
-                    aux_hidden_states = [self.pcp_manager.restore_hidden_states(combined_aux_hidden_states)]
+                    aux_hidden_states = [
+                        self.pcp_manager.restore_hidden_states(
+                            combined_aux_hidden_states
+                        )[:num_tokens]
+                    ]
 
+            self.input_batch = proposal_input_batch
             return super().propose(
-                input_batch,
+                proposal_input_batch,
                 attn_metadata,
                 slot_mappings,
-                last_hidden_states,
+                proposal_hidden_states,
                 aux_hidden_states,
                 num_sampled,
                 num_rejected,
@@ -198,13 +269,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
+        # Ascend backend factories read the current config when choosing the
+        # metadata builder class, in addition to the explicit config argument.
+        with set_current_vllm_config(self.attn_vllm_config):
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
 
         # npu needs attn_backends to update graph params
         attn_backends: dict[str, type[AttentionBackend]] = {}
@@ -254,7 +328,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.model_state,
             self.target_input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            self.draft_prefill_attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -382,30 +456,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
-
-        if is_draft_model_prefill and self._pcp_draft_prefill_attn_inputs is not None:
-            assert self.input_batch is not None
-            if (
-                batch_desc.num_reqs != self.input_batch.num_reqs_after_padding
-                or batch_desc.num_tokens != self.input_batch.num_tokens_after_padding
-            ):
-                raise RuntimeError(
-                    "PCP draft-prefill graph shape does not match the restored "
-                    "global batch: "
-                    f"graph=({batch_desc.num_reqs}, {batch_desc.num_tokens}), "
-                    "batch=("
-                    f"{self.input_batch.num_reqs_after_padding}, "
-                    f"{self.input_batch.num_tokens_after_padding})."
-                )
-            block_tables, slot_mappings = self._pcp_draft_prefill_attn_inputs
-            attn_metadata = self.model_state.prepare_attn(
-                self.input_batch,
-                batch_desc.cg_mode,
-                block_tables,
-                slot_mappings,
-                self.target_attn_groups,
-                self.kv_cache_config,
-            )
 
         attn_metadata = {
             name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names

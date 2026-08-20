@@ -17,9 +17,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive import (
-    cudagraph_utils as speculator_cudagraph_utils,
-)
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
@@ -34,7 +31,6 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
-    prepare_pcp_speculator_inputs_to_capture,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -94,59 +90,15 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             model_capture_wrapper(self.speculator, self.is_draft_model_prefill),
         ):
             if self.is_draft_model_prefill:
-                # Import lazily to avoid a cycle during plugin patch registration.
-                from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-
-                pcp_manager = getattr(self.speculator, "pcp_manager", None)
-                if not isinstance(pcp_manager, AscendPCPManager):
-                    super().capture(
-                        forward_fn,
-                        model_state,
-                        input_buffers,
-                        block_tables,
-                        attn_groups,
-                        kv_cache_config,
-                        progress_bar_desc=progress_bar_desc,
-                    )
-                    return
-
-                original_prepare_inputs = speculator_cudagraph_utils.prepare_inputs_to_capture
-
-                def prepare_pcp_speculator_inputs(
-                    num_reqs: int,
-                    num_tokens: int,
-                    model_state: ModelState,
-                    input_buffers: InputBuffers,
-                    block_tables: BlockTables,
-                    attn_groups: list[list[AttentionGroup]],
-                    kv_cache_config: KVCacheConfig,
-                    full_cudagraph: bool,
-                ):
-                    return prepare_pcp_speculator_inputs_to_capture(
-                        num_reqs,
-                        num_tokens,
-                        model_state,
-                        input_buffers,
-                        block_tables,
-                        attn_groups,
-                        kv_cache_config,
-                        pcp_manager,
-                        full_cudagraph=full_cudagraph,
-                    )
-
-                speculator_cudagraph_utils.prepare_inputs_to_capture = prepare_pcp_speculator_inputs
-                try:
-                    super().capture(
-                        forward_fn,
-                        model_state,
-                        input_buffers,
-                        block_tables,
-                        attn_groups,
-                        kv_cache_config,
-                        progress_bar_desc=progress_bar_desc,
-                    )
-                finally:
-                    speculator_cudagraph_utils.prepare_inputs_to_capture = original_prepare_inputs
+                super().capture(
+                    forward_fn,
+                    model_state,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    progress_bar_desc=progress_bar_desc,
+                )
                 return
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):

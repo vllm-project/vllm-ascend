@@ -25,6 +25,10 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.input_batch import (
+    combine_sampled_and_draft_tokens,
+    expand_idx_mapping,
+)
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -95,6 +99,14 @@ class AscendPCPManager(PCPManager):
         graph_num_reqs = input_batch.num_reqs_after_padding
         graph_num_tokens = input_batch.num_tokens_after_padding
         is_decode_only = not np.any(input_batch.is_prefilling_np)
+        speculative_config = getattr(
+            self.vllm_config, "speculative_config", None
+        )
+        has_mtp_draft_tokens = (
+            input_batch.num_draft_tokens > 0
+            and speculative_config is not None
+            and speculative_config.method == "mtp"
+        )
 
         upstream_input_batch = input_batch
         if input_batch.num_draft_tokens > 0:
@@ -114,7 +126,12 @@ class AscendPCPManager(PCPManager):
             self._global_batch = input_batch
 
         assert isinstance(local_batch, AscendInputBatch)
-        local_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        if has_mtp_draft_tokens:
+            local_batch = self._rebuild_local_mtp_fields(input_batch, local_batch)
+
+        local_seq_lens_np = (
+            local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        )
         if is_decode_only:
             local_batch.attn_state = input_batch.attn_state
             if local_batch.attn_state is None:
@@ -128,8 +145,11 @@ class AscendPCPManager(PCPManager):
             )
 
         local_num_valid_tokens = local_batch.num_scheduled_tokens
-        if local_batch.num_draft_tokens_per_req is not None:
-            local_num_valid_tokens = local_batch.num_scheduled_tokens - local_batch.num_draft_tokens_per_req
+        local_draft_counts = local_batch.num_draft_tokens_per_req
+        if local_draft_counts is not None:
+            local_num_valid_tokens = (
+                local_batch.num_scheduled_tokens - local_draft_counts
+            )
         local_batch.attn_state = build_attn_state(
             self.vllm_config,
             local_seq_lens_np,
@@ -140,43 +160,90 @@ class AscendPCPManager(PCPManager):
         local_batch.seq_lens_np = local_seq_lens_np
         return local_batch
 
+    def _rebuild_local_mtp_fields(
+        self,
+        global_batch: AscendInputBatch,
+        local_batch: AscendInputBatch,
+    ) -> AscendInputBatch:
+        """Restore rank-local MTP metadata after upstream PCP partitioning."""
+        assert self._req_states is not None
+        assert self.vllm_config is not None
+        assert global_batch.num_draft_tokens_per_req is not None
+
+        global_draft_counts = np.asarray(
+            global_batch.num_draft_tokens_per_req, dtype=np.int32
+        )
+        draft_count_by_req_id = dict(
+            zip(global_batch.req_ids, global_draft_counts.tolist(), strict=True)
+        )
+        local_draft_counts = np.fromiter(
+            (draft_count_by_req_id[req_id] for req_id in local_batch.req_ids),
+            dtype=np.int32,
+            count=local_batch.num_reqs,
+        )
+
+        if local_batch.num_tokens == 0:
+            local_num_logits = np.zeros(local_batch.num_reqs, dtype=np.int32)
+            local_draft_counts.fill(0)
+        else:
+            local_num_logits = local_draft_counts + 1
+
+        local_cu_num_logits_np = np.empty(local_batch.num_reqs + 1, dtype=np.int32)
+        local_cu_num_logits_np[0] = 0
+        np.cumsum(local_num_logits, out=local_cu_num_logits_np[1:])
+        total_num_logits = int(local_cu_num_logits_np[-1])
+        local_cu_num_logits = async_copy_to_gpu(
+            local_cu_num_logits_np, device=self.device
+        )
+
+        max_expand_len = self.vllm_config.num_speculative_tokens + 1
+        expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+            local_batch.idx_mapping,
+            total_num_logits,
+            local_cu_num_logits,
+            max_expand_len=max_expand_len,
+        )
+        logits_indices = combine_sampled_and_draft_tokens(
+            local_batch.input_ids,
+            local_batch.idx_mapping,
+            self._req_states.last_sampled_tokens,
+            local_batch.query_start_loc,
+            local_batch.seq_lens,
+            self._req_states.prefill_len.gpu,
+            self._req_states.draft_tokens,
+            local_cu_num_logits,
+            total_num_logits,
+            1,
+        )
+
+        return replace(
+            local_batch,
+            num_draft_tokens=int(local_draft_counts.sum()),
+            num_draft_tokens_per_req=local_draft_counts,
+            expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
+            logits_indices=logits_indices,
+            cu_num_logits=local_cu_num_logits,
+            cu_num_logits_np=local_cu_num_logits_np,
+        )
+
     def prepare_speculator_attn(
         self,
         input_batch: AscendInputBatch,
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        """Build the global KV layout consumed by a PCP speculator."""
+        """Build the real global KV layout consumed by an eager speculator."""
         if input_batch is not self._global_batch:
             raise RuntimeError("PCP speculative proposal must use the restored global batch.")
         assert self._block_tables is not None
         block_tables = self._block_tables.gather_block_tables(
             input_batch.idx_mapping,
-            num_reqs_padded=input_batch.num_reqs_after_padding,
+            num_reqs_padded=input_batch.num_reqs,
         )
         assert self._global_batch_slot_mappings is not None
-        num_tokens = input_batch.num_tokens_after_padding
-        if num_tokens > input_batch.num_tokens:
-            self._global_batch_slot_mappings[
-                :,
-                input_batch.num_tokens : num_tokens,
-            ].fill_(PAD_SLOT_ID)
-        global_slot_mappings = self._global_batch_slot_mappings[:, :num_tokens]
-
-        assert self._gathered_kv_slot_mappings is not None
-        num_expanded_tokens = num_tokens * self.pcp_world_size
-        if num_expanded_tokens > self._gathered_kv_slot_mappings.shape[1]:
-            raise RuntimeError(
-                "PCP speculator slot mapping exceeds the persistent buffer "
-                f"capacity: {num_expanded_tokens} > "
-                f"{self._gathered_kv_slot_mappings.shape[1]}."
-            )
-        expanded_slot_mappings = self._gathered_kv_slot_mappings[:, :num_expanded_tokens]
-        for rank in range(self.pcp_world_size):
-            rank_start = rank * num_tokens
-            expanded_slot_mappings[
-                :,
-                rank_start : rank_start + num_tokens,
-            ].copy_(global_slot_mappings)
-        return block_tables, expanded_slot_mappings
+        global_slot_mappings = self._global_batch_slot_mappings[
+            :, : input_batch.num_tokens
+        ]
+        return block_tables, global_slot_mappings
 
     def _pad_decode_batch_for_full_graph(
         self,
@@ -296,14 +363,46 @@ class AscendPCPManager(PCPManager):
             self.get_dummy_slot_mappings(num_tokens),
         )
 
-    def prepare_slot_mappings(self) -> torch.Tensor:
-        slot_mappings = super().prepare_slot_mappings()
-        assert self._global_batch is not None
-        assert self._gathered_kv_slot_mappings is not None
+    def prepare_attn(
+        self,
+        input_batch: AscendInputBatch,
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        assert self._block_tables is not None
+        assert self._local_block_tables is not None
+        assert self._local_block_table_ptrs is not None
+        block_tables = self._block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            input_batch.num_reqs_after_padding,
+            out=self._local_block_tables,
+            out_ptrs=self._local_block_table_ptrs,
+        )
+        slot_mappings = self.prepare_slot_mappings(input_batch)
+        return block_tables, slot_mappings
 
+    def prepare_slot_mappings(
+        self,
+        input_batch: AscendInputBatch | None = None,
+    ) -> torch.Tensor:
+        assert self._global_batch is not None
         global_batch = self._global_batch
         if np.any(global_batch.is_prefilling_np):
-            return slot_mappings
+            return super().prepare_slot_mappings()
+        if input_batch is None:
+            input_batch = global_batch
+
+        assert self._block_tables is not None
+        assert self._global_batch_slot_mappings is not None
+        local_batch_slot_mappings = self._block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            input_batch.num_tokens,
+            out=self._global_batch_slot_mappings,
+        )
+        slot_mappings = self._convert_to_gathered_slot_mappings(
+            local_batch_slot_mappings
+        )
+        assert self._gathered_kv_slot_mappings is not None
 
         graph_num_tokens = global_batch.num_tokens_after_padding
         if graph_num_tokens <= global_batch.num_tokens:

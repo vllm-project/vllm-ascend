@@ -68,15 +68,12 @@ class TestAscendAttentionBackend(TestBase):
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
+        from vllm_ascend.attention.utils import enable_dcp
 
         self.enable_dcp = enable_dcp
-        self.enable_pcp = enable_pcp
         enable_dcp.cache_clear()
-        enable_pcp.cache_clear()
         self.addCleanup(self.utils_patcher.stop)
         self.addCleanup(enable_dcp.cache_clear)
-        self.addCleanup(enable_pcp.cache_clear)
 
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
@@ -89,7 +86,6 @@ class TestAscendAttentionBackend(TestBase):
 
     def test_get_impl_cls_with_pcp(self):
         self.mock_config.parallel_config.prefill_context_parallel_size = 2
-        self.enable_pcp.cache_clear()
 
         self.assertIs(
             AscendAttentionBackend.get_impl_cls(),
@@ -98,17 +94,33 @@ class TestAscendAttentionBackend(TestBase):
 
     def test_get_builder_cls_with_pcp(self):
         self.mock_config.parallel_config.prefill_context_parallel_size = 2
-        self.enable_pcp.cache_clear()
 
         self.assertIs(
             AscendAttentionBackend.get_builder_cls(),
             AscendAttentionPCPMetadataBuilder,
         )
 
+    def test_impl_tracks_current_pcp_config(self):
+        self.assertIs(
+            AscendAttentionBackend.get_impl_cls(),
+            AscendAttentionBackendImpl,
+        )
+
+        self.mock_config.parallel_config.prefill_context_parallel_size = 2
+        self.assertIs(
+            AscendAttentionBackend.get_impl_cls(),
+            AscendAttentionPCPImpl,
+        )
+
+        self.mock_config.parallel_config.prefill_context_parallel_size = 1
+        self.assertIs(
+            AscendAttentionBackend.get_impl_cls(),
+            AscendAttentionBackendImpl,
+        )
+
     def test_pcp_and_dcp_are_rejected_together(self):
         self.mock_config.parallel_config.prefill_context_parallel_size = 2
         self.mock_config.parallel_config.decode_context_parallel_size = 2
-        self.enable_pcp.cache_clear()
         self.enable_dcp.cache_clear()
 
         with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):

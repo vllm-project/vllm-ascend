@@ -60,6 +60,10 @@ class TestAscendMLABackend(TestBase):
         self.assertEqual(AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder)
         self.mock_parallel_config.prefill_context_parallel_size = 2
         self.assertIs(AscendMLABackend.get_builder_cls(), AscendMLAPCPMetadataBuilder)
+        self.mock_parallel_config.prefill_context_parallel_size = 1
+        self.assertIs(
+            AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder
+        )
 
     def test_get_kv_cache_shape(self):
         result = AscendMLABackend.get_kv_cache_shape(2, 4, 8, 128)
@@ -69,6 +73,8 @@ class TestAscendMLABackend(TestBase):
         self.assertEqual(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
         self.mock_parallel_config.prefill_context_parallel_size = 2
         self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAPCPImpl)
+        self.mock_parallel_config.prefill_context_parallel_size = 1
+        self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
 
     def test_get_supported_kernel_block_sizes(self):
         result = AscendMLABackend.get_supported_kernel_block_sizes()

@@ -2216,6 +2216,9 @@ class AscendMLAPCPImpl(AscendMLAImpl):
     ) -> int:
         if not isinstance(attn_metadata, AscendMLAPCPMetadata):
             raise RuntimeError("PCP MLA prefill requires AscendMLAPCPMetadata.")
+        # Keep the PCP-padded prefill length so every PCP rank processes the
+        # same number of KV tokens. exec_kv_prefill trims the gathered tensors
+        # back to this rank's actual prefill range.
         return (
             attn_metadata.pcp_local_num_input_tokens
             - attn_metadata.num_decode_tokens
@@ -2272,6 +2275,7 @@ class AscendMLAPCPImpl(AscendMLAImpl):
             kv_cache,
             gathered_prefill_slots,
         )
+        # Unpad the gathered KV tensors to this PCP rank's actual prefill range.
         prefill_k_pe = gathered_k_pe[
             attn_metadata.pcp_local_prefill_start : attn_metadata.pcp_local_prefill_end
         ]
