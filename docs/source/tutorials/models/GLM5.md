@@ -426,9 +426,10 @@ Run the following scripts on two nodes respectively.
 
 ```{code-block} bash
    :substitutions:
-# Auto-detect the network interface name and local IP
-nic_name=`ip route show default|awk '{print $5}'`
-local_ip=`hostname -I|awk -F " " '{print$1}'`
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -471,9 +472,10 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
 
 ```{code-block} bash
    :substitutions:
-# Auto-detect the network interface name and local IP
-nic_name=`ip route show default|awk '{print $5}'`
-local_ip=`hostname -I|awk -F " " '{print$1}'`
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
 # IP of node 0 (the data parallel master node), must be consistent with the local_ip of node 0
 node0_ip="xxxx"
 
@@ -513,105 +515,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
 --enable-prefix-caching \
 --async-scheduling \
 --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
-```
-
-**Low-Latency Scenario (DP2 TP16)**
-
-- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for low-latency scenarios (16k/1k and 64k/1k cases at 0/50%/90% prefix cache hit rate, 128k/1k and 198k/1k cases at 50%/90%, and 198k/1k at 99%).
-
-Run the following scripts on two nodes respectively.
-
-**node 0**
-
-```{code-block} bash
-   :substitutions:
-# Auto-detect the network interface name and local IP
-nic_name=`ip route show default|awk '{print $5}'`
-local_ip=`hostname -I|awk -F " " '{print$1}'`
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=400
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $local_ip \
---enable-expert-parallel \
---data-parallel-rpc-port 12980 \
---tensor-parallel-size 16 \
---hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
---seed 1024 \
---served-model-name glm-5 \
---tool-call-parser glm47 \
---reasoning-parser glm45 \
---enable-auto-tool-choice \
---trust-remote-code \
---gpu-memory-utilization 0.92 \
---quantization ascend \
---enable-chunked-prefill \
---enable-prefix-caching \
---async-scheduling \
---additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
-```
-
-**node 1**
-
-```{code-block} bash
-   :substitutions:
-# Auto-detect the network interface name and local IP
-nic_name=`ip route show default|awk '{print $5}'`
-local_ip=`hostname -I|awk -F " " '{print$1}'`
-# IP of node 0 (the data parallel master node), must be consistent with the local_ip of node 0
-node0_ip="xxxx"
-
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=400
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
---host 0.0.0.0 \
---port 8077 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---enable-expert-parallel \
---data-parallel-rpc-port 12980 \
---tensor-parallel-size 16 \
---hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
---seed 1024 \
---served-model-name glm-5 \
---tool-call-parser glm47 \
---reasoning-parser glm45 \
---enable-auto-tool-choice \
---trust-remote-code \
---gpu-memory-utilization 0.92 \
---quantization ascend \
---enable-chunked-prefill \
---enable-prefix-caching \
---async-scheduling \
---additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "fuse_muls_add": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
@@ -739,7 +642,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates this is a non-master node. Do not use on node 0.
-- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `1`.
+- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`; node 1 uses the number of DP ranks on node 0 (e.g., `1` for DP2, `4` for DP8).
 
 **Multi-node performance tuning:**
 
