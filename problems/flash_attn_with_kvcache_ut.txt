@@ -1,42 +1,21 @@
-python tests/standalone/fa3/test_fa3_graph_varlen_split.py 
-[W820 14:29:06.618617025 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_capture_replay.py 
+[W820 15:05:10.766005280 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C27 varlen+split   width=128  maxk=16384
+C28 capture+replay   batch=4 width=128 maxk=16384
 ========================================================================
+[W820 15:05:15.055206303 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[capture] torch.npu.graph begin
+[capture] done
 ------------------------------------------------------------------------
-[ctrl bake-short] batch=4 call=[512, 1024, 2048, 4096] bake=[16, 16, 16, 16]
-[W820 14:29:11.913984185 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000776
-    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000639
-    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000529
-    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000287
-------------------------------------------------------------------------
-[split bake-1024] batch=4 call=[512, 1024, 2048, 4096] bake=[1024, 1024, 1024, 1024]
-    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000791
-    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000562
-    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000351
-    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000269
-------------------------------------------------------------------------
-[split bake-2048] batch=4 call=[512, 1024, 2048, 4096] bake=[2048, 2048, 2048, 2048]
-    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000725
-    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000618
-    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000374
-    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000276
-------------------------------------------------------------------------
-[split bake-4096] batch=4 call=[512, 1024, 2048, 4096] bake=[4096, 4096, 4096, 4096]
-    row 0  seq=  512  : kernel-vs-cpuF64 = 0.001145
-    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000616
-    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000450
-    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000311
-------------------------------------------------------------------------
-[split bake-4096 call-short] batch=4 call=[256, 512, 768, 1024] bake=[4096, 4096, 4096, 4096]
-    row 0  seq=  256  : kernel-vs-cpuF64 = 0.001017
-    row 1  seq=  512  : kernel-vs-cpuF64 = 0.000966
-    row 2  seq=  768  : kernel-vs-cpuF64 = 0.000631
-    row 3  seq= 1024  : kernel-vs-cpuF64 = 0.000623
-------------------------------------------------------------------------
-Read:
-  any split cell >0.05 => SPLIT stale-plan WRONG for multi-seq (production bug).
-  all ~1e-3            => split stale-plan harmless; look elsewhere.
-------------------------------------------------------------------------
+[T1] replay, no refresh (capture-time buffers)
+Traceback (most recent call last):
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_capture_replay.py", line 245, in <module>
+    main()
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_capture_replay.py", line 190, in main
+    _report("T1", out, q, k, v, bt, seqlens, batch)
+  File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/tests/standalone/fa3/test_fa3_graph_capture_replay.py", line 113, in _report
+    d = _max_abs_diff(out[b], ref[b])
+                      ~~~^^^
+TypeError: 'NoneType' object is not subscriptable
+[ERROR] 2026-08-20-15:05:18 (PID:182337, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception
