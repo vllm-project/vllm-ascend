@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
-
+#
 import contextlib
 import copy
 import functools

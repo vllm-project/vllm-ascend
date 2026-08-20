@@ -23,7 +23,7 @@ be a member of the dimension's allowed set; see :func:`split_multi` and
 from __future__ import annotations
 
 from typing import Any
-
+#
 # ---------------------------------------------------------------------------
 # Dimensions and their allowed values
 # ---------------------------------------------------------------------------
