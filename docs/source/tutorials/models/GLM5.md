@@ -418,7 +418,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 ::::{tab-item} A3 series
 :sync: A3
 
-- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × 16).
+- `GLM-5`(BF16 version) and `GLM-5.1`(BF16 version): require at least 2 Atlas 800 A3 (64GB × 16).
 
 Run the following scripts on two nodes respectively.
 
@@ -835,7 +835,7 @@ We'd like to show the deployment guide of `GLM-5` on multi-node environment with
 
 Before you start, please
 
-1. prepare the script `launch_online_dp.py` on each node:
+prepare the script `launch_online_dp.py` on each node:
 
     ```python
     import argparse
@@ -942,7 +942,7 @@ Before you start, please
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 2P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
-2. prepare the script `run_dp_template.sh` on each node.
+1. prepare the script `run_dp_template.sh` on each node.
 
     1. Prefill node 0
 
@@ -1262,7 +1262,7 @@ Once the preparation is done, you can start the server with the following comman
 
 The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB × 16): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
 
-2. prepare the script `run_dp_template.sh` on each node.
+1. prepare the script `run_dp_template.sh` on each node.
 
     1. Prefill node 0
 
@@ -1506,7 +1506,7 @@ Once the preparation is done, you can start the server with the following comman
 - When testing with a prefix cache hit rate > 0, add `--enable-prefix-caching` on the prefill nodes (as in the scripts above); when the hit rate is 0, use `--no-enable-prefix-caching` instead.
 - `"recompute_scheduler_enable"` is set to `false` on prefill nodes and `true` on decode nodes in this scenario.
 
-#### 5.3.3 Request Forwarding
+#### 5.3.3 Request Forwarding and Key Parameter Descriptions
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -1665,12 +1665,13 @@ The tables below provide recommended parameter configurations for the `GLM-5.1-w
 - **Dual-Node Co-Located 198K High Throughput**: `DP8 TP4`, see [Multi-node Deployment](#52-multi-node-deployment).
 - **Dual-Node Co-Located 198K Low Latency**: `DP2 TP16`, see [Multi-node Deployment](#52-multi-node-deployment).
 - **Prefill-Decode Disaggregation 198K (PP2)**: prefill `PP2 TP16` + decode `DP8 TP4`, see [Prefill-Decode Disaggregation (A3 series)](#532-prefill-decode-disaggregation-a3-series).
+- **Prefill-Decode Disaggregation 198K (Ascend950DT)**: prefill `TP8` (DSA CP 8) + decode `DP16 TP1`, see [Prefill-Decode Disaggregation (Ascend950DT series)](#531-prefill-decode-disaggregation-ascend950dt-series).
 
 Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tokens and 1K output tokens; `@50%/90%` marks the prefix cache hit rate. When the prefix cache hit rate is > 0, add `--enable-prefix-caching`; when the hit rate is 0, add `--no-enable-prefix-caching` instead (for the PD scenario, this applies to the prefill nodes).
 
 #### 9.1.1 Table 1: Detailed Node Configuration
 
-> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a co-located node hosting 4 DP ranks of TP4 uses 16 NPUs; a PD prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a PD decode node hosting 4 DP ranks of TP4 uses 16 NPUs). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All scenarios use the `GLM-5.1-w8a8c8` weights.
+> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a co-located node hosting 4 DP ranks of TP4 uses 16 NPUs; a PD prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a PD decode node hosting 4 DP ranks of TP4 uses 16 NPUs; an Ascend950DT node hosting 8 cards). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All A3 scenarios use the `GLM-5.1-w8a8c8` weights; the Ascend950DT scenarios use the `GLM-5.1-w4a4` weights.
 >
 > When testing with a prefix cache hit rate > 0, keep `--enable-prefix-caching` (as in the deployment scripts); when the hit rate is 0, replace it with `--no-enable-prefix-caching`.
 
@@ -1680,6 +1681,10 @@ Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tok
 |Dual-Node Co-Located 198K Low Latency (A3)|w8a8c8|Dual-Node Co-Located Node (0/1)|16|16|1|16|4096|202752|3|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-P Node (PP2)|16|16|1|64|16384|202752|3|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-D Node|16|4|4|32|164|202752|3|
+|PD 198K High Throughput (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|3|
+|PD 198K High Throughput (Ascend950DT)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
+|PD 198K Low Latency (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|3|
+|PD 198K Low Latency (Ascend950DT)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
 
 #### 9.1.2 Table 2: Optimizations Requiring Explicit Enablement
 
