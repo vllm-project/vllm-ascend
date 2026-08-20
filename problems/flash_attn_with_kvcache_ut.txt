@@ -1,53 +1,42 @@
-python tests/standalone/fa3/test_fa3_graph_varlen.py 
-[W820 11:20:01.055410072 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_varlen_split.py 
+[W820 14:29:06.618617025 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C26 variable-seqlen   width=128  maxk=16384
+C27 varlen+split   width=128  maxk=16384
 ========================================================================
 ------------------------------------------------------------------------
-[V1 single long] batch=1 seqlens=[2048] bake=actual
-[W820 11:20:07.306329371 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-    row 0  seq= 2048  : kernel-vs-cpuF64 = 0.000354
+[ctrl bake-short] batch=4 call=[512, 1024, 2048, 4096] bake=[16, 16, 16, 16]
+[W820 14:29:11.913984185 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000776
+    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000639
+    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000529
+    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000287
 ------------------------------------------------------------------------
-[V2 var] batch=2 seqlens=[512, 2048] bake=actual
-    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000787
-    row 1  seq= 2048  : kernel-vs-cpuF64 = 0.000467
+[split bake-1024] batch=4 call=[512, 1024, 2048, 4096] bake=[1024, 1024, 1024, 1024]
+    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000791
+    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000562
+    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000351
+    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000269
 ------------------------------------------------------------------------
-[V4 var] batch=4 seqlens=[512, 1024, 2048, 4096] bake=actual
-    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000824
-    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000486
-    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000387
-    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000268
+[split bake-2048] batch=4 call=[512, 1024, 2048, 4096] bake=[2048, 2048, 2048, 2048]
+    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000725
+    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000618
+    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000374
+    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000276
 ------------------------------------------------------------------------
-[V8 var] batch=8 seqlens=[256, 512, 768, 1024, 1536, 2048, 2560, 3072] bake=actual
-    row 0  seq=  256  : kernel-vs-cpuF64 = 0.001275
-    row 1  seq=  512  : kernel-vs-cpuF64 = 0.000742
-    row 2  seq=  768  : kernel-vs-cpuF64 = 0.000637
-    row 3  seq= 1024  : kernel-vs-cpuF64 = 0.000609
-    row 4  seq= 1536  : kernel-vs-cpuF64 = 0.000520
-    row 5  seq= 2048  : kernel-vs-cpuF64 = 0.000351
-    row 6  seq= 2560  : kernel-vs-cpuF64 = 0.000325
-    row 7  seq= 3072  : kernel-vs-cpuF64 = 0.000303
+[split bake-4096] batch=4 call=[512, 1024, 2048, 4096] bake=[4096, 4096, 4096, 4096]
+    row 0  seq=  512  : kernel-vs-cpuF64 = 0.001145
+    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000616
+    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000450
+    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000311
 ------------------------------------------------------------------------
-[V4 short] batch=4 seqlens=[128, 256, 384, 512] bake=actual
-    row 0  seq=  128  : kernel-vs-cpuF64 = 0.001380
-    row 1  seq=  256  : kernel-vs-cpuF64 = 0.001464
-    row 2  seq=  384  : kernel-vs-cpuF64 = 0.001141
-    row 3  seq=  512  : kernel-vs-cpuF64 = 0.000936
-------------------------------------------------------------------------
-[V4 long] batch=4 seqlens=[1024, 2048, 3072, 4096] bake=actual
-    row 0  seq= 1024  : kernel-vs-cpuF64 = 0.000685
-    row 1  seq= 2048  : kernel-vs-cpuF64 = 0.000452
-    row 2  seq= 3072  : kernel-vs-cpuF64 = 0.000313
-    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000320
-------------------------------------------------------------------------
-[G4 bake-short] batch=4 seqlens=[512, 1024, 2048, 4096] bake=short
-    row 0  seq=  512  : kernel-vs-cpuF64 = 0.000755
-    row 1  seq= 1024  : kernel-vs-cpuF64 = 0.000604
-    row 2  seq= 2048  : kernel-vs-cpuF64 = 0.000382
-    row 3  seq= 4096  : kernel-vs-cpuF64 = 0.000298
+[split bake-4096 call-short] batch=4 call=[256, 512, 768, 1024] bake=[4096, 4096, 4096, 4096]
+    row 0  seq=  256  : kernel-vs-cpuF64 = 0.001017
+    row 1  seq=  512  : kernel-vs-cpuF64 = 0.000966
+    row 2  seq=  768  : kernel-vs-cpuF64 = 0.000631
+    row 3  seq= 1024  : kernel-vs-cpuF64 = 0.000623
 ------------------------------------------------------------------------
 Read:
-  any cell >0.05 => FA3 kernel WRONG for variable seq_lens (production bug).
-  all ~1e-3      => kernel correct; look in glue/capture code.
+  any split cell >0.05 => SPLIT stale-plan WRONG for multi-seq (production bug).
+  all ~1e-3            => split stale-plan harmless; look elsewhere.
 ------------------------------------------------------------------------
