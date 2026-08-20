@@ -58,7 +58,6 @@ ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
-REGISTERED_ASCEND_OPS = {}
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -69,7 +68,6 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
-_ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
@@ -654,138 +652,6 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
-
-
-def register_ascend_customop(vllm_config: VllmConfig | None = None):
-    """Register Ascend CustomOP
-
-    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
-    and ensure this will execute after model config is initilazed.
-    """
-    global _ASCEND_CUSTOMOP_IS_REIGISTERED
-    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
-        return
-    from vllm.model_executor.custom_op import CustomOp
-
-    from vllm_ascend.ops.activation import (
-        AscendQuickGELU,
-        AscendSiluAndMul,
-        AscendSiluAndMulWithClamp,
-    )
-    from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
-    from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-    from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
-    from vllm_ascend.ops.linear import (
-        AscendColumnParallelLinear,
-        AscendMergedColumnParallelLinear,
-        AscendQKVParallelLinear,
-        AscendReplicatedLinear,
-        AscendRowParallelLinear,
-    )
-    from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
-    from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
-    from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
-    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
-    from vllm_ascend.ops.rotary_embedding import (
-        AscendApplyRotaryEmb,
-        AscendDeepseekScalingRotaryEmbedding,
-        AscendMRotaryEmbedding,
-        AscendRotaryEmbedding,
-        AscendYaRNRotaryEmbedding,
-    )
-    from vllm_ascend.ops.vocab_parallel_embedding import (
-        AscendLogitsProcessor,
-        AscendParallelLMHead,
-        AscendVocabParallelEmbedding,
-    )
-
-    global REGISTERED_ASCEND_OPS
-    REGISTERED_ASCEND_OPS = {
-        "QuickGELU": AscendQuickGELU,
-        "SiluAndMul": AscendSiluAndMul,
-        "SiluAndMulClamp": AscendSiluAndMulWithClamp,
-        "RotaryEmbedding": AscendRotaryEmbedding,
-        "MRotaryEmbedding": AscendMRotaryEmbedding,
-        "ColumnParallelLinear": AscendColumnParallelLinear,
-        "RowParallelLinear": AscendRowParallelLinear,
-        "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
-        "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
-        "QKVParallelLinear": AscendQKVParallelLinear,
-        "ReplicatedLinear": AscendReplicatedLinear,
-        "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
-        "VocabParallelEmbedding": AscendVocabParallelEmbedding,
-        "ParallelLMHead": AscendParallelLMHead,
-        "LogitsProcessor": AscendLogitsProcessor,
-        "RMSNorm": AscendRMSNorm,
-        "GemmaRMSNorm": AscendGemmaRMSNorm,
-        "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
-        "MMEncoderAttention": AscendMMEncoderAttention,
-        "ApplyRotaryEmb": AscendApplyRotaryEmb,
-        "RMSNormGated": AscendRMSNormGated,
-        "FusedRMSNormGated": AscendFusedRMSNormGated,
-        "Conv3dLayer": AscendConv3dLayer,
-        "RelPosAttention": AscendRelPosAttention,
-        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
-        "BailingMoELinearAttention": AscendBailingMoELinearAttention,
-        "MoERunner": AscendMoERunner,
-        "RoutedExperts": AscendRoutedExperts,
-    }
-    if vllm_config is None:
-        try:
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
-        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
-
-        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
-
-    # Override selected ops when the compatibility implementations are required.
-    if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
-        from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
-        from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
-        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
-        from vllm_ascend._310p.ops.layernorm import (
-            AscendGemmaRMSNorm310,
-            AscendRMSNorm310,
-            AscendRMSNormGated310,
-        )
-        from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
-        from vllm_ascend._310p.ops.rotary_embedding import AscendMRotaryEmbedding310, AscendRotaryEmbedding310
-        from vllm_ascend._310p.ops.vocab_parallel_embedding import (
-            AscendParallelLMHead310,
-            AscendVocabParallelEmbedding310,
-        )
-
-        REGISTERED_ASCEND_OPS.update(
-            {
-                "SiluAndMul": AscendSiluAndMul310,
-                "RotaryEmbedding": AscendRotaryEmbedding310,
-                "RMSNorm": AscendRMSNorm310,
-                "GemmaRMSNorm": AscendGemmaRMSNorm310,
-                "RMSNormGated": AscendRMSNormGated310,
-                "ParallelLMHead": AscendParallelLMHead310,
-                "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
-                "MMEncoderAttention": AscendMMEncoderAttention310,
-                "Conv3dLayer": AscendConv3dLayer310,
-                "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
-                "MRotaryEmbedding": AscendMRotaryEmbedding310,
-                "MoERunner": AscendMoERunner310,
-                "RoutedExperts": AscendRoutedExperts310,
-            }
-        )
-    for name, op_cls in REGISTERED_ASCEND_OPS.items():
-        CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
-
-    # NOTE: Keep this at last to ensure all custom actions are registered
-    _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
 def lmhead_tp_enable() -> bool:
