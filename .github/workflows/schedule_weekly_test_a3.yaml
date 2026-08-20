@@ -164,7 +164,7 @@ jobs:
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -330,6 +330,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: tests/e2e/weekly/single_node/configs/
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       testcase_timeout: 600
       should_run: >-
         ${{

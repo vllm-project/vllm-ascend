@@ -19,13 +19,18 @@ import os
 from unittest.mock import patch
 
 import pytest
+from vllm import SamplingParams
+from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
+
+os.environ["HCCL_BUFFSIZE"] = "2048"
+DSPARK_MAIN_MODEL = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 
 MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
 
-@pytest.mark.skip("Temporarily skip this DeepSeek V4 test.")
 @pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -78,3 +83,49 @@ def test_deepseek_v4_mtp_eager():
     for (output_ids, output_str), expected_ids in zip(outputs, expected_token_ids):
         assert output_str
         assert output_ids == expected_ids
+
+
+@pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
+@pytest.mark.parametrize("max_tokens", [1024])
+@pytest.mark.parametrize("enforce_eager", [True])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dspark_spec_decoding(
+    model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    num_speculative_tokens = 5
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=4096,
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+        async_scheduling=True,
+        speculative_config={
+            "method": "dspark",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
+
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.83, 0.74, 0.65, 0.59, 0.52]
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"

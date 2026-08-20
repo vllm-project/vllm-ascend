@@ -180,6 +180,7 @@ def build_attn_metadata(
     graph_pad_size: int = -1,
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
+    is_prefilling: torch.Tensor | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -234,6 +235,7 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,
@@ -872,3 +874,26 @@ def build_attn_metadata_wrapper():
         yield
     finally:
         _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
+
+
+@contextmanager
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+
+    The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
+    DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
+    speculator path does not forward them. Must run inside
+    ``build_attn_metadata_wrapper()``.
+    """
+    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
+
+    def build_attn_metadata(*args, **kwargs):
+        kwargs["positions"] = positions[:pad]
+        kwargs["is_prefilling"] = is_prefilling
+        return raw(*args, **kwargs)
+
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore
