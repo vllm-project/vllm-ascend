@@ -22,7 +22,7 @@ from copy import copy
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -72,6 +72,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
+        self.draft_vllm_config = self._create_draft_vllm_config()
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -93,6 +94,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Build the runtime config used while executing the draft model."""
+        return replace(
+            self.attn_vllm_config,
+            model_config=self.draft_model_config,
+        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)

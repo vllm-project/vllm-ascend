@@ -38,7 +38,12 @@ def test_eagle_speculator_selects_backend_and_draft_replay_reuses_it() -> None:
 
     assert "_get_graph_update_backend(self.attn_groups)" in speculator_source
     assert "issubclass(self.attn_backend" in speculator_source
-    assert "set_current_vllm_config(self.vllm_config)" in aclgraph_source
+    assert "self.draft_vllm_config = self._create_draft_vllm_config()" in speculator_source
+    assert "model_config=self.draft_model_config" in speculator_source
+    assert "draft_vllm_config = self.speculator.draft_vllm_config" in aclgraph_source
+    assert "set_current_vllm_config(draft_vllm_config)" in aclgraph_source
+    assert "set_current_vllm_config(self.vllm_config)" not in aclgraph_source
+    assert aclgraph_source.count("draft_vllm_config") >= 4
     assert "attn_backend = self.speculator.attn_backend" in aclgraph_source
     assert "_get_graph_update_backend(self.speculator.attn_groups)" not in aclgraph_source
 

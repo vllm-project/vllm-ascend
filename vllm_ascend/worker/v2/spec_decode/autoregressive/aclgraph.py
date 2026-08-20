@@ -52,18 +52,17 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             lora_capture_cases=lora_capture_cases,
         )
 
-        # set speculator attribute, so we can access attributes speculator
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
+        # Upstream constructs graph managers without a speculator reference.
+        # AscendAutoRegressiveSpeculator attaches it after construction so replay
+        # can rebuild draft metadata and update graph parameters.
         self.speculator: Any = None
         # The attention backend keys its per-size graph params by the actual
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors
         # instead of the raw config sizes.
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-        # vllm-ascend need to update draft graph params of attention backend.
-        # so we need to set draft graph params before capture full graph.
-        # `prefill` graph and `decodes` graph are different, `decode_query_len` can be used to distinguish them
+        # Upstream uses num_speculative_steps + 1 as the draft-prefill query
+        # length and 1 for draft decode.
         self.is_draft_model_prefill = decode_query_len > 1
         if super().needs_capture():
             if self.is_draft_model_prefill:
@@ -81,7 +80,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture ACL graphs for Eagle."""
+        """Capture ACL graphs for autoregressive speculative decoding."""
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             if self.is_draft_model_prefill:
@@ -126,7 +125,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        """Override run_fullgraph to update full graph params in run_fullgraph."""
+        """Replay the draft ACL graph and update its attention parameters."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
             logger.info_once(
@@ -139,14 +138,17 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
-        # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
-        # calculate num_tokens_across_dp.
+        # Mirror vLLM's DP graph-replay token-count metadata.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
+        # set_forward_context does not update the config returned by
+        # get_current_vllm_config(). Graph-update helpers may still read that
+        # global context, so expose the draft config through both contexts.
+        draft_vllm_config = self.speculator.draft_vllm_config
         with (
-            set_current_vllm_config(self.vllm_config),
+            set_current_vllm_config(draft_vllm_config),
             set_forward_context(
                 self.speculator.model_state.attn_metadata,
-                self.vllm_config,
+                draft_vllm_config,
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=desc.cg_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
@@ -154,10 +156,8 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 slot_mapping=None,
             ),
         ):
-            # decide to update draft graph params
+            # Select the draft prefill/decode graph-parameter pool.
             _EXTRA_CTX.is_draft_model = True
-
-            # decide to run `prefill` graph or `decodes` graph
             _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
 
             forward_context = get_forward_context()
@@ -169,7 +169,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 self.update_stream,
                 forward_context,
                 num_tokens,
-                self.vllm_config,
+                draft_vllm_config,
                 self.speculator.speculative_config,
                 draft_attn_metadatas=draft_attn_metadatas,
             )
