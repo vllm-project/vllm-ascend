@@ -52,6 +52,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -195,6 +196,7 @@ class NPUModelRunner310(NPUModelRunner):
 
     def _pad_query_start_loc_for_fia(
         self,
+        query_start_loc: Any,
         num_tokens_padded: int,
         num_reqs_padded: int,
         num_reqs: int,
@@ -211,8 +213,8 @@ class NPUModelRunner310(NPUModelRunner):
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
-            last_loc = self.query_start_loc.np[num_reqs]
-            self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
+            last_loc = query_start_loc.np[num_reqs]
+            query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
                 self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * uniform_decode_query_len + last_loc
             )
         else:
@@ -220,10 +222,10 @@ class NPUModelRunner310(NPUModelRunner):
             assert num_reqs == num_reqs_padded
 
             # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
+            query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
-        self.query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(query_start_loc)
         return num_reqs_padded
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):

@@ -161,7 +161,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -699,6 +699,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _pad_query_start_loc_for_fia(
         self,
+        query_start_loc: Any,
         num_tokens_padded: int,
         num_reqs_padded: int,
         num_reqs: int,
@@ -727,8 +728,8 @@ class NPUModelRunner(GPUModelRunner):
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
-            last_loc = self.query_start_loc.np[num_reqs]
-            self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
+            last_loc = query_start_loc.np[num_reqs]
+            query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
                 self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
             )
         else:
@@ -736,12 +737,12 @@ class NPUModelRunner(GPUModelRunner):
             assert num_reqs == num_reqs_padded
 
             # Do not insert if the last value already equals the num_tokens
-            if self.query_start_loc.np[num_reqs_padded] < num_tokens_padded:
+            if query_start_loc.np[num_reqs_padded] < num_tokens_padded:
                 # Insert a dummy request instead of change the last value directly
-                self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
+                query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
                 num_reqs_padded = num_reqs_padded + 1
 
-        self.query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(query_start_loc)
 
         return num_reqs_padded
 
@@ -2159,6 +2160,7 @@ class NPUModelRunner(GPUModelRunner):
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
                     # but this scope is way too big and the consequences are unpredictable
                     num_reqs_padded = self._pad_query_start_loc_for_fia(
+                        self.query_start_loc,
                         num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
                     )
 
@@ -3444,6 +3446,7 @@ class NPUModelRunner(GPUModelRunner):
 
             if not profile_cpp:
                 num_reqs_padded = self._pad_query_start_loc_for_fia(
+                    self.query_start_loc,
                     num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
                 )
 

@@ -6,9 +6,16 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+
+def copy_snapshot_to_gpu(buffer: CpuGpuBuffer) -> torch.Tensor:
+    """Copy a CPU snapshot so later host writes do not race the copy."""
+    cpu_snapshot = buffer.cpu.clone()
+    return buffer.gpu.copy_(cpu_snapshot, non_blocking=False)
 
 
 @triton.jit
