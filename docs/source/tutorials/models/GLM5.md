@@ -1451,7 +1451,6 @@ In addition to the single-node and multi-node parameters described above, the fo
 
 For further explanation and restrictions of the environment variables above, refer to: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
 
-
 ## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:

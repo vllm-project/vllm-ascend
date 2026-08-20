@@ -332,7 +332,6 @@ Before you start, please
 
 1. prepare the script `launch_online_dp.py` on each node:
 
-
     ```python
     import argparse
     import multiprocessing
@@ -656,7 +655,7 @@ Before you start, please
 
 Once the preparation is done, start the server on each node:
 
-1. Prefill node 0: 
+1. Prefill node 0:
 
     ```shell
     bash run_dp_template.sh
@@ -715,7 +714,6 @@ python load_balance_proxy_server_example.py \
 
 - When testing with a prefix cache hit rate > 0, add `--enable-prefix-caching` on the prefill nodes (as in the script above); when the hit rate is 0, use `--no-enable-prefix-caching` instead.
 - `"recompute_scheduler_enable"` is set to `false` on prefill nodes and `true` on decode nodes in this scenario.
-
 
 Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single-node-deployment) and [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)):
 
@@ -1587,7 +1585,6 @@ python load_balance_proxy_server_example.py \
 
 - When testing with a prefix cache hit rate > 0, add `--enable-prefix-caching` on the prefill nodes (as in the script above); when the hit rate is 0, use `--no-enable-prefix-caching` instead.
 - `"recompute_scheduler_enable"` is set to `false` on prefill nodes and `true` on decode nodes in this scenario.
-
 
 Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation) and [Dual-Node Co-Located 1M Deployment](#522-dual-node-co-located-1m-deployment)):
 
