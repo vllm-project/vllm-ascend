@@ -160,6 +160,28 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     assert afc.get_mc2_tokens_capacity() == 520
 
 
+def test_get_a5_mega_moe_buffer_capacity_uses_mc2_execution_capacity(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mega_moe_max_tokens=65536),
+    )
+    vllm_config = _make_vllm_config(world_size=4, max_num_batched_tokens=120)
+
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, 64) == 64
+
+
+def test_get_a5_mega_moe_buffer_capacity_honors_configured_global_limit(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mega_moe_max_tokens=256),
+    )
+    vllm_config = _make_vllm_config(world_size=8)
+
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, 128) == 32
+
+
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
@@ -271,11 +293,11 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
         (128, 4, 2, 0, None, MoECommType.MC2),
         (129, 2, 4, 0, None, MoECommType.ALLGATHER),
         (129, 8, 4, 0, None, MoECommType.ALLTOALL),
-        (129, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
-        (512, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
-        (513, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
-        (129, 8, 4, 1, QuantType.MXFP8, MoECommType.FUSED_MC2),
-        (129, 8, 4, 1, QuantType.MXFP4, MoECommType.FUSED_MC2),
+        (128, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.FUSED_MC2),
+        (129, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
+        (512, 8, 4, 1, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
+        (128, 8, 4, 1, QuantType.MXFP8, MoECommType.FUSED_MC2),
+        (128, 8, 4, 1, QuantType.MXFP4, MoECommType.FUSED_MC2),
         (129, 8, 4, 2, QuantType.W4A8MXFP, MoECommType.ALLTOALL),
         (129, 8, 4, 1, QuantType.W8A8, MoECommType.ALLTOALL),
         (129, 8, 4, 1, QuantType.W4A16MXFP4, MoECommType.ALLTOALL),
@@ -318,7 +340,7 @@ def test_select_moe_comm_method_a5_reads_quant_type_from_model_instance(monkeypa
     )
 
     assert (
-        afc.select_moe_comm_method(129, vllm_config, model_instance=_make_model_instance(QuantType.W4A8MXFP))
+        afc.select_moe_comm_method(128, vllm_config, model_instance=_make_model_instance(QuantType.W4A8MXFP))
         == MoECommType.FUSED_MC2
     )
     assert not hasattr(vllm_config, "ascend_moe_quant_type")
@@ -349,6 +371,7 @@ def test_select_moe_comm_method_a5_logs_mega_moe_decisions_at_debug(monkeypatch)
     assert sum(message.startswith("A5 MegaMoE condition check") for message in messages) == 2
     assert any(message.startswith("A5 MoE comm selected FUSED_MC2/MegaMoE") for message in messages)
     assert any(message.startswith("A5 MoE comm selected fallback") for message in messages)
+    assert any("mc2_tokens_capacity=%s" in message for message in messages)
 
 
 def test_select_moe_comm_method_a5_uses_mega_moe_for_draft_model(monkeypatch):
@@ -386,7 +409,7 @@ def test_select_moe_comm_method_a5_honors_configured_mega_moe_capacity(monkeypat
     assert afc.select_moe_comm_method(65, vllm_config) == MoECommType.MC2
 
 
-def test_select_moe_comm_method_a5_clamps_capacity_to_scheduler_limit(monkeypatch):
+def test_select_moe_comm_method_a5_clamps_capacity_to_mc2_limit(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A5,
@@ -402,6 +425,24 @@ def test_select_moe_comm_method_a5_clamps_capacity_to_scheduler_limit(monkeypatc
 
     assert afc.select_moe_comm_method(2048, vllm_config) == MoECommType.FUSED_MC2
     assert afc.select_moe_comm_method(2049, vllm_config) == MoECommType.ALLGATHER
+
+
+def test_select_moe_comm_method_a5_uses_decode_graph_bucket_instead_of_scheduler_limit(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=64,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=4,
+        top_k_experts=6,
+        max_num_batched_tokens=120,
+        resolved_moe_quant_type=QuantType.W4A8MXFP,
+    )
+
+    assert afc.select_moe_comm_method(64, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(65, vllm_config) == MoECommType.ALLGATHER
 
 
 @pytest.mark.parametrize(
@@ -427,7 +468,7 @@ def test_select_moe_comm_method_a5_falls_back_for_unsupported_eplb(
         resolved_moe_quant_type=QuantType.MXFP8,
     )
 
-    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.MC2
 
 
 @pytest.mark.parametrize(
@@ -470,7 +511,7 @@ def test_select_moe_comm_method_a5_falls_back_for_unsupported_activation(monkeyp
         hidden_act=hidden_act,
     )
 
-    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.MC2
 
 
 def test_select_moe_comm_method_a5_reads_activation_from_model_instance(monkeypatch):
@@ -483,7 +524,7 @@ def test_select_moe_comm_method_a5_reads_activation_from_model_instance(monkeypa
     vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
     model_instance = _make_model_instance(QuantType.W4A8MXFP, activation="swiglustep")
 
-    assert afc.select_moe_comm_method(129, vllm_config, model_instance=model_instance) == MoECommType.ALLTOALL
+    assert afc.select_moe_comm_method(128, vllm_config, model_instance=model_instance) == MoECommType.MC2
 
 
 def test_select_moe_comm_method_a5_falls_back_for_unsupported_mxfp_group_size(monkeypatch):
@@ -500,7 +541,7 @@ def test_select_moe_comm_method_a5_falls_back_for_unsupported_mxfp_group_size(mo
         quant_description={"group_size": 64},
     )
 
-    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.MC2
 
 
 def test_select_moe_comm_method_a5_reads_quant_type_from_vllm_config_cache(monkeypatch):
@@ -516,7 +557,7 @@ def test_select_moe_comm_method_a5_reads_quant_type_from_vllm_config_cache(monke
         resolved_moe_quant_type=QuantType.MXFP8,
     )
 
-    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.FUSED_MC2
 
 
 def test_select_moe_comm_method_a5_does_not_parse_config_quant_string(monkeypatch):
@@ -534,7 +575,7 @@ def test_select_moe_comm_method_a5_does_not_parse_config_quant_string(monkeypatc
         quant_description={"model.layers.0.mlp.experts.w13_weight": "W4A8_MXFP"},
     )
 
-    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.MC2
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
