@@ -875,10 +875,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 intermediate_tensors.tensors[key] for key in aux_keys
             ]
 
-        if pp_group.is_first_rank:
-            self._maybe_add_hidden_state(
-                aux_hidden_states, 0, hidden_states, residual
-            )
+        self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
