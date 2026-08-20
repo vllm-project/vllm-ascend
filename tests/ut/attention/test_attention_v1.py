@@ -659,12 +659,6 @@ class TestAscendAttentionBackendImpl(TestBase):
     ):
         """Test forward pass in DecodeOnly state"""
         mock_extra_ctx.capturing = False
-        mock_reshape_and_cache.side_effect = lambda query, key, value, kv_cache, attn_metadata, output: (
-            query,
-            key,
-            value,
-            output,
-        )
 
         query = torch.randn(4, 8 * 64)
         key = torch.randn(4, 8 * 64)
@@ -680,11 +674,14 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
         metadata.num_decodes = 4
         metadata.num_prefills = 0
+        metadata.causal = True
+        metadata.model_runner_type = None
         layer = self.layer_no_quant
 
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
         mock_paged_attention.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
         assert output.shape == (4, 8 * 64)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -726,12 +723,6 @@ class TestAscendAttentionBackendImpl(TestBase):
     ):
         """Test forward pass in DecodeOnly state"""
         mock_extra_ctx.capturing = False
-        mock_reshape_and_cache.side_effect = lambda query, key, value, kv_cache, attn_metadata, output: (
-            query,
-            key,
-            value,
-            output,
-        )
 
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
@@ -750,10 +741,13 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         metadata.num_decodes = 10
         metadata.num_prefills = 0
+        metadata.causal = True
+        metadata.model_runner_type = None
         layer = self.layer_no_quant
         mock_fused_infer_attention_score_v2.return_value = (torch.ones(10, 8, 64), 1)
         output = self.impl_swa_sink.forward(layer, query, key, value, kv_cache, metadata, output)
         mock_fused_infer_attention_score_v2.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
         assert output.shape == (10, 8, 64)
 
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
@@ -769,12 +763,6 @@ class TestAscendAttentionBackendImpl(TestBase):
     ):
         """Test forward pass in DecodeOnly state when seq)len_mismatch"""
         mock_extra_ctx.capturing = False
-        mock_reshape_and_cache.side_effect = lambda query, key, value, kv_cache, attn_metadata, output: (
-            query,
-            key,
-            value,
-            output,
-        )
 
         query = torch.randn(10, 8, 64)
         key = torch.randn(10, 8, 64)
@@ -793,6 +781,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_decodes = 10
         metadata.num_prefills = 0
         metadata.actual_seq_lengths_q = [10]
+        metadata.causal = True
+        metadata.model_runner_type = None
 
         mock_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64), torch.ones(10, 8, 64))
 
@@ -800,6 +790,7 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         mock_paged_attention.assert_not_called()
         mock_fused_infer_attention_score.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
 
         assert output.shape == (10, 8, 64)
 
