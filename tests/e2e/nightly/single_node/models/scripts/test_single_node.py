@@ -197,7 +197,12 @@ async def run_spec_decode_acceptance_test(
 
     pos0_rate, _ = calc_acceptance_rate(server, num_speculative_tokens, warmup_fn=warmup_fn)
     validate_acceptance_rate(pos0_rate, float(baseline), float(tolerance))
-
+# test_content:
+#   - chat_completion
+#   - spec_decode_acceptance
+# acceptance_rate:
+#   baseline: 0.85      # 预期第0位采信率
+#   tolerance: 0.05      # ±5%
 
 # Extend this dictionary to add new test capabilities
 TEST_HANDLERS = {
