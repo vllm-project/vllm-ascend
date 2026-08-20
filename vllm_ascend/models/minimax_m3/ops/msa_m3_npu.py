@@ -12,6 +12,7 @@ from vllm_ascend.utils import (
 )
 
 _SPARSE_ATTN_INNER_PRECISE = 4
+_PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
 _ASCEND_DEVICE_TYPE = get_ascend_device_type()
 
 
@@ -106,6 +107,53 @@ def _build_cu_block_lens(
     return cu_block_lens
 
 
+def _minimax_m3_sparse_attn_a3_kv_gather_q(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+    topk_idx: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_kv_heads: int,
+    sm_scale: float,
+    output: torch.Tensor,
+    block_size: int,
+    total_kv_blocks: int,
+    max_kv_blocks: int,
+) -> None:
+    key, value = _split_main_kv_cache(kv_cache)
+    cu_block_lens = _build_cu_block_lens(seq_lens, block_size)
+    k2q_row_ptr, k2q_q_indices, k2q_slot_indices = _npu_k2q_csr(
+        topk_idx,
+        cu_seqlens_q,
+        cu_block_lens,
+        order_method=1,
+        total_rows=total_kv_blocks,
+        max_kv=max_kv_blocks,
+        use_simt=0,
+        q_global_offset=True,
+    )
+
+    q_lens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32).contiguous()
+    out = torch.ops._C_ascend.npu_sparse_attention_score_prefill_v1(
+        q,
+        key,
+        value,
+        block_table,
+        k2q_row_ptr.to(dtype=torch.int32).contiguous(),
+        k2q_q_indices.to(dtype=torch.int32).contiguous(),
+        k2q_slot_indices.to(dtype=torch.int32).contiguous(),
+        num_kv_heads,
+        sm_scale,
+        block_size,
+        topk_idx.shape[-1],
+        _PREFILL_KV_GATHER_Q_INNER_PRECISE,
+        actual_seq_lengths=q_lens,
+        actual_seq_lengths_kv=seq_lens.to(torch.int32).contiguous(),
+    )
+    output.copy_(out)
+
+
 def _minimax_m3_sparse_attn_a3(
     q: torch.Tensor,
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
@@ -117,7 +165,27 @@ def _minimax_m3_sparse_attn_a3(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int,
+    total_kv_blocks: int,
+    max_kv_blocks: int,
+    min_kv_blocks: int,
 ) -> None:
+    if min_kv_blocks >= topk_idx.shape[-1]:
+        _minimax_m3_sparse_attn_a3_kv_gather_q(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            num_kv_heads,
+            sm_scale,
+            output,
+            block_size,
+            total_kv_blocks,
+            max_kv_blocks,
+        )
+        return
+
     key, value = _split_main_kv_cache(kv_cache)
     q_lens_t = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     out = torch.ops._C_ascend.npu_sparse_attention_score(
@@ -199,12 +267,27 @@ def minimax_m3_sparse_attn(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int = 128,
+    total_kv_blocks: int = -1,
+    max_kv_blocks: int = -1,
+    min_kv_blocks: int = -1,
 ) -> None:
     del prefix_lens, max_query_len
-    sparse_attn_impl = (
-        _minimax_m3_sparse_attn_a5 if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5 else _minimax_m3_sparse_attn_a3
-    )
-    sparse_attn_impl(
+    if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5:
+        _minimax_m3_sparse_attn_a5(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            num_kv_heads,
+            sm_scale,
+            output,
+            block_size,
+        )
+        return
+
+    _minimax_m3_sparse_attn_a3(
         q,
         kv_cache,
         topk_idx,
@@ -215,6 +298,9 @@ def minimax_m3_sparse_attn(
         sm_scale,
         output,
         block_size,
+        total_kv_blocks,
+        max_kv_blocks,
+        min_kv_blocks,
     )
 
 

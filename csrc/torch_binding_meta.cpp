@@ -1527,6 +1527,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
+    ops.impl("npu_sparse_attention_score_prefill_v1",
+             &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
