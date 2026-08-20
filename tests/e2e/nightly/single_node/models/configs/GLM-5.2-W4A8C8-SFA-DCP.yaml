@@ -67,9 +67,9 @@ test_cases:
       - "prefetch"
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}'
-      # Deliberately enable SFA C8 on top of the 1M reference deployment to guard SFA+DCP.
+      # Keep SFA C8 disabled to match the GLM-5.2 1M reference deployment.
       - "--additional-config"
-      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true}'
+      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_cpu_binding": true}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     test_content: []
