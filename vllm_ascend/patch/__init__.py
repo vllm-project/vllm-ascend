@@ -91,6 +91,22 @@
 #       Remove this patch once the supported vLLM version contains PR #50580
 #       and PR #51296.
 #
+# ** 3a. File: platform/patch_deepseek_v4_tool_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.deepseek_v4.DeepSeekV4Parser._compute_arg_delta`
+#    Why:
+#       The supported vLLM skips argument conversion for DeepSeek V4 parameter-body
+#       deltas without `>`. A long string is consequently emitted only when
+#       `</parameter>` arrives instead of streaming incrementally.
+#    How:
+#       After the original converter confirms an in-progress, schema-stable
+#       string parameter, JSON-escape and emit plain body deltas directly.
+#       Structural deltas and final conversion remain on the original path.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/52865
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #52865.
+#
 # ** 4. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`

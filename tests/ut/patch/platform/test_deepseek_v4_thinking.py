@@ -102,6 +102,69 @@ def test_deepseek_v4_tokenizer_maps_latest_reasoning_effort_values(
     assert captured_kwargs[-1]["reasoning_effort"] == expected_effort
 
 
+@pytest.mark.parametrize(
+    ("reasoning_effort", "expected_effort"),
+    [
+        (None, "high"),
+        ("high", "high"),
+        ("low", "low"),
+    ],
+)
+def test_deepseek_v4_tokenizer_attaches_tools_to_existing_system(
+    monkeypatch,
+    reasoning_effort,
+    expected_effort,
+):
+    captured_messages = []
+    captured_kwargs = []
+
+    def fake_encode_messages(messages, **kwargs):
+        captured_messages.append(messages)
+        captured_kwargs.append(kwargs)
+        return "prompt"
+
+    monkeypatch.setattr(deepseek_v4, "encode_messages", fake_encode_messages)
+    tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "hi"},
+    ]
+    tools = [{"type": "function", "function": {"name": "get_weather"}}]
+    original_messages = [message.copy() for message in messages]
+    kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
+
+    tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, **kwargs)
+
+    assert captured_messages[-1] == [
+        {"role": "system", "content": "system prompt", "tools": tools},
+        {"role": "user", "content": "hi"},
+    ]
+    assert captured_kwargs[-1]["reasoning_effort"] == expected_effort
+    assert messages == original_messages
+
+
+def test_deepseek_v4_tokenizer_adds_system_for_tools_when_missing(monkeypatch):
+    captured_messages = []
+
+    def fake_encode_messages(messages, **kwargs):
+        captured_messages.append(messages)
+        return "prompt"
+
+    monkeypatch.setattr(deepseek_v4, "encode_messages", fake_encode_messages)
+    tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
+    messages = [{"role": "user", "content": "hi"}]
+    tools = [{"type": "function", "function": {"name": "get_weather"}}]
+    original_messages = [message.copy() for message in messages]
+
+    tokenizer.apply_chat_template(messages, tools=tools, tokenize=False)
+
+    assert captured_messages[-1] == [
+        {"role": "system", "tools": tools},
+        {"role": "user", "content": "hi"},
+    ]
+    assert messages == original_messages
+
+
 def test_deepseek_v4_defaults_to_thinking_with_high_effort():
     tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
     prompt = tokenizer.apply_chat_template(
