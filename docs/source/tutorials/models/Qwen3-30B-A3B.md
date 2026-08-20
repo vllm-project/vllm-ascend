@@ -250,7 +250,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --quantization ascend \
         --distributed_executor_backend "mp" \
         --no-enable-prefix-caching \
-        --async-scheduling \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
         --gpu-memory-utilization 0.95 \
@@ -542,7 +541,6 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
@@ -578,7 +576,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -615,7 +612,6 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \

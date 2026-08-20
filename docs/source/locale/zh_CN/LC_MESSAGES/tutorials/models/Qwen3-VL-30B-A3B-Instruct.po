@@ -443,12 +443,6 @@ msgstr ""
 "| 前缀缓存 | `--enable-prefix-caching` | 提升重复前缀工作负载的性能。 | 随机提示或唯一媒体可能无法受益。 |"
 
 msgid ""
-"| Asynchronous scheduling | `--async-scheduling` | Can improve high-"
-"concurrency throughput. | Disable and compare for latency-sensitive "
-"workloads. |"
-msgstr "| 异步调度 | `--async-scheduling` | 可提升高并发吞吐量。 | 对于延迟敏感型工作负载，请禁用并进行对比。 |"
-
-msgid ""
 "| Pipeline parallel validation | `--pipeline-parallel-size 2` | Provides "
 "another two-card validation layout. | Use shorter context and lower batch "
 "tokens for functional tests. |"

@@ -611,12 +611,6 @@ msgstr ""
 "PD，建议从禁用前缀缓存开始。 |"
 
 msgid ""
-"| Asynchronous scheduling | `--async-scheduling` | Can improve high-"
-"concurrency throughput. | Disable and compare for latency-sensitive "
-"workloads. |"
-msgstr "| 异步调度 | `--async-scheduling` | 可提高高并发吞吐量。 | 对于延迟敏感的工作负载，请禁用并比较。 |"
-
-msgid ""
 "| PD disaggregation | `--kv-transfer-config` | Separates prefill and decode "
 "resources. | Ensure producer/consumer DP and TP sizes match the actual "
 "topology. |"

@@ -166,7 +166,6 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --max-num-batched-tokens 16384 \
     --gpu-memory-utilization 0.87 \
     --seed 42 \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \

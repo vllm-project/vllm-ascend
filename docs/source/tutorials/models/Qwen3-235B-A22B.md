@@ -227,8 +227,7 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.95 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true}' \
-    --async-scheduling
+    --additional-config '{"enable_flashcomm1": true}'
 ```
 
 !!! note
@@ -428,7 +427,6 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
     --kv-transfer-config \
@@ -493,7 +491,6 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
     --kv-transfer-config \
@@ -769,7 +766,6 @@ vllm serve your_model_path \
     --served-model-name qwen3 \
     --host <host_ip> \
     --port <port> \
-    --async-scheduling \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
     --data-parallel-size-local 4 \
@@ -814,7 +810,6 @@ vllm serve your_model_path \
     --served-model-name qwen3 \
     --host <host_ip> \
     --port <port> \
-    --async-scheduling \
     --tensor-parallel-size 16 \
     --data-parallel-size 1 \
     --data-parallel-size-local 1 \
