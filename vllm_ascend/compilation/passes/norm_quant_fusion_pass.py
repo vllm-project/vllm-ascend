@@ -288,8 +288,16 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
             """
             Pattern for AddRMSNormQuant fusion.
+            AscendRMSNorm emits the custom op `_C_ascend.npu_add_rms_norm_bias`
+            (with bias=None) when custom ops are enabled, and falls back to
+            `torch.ops.npu.npu_add_rms_norm` otherwise. Match the actual one.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            if enable_custom_op():
+                output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    rms_norm_input, residual, rms_norm_weight, None, self.eps
+                )
+            else:
+                output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
             quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
@@ -385,7 +393,12 @@ class AddRMSNormDynamicQuantSPPattern(BasePattern):
             """
             Pattern for AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            if enable_custom_op():
+                output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    rms_norm_input, residual, rms_norm_weight, None, self.eps
+                )
+            else:
+                output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
             out0 = tensor_model_parallel_all_gather(out0, 0)
