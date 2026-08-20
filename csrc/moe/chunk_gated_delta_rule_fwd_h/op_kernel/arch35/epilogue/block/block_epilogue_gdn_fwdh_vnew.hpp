@@ -227,13 +227,19 @@ public:
     void ComputeVNew(
         AscendC::LocalTensor<float> workspace,
         AscendC::LocalTensor<UElementInput> uInput,
-        uint32_t count)
+        uint32_t count,
+        bool useSingleIssue)
     {
         __ubuf__ float *workspaceAddr = reinterpret_cast<__ubuf__ float *>(workspace.GetPhyAddr());
         __ubuf__ UElementInput *uInputAddr =
             reinterpret_cast<__ubuf__ UElementInput *>(uInput.GetPhyAddr());
-        AscendC::VF_CALL<detail::ComputeVNewRegbaseDualIssue<UElementInput>>(
-            workspaceAddr, uInputAddr, count);
+        if (useSingleIssue) {
+            AscendC::VF_CALL<detail::ComputeVNewRegbaseSingleIssue<UElementInput>>(
+                workspaceAddr, uInputAddr, count);
+        } else {
+            AscendC::VF_CALL<detail::ComputeVNewRegbaseDualIssue<UElementInput>>(
+                workspaceAddr, uInputAddr, count);
+        }
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -362,7 +368,9 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 ApplyRowScale(calcUbTensor, gUbTensor, rowBegin, mActualThisSubBlock, nvActual);
             } else {
-                ComputeVNew(wsUbTensor, uUbTensor, mActualThisSubBlock * nvActual);
+                ComputeVNew(
+                    wsUbTensor, uUbTensor, mActualThisSubBlock * nvActual,
+                    cube1AlreadyWaited);
             }
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pingpongFlag);
 
@@ -474,7 +482,9 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 ApplyRowScale(calcUbTensor, gUbTensor, rowStart, rowsThisTile, nvActual);
             } else {
-                ComputeVNew(wsUbTensorThisTile, uUbTensor, rowsThisTile * nvActual);
+                ComputeVNew(
+                    wsUbTensorThisTile, uUbTensor, rowsThisTile * nvActual,
+                    cube1AlreadyWaited);
             }
 
             uint32_t nvLoops = nvActual / FLOAT_NUM_PER_REPEAT;

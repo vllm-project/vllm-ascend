@@ -109,6 +109,27 @@ static __simd_vf__ inline void ComputeVNewRegbaseDualIssue(
 }
 
 template <typename T>
+static __simd_vf__ inline void ComputeVNewRegbaseSingleIssue(
+    __ubuf__ float *workspace, __ubuf__ T *uInput, uint32_t count)
+{
+    constexpr uint32_t FP32_PER_REG = VECTOR_REG_WIDTH / sizeof(float);
+    RegTensor<float> uReg;
+    RegTensor<float> wsReg;
+    MaskReg mask;
+
+    uint32_t remaining = count;
+    uint32_t offset = 0;
+    while (remaining > 0) {
+        mask = UpdateMask<float>(remaining);
+        LoadKdaAsFloat<T>(uReg, uInput + offset, mask);
+        LoadKdaFloat(wsReg, workspace + offset);
+        Sub(wsReg, uReg, wsReg, mask);
+        StoreKdaFloat(workspace + offset, wsReg, mask);
+        offset += FP32_PER_REG;
+    }
+}
+
+template <typename T>
 static __simd_vf__ inline void ApplyKGateUpdateRegbaseDualIssue(
     __ubuf__ float *update, __ubuf__ T *state, __ubuf__ float *rowScale,
     uint16_t rows, uint16_t cols)
