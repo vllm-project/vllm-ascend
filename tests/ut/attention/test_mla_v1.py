@@ -1,8 +1,7 @@
-import os
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -580,11 +579,12 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.scheduler_config = mock_scheduler_config
         self.mock_vllm_config.speculative_config = None
         self.mock_device = torch.device("cpu")
-        fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "_fake_weight")
-        model_config = ModelConfig(
-            model=fake_weight_path,
-            skip_tokenizer_init=True,
-        )
+        # Avoid real ModelConfig: it inspects architectures via a subprocess
+        # that requires NPU tooling on CPU CI.
+        model_config = MagicMock()
+        model_config.max_model_len = 1024
+        model_config.dtype = torch.float16
+        model_config.get_head_size.return_value = 128
         model_config.hf_text_config.head_dim = 128
         model_config.hf_text_config.qk_rope_head_dim = 32
         self.mock_vllm_config.model_config = model_config
