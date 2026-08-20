@@ -10,7 +10,6 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     FusedMC2CommImpl,
     MC2CommImpl,
 )
-from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoEFusedExpertsInput,
@@ -19,6 +18,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoERoutingParams,
     MoEWeights,
 )
+from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput
 from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import AscendDeviceType

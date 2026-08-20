@@ -156,9 +156,7 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         layer.w13_weight_scale = nn.Parameter(
             torch.randint(0, 255, (8, 512, 4), dtype=torch.uint8), requires_grad=False
         )
-        layer.w2_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False
-        )
+        layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
         self.scheme.process_weights_after_loading(layer)
         mock_select.return_value = (
             torch.ones(tokens, 2),

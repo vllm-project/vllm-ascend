@@ -28,12 +28,8 @@ def _make_layer():
     layer = nn.Module()
     layer.w13_weight = nn.Parameter(torch.randint(0, 255, (2, 128, 64), dtype=torch.uint8), requires_grad=False)
     layer.w2_weight = nn.Parameter(torch.randint(0, 255, (2, 128, 32), dtype=torch.uint8), requires_grad=False)
-    layer.w13_weight_scale = nn.Parameter(
-        torch.randint(0, 255, (2, 128, 4), dtype=torch.uint8), requires_grad=False
-    )
-    layer.w2_weight_scale = nn.Parameter(
-        torch.randint(0, 255, (2, 128, 2), dtype=torch.uint8), requires_grad=False
-    )
+    layer.w13_weight_scale = nn.Parameter(torch.randint(0, 255, (2, 128, 4), dtype=torch.uint8), requires_grad=False)
+    layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (2, 128, 2), dtype=torch.uint8), requires_grad=False)
     layer.swiglu_limit = 0.0
     return layer
 
