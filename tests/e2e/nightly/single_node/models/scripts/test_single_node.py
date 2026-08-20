@@ -218,6 +218,38 @@ async def _dispatch_tests(config: SingleNodeConfig, server: "RemoteOpenAIServer 
             logger.warning("No handler registered for test content type: %s", test_name)
 
 
+async def _run_benchmarks_and_spec_decode(
+    config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy", port: int
+) -> None:
+    """Run benchmarks, with spec decode baseline capture before and acceptance measurement after."""
+    spec_baseline = None
+    if "spec_decode_acceptance" in config.test_content:
+        from tools.spec_decode_metrics import capture_baseline
+
+        spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+        num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+        chat_url = server.url_for("v1", "chat", "completions")
+
+        def warmup_fn():
+            requests.post(
+                chat_url,
+                json={
+                    "model": config.model,
+                    "messages": [{"role": "user", "content": "Hello!"}],
+                    "max_tokens": 16,
+                },
+                timeout=120,
+            )
+
+        spec_baseline = capture_baseline(server, num_spec_tokens, warmup_fn)
+
+    _run_benchmarks(config, port)
+
+    if "spec_decode_acceptance" in config.test_content:
+        await run_spec_decode_acceptance_test(config, server, spec_baseline)
+
+
 def _extract_server_cmd_value(server_cmd: list[str], flag: str) -> str | None:
     """Return the value following `flag` in a server_cmd list, or None."""
     try:
@@ -476,33 +508,7 @@ async def test_single_node(config: SingleNodeConfig) -> None:
             DisaggEpdProxy(proxy_args=config.epd_proxy_args, env_dict=config.envs) as proxy,
         ):
             await _dispatch_tests(config, proxy)
-
-            spec_baseline = None
-            if "spec_decode_acceptance" in config.test_content:
-                from tools.spec_decode_metrics import capture_baseline
-
-                spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
-                num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
-
-                chat_url = proxy.url_for("v1", "chat", "completions")
-
-                def warmup_fn():
-                    requests.post(
-                        chat_url,
-                        json={
-                            "model": config.model,
-                            "messages": [{"role": "user", "content": "Hello!"}],
-                            "max_tokens": 16,
-                        },
-                        timeout=120,
-                    )
-
-                spec_baseline = capture_baseline(proxy, num_spec_tokens, warmup_fn)
-
-            _run_benchmarks(config, proxy.port)
-
-            if "spec_decode_acceptance" in config.test_content:
-                await run_spec_decode_acceptance_test(config, proxy, spec_baseline)
+            await _run_benchmarks_and_spec_decode(config, proxy, proxy.port)
         return
 
     # Standard OpenAI service mode
@@ -514,32 +520,4 @@ async def test_single_node(config: SingleNodeConfig) -> None:
         auto_port=False,
     ) as server:
         await _dispatch_tests(config, server)
-
-        # Capture spec decode baseline before benchmarks
-        spec_baseline = None
-        if "spec_decode_acceptance" in config.test_content:
-            from tools.spec_decode_metrics import capture_baseline
-
-            spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
-            num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
-
-            chat_url = server.url_for("v1", "chat", "completions")
-
-            def warmup_fn():
-                requests.post(
-                    chat_url,
-                    json={
-                        "model": config.model,
-                        "messages": [{"role": "user", "content": "Hello!"}],
-                        "max_tokens": 16,
-                    },
-                    timeout=120,
-                )
-
-            spec_baseline = capture_baseline(server, num_spec_tokens, warmup_fn)
-
-        _run_benchmarks(config, config.server_port)
-
-        # Measure spec decode acceptance rate after benchmarks
-        if "spec_decode_acceptance" in config.test_content:
-            await run_spec_decode_acceptance_test(config, server, spec_baseline)
+        await _run_benchmarks_and_spec_decode(config, server, config.server_port)
