@@ -15,8 +15,9 @@ static constexpr size_t DIM_H = 2;
 static constexpr size_t DIM_D = 3;
 
 static constexpr int64_t FIXED_CHUNK = 64;
-// 310P dav_m200 UB is 192KB. At K=V=64, InitBuffer is ~154KB; K=V=128 overflows (~242KB).
-static constexpr int64_t MAX_HEAD_DIM = 64;
+// 310P dav_m200 UB is 192KB. K=V=128 fits since the kernel solves W and U in two
+// passes with a single fp32 RHS resident (~178KB peak); see compute_wy_kernel.h.
+static constexpr int64_t MAX_HEAD_DIM = 128;
 static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
 // Per-core GM staging for Cube inputs: A_half(64*MAX_HEAD_DIM) + B_half(64*MAX_HEAD_DIM).
 static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);

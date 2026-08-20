@@ -25,7 +25,9 @@ using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, 
 
 // GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
 // Doubling applies U/W separately so N <= MAX_HEAD (no stacked 2N-wide staging).
-constexpr uint32_t WY_CUBE_MAX_HEAD = 64;
+// 128 is UB-safe again since the kernel solves W and U in two passes (one RHS
+// resident at a time) instead of keeping K,V,Kβ fp32 chunks live together.
+constexpr uint32_t WY_CUBE_MAX_HEAD = 128;
 constexpr uint32_t WY_CUBE_CHUNK = 64;
 constexpr uint32_t WY_CUBE_STAGING_A_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
 constexpr uint32_t WY_CUBE_STAGING_B_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
