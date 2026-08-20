@@ -14,7 +14,7 @@ This document is validated and written based on **vLLM-Ascend 0.23.0**. The curr
 
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 > **Note**: The support matrix records the maximum verified capability for this model. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
 
@@ -374,7 +374,7 @@ Record the node count, DP/TP topology, context length, concurrency, reasoning ef
 
 Use the deployment values above as a baseline. Adjust `max-model-len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together for the target workload.
 
-Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md) and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for additional guidance.
+Refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) and the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for additional guidance.
 
 ## 10 FAQ
 

@@ -312,7 +312,7 @@ examples and NPU-specific tests when no device is available.
     To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
     For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
 
-## Set up using Docker {: #set-up-using-docker }
+## Set up using Docker
 
 `vllm-ascend` offers Docker images for deployment. You can just pull the **prebuilt image** from the image repository [ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and run it with bash.
 
@@ -510,7 +510,7 @@ sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
 
 ## Multi-node Deployment
 
-### Verify Multi-Node Communication {: #verify-multi-node-communication }
+### Verify Multi-Node Communication
 
 First, check physical layer connectivity, then verify each node, and finally verify the inter-node connectivity.
 
@@ -527,7 +527,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..7}; do hccn_tool -i $i -link -g ; done
      # Check the network health status
@@ -544,7 +544,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..15}; do hccn_tool -i $i -link -g ; done
      # Check the network health status
@@ -561,7 +561,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..7}; do hccn_tool -i $i -link -g ; done
      # Check the network health status
