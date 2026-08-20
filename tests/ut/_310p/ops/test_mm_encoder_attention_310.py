@@ -22,18 +22,14 @@ from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention3
 
 
 def test_register_customop_overrides_mm_encoder_attention_for_310p():
-    original_registered = utils._ASCEND_CUSTOMOP_IS_REIGISTERED
-    try:
-        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
-        with (
-            mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot"),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
-        ):
-            utils.register_ascend_customop()
+    from vllm_ascend.ops import registry as ops_registry
 
-        assert utils.REGISTERED_ASCEND_OPS["MMEncoderAttention"] is AscendMMEncoderAttention310
-    finally:
-        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = original_registered
+    with (
+        mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot"),
+        mock.patch("vllm_ascend.ops.registry.is_310p", return_value=True),
+    ):
+        utils.register_ascend_customop()
+        assert ops_registry.ascend_custom_ops()["MMEncoderAttention"] is AscendMMEncoderAttention310
 
 
 def test_mm_encoder_attention_310_forward_oot_with_padding():
