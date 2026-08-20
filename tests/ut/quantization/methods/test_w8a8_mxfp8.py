@@ -136,6 +136,12 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         mock_ascend.return_value = create_mock_ascend_config()
         mock_ensure.return_value = None
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+        patcher = patch(
+            "vllm_ascend.quantization.methods.w8a8_mxfp8.maybe_trans_nz",
+            side_effect=lambda x, **kwargs: x,
+        )
+        self.mock_maybe_trans_nz = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_get_weight_various_expert_counts(self):
         for num_experts in [4, 8, 16]:
@@ -159,6 +165,20 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertIn("w13_weight", layer._mxfp8_original_shapes)
         self.assertEqual(layer.w13_weight.shape, (original_shape[0], original_shape[2], original_shape[1]))
+        self.assertTrue(layer.w13_weight.data.is_contiguous())
+        self.assertTrue(layer.w2_weight.data.is_contiguous())
+        self.assertTrue(layer.w13_weight_scale.data.is_contiguous())
+        self.assertTrue(layer.w2_weight_scale.data.is_contiguous())
+        self.assertEqual(self.mock_maybe_trans_nz.call_count, 2)
+        for call in self.mock_maybe_trans_nz.call_args_list:
+            self.assertEqual(call.kwargs["customize_dtype"], torch.float8_e4m3fn)
+
+    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8._should_trans_nz", return_value=False)
+    def test_process_weights_nz_disabled_keeps_pre_nz_layout(self, mock_should_trans_nz):
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
+        self.scheme.process_weights_after_loading(layer)
         self.assertFalse(layer.w13_weight.data.is_contiguous())
         self.assertFalse(layer.w2_weight.data.is_contiguous())
         self.assertFalse(layer.w13_weight_scale.data.is_contiguous())
