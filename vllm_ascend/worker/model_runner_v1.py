@@ -21,7 +21,7 @@ import logging
 import math
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -112,7 +112,10 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import (
+    get_ascend_config,
+    is_score_encoder_cache_manager,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
@@ -231,6 +234,28 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
+class _EncoderCacheView:
+
+    def __init__(
+        self,
+        contains: Callable[[str], bool],
+        get: Callable[[str], torch.Tensor | None],
+    ) -> None:
+        self._contains = contains
+        self._get = get
+
+    def __contains__(self, mm_hash: object) -> bool:
+        return isinstance(mm_hash, str) and self._contains(mm_hash)
+
+    def get(
+        self,
+        mm_hash: str,
+        default: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        value = self._get(mm_hash)
+        return default if value is None else value
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -344,6 +369,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -567,6 +593,13 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
+        # Score encoder cache state.
+        self.tmp_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cpu_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cached: dict[str, set[str]] = {}
+        self._pending_encoder_cache_copies: deque[
+            tuple[torch.Tensor, torch.npu.Event]
+        ] = deque()
 
         self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
         self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
@@ -589,6 +622,21 @@ class NPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
+
+    def reset_encoder_cache(self) -> None:
+        """Clear device and score-based encoder cache state."""
+        if (
+            self.tmp_encoder_cache
+            or self.cpu_encoder_cache
+            or self._pending_encoder_cache_copies
+        ):
+            self._sync_device()
+
+        super().reset_encoder_cache()
+        self.tmp_encoder_cache.clear()
+        self.cpu_encoder_cache.clear()
+        self.cached.clear()
+        self._pending_encoder_cache_copies.clear()
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -797,7 +845,9 @@ class NPUModelRunner(GPUModelRunner):
                     req_state.prev_num_draft_len = 0
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
-        return super()._update_states(scheduler_output)
+        sampling_metadata = super()._update_states(scheduler_output)
+        self._track_tmp_encoder_cache_refs(scheduler_output)
+        return sampling_metadata
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -847,6 +897,197 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc.copy_to_gpu()
 
         return num_reqs_padded
+
+    def _track_tmp_encoder_cache_refs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        if not self.use_score_encoder_cache:
+            return
+
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            for mm_feature in new_req_data.mm_features:
+                cur_hash = mm_feature.identifier
+                self.cached.setdefault(cur_hash, set()).add(new_req_data.req_id)
+
+    def _get_score_encoder_cache_metadata(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Any | None:
+        return getattr(
+            scheduler_output,
+            "encoder_cache_manager_metadata",
+            getattr(scheduler_output, "ec_manager_metadata", None),
+        )
+
+    def _on_request_state_removed(self, req_id: str, req_state: Any | None) -> None:
+        if req_state is None:
+            return
+        if not self.use_score_encoder_cache:
+            self.cached.clear()
+            return
+        free_mm_hashes = set()
+        if req_state.mm_features is None:
+            return
+        for mm_feature in req_state.mm_features:
+            free_mm_hashes.add(mm_feature.identifier)
+
+        for mm_hash in free_mm_hashes:
+            if mm_hash not in self.cached:
+                continue
+            self.cached[mm_hash].discard(req_id)
+            if not self.cached.get(mm_hash):
+                del self.cached[mm_hash]
+                if mm_hash in self.tmp_encoder_cache:
+                    del self.tmp_encoder_cache[mm_hash]
+
+    def _process_encoder_cache_scheduler_output(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        self._clear_finished_encoder_cache_copies()
+        if not self.use_score_encoder_cache:
+            super()._process_encoder_cache_scheduler_output(scheduler_output)
+            return
+
+        ec_manager_metadata = self._get_score_encoder_cache_metadata(scheduler_output)
+        if ec_manager_metadata is None:
+            super()._process_encoder_cache_scheduler_output(scheduler_output)
+            return
+
+        # Free the cached encoder outputs.
+        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
+        cpu_get_encoder_mm_hashes = ec_manager_metadata.cpu_get_encoder_mm_hashes
+
+        for mm_hash in ec_manager_metadata.npu_freed:
+            self.encoder_cache.pop(mm_hash, None)
+
+        for mm_hash in ec_manager_metadata.cpu_freed:
+            self.cpu_encoder_cache.pop(mm_hash, None)
+
+        for mm_hash in promoting_mm_hashes:
+            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+            if cpu_value is None:
+                continue
+
+            self.encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
+                cpu_value
+            )
+
+        for mm_hash in cpu_get_encoder_mm_hashes:
+            if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
+                continue
+            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+            if cpu_value is None:
+                continue
+            self.tmp_encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
+                cpu_value
+            )
+
+    def _get_encoder_output_from_cache(self, mm_hash: str) -> torch.Tensor | None:
+        encoder_output = self.encoder_cache.get(mm_hash, None)
+        if encoder_output is not None:
+            return encoder_output
+
+        encoder_output = self.tmp_encoder_cache.get(mm_hash, None)
+        if encoder_output is not None:
+            return encoder_output
+
+        if not self.use_score_encoder_cache:
+            return None
+
+        cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+        if cpu_value is None:
+            return None
+
+        # The score encoder cache scheduler asks the worker to stage CPU cache
+        # hits into a device cache before gather.  Keep a defensive synchronous
+        # fallback here so a stale worker-side temporary entry cannot turn a
+        # scheduler CPU-cache hit into an engine-fatal cache miss.
+        encoder_output = self._copy_cpu_encoder_cache_to_device(
+            cpu_value, non_blocking=False
+        )
+        self.tmp_encoder_cache[mm_hash] = encoder_output
+        return encoder_output
+
+    def _has_encoder_output_in_cache(self, mm_hash: str) -> bool:
+        if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
+            return True
+        return self.use_score_encoder_cache and mm_hash in self.cpu_encoder_cache
+
+    def _get_encoder_cache_view(self) -> _EncoderCacheView:
+        return _EncoderCacheView(
+            contains=self._has_encoder_output_in_cache,
+            get=self._get_encoder_output_from_cache,
+        )
+
+    def _clear_finished_encoder_cache_copies(self) -> None:
+        while (
+            self._pending_encoder_cache_copies
+            and self._pending_encoder_cache_copies[0][1].query()
+        ):
+            self._pending_encoder_cache_copies.popleft()
+
+    def _copy_cpu_encoder_cache_to_device(
+        self,
+        cpu_value: torch.Tensor,
+        *,
+        non_blocking: bool = True,
+    ) -> torch.Tensor:
+        if not non_blocking:
+            return cpu_value.to(self.device, non_blocking=False)
+
+        self._clear_finished_encoder_cache_copies()
+        source = cpu_value if cpu_value.is_pinned() else cpu_value.pin_memory()
+        npu_value = torch.empty_like(source, device=self.device)
+        npu_value.copy_(source, non_blocking=True)
+
+        copy_done = torch.npu.Event()
+        copy_done.record(torch.npu.current_stream())
+        self._pending_encoder_cache_copies.append((source, copy_done))
+        npu_value.record_stream(torch.npu.current_stream())
+        return npu_value
+
+    def _cache_encoder_output(
+        self,
+        mm_hash: str,
+        output: torch.Tensor,
+        ec_manager_metadata: Any | None,
+        free_encoder_mm_hashes: list[str],
+    ) -> None:
+        if not self.use_score_encoder_cache:
+            super()._cache_encoder_output(
+                mm_hash,
+                output,
+                ec_manager_metadata,
+                free_encoder_mm_hashes,
+            )
+            return
+
+        promoting_mm_hashes = (
+            ec_manager_metadata.promoting_mm_hashes
+            if ec_manager_metadata is not None
+            else []
+        )
+        npu_freed = (
+            ec_manager_metadata.npu_freed
+            if ec_manager_metadata is not None
+            else []
+        )
+
+        staging = torch.empty_like(output, device="cpu", pin_memory=True)
+        staging.copy_(output.detach(), non_blocking=True)
+        self.cpu_encoder_cache[mm_hash] = staging
+
+        if (
+            mm_hash in promoting_mm_hashes
+            and mm_hash not in npu_freed
+        ):
+            self.encoder_cache[mm_hash] = output
+        else:
+            self.tmp_encoder_cache[mm_hash] = output
+
+        self.maybe_save_ec_to_connector({mm_hash: output}, mm_hash)
 
     def _prepare_inputs(
         self,
@@ -1062,7 +1303,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
-        
+
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
@@ -1434,7 +1675,7 @@ class NPUModelRunner(GPUModelRunner):
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
         default_stream = torch.npu.current_stream()
-        with torch.npu.stream(self.valid_sampled_token_count_copy_stream): 
+        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
@@ -1797,7 +2038,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
-       
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -2400,7 +2641,7 @@ class NPUModelRunner(GPUModelRunner):
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
             return model_runner_output
-        
+
         # Async path: produce a device-side snapshot that the async
         # copy stream can D2H later. Both tensors must be private
         # clones because:
@@ -3281,10 +3522,10 @@ class NPUModelRunner(GPUModelRunner):
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
-        
+
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
-        
+
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
@@ -3617,7 +3858,7 @@ class NPUModelRunner(GPUModelRunner):
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         ) # type: bool
-        
+
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
@@ -4545,7 +4786,7 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
-                ) 
+                )
 
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
                 max_num_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
