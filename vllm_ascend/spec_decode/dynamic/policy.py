@@ -78,6 +78,22 @@ class HardwareAwarePrefixPolicy:
     def _lookup_latency(self, token_counts: torch.Tensor) -> torch.Tensor:
         return self._latency_ms[token_counts.clamp(min=1, max=self._latency_ms.numel() - 1)]
 
+    def full_width_goodput(self, survival: torch.Tensor) -> float:
+        """Estimate expected goodput when every request verifies full width.
+
+        The estimate uses the same bonus-token accounting and hardware latency
+        lookup as :meth:`allocate`.  Keeping this calculation in the policy
+        lets the hybrid scheduler compare its cheap full-width branch against
+        the profile-selected dynamic allocation without another device-side
+        search.
+        """
+        num_reqs, num_draft_tokens = survival.shape
+        if num_reqs == 0 or num_draft_tokens == 0:
+            return 0.0
+        expected_accepts = float(num_reqs + survival.sum().item())
+        verify_token_count = num_reqs * (num_draft_tokens + 1)
+        return expected_accepts / self.cost_model.latency(verify_token_count)
+
     def allocate(
         self,
         survival: torch.Tensor,

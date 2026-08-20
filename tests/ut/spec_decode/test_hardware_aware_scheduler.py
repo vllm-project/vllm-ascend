@@ -237,6 +237,64 @@ def test_hybrid_policy_enters_dynamic_path_for_large_low_acceptance_batch() -> N
     assert int(lengths.sum().item()) < 8 * 3
 
 
+def test_hybrid_policy_uses_profile_goodput_when_acceptance_is_borderline() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    # The full-prefix survival is just above the acceptance threshold, but
+    # the profile makes the full-width graph much more expensive than the
+    # shorter dynamic candidates.  The cost guard must keep the scheduler in
+    # dynamic K instead of holding full width only because of acceptance.
+    latency_ms = {
+        **{str(size): 1.0 for size in range(1, 25)},
+        **{str(size): 10.0 for size in range(25, 33)},
+    }
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "profile": {
+                "fingerprint": {"device": "Ascend", "graph_mode": "FULL_DECODE_ONLY"},
+                "latency_ms": latency_ms,
+            },
+            "hardware_min_budget_ratio": 0.0,
+            "hybrid_policy_enabled": True,
+            "hybrid_min_batch_size": 8,
+            "hybrid_acceptance_threshold": 0.6,
+            "confidence_update_interval": 16,
+        },
+        max_batch_size=8,
+        num_speculative_tokens=3,
+        device=torch.device("cpu"),
+    )
+    model = _FakeDSparkModel()
+    draft_ids = torch.tensor([[1, 2, 3, 4]] * 8)
+    hidden = torch.zeros((24, 1))
+
+    first = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=8,
+    )
+    second = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=8,
+    )
+
+    assert float(scheduler._hybrid_last_acceptance) >= 0.6
+    assert scheduler._hybrid_last_dynamic_goodput is not None
+    assert scheduler._hybrid_last_full_width_goodput is not None
+    assert (
+        scheduler._hybrid_last_dynamic_goodput
+        > scheduler._hybrid_last_full_width_goodput
+    )
+    assert int(first.sum().item()) < 8 * 3
+    assert int(second.sum().item()) < 8 * 3
+    assert model.confidence_calls == 1
+
+
 def test_hybrid_policy_holds_large_high_acceptance_batch_until_probe() -> None:
     from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 

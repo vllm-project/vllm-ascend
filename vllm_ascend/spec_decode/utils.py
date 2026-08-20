@@ -401,6 +401,11 @@ class DynamicSpecScheduler:
         )
         if self.hybrid_probe_interval <= 0:
             raise ValueError("hybrid_probe_interval must be > 0")
+        self.hybrid_full_width_goodput_margin = float(
+            method_params.get("hybrid_full_width_goodput_margin", 0.0)
+        )
+        if self.hybrid_full_width_goodput_margin < 0.0:
+            raise ValueError("hybrid_full_width_goodput_margin must be >= 0")
 
         self._steps_since_budget_update = 0
 
@@ -409,6 +414,8 @@ class DynamicSpecScheduler:
         self._hybrid_last_num_draft_tokens: int | None = None
         self._hybrid_steps_since_probe = 0
         self._hybrid_full_width_active = False
+        self._hybrid_last_dynamic_goodput: float | None = None
+        self._hybrid_last_full_width_goodput: float | None = None
 
         # Shared buffers
 
@@ -527,7 +534,18 @@ class DynamicSpecScheduler:
             return False
         if self._hybrid_steps_since_probe >= self.hybrid_probe_interval:
             return False
-        return self._hybrid_last_acceptance >= self.hybrid_acceptance_threshold
+        if self._hybrid_last_acceptance < self.hybrid_acceptance_threshold:
+            return False
+        if (
+            self._hybrid_last_dynamic_goodput is not None
+            and self._hybrid_last_full_width_goodput is not None
+            and self._hybrid_last_full_width_goodput
+            * (1.0 + self.hybrid_full_width_goodput_margin)
+            + 1e-6 * max(1.0, self._hybrid_last_dynamic_goodput)
+            < self._hybrid_last_dynamic_goodput
+        ):
+            return False
+        return True
 
     def update(
         self,
@@ -641,6 +659,12 @@ class DynamicSpecScheduler:
             if num_reqs and draft_width:
                 self._hybrid_last_acceptance = float(
                     self._survival_buffer[:num_reqs, draft_width - 1].mean().item()
+                )
+                self._hybrid_last_dynamic_goodput = self.hardware_policy.last_goodput
+                self._hybrid_last_full_width_goodput = (
+                    self.hardware_policy.full_width_goodput(
+                        self._survival_buffer[:num_reqs, :draft_width]
+                    )
                 )
             self._hybrid_last_num_reqs = int(num_reqs or 0)
             self._hybrid_last_num_draft_tokens = draft_width
