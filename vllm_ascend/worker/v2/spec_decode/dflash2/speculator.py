@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 from vllm.v1.worker.gpu.sample.gumbel import tl_rand32
@@ -111,4 +112,13 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     aclgraph capture, which captures ``self._generate_draft``.
     """
 
-    pass
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # V2 passes the runner's cudagraph mode to the draft speculator
+        # without consulting the spec-level enforce_eager. Honor it here:
+        # with enforce_eager the draft runs eagerly while the target keeps
+        # its own cudagraph mode (e.g. FULL_DECODE_ONLY). This also works
+        # around a dynamo fullgraph capture failure in the draft's RoPE
+        # (fake-tensor shape mismatch on the NPU meta kernels).
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
+        super().init_cudagraph_manager(cudagraph_mode)

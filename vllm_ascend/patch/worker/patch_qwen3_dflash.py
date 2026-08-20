@@ -79,3 +79,25 @@ def _patched_read_mask_embedding(self):
 
 
 DFlashQwen3ForCausalLM._read_mask_embedding = _patched_read_mask_embedding
+
+# torch.compile fake-tensor propagation mis-derives the draft RoPE broadcast
+# shapes on NPU (mul((s, 7, 16, 256), (s, 256, 1)) fails dimension checks),
+# so the DFlash draft models run eagerly; the target model keeps its own
+# compilation config.
+from vllm.compilation.decorators import IGNORE_COMPILE_KEY
+
+from vllm.model_executor.models.qwen3_dflash2 import (
+    CandidateSelector,
+    DFlash2Qwen3ForCausalLM,
+    DFlash2Qwen3Model,
+)
+
+DFlashQwen3Model._ignore_compile_vllm = True
+DFlash2Qwen3Model._ignore_compile_vllm = True
+# The compile wrapper wraps the outer ForCausalLM forward (inherited from
+# Qwen3ForCausalLM), so it must be flagged too.
+DFlashQwen3ForCausalLM._ignore_compile_vllm = True
+DFlash2Qwen3ForCausalLM._ignore_compile_vllm = True
+# Submodule decorators compile independently of the outer model; the
+# selector's hidden[:, :, None] broadcast is mis-derived by dynamo fakes.
+CandidateSelector._ignore_compile_vllm = True
