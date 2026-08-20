@@ -10,6 +10,7 @@ from typing import Any
 import openai
 import psutil
 import pytest
+import requests
 import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
@@ -181,12 +182,11 @@ async def run_spec_decode_acceptance_test(
         logger.warning("acceptance_rate.baseline not set in config, skipping validation")
         baseline = 0.0
 
-    def warmup_fn():
-        import requests as _req
+    chat_url = server.url_for("v1", "chat", "completions")
 
-        url = server.url_for("v1", "chat", "completions")
-        _req.post(
-            url,
+    def warmup_fn():
+        requests.post(
+            chat_url,
             json={
                 "model": config.model,
                 "messages": [{"role": "user", "content": "Hello!"}],
@@ -195,7 +195,22 @@ async def run_spec_decode_acceptance_test(
             timeout=120,
         )
 
-    pos0_rate, _ = calc_acceptance_rate(server, num_speculative_tokens, warmup_fn=warmup_fn)
+    def test_fn():
+        prompts = config.prompts if config.prompts else ["Tell me a story about a brave knight."]
+        for p in prompts:
+            requests.post(
+                chat_url,
+                json={
+                    "model": config.model,
+                    "messages": [{"role": "user", "content": p}],
+                    "max_tokens": 128,
+                },
+                timeout=300,
+            )
+
+    pos0_rate, _ = calc_acceptance_rate(
+        server, num_speculative_tokens, warmup_fn=warmup_fn, test_fn=test_fn
+    )
     validate_acceptance_rate(pos0_rate, float(baseline), float(tolerance))
 # test_content:
 #   - chat_completion

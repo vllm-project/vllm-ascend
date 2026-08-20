@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Callable, Optional
 
 import requests
 from prometheus_client.parser import text_string_to_metric_families
@@ -31,12 +31,19 @@ def analysis_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[in
 def calc_acceptance_rate(
     server,
     num_speculative_tokens: int,
-    warmup_fn=None,
+    warmup_fn: Optional[Callable] = None,
+    test_fn: Optional[Callable] = None,
 ) -> tuple[float, list[float]]:
-    """Fetch metrics, optionally subtract warmup baseline, return (pos0_rate, all_rates).
+    """Calculate spec decode acceptance rate.
 
-    If warmup_fn is provided, it is called once before measuring to build the
-    baseline (arr). The baseline is subtracted so only post-warmup counts are used.
+    Flow:
+      1. warmup_fn()  — optional warmup request(s)
+      2. fetch baseline metrics (arr)
+      3. test_fn()    — actual test request(s) that produce spec decode drafts
+      4. fetch final metrics, subtract baseline
+      5. compute acceptance_per_pos
+
+    Returns (pos0_rate, all_rates).
     """
     arr = [0, 0, 0, 0, 0, 0, 0, 0]
     if warmup_fn is not None:
@@ -47,6 +54,9 @@ def calc_acceptance_rate(
         for i, v in enumerate(base_accepted):
             if i + 1 < len(arr):
                 arr[i + 1] = v
+
+    if test_fn is not None:
+        test_fn()
 
     metrics_text = fetch_metrics(server)
     num_drafts, num_accepted_tokens_per_pos = analysis_metrics(metrics_text, num_speculative_tokens)
