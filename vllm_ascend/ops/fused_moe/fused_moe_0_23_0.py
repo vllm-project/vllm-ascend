@@ -23,6 +23,7 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -36,6 +37,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     MoERunner,
     QuantType,
     VllmEplbAdaptor,
+    cache_a5_moe_quant_type,
     get_ascend_config,
     get_compressed_expert_map,
     get_current_vllm_config,
@@ -58,7 +60,6 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     torch_npu,
     wraps,
 )
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import enable_sp
 
 
@@ -278,6 +279,7 @@ class AscendFusedMoE(FusedMoE):
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
+        cache_a5_moe_quant_type(getattr(self, "vllm_config", None), self.quant_type)
 
         self.runner = AscendMoERunner(
             self.layer_name,
@@ -675,9 +677,7 @@ class AscendFusedMoE(FusedMoE):
             gate = self.gate
             assert gate is not None
             before_routed_experts = torch.npu.current_stream().record_event()
-            router_logits = DeviceOperator.compute_gate_logits(
-                hidden_states, gate.weight, gate.weight_fp32
-            )
+            router_logits = DeviceOperator.compute_gate_logits(hidden_states, gate.weight, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
         else:
             before_routed_experts = torch.npu.current_stream().record_event()

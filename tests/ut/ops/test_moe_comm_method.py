@@ -7,8 +7,10 @@ from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
+    FusedMC2CommImpl,
     MC2CommImpl,
 )
+from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoEFusedExpertsInput,
@@ -19,6 +21,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput
 from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestMoECommMethod(TestBase):
@@ -26,6 +29,7 @@ class TestMoECommMethod(TestBase):
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant = False
         self.mock_ascend_config.enable_fused_mc2 = False
+        self.mock_ascend_config.mega_moe_max_tokens = 65536
         self._patch_get_ascend_config = patch(
             "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_config",
             return_value=self.mock_ascend_config,
@@ -49,10 +53,18 @@ class TestMoECommMethod(TestBase):
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.global_redundant_expert_num = 0
+        self.moe_config.hidden_dim = 8
+
+        self._patch_get_device_type = patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        )
+        self._patch_get_device_type.start()
 
     def tearDown(self):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
+        self._patch_get_device_type.stop()
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
@@ -268,3 +280,70 @@ class TestMoECommMethod(TestBase):
             hidden_states=mock_unified_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMegaMoE")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.MegaMoEBackend")
+    def test_a5_fused_mc2_dispatches_to_mega_moe_backend(
+        self,
+        mock_mega_moe_backend,
+        mock_token_dispatcher,
+        mock_prepare_finalize,
+    ):
+        self._patch_get_device_type.stop()
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ):
+            self.mock_ascend_config.enable_fused_mc2 = 1
+            mock_token_dispatcher.return_value = MagicMock()
+            mock_prepare_finalize.return_value = MagicMock()
+            routed_out = torch.randn(4, 8)
+            expert_tokens = torch.tensor([1, 3], dtype=torch.int32)
+            mock_mega_moe_backend.return_value.fused_experts.return_value = (routed_out, expert_tokens)
+
+            comm_impl = FusedMC2CommImpl(self.moe_config)
+            fused_input = MoEFusedExpertsInput(
+                hidden_states=torch.randn(4, 8),
+                topk_weights=torch.randn(4, 2),
+                topk_ids=torch.tensor([[0, 1], [1, 0], [0, 1], [1, 0]]),
+                weights=MoEWeights(
+                    w1=torch.randn(2, 16, 8),
+                    w2=torch.randn(2, 8, 8),
+                    w1_scale=torch.ones(2, 16, 1),
+                    w2_scale=torch.ones(2, 8, 1),
+                ),
+                routing=MoERoutingParams(
+                    expert_map=None,
+                    global_redundant_expert_num=0,
+                    mc2_mask=None,
+                    apply_router_weight_on_input=False,
+                ),
+                activation="silu",
+                need_trans=False,
+                dynamic_eplb=False,
+                quant=MoEQuantParams(
+                    quant_type=QuantType.W4A8MXFP,
+                    mxfp=MoEMxfpParams(
+                        act_quant_type=torch.float8_e4m3fn,
+                        weight_quant_type=torch.float8_e4m3fn,
+                        scale_dtype=torch.float32,
+                        per_token_scale_dtype=torch.float32,
+                    ),
+                ),
+            )
+
+            result = comm_impl.fused_experts(fused_input)
+
+            self.assertIs(result.routed_out, routed_out)
+            self.assertIs(result.expert_tokens, expert_tokens)
+            self.assertEqual(result.group_list_type, 1)
+            mock_prepare_finalize.assert_called_once_with(self.moe_config)
+            mock_token_dispatcher.assert_not_called()
+            mock_mega_moe_backend.return_value.fused_experts.assert_called_once_with(fused_input)
+
+        self._patch_get_device_type = patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        )
+        self._patch_get_device_type.start()

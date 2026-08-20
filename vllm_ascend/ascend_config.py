@@ -24,6 +24,26 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+def compute_mega_moe_buffer_tokens_per_rank(
+    mega_moe_max_tokens: int,
+    max_num_batched_tokens: int,
+    expert_parallel_size: int,
+) -> int:
+    """Compute the per-rank token capacity used to allocate the MegaMoE buffer."""
+    if expert_parallel_size <= 0:
+        raise ValueError(f"expert_parallel_size must be positive, got {expert_parallel_size}")
+
+    buffer_tokens_per_rank = min(mega_moe_max_tokens, max_num_batched_tokens) // expert_parallel_size
+    if buffer_tokens_per_rank <= 0:
+        raise ValueError(
+            "MegaMoE token capacity must be at least the expert parallel size: "
+            f"mega_moe_max_tokens={mega_moe_max_tokens}, "
+            f"max_num_batched_tokens={max_num_batched_tokens}, "
+            f"expert_parallel_size={expert_parallel_size}."
+        )
+    return buffer_tokens_per_rank
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -289,11 +309,9 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
-        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
-        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
-        # are dropped and skipped from computation, degrading accuracy.
-        # Do not set this too large: workspace memory scales linearly with this value, which matters
-        # especially under long-context scenarios where the operator should not hold too much memory.
+        # Per-rank token capacity for dispatch_ffn_combine. A5 MegaMoE treats
+        # this as a global chunk limit and derives its per-rank symmetric-buffer
+        # capacity from the scheduler limit and expert-parallel size.
         # Default 65536.
         self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
         if not isinstance(self.mega_moe_max_tokens, int):

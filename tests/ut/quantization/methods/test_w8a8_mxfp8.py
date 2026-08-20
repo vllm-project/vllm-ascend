@@ -9,6 +9,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
@@ -167,3 +168,77 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         )
         mock_select.assert_called_once()
         mock_comm.fused_experts.assert_called_once()
+
+    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.select_experts")
+    def test_apply_uses_stacked_checkpoint_layout_for_mega_moe(self, mock_select, mock_ctx):
+        tokens = 4
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+        self.scheme.process_weights_after_loading(layer)
+        layer.swiglu_limit = 0.0
+        mock_select.return_value = (
+            torch.ones(tokens, 2),
+            torch.tensor([[0, 1], [1, 0], [0, 1], [1, 0]]),
+        )
+        mock_comm = Mock()
+        mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        mock_ctx.moe_comm_method = mock_comm
+
+        self.scheme.apply(
+            layer,
+            torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16),
+            torch.randn(tokens, self.num_experts),
+            top_k=2,
+            renormalize=True,
+            num_experts=self.num_experts,
+            enable_force_load_balance=False,
+        )
+
+        fused_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_input.weights.w1.shape, (8, 512, 128))
+        self.assertEqual(fused_input.weights.w2.shape, (8, 128, 256))
+        self.assertEqual(fused_input.weights.w1_scale.shape, (8, 512, 2, 2))
+        self.assertEqual(fused_input.weights.w2_scale.shape, (8, 128, 4, 2))
+        self.assertTrue(fused_input.weights.w1.is_contiguous())
+        self.assertTrue(fused_input.weights.w2.is_contiguous())
+        self.assertTrue(fused_input.weights.w1_scale.is_contiguous())
+        self.assertTrue(fused_input.weights.w2_scale.is_contiguous())
+
+    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_flash_common3_context")
+    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8._EXTRA_CTX")
+    def test_apply_pads_cached_routing_for_mega_moe(self, mock_ctx, mock_get_fc3_context):
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+        self.scheme.process_weights_after_loading(layer)
+        self.scheme.multistream_overlap_gate = True
+        layer.swiglu_limit = 0.0
+        mock_get_fc3_context.return_value = Mock(
+            topk_weights=torch.ones(4, 2),
+            topk_ids=torch.tensor([[0, 1], [1, 0], [0, 1], [1, 0]]),
+        )
+        mock_comm = Mock()
+        mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        mock_ctx.moe_comm_method = mock_comm
+
+        self.scheme.apply(
+            layer,
+            torch.randn(6, self.hidden_size, dtype=torch.bfloat16),
+            torch.randn(6, self.num_experts),
+            top_k=2,
+            renormalize=True,
+            num_experts=self.num_experts,
+            enable_force_load_balance=False,
+        )
+
+        fused_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_input.topk_weights.shape, (6, 2))
+        self.assertEqual(fused_input.topk_ids.shape, (6, 2))
+        self.assertEqual(torch.count_nonzero(fused_input.topk_weights[4:]), 0)
+        self.assertEqual(torch.count_nonzero(fused_input.topk_ids[4:]), 0)
