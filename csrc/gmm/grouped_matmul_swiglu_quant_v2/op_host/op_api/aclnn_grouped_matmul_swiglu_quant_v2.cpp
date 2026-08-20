@@ -26,16 +26,24 @@ namespace {
 constexpr int64_t NZ_K_BLOCK = 16;
 constexpr int64_t NZ_N_BLOCK_INT8 = 32;
 constexpr int64_t NZ_N_BLOCK_INT4 = 64;
-// torch_npu carries packed INT4 values in INT32 storage. The last physical
-// dimension is expanded by INT4_PER_INT32 later in gmm_dsq_base::UnpackInt32ToInt4.
+// VA W4A8 packs two INT4 values into one INT8, NZ-casts as INT8, then views
+// as INT32. UnpackInt32ToInt4 later expands the last physical dim by 8.
 constexpr int64_t NZ_STORAGE_LAST_DIM_PACKED_INT4 = 8;
 
 op::Shape GetWeightNzStorageShape(const aclTensor *weight, int64_t expertNum, int64_t k, int64_t n,
                                   bool singleTensor)
 {
-    const bool isA8W8 = weight->GetDataType() == op::DataType::DT_INT8;
-    const int64_t nBlock = isA8W8 ? NZ_N_BLOCK_INT8 : NZ_N_BLOCK_INT4;
-    const int64_t lastDim = isA8W8 ? NZ_N_BLOCK_INT8 : NZ_STORAGE_LAST_DIM_PACKED_INT4;
+    const auto dtype = weight->GetDataType();
+    int64_t nBlock = NZ_N_BLOCK_INT8;
+    int64_t lastDim = NZ_N_BLOCK_INT8;
+    if (dtype == op::DataType::DT_INT32) {
+        // Production W4A8: `n` is the logical INT4 N from weight_scale.
+        nBlock = NZ_N_BLOCK_INT4;
+        lastDim = NZ_STORAGE_LAST_DIM_PACKED_INT4;
+    } else if (dtype != op::DataType::DT_INT8) {
+        nBlock = NZ_N_BLOCK_INT4;
+        lastDim = NZ_N_BLOCK_INT4;
+    }
     if (singleTensor) {
         return {expertNum, n / nBlock, k / NZ_K_BLOCK, NZ_K_BLOCK, lastDim};
     }

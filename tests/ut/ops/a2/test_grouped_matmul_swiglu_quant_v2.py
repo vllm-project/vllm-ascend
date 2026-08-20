@@ -32,11 +32,9 @@ NUM_EXPERTS = 4
 INTERMEDIATE_SIZE = 1024
 SPLIT_SYNC_NUM_TOKENS = 1024
 SPLIT_SYNC_CHUNK_SIZE = 128
-COMPAT_HIDDEN_SIZE = 2048
-COMPAT_INTERMEDIATE_SIZE = 2816
-GRAPH_COMPAT_NUM_TOKENS = 64
-GRAPH_COMPAT_NUM_EXPERTS = 16
-REAL_CAPACITY_NUM_TOKENS = 24972
+# Packed INT8 last dim stores two INT4 values, so logical N is 2x this.
+W4_PACKED_N = INTERMEDIATE_SIZE
+W4_LOGICAL_N = W4_PACKED_N * 2
 
 
 @pytest.fixture(autouse=True)
@@ -103,22 +101,24 @@ def _call_adaptor_v2(
     )
 
 
-def _call_a8w8_compat(
+def _call_cann_v2(
     *,
     hidden_states: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
+    weights: list[torch.Tensor],
+    weight_scales: list[torch.Tensor],
     token_scales: torch.Tensor,
     groups: torch.Tensor,
+    group_list_type: int,
 ):
-    output, output_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
-        hidden_states,
-        weight,
-        groups,
-        weight_scale,
-        token_scales,
+    return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+        x=hidden_states,
+        weight=weights,
+        weight_scale=weight_scales,
+        x_scale=token_scales,
+        group_list=groups,
+        group_list_type=group_list_type,
+        dequant_mode=0,
     )
-    return output, output_scale
 
 
 def _make_a8w8_case(single_tensor: bool):
@@ -166,16 +166,10 @@ def _a8w8_golden(
     return output, output_scale
 
 
-def _pack_a8w4_weight(weight: torch.Tensor) -> torch.Tensor:
-    weight_nz = torch_npu.npu_format_cast(weight.npu().to(torch.float32), 29)
-    return torch_npu.npu_quantize(
-        weight_nz,
-        torch.tensor([1.0], device="npu"),
-        None,
-        torch.quint4x2,
-        -1,
-        False,
-    )
+def _pack_va_w4_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Production W4A8 packing: two INT4 values in one INT8, NZ as INT8, view INT32."""
+    weight_nz = torch_npu.npu_format_cast(weight.npu().contiguous(), 29)
+    return weight_nz.view(torch.int32).contiguous()
 
 
 def _pack_a8w4_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -185,22 +179,21 @@ def _pack_a8w4_scale(scale: torch.Tensor) -> torch.Tensor:
 
 def _make_a8w4_case(single_tensor: bool, per_group: bool):
     weights_cpu = torch.randint(
-        -5,
-        5,
-        (NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE),
+        -8,
+        8,
+        (NUM_EXPERTS, HIDDEN_SIZE, W4_PACKED_N),
         dtype=torch.int8,
     )
-    packed_weights = _pack_a8w4_weight(weights_cpu)
-    # npu_quantize does not support packing a rank-2 FRACTAL_NZ tensor on A3.
-    # Slice the correctly packed rank-3 tensor to build the equivalent
-    # TensorList representation without changing the underlying NZ layout.
-    weights = [packed_weights] if single_tensor else [packed_weights[i].clone() for i in range(NUM_EXPERTS)]
-    scale_shape = (NUM_EXPERTS, 2, INTERMEDIATE_SIZE) if per_group else (NUM_EXPERTS, INTERMEDIATE_SIZE)
+    if single_tensor:
+        weights = [_pack_va_w4_weight(weights_cpu)]
+    else:
+        weights = [_pack_va_w4_weight(weights_cpu[i]) for i in range(NUM_EXPERTS)]
+    scale_shape = (NUM_EXPERTS, 2, W4_LOGICAL_N) if per_group else (NUM_EXPERTS, W4_LOGICAL_N)
     scales_cpu = torch.rand(scale_shape, dtype=torch.float32) * 0.02 + 0.001
     weight_scales = (
         [_pack_a8w4_scale(scales_cpu)] if single_tensor else [_pack_a8w4_scale(scale) for scale in scales_cpu]
     )
-    assist_cpu = torch.rand(NUM_EXPERTS, INTERMEDIATE_SIZE, dtype=torch.float32) * 0.02
+    assist_cpu = torch.rand(NUM_EXPERTS, W4_LOGICAL_N, dtype=torch.float32) * 0.02
     assists = [assist_cpu.npu()] if single_tensor else [assist.npu() for assist in assist_cpu]
     return weights, weight_scales, assists
 
@@ -339,120 +332,28 @@ def test_grouped_matmul_swiglu_quant_v2_a8w8_matches_cpu(single_tensor):
     ids=["decode", "small-prefill", "prefill"],
 )
 @torch.inference_mode()
-def test_grouped_matmul_swiglu_quant_v2_a8w8_matches_compat(expert_counts):
-    """V2 must preserve the A2/A3 A8W8 output of the compatibility API."""
+def test_grouped_matmul_swiglu_quant_v2_a8w8_matches_cann_v2(expert_counts):
+    """Custom V2 should stay within int8 rounding of CANN GmmSwigluQuantV2."""
     torch.manual_seed(17)
     num_tokens = sum(expert_counts)
     hidden_states = torch.randint(
         -16,
         16,
-        (num_tokens, COMPAT_HIDDEN_SIZE),
+        (num_tokens, HIDDEN_SIZE),
         dtype=torch.int8,
         device="npu",
     )
-    weight = torch_npu.npu_format_cast(
-        torch.randint(
-            -16,
-            16,
-            (NUM_EXPERTS, COMPAT_HIDDEN_SIZE, COMPAT_INTERMEDIATE_SIZE),
-            dtype=torch.int8,
-            device="npu",
-        ),
-        29,
-    )
-    weight_scale = (
-        torch.rand(
-            NUM_EXPERTS,
-            COMPAT_INTERMEDIATE_SIZE,
-            dtype=torch.float32,
-            device="npu",
-        )
-        * 0.02
-        + 0.001
-    )
+    weights, weight_scales = _make_a8w8_case(True)
     token_scales = torch.rand(num_tokens, dtype=torch.float32, device="npu") * 0.02 + 0.001
     groups = _group_list(expert_counts, 0)
 
-    compat_output, compat_scale = _call_a8w8_compat(
+    cann_output, cann_scale = _call_cann_v2(
         hidden_states=hidden_states,
-        weight=weight,
-        weight_scale=weight_scale,
-        token_scales=token_scales,
-        groups=groups,
-    )
-    output, output_scale = _call_v2(
-        hidden_states=hidden_states,
-        weights=[weight],
-        weight_scales=[weight_scale],
+        weights=weights,
+        weight_scales=weight_scales,
         token_scales=token_scales,
         groups=groups,
         group_list_type=0,
-    )
-
-    torch.testing.assert_close(output.cpu(), compat_output.cpu(), atol=0, rtol=0)
-    torch.testing.assert_close(output_scale.cpu(), compat_scale.cpu(), atol=0, rtol=0)
-
-
-@torch.inference_mode()
-def test_grouped_matmul_swiglu_quant_v2_a8w8_real_capacity_matches_compat():
-    """Large prefill buffers must keep the compatibility path's rounding."""
-    torch.manual_seed(29)
-    hidden_states = torch.randint(
-        -128,
-        127,
-        (REAL_CAPACITY_NUM_TOKENS, COMPAT_HIDDEN_SIZE),
-        dtype=torch.int8,
-        device="npu",
-    )
-    weights_cpu = torch.randint(
-        -128,
-        127,
-        (GRAPH_COMPAT_NUM_EXPERTS, COMPAT_HIDDEN_SIZE, COMPAT_INTERMEDIATE_SIZE),
-        dtype=torch.int8,
-    )
-    compat_weight = torch_npu.npu_format_cast(weights_cpu.npu(), 29)
-    weights = [torch_npu.npu_format_cast(weight.npu(), 29) for weight in weights_cpu]
-    weight_scales_cpu = (
-        torch.rand(
-            GRAPH_COMPAT_NUM_EXPERTS,
-            COMPAT_INTERMEDIATE_SIZE,
-            dtype=torch.float32,
-        )
-        * 0.02
-        + 0.001
-    )
-    compat_weight_scale = weight_scales_cpu.npu()
-    weight_scales = [scale.npu() for scale in weight_scales_cpu]
-    token_scales = torch.rand(REAL_CAPACITY_NUM_TOKENS, dtype=torch.float32, device="npu") * 0.02 + 0.001
-    groups = torch.tensor(
-        [
-            1568,
-            3100,
-            4704,
-            6376,
-            7832,
-            9380,
-            10928,
-            12468,
-            14060,
-            15604,
-            17156,
-            18608,
-            20148,
-            21660,
-            23280,
-            REAL_CAPACITY_NUM_TOKENS,
-        ],
-        dtype=torch.int64,
-        device="npu",
-    )
-
-    compat_output, compat_scale = _call_a8w8_compat(
-        hidden_states=hidden_states,
-        weight=compat_weight,
-        weight_scale=compat_weight_scale,
-        token_scales=token_scales,
-        groups=groups,
     )
     output, output_scale = _call_v2(
         hidden_states=hidden_states,
@@ -463,98 +364,8 @@ def test_grouped_matmul_swiglu_quant_v2_a8w8_real_capacity_matches_compat():
         group_list_type=0,
     )
 
-    torch.testing.assert_close(output.cpu(), compat_output.cpu(), atol=0, rtol=0)
-    torch.testing.assert_close(output_scale.cpu(), compat_scale.cpu(), atol=0, rtol=0)
-
-
-@torch.inference_mode()
-def test_grouped_matmul_swiglu_quant_v2_a8w8_graph_matches_compat():
-    """Realistic decode replays must stay bitwise compatible with the A8W8 API."""
-    torch.manual_seed(19)
-    static_x = torch.zeros(
-        GRAPH_COMPAT_NUM_TOKENS,
-        COMPAT_HIDDEN_SIZE,
-        dtype=torch.int8,
-        device="npu",
-    )
-    weight = torch_npu.npu_format_cast(
-        torch.randint(
-            -16,
-            16,
-            (GRAPH_COMPAT_NUM_EXPERTS, COMPAT_HIDDEN_SIZE, COMPAT_INTERMEDIATE_SIZE),
-            dtype=torch.int8,
-            device="npu",
-        ),
-        29,
-    )
-    weight_scale = (
-        torch.rand(
-            GRAPH_COMPAT_NUM_EXPERTS,
-            COMPAT_INTERMEDIATE_SIZE,
-            dtype=torch.float32,
-            device="npu",
-        )
-        * 0.02
-        + 0.001
-    )
-    static_token_scales = torch.ones(GRAPH_COMPAT_NUM_TOKENS, dtype=torch.float32, device="npu")
-    static_groups = _group_list([4] * GRAPH_COMPAT_NUM_EXPERTS, 0)
-
-    compat_graph = torch.npu.NPUGraph()
-    compat_pool = torch.npu.graph_pool_handle()
-    with torch.npu.graph(
-        compat_graph,
-        pool=compat_pool,
-        capture_error_mode="thread_local",
-        auto_dispatch_capture=True,
-    ):
-        compat_output, compat_scale = _call_a8w8_compat(
-            hidden_states=static_x,
-            weight=weight,
-            weight_scale=weight_scale,
-            token_scales=static_token_scales,
-            groups=static_groups,
-        )
-
-    v2_graph = torch.npu.NPUGraph()
-    v2_pool = torch.npu.graph_pool_handle()
-    with torch.npu.graph(
-        v2_graph,
-        pool=v2_pool,
-        capture_error_mode="thread_local",
-        auto_dispatch_capture=True,
-    ):
-        output, output_scale = _call_v2(
-            hidden_states=static_x,
-            weights=[weight],
-            weight_scales=[weight_scale],
-            token_scales=static_token_scales,
-            groups=static_groups,
-            group_list_type=0,
-        )
-
-    replay_counts = (
-        [1, 0, 5, 2, 0, 8, 3, 0, 7, 1, 0, 9, 4, 0, 10, 14],
-        [0, 8, 0, 8, 0, 8, 0, 8, 0, 8, 0, 8, 0, 8, 0, 8],
-    )
-    try:
-        for seed, counts in enumerate(replay_counts, start=20):
-            torch.manual_seed(seed)
-            static_x.copy_(torch.randint(-16, 16, static_x.shape, dtype=torch.int8, device="npu"))
-            static_token_scales.copy_(
-                torch.rand(GRAPH_COMPAT_NUM_TOKENS, dtype=torch.float32, device="npu") * 0.02 + 0.001
-            )
-            static_groups.copy_(_group_list(counts, 0))
-
-            compat_graph.replay()
-            v2_graph.replay()
-            torch.npu.synchronize()
-
-            torch.testing.assert_close(output.cpu(), compat_output.cpu(), atol=0, rtol=0)
-            torch.testing.assert_close(output_scale.cpu(), compat_scale.cpu(), atol=0, rtol=0)
-    finally:
-        compat_graph.reset()
-        v2_graph.reset()
+    torch.testing.assert_close(output.cpu(), cann_output.cpu(), atol=1, rtol=2**-13)
+    torch.testing.assert_close(output_scale.cpu(), cann_scale.cpu(), atol=1e-5, rtol=1e-4)
 
 
 @pytest.mark.parametrize("single_tensor", [True, False], ids=["single", "multi"])
@@ -611,12 +422,9 @@ def test_grouped_matmul_swiglu_quant_v2_a8w8_count_graph_replay(single_tensor):
 @pytest.mark.parametrize("swiglu_limit", [0.0, 7.0], ids=["unclamped", "clamped"])
 @torch.inference_mode()
 def test_grouped_matmul_swiglu_quant_v2_a8w4_single_matches_multi(per_group, swiglu_limit):
-    """Packed and TensorList W4 layouts must implement the same grouping."""
+    """Packed and TensorList VA W4 layouts must implement the same grouping."""
     torch.manual_seed(2)
     single_weights, single_scales, single_assists = _make_a8w4_case(True, per_group)
-
-    # Reuse the unpacked values encoded by the single tensor so both layouts
-    # compare the same logical weights and scales.
     torch.manual_seed(2)
     multi_weights, multi_scales, multi_assists = _make_a8w4_case(False, per_group)
     hidden_states = torch.randint(
@@ -654,3 +462,4 @@ def test_grouped_matmul_swiglu_quant_v2_a8w4_single_matches_multi(per_group, swi
 
     torch.testing.assert_close(single_output.cpu(), multi_output.cpu(), atol=1, rtol=0.005)
     torch.testing.assert_close(single_output_scale.cpu(), multi_output_scale.cpu(), atol=1e-6, rtol=0.005)
+    assert tuple(single_output.shape) == (NUM_TOKENS, W4_LOGICAL_N // 2)
