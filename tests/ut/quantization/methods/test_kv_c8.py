@@ -151,7 +151,7 @@ class TestAscendFAQuantAttentionMethodInit(unittest.TestCase):
         self.mock_hf_config = Mock()
         self.mock_hf_config.kv_lora_rank = 128
         self.mock_hf_config.qk_rope_head_dim = 64
-        self.mock_config.model_config.hf_config = self.mock_hf_config
+        self.mock_config.model_config.hf_text_config = self.mock_hf_config
         self.mock_get_config.return_value = self.mock_config
 
         # Import the class after patching
@@ -192,7 +192,7 @@ class TestAscendFAQuantAttentionMethodCreateWeights(unittest.TestCase):
         self.mock_hf_config = Mock()
         self.mock_hf_config.kv_lora_rank = 128
         self.mock_hf_config.qk_rope_head_dim = 64
-        self.mock_config.model_config.hf_config = self.mock_hf_config
+        self.mock_config.model_config.hf_text_config = self.mock_hf_config
         self.mock_get_config.return_value = self.mock_config
 
         # Import the class
@@ -308,7 +308,7 @@ class TestAscendFAQuantAttentionMethodProcessWeights(unittest.TestCase):
         self.mock_hf_config = Mock()
         self.mock_hf_config.kv_lora_rank = 64
         self.mock_hf_config.qk_rope_head_dim = 32
-        self.mock_config.model_config.hf_config = self.mock_hf_config
+        self.mock_config.model_config.hf_text_config = self.mock_hf_config
         self.mock_get_config.return_value = self.mock_config
 
         # Import the class
@@ -363,7 +363,7 @@ class TestIntegration(unittest.TestCase):
         self.mock_hf_config = Mock()
         self.mock_hf_config.kv_lora_rank = 64
         self.mock_hf_config.qk_rope_head_dim = 32
-        self.mock_config.model_config.hf_config = self.mock_hf_config
+        self.mock_config.model_config.hf_text_config = self.mock_hf_config
         self.mock_get_config.return_value = self.mock_config
 
         # Mock distributed functions
