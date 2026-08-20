@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+ABORT_REQUEST_MSG = b"abort_request_msg"
 
 
 # A busy peer can otherwise keep a global executor worker forever when the
@@ -161,6 +162,15 @@ class KVCacheTaskTracker:
                     request_id,
                 )
 
+    def abort_request(self, request_id: str) -> None:
+        """Force-release a prefiller request aborted by the decoder."""
+        with self.done_task_lock:
+            if request_id in self.reqs_to_process:
+                self.reqs_to_process.discard(request_id)
+                self.delayed_free_requests.pop(request_id, None)
+                self.finished_requests.add(request_id)
+
+
     def get_and_clear_finished_requests(self) -> set[str]:
         """
         Get and clear the requests that have been completed.
@@ -232,6 +242,7 @@ class KVCacheSendingThread(threading.Thread):
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
+
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -341,10 +352,15 @@ class KVCacheSendingThread(threading.Thread):
                             # If the socket is not ready, retry sending.
                             logger.debug("Socket not ready, retrying to send ACK for request %s", msg[1])
                             time.sleep(0.01)
+                elif msg[0] == ABORT_REQUEST_MSG:
+                    request_id = msg[1]
+                    self.task_tracker.abort_request(request_id)
+                    sock.send_multipart((identity, b"", b"ACK"))
+                    logger.info("Prefill handled abort request and sent ACK: request_id=%s", request_id)
                 else:
                     logger.error(
                         "Connection listener received unexpected message type. "
-                        "Expected: GET_META_MSG or DONE_RECVING_MSG. "
+                        "Expected: GET_META_MSG, DONE_RECVING_MSG, or ABORT_REQUEST_MSG. "
                         "Actual: %s. "
                         "Full message: %s. "
                         "Check: Verify message protocol implementation.",
@@ -489,6 +505,7 @@ class KVCacheRecvingThread(threading.Thread):
                 "all_task_done": all_task_done,
             }
         )
+
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
