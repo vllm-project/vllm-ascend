@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from functools import lru_cache
+from math import lcm
 from typing import Any
 
 import torch
@@ -162,6 +163,27 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     chunked_prefill_workspace_size = max(
         chunked_prefill_workspace_size,
         scheduler_config.max_num_seqs * cache_config.block_size,
+    )
+
+    # Upstream aligns the MLA chunked-context workspace so the enlarged DCP
+    # workspace (size + size // dcp_world_size) splits evenly across ranks
+    # (see align_mla_chunked_context_workspace_size in mla_attention.py). Mirror
+    # that alignment here so MLACommonMetadataBuilder's DCP assert holds for any
+    # decode_context_parallel_size. No-op when DCP is disabled.
+    parallel_config = vllm_config.parallel_config
+    alignment = cache_config.block_size
+    if parallel_config.decode_context_parallel_size > 1:
+        alignment = lcm(
+            alignment,
+            parallel_config.decode_context_parallel_size
+            * parallel_config.cp_kv_cache_interleave_size,
+        )
+    chunked_prefill_workspace_size = max(
+        chunked_prefill_workspace_size,
+        scheduler_config.max_num_seqs * alignment,
+    )
+    chunked_prefill_workspace_size = (
+        (chunked_prefill_workspace_size + alignment - 1) // alignment * alignment
     )
 
     return chunked_prefill_workspace_size

@@ -128,16 +128,6 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError(
-            "The static NPU IPC trainer path has been replaced by "
-            "NPUIPCTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init("
-            "NPUIPCTrainerInitInfo(...), client=..., "
-            "source=...) and drive it with send_weights()."
-        )
-
     def __init__(  # type: ignore[misc]
         self,
         config: WeightTransferConfig,

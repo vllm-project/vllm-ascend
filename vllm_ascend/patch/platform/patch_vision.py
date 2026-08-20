@@ -22,10 +22,16 @@
 # passes eps=0.0 it works fine upstream, but fails on vllm-ascend with
 # "batch_norm eps must be positive" on Ascend. This patch replaces eps to avoid
 # the error.
+#
+# Upstream main replaced FusedInputNorm.forward with a plain per-channel affine
+# (no F.batch_norm, no running_mean/running_var buffers), so the patch is only
+# installed on the fixed branch where the batch-norm implementation remains.
 
 import contextlib
 
 import torch
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
@@ -50,9 +56,10 @@ def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
 
 
 def install_patch():
-    from vllm.model_executor.models.vision import FusedInputNorm
+    if vllm_version_is("0.27.1"):
+        from vllm.model_executor.models.vision import FusedInputNorm  # type: ignore[import-not-found]
 
-    FusedInputNorm.forward = _patched_fused_input_norm_forward
+        FusedInputNorm.forward = _patched_fused_input_norm_forward
 
 
 with contextlib.suppress(ImportError):

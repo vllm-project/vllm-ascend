@@ -201,26 +201,36 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
-            if self.ascend_shared_experts is None:
-                return self.routed_experts.forward_impl(
-                    hidden_states=hidden_states,
-                    router_logits=router_logits,
-                    input_ids=input_ids,
-                )
-            if self.is_internal_router:
-                gate = self.gate
-                assert gate is not None
+            gate = self.gate
+            if gate is not None:
+                # Upstream model forwards no longer compute the MoE gate
+                # themselves — they pass `router_logits=hidden_states` and rely
+                # on the runner to apply it. Apply the gate whenever the runner
+                # owns one: DeepSeek-V4 delegates via a precast fp32 weight,
+                # while qwen3_moe / deepseek_v2 route through a regular gate
+                # linear. MiniMax-M2 keeps a model-side gate and passes no gate
+                # to the runner, so it is skipped here (no double application).
                 # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
                 # increase with extra hidden states. We also assume that all gate
                 # linear is unquantized so that we the weight is pre-casted in
                 # process_weights_after_loading of AscendUnquantizedLinearMethod.
                 hidden_states_fp32 = hidden_states.float()
                 before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                gate_weight = getattr(gate, "weight_fp32", None) or gate.weight
+                router_logits = F.linear(
+                    hidden_states_fp32, gate_weight, getattr(gate, "bias", None)
+                )
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()
                 after_routed_experts = None
+
+            if self.ascend_shared_experts is None:
+                return self.routed_experts.forward_impl(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
 
             routed_out, fused_moe_events = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
