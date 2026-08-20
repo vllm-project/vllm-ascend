@@ -39,5 +39,7 @@ def test_qwen3_large_mixed_batch_exceeding_triton_grid_limit() -> None:
     ) as runner:
         outputs = runner.model.generate(prompts, sampling_params)
 
+    print(f"Generation completed: output_count={len(outputs)}", flush=True)
+
     assert len(outputs) == 512
     assert all(output.outputs and output.outputs[0].token_ids for output in outputs)

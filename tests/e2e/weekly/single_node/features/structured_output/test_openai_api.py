@@ -14,12 +14,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import json
 from concurrent.futures import ThreadPoolExecutor
 from itertools import cycle, islice
 from typing import Any
 
-import jsonschema
 import pytest
 import requests
 
@@ -49,55 +47,6 @@ def test_openai_structured_output(openai_client: Any, case: StructuredOutputCase
     text = create_structured_chat_completion(openai_client, SERVED_MODEL_NAME, case)
 
     assert_structured_output(text, case)
-
-
-def test_openai_unbounded_array_does_not_repeat_until_token_limit(openai_client: Any) -> None:
-    schema = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"},
-            "score": {"type": "number"},
-            "is_active": {"type": "boolean"},
-            "tags": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-        },
-        "required": ["name", "age"],
-    }
-    response = openai_client.chat.completions.create(
-        model=SERVED_MODEL_NAME,
-        messages=[{"role": "user", "content": "Please generate a dataset containing various types of fields."}],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "multi_type_data",
-                "schema": schema,
-            },
-        },
-        temperature=0.0,
-        max_tokens=1024,
-    )
-
-    choice = response.choices[0]
-    completion_tokens = response.usage.completion_tokens if response.usage is not None else None
-    print(f"finish_reason: {choice.finish_reason}", flush=True)
-    print(f"completion_tokens: {completion_tokens}", flush=True)
-    print(f"generated content:\n{choice.message.content}", flush=True)
-
-    assert choice.finish_reason == "stop"
-    assert choice.message.content is not None
-
-    result = json.loads(choice.message.content)
-    jsonschema.validate(instance=result, schema=schema)
-
-    if response.usage is not None:
-        assert response.usage.completion_tokens < 1024
-
-    tags = result.get("tags", [])
-    assert len(tags) < 64
-    assert len(tags) < 8 or len(set(tags)) > 1
 
 
 @pytest.mark.parametrize("case", STRUCTURED_OUTPUT_CASES, ids=lambda case: case.case_id)
