@@ -1,6 +1,8 @@
-# Decode Context Parallel Guide
+# Context Parallel Guide
 
 ## Overview
+
+The context parallel features include Decode Context Parallel (DCP) and DSA-CP.
 
 Decode Context Parallel (DCP) shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It removes redundant KV-cache copies and can increase the batch size available for long-context decoding.
 
@@ -24,33 +26,29 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 - 🔴 **Not supported**: Combining the feature with DCP is not supported.
 - **Not applicable**: The feature does not apply to this attention backend.
 
+DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D disaggregation on the model and hardware combinations documented by vLLM Ascend
+
 ## Usage
 
-Offline example:
-
-```python
-from vllm import LLM, SamplingParams
-
-prompts = ["The future of AI is"]
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-
-llm = LLM(
-    model="deepseek-ai/DeepSeek-V2-Lite",
-    tensor_parallel_size=2,
-    decode_context_parallel_size=2,
-)
-outputs = llm.generate(prompts, sampling_params)
-```
-
-Online example:
+### DCP
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-V2-Lite \
-    --tensor-parallel-size 2 \
-    --decode-context-parallel-size 2
+vllm serve <glm-5.2-model> \
+  --tensor-parallel-size <N> \
+  --prefill-context-parallel-size 1 \
+  --decode-context-parallel-size <N> \
+  --block-size <B> \
+  --cp-kv-cache-interleave-size <B> \
 ```
 
-DCP reuses the TP devices and does not increase the world size.
+### DSA-CP
+
+```bash
+vllm serve <glm-5.2-model> \
+  --tensor-parallel-size <N> \
+  --block-size <B> \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true}'
+```
 
 ## Constraints
 
