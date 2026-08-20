@@ -3987,6 +3987,106 @@ class NPUModelRunner(GPUModelRunner):
 
         return dsa_k_tensor, dsa_k_scale_tensor
 
+    def _get_hybrid_attn_mamba_layout_layers(
+        self,
+        kv_cache_config: KVCacheConfig,
+        layer_kv_cache_spec: dict[str, KVCacheSpec],
+    ) -> set[str]:
+        """Return layers that use Ascend's shared attention-Mamba layout.
+
+        A tensor directly shared by attention and Mamba identifies a hybrid
+        physical page size. Other tensors with the same page size must use the
+        same planar raw layout as well (for example, an unpaired target/MTP
+        attention layer). Tensors with another page size, such as a standalone
+        BF16 draft cache, keep the normal contiguous K/V layout.
+
+        Classifying all tensors before allocation makes the result independent
+        of ``kv_cache_config.kv_cache_tensors`` iteration order.
+        """
+
+        def is_layout_attention_spec(spec: KVCacheSpec) -> bool:
+            return (
+                isinstance(spec, AttentionSpec)
+                and not isinstance(spec, AscendSFAIndexerCacheSpec)
+                and not is_hidden_state_cache_spec(spec)
+            )
+
+        hybrid_page_sizes: set[int] = set()
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            tensor_specs = [
+                layer_kv_cache_spec[layer_name]
+                for layer_name in kv_cache_tensor.shared_by
+            ]
+            has_mamba = any(isinstance(spec, MambaSpec) for spec in tensor_specs)
+            has_attention = any(
+                is_layout_attention_spec(spec) for spec in tensor_specs
+            )
+            if not (has_mamba and has_attention):
+                continue
+
+            page_sizes = {
+                spec.page_size_bytes
+                for spec in tensor_specs
+                if isinstance(spec, MambaSpec) or is_layout_attention_spec(spec)
+            }
+            if len(page_sizes) != 1:
+                raise ValueError(
+                    "Attention and Mamba layers sharing a KV cache tensor must "
+                    f"have one physical page size, got {sorted(page_sizes)} for "
+                    f"layers {kv_cache_tensor.shared_by}."
+                )
+            hybrid_page_sizes.update(page_sizes)
+
+        # Pipeline-parallel projection keeps empty KV groups in the worker
+        # config. A stage can therefore own only a padded target-attention
+        # tensor while the corresponding Mamba group has no local layer and no
+        # directly shared descriptor. The retained group spec still identifies
+        # the physical page family that must use the hybrid planar layout.
+        mamba_group_page_sizes = {
+            group.kv_cache_spec.page_size_bytes
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        padded_mla_page_sizes = {
+            spec.page_size_bytes
+            for spec in layer_kv_cache_spec.values()
+            if isinstance(spec, AscendMLAAttentionSpec)
+            and spec.page_size_padded is not None
+            and spec.page_size_padded > spec.unpadded_page_size_bytes
+        }
+        hybrid_page_sizes.update(
+            mamba_group_page_sizes.intersection(padded_mla_page_sizes)
+        )
+
+        if not hybrid_page_sizes:
+            return set()
+
+        hybrid_layout_layers: set[str] = set()
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            layout_layers = []
+            other_layout_layers = []
+            for layer_name in kv_cache_tensor.shared_by:
+                spec = layer_kv_cache_spec[layer_name]
+                if not (
+                    isinstance(spec, MambaSpec)
+                    or is_layout_attention_spec(spec)
+                ):
+                    continue
+                if spec.page_size_bytes in hybrid_page_sizes:
+                    layout_layers.append(layer_name)
+                else:
+                    other_layout_layers.append(layer_name)
+
+            if layout_layers and other_layout_layers:
+                raise ValueError(
+                    "A KV cache tensor cannot mix Ascend hybrid-planar and "
+                    "standard contiguous layouts. Hybrid layers: "
+                    f"{layout_layers}; standard layers: {other_layout_layers}."
+                )
+            hybrid_layout_layers.update(layout_layers)
+
+        return hybrid_layout_layers
+
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -4008,24 +4108,30 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-        # If some tensors are shared by linear layers and attention layers,
-        # the same tensor format must be maintained even if some layers
-        # have only linear or attention layers, for example, the mtp layer.
-        self.hybrid_with_attn_and_mamba = False
+        hybrid_layout_layers = self._get_hybrid_attn_mamba_layout_layers(
+            kv_cache_config,
+            layer_kv_cache_spec,
+        )
+        # Keep this model-level flag for callers that only need to know whether
+        # a hybrid layout exists. Allocation and reshape must use the per-layer
+        # classification above, never this sticky/global value.
+        self.hybrid_with_attn_and_mamba = bool(hybrid_layout_layers)
+        self._hybrid_attn_mamba_layout_layers = hybrid_layout_layers
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            use_mamba, use_attn = False, False
+            use_mamba = False
             for layer_name in kv_cache_tensor.shared_by:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
                     use_mamba = True
-                if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
-                    use_attn = True
-            self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
+            use_hybrid_layout = any(
+                layer_name in hybrid_layout_layers
+                for layer_name in kv_cache_tensor.shared_by
+            )
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
                     "linear_attn" in layer_name
-                    or self.hybrid_with_attn_and_mamba
+                    or use_hybrid_layout
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
                 ) and layer_name not in kv_cache_raw_tensors:
@@ -4114,6 +4220,9 @@ class NPUModelRunner(GPUModelRunner):
                             layer_name,
                             current_kv_cache_spec,
                         )
+                        # Ascend MLA FA quantization is a per-layer property.
+                        # A standalone BF16 draft must not inherit the target
+                        # model's globally enabled KV quantization config.
                         if mla_fa_quant_dtypes is not None:
                             k_cache_dtype, v_cache_dtype = mla_fa_quant_dtypes
                             kv_head_dim_list = [
@@ -4121,7 +4230,14 @@ class NPUModelRunner(GPUModelRunner):
                                 v_dim * get_dtype_size(v_cache_dtype),
                             ]
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
-                        elif not self.use_sparse and enable_fa_quant(self.vllm_config):
+                        elif (
+                            not isinstance(
+                                current_kv_cache_spec,
+                                AscendMLAAttentionSpec,
+                            )
+                            and not self.use_sparse
+                            and enable_fa_quant(self.vllm_config)
+                        ):
                             kv_head_dim_list = [k_dim, v_dim]
                             k_tensor_split_factor, v_tensor_split_factor = (
                                 self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
@@ -4229,6 +4345,12 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        hybrid_layout_layers = self._get_hybrid_attn_mamba_layout_layers(
+            kv_cache_config,
+            layer_kv_cache_spec,
+        )
+        self.hybrid_with_attn_and_mamba = bool(hybrid_layout_layers)
+        self._hybrid_attn_mamba_layout_layers = hybrid_layout_layers
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -4365,7 +4487,7 @@ class NPUModelRunner(GPUModelRunner):
                             sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     elif (
                         self.use_hybrid_blocks
-                        and self.hybrid_with_attn_and_mamba
+                        and layer_name in hybrid_layout_layers
                         and "cache_only_layers" not in layer_name
                         and not is_hidden_state_cache_spec(current_kv_cache_spec)
                     ):
@@ -4439,7 +4561,7 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                        if self.hybrid_with_attn_and_mamba:
+                        if layer_name in hybrid_layout_layers:
                             if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                                 attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                     current_kv_cache_spec.dtype
@@ -4510,9 +4632,17 @@ class NPUModelRunner(GPUModelRunner):
                         layer_name,
                         current_kv_cache_spec,
                     )
+                    # Keep this consistent with allocation: helper=None means
+                    # an Ascend MLA layer uses its own cache dtype.
                     if mla_fa_quant_dtypes is not None:
                         k_cache_dtype, v_cache_dtype = mla_fa_quant_dtypes
-                    elif enable_fa_quant(self.vllm_config):
+                    elif (
+                        not isinstance(
+                            current_kv_cache_spec,
+                            AscendMLAAttentionSpec,
+                        )
+                        and enable_fa_quant(self.vllm_config)
+                    ):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
