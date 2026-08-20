@@ -216,9 +216,8 @@ def load_lora_adapter(
     payload = {
         "lora_name": lora_name,
         "lora_path": lora_path,
+        "load_inplace": load_inplace,
     }
-    if load_inplace:
-        payload["load_inplace"] = True
     print(f"[trainer] Loading LoRA '{lora_name}' from {lora_path} (load_inplace={load_inplace}) ...")
     response = requests.post(url, json=payload, timeout=120)
     response.raise_for_status()
@@ -297,6 +296,8 @@ class LoRAServer:
         self._wait_until_ready(base_url)
 
     def _wait_until_ready(self, base_url: str) -> None:
+        # Only reached from __init__ after Popen() assigned self.proc.
+        assert self.proc is not None
         health_url = f"{base_url}/health"
         deadline = time.monotonic() + SERVER_START_TIMEOUT
         while time.monotonic() < deadline:
@@ -322,7 +323,9 @@ class LoRAServer:
         raise TimeoutError(f"vLLM server did not become ready within {SERVER_START_TIMEOUT}s")
 
     def stop(self) -> None:
-        if self.external or self.proc.poll() is not None:
+        if self.external:
+            return
+        if self.proc is None or self.proc.poll() is not None:
             return
         self.proc.terminate()
         try:
