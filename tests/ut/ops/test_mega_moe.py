@@ -89,7 +89,7 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
             "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
             return_value=_make_mega_moe_group(mega_moe_device_group),
         ),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.logger.info") as mock_info,
+        patch("vllm_ascend.ops.fused_moe.mega_moe.logger.debug") as mock_debug,
     ):
         backend = MegaMoEBackend(_make_moe_config())
         backend.fused_experts(fused_input)
@@ -111,7 +111,7 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     assert mega_moe_kwargs["weight2_type"] == torch.float8_e4m3fn
     assert mega_moe_kwargs["l1_weights_sf"][0].dtype == torch.float8_e8m0fnu
     assert mega_moe_kwargs["l2_weights_sf"][0].dtype == torch.float8_e8m0fnu
-    messages = [call.args[0] for call in mock_info.call_args_list]
+    messages = [call.args[0] for call in mock_debug.call_args_list]
     assert any(message.startswith("A5 MegaMoE creates the process-wide symmetric buffer") for message in messages)
     assert any(message.startswith("A5 MegaMoE call") for message in messages)
     assert any(message.startswith("A5 MegaMoE output") for message in messages)
@@ -199,7 +199,7 @@ def test_main_and_draft_mega_moe_backends_share_single_buffer():
             "vllm_ascend.ops.fused_moe.mega_moe.get_mega_moe_group",
             return_value=_make_mega_moe_group(),
         ),
-        patch("vllm_ascend.ops.fused_moe.mega_moe.logger.info") as mock_info,
+        patch("vllm_ascend.ops.fused_moe.mega_moe.logger.debug") as mock_debug,
     ):
         main_backend = MegaMoEBackend(_make_moe_config())
         draft_backend = MegaMoEBackend(_make_moe_config())
@@ -213,7 +213,7 @@ def test_main_and_draft_mega_moe_backends_share_single_buffer():
     assert all(call.kwargs["sym_buffer"] is sym_buffer for call in mega_moe.call_args_list)
     assert any(
         call.args[0].startswith("A5 MegaMoE reuses the process-wide symmetric buffer")
-        for call in mock_info.call_args_list
+        for call in mock_debug.call_args_list
     )
 
 
