@@ -50,10 +50,11 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     prepare_sparse_kv_offload_mtp_dummy_metadata,
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
-from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _disable_flash_comm_v1_context,
@@ -632,7 +633,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 assert len(self.draft_attn_groups) > 0
                 builder = self.draft_attn_groups[0].get_metadata_builder()
-                kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -640,7 +640,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if self.use_compress:
                         extra_attn_metadata_args.update(
                             common_ratio_to_sas_metadata=dict(),
-                            block_size=kv_cache_spec.block_size,
                         )
                     # Set the real slot_mapping.
                     slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
@@ -1146,7 +1145,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
-                    logits = get_lmhead_tp_group().all_to_all(logits)
+                    # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
+                    logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                 else:
                     logits = self.model.model.logits_processor._gather_logits(logits)
                 if lmhead_tp_enable():
@@ -1337,7 +1337,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
-                        logits = get_lmhead_tp_group().all_to_all(logits)
+                        # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
+                        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                     else:
                         logits = self.model.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
@@ -1721,11 +1722,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         attn_metadata_builder = attn_group.get_metadata_builder()
 
-        extra_attn_metadata_args = {}
+        extra_attn_metadata_args: dict[str, Any] = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
                 common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
         if dcp_manager is not None:
             dcp_manager.prepare_spec_decode_drafting_cp_metadata(
@@ -2171,7 +2171,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.use_compress:
                 extra_attn_metadata_args = dict(
                     common_ratio_to_sas_metadata=dict(),
-                    block_size=attn_group.kv_cache_spec.block_size,
                 )
             if self.method == "dspark":
                 gid = attn_group.kv_cache_group_id

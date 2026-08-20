@@ -1161,6 +1161,8 @@ int64_t get_type_code(at::ScalarType dst_type)
             return 35;
         case at::ScalarType::Float8_e4m3fn:
             return 36;
+        case at::ScalarType::Float4_e2m1fn_x2:
+            return 40;
         case at::ScalarType::Half:
             return 1;
         case at::ScalarType::BFloat16:
@@ -1296,6 +1298,64 @@ at::Tensor npu_lightning_indexer_quant_meta(
     at::Tensor lightning_indexer_quant_output = at::empty_symint(output_size, query.options().dtype(at::kInt));
 
     return lightning_indexer_quant_output;
+}
+
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
+    const at::Tensor &q2k,
+    const at::Tensor &cu_seqlens,
+    const at::Tensor &cu_block_lens,
+    int64_t order_method,
+    int64_t total_rows,
+    int64_t max_kv,
+    int64_t use_simt,
+    int64_t q_global_offset = 0)
+{
+    (void)cu_seqlens;
+    (void)cu_block_lens;
+    (void)order_method;
+    (void)max_kv;
+    (void)use_simt;
+    (void)q_global_offset;
+
+    TORCH_CHECK(q2k.dim() == 3, "q2k must be 3-D [H, T, topk]");
+    const c10::SymInt H = q2k.sym_size(0);
+    const c10::SymInt T = q2k.sym_size(1);
+    const c10::SymInt topk = q2k.sym_size(2);
+    // ACLGraph capture should pass total_rows explicitly; fallback keeps shape valid.
+    const c10::SymInt tr = total_rows >= 0 ? c10::SymInt(total_rows) : c10::SymInt(1);
+    auto opts = q2k.options().dtype(at::kInt);
+    at::Tensor row_ptr = at::empty_symint(c10::SymDimVector{H, tr + 1}, opts);
+    at::Tensor q_ind = at::empty_symint(c10::SymDimVector{H, T * topk}, opts);
+    at::Tensor slot = at::empty_symint(c10::SymDimVector{H, T * topk}, opts);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(row_ptr, q_ind, slot);
+}
+
+at::Tensor npu_sparse_attention_score_prefill_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &block_table,
+    const at::Tensor &k2q_row_ptr,
+    const at::Tensor &k2q_q_indices,
+    const at::Tensor &k2q_slot_indices,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
+{
+    (void)key;
+    (void)value;
+    (void)block_table;
+    (void)k2q_row_ptr;
+    (void)k2q_q_indices;
+    (void)k2q_slot_indices;
+    (void)num_key_value_heads;
+    (void)scale_value;
+    (void)block_size;
+    (void)top_k;
+    (void)inner_precise;
+    (void)actual_seq_lengths;
+    (void)actual_seq_lengths_kv;
+    return at::empty_like(query);
 }
 
 void npu_scatter_nd_update_v2_meta(
@@ -1464,6 +1524,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
+    ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
+    ops.impl("npu_sparse_attention_score_prefill",
+             &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine

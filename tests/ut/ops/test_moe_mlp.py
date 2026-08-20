@@ -15,12 +15,14 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
 from vllm_ascend.ops.fused_moe.moe_mlp import (
+    _swiglu_oai_dynamic_mx_quant,
     cumsum_group_list,
     quant_apply_mlp,
     unified_apply_mlp,
     unquant_apply_mlp,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import AscendDeviceType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
@@ -72,7 +74,92 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
         )
 
 
+class TestSwigluOaiDynamicMxQuant(unittest.TestCase):
+    def test_uses_small_op_activation_and_dynamic_mx_quant(self):
+        hidden_states = torch.randn(2, 8)
+        activated = torch.randn(2, 4)
+        quantized = torch.randn(2, 4)
+        output_scale = torch.randn(2, 1)
+
+        with (
+            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A5),
+            patch(
+                f"{MOE_MLP}._apply_clipped_swiglu",
+                return_value=activated,
+            ) as mock_activation,
+            patch.object(
+                DeviceOperator,
+                "npu_dynamic_quant",
+                return_value=(quantized, output_scale),
+            ) as mock_dynamic_quant,
+        ):
+            output, actual_scale = _swiglu_oai_dynamic_mx_quant(
+                hidden_states,
+                act_quant_type=torch.float8_e4m3fn,
+                swiglu_limit=7.0,
+                swiglu_alpha=1.5,
+                swiglu_beta=0.25,
+            )
+
+        self.assertIs(output, quantized)
+        self.assertIs(actual_scale, output_scale)
+        mock_activation.assert_called_once_with(
+            hidden_states,
+            swiglu_limit=7.0,
+            swiglu_alpha=1.5,
+            swiglu_beta=0.25,
+        )
+        mock_dynamic_quant.assert_called_once_with(
+            activated,
+            act_quant_type=torch.float8_e4m3fn,
+            use_mxfp_quant=True,
+        )
+
+
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
+    def test_unquant_swigluoai_uninterleave_falls_back_on_a5(self):
+        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+        gate_up_out = torch.randn(2, 16, dtype=torch.bfloat16)
+        expected_output = torch.randn(2, 8, dtype=torch.bfloat16)
+        w1 = torch.randn(2, 8, 16, dtype=torch.bfloat16)
+        w2 = torch.randn(2, 8, 8, dtype=torch.bfloat16)
+        swiglu_limit = 7.0
+        swiglu_alpha = 1.702
+        swiglu_beta = 1.0
+
+        gate = gate_up_out[..., :8].clamp(max=swiglu_limit)
+        up = gate_up_out[..., 8:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
+        )
+        expected_activation = gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
+
+        with (
+            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A5),
+            patch(
+                "torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up_out], [expected_output]],
+                create=True,
+            ) as mock_grouped_matmul,
+            patch("torch_npu.npu_clipped_swiglu", create=True) as mock_clipped_swiglu,
+        ):
+            output, _ = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                group_list=torch.tensor([1, 1]),
+                activation="swigluoai_uninterleave",
+                need_trans=False,
+                swiglu_limit=swiglu_limit,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_beta=swiglu_beta,
+            )
+
+        self.assertIs(output, expected_output)
+        second_call = mock_grouped_matmul.call_args_list[1]
+        torch.testing.assert_close(second_call.kwargs["x"][0], expected_activation)
+        mock_clipped_swiglu.assert_not_called()
+
     def test_unquant_apply_mlp_wraps_tensor_weights_for_grouped_matmul(self):
         hidden_states = torch.randn(2, 8)
         gate_up_out = torch.randn(2, 16)
@@ -430,6 +517,65 @@ class _GeluPathBase(unittest.TestCase):
             swiglu_limit=0.0,
             use_w4a8_per_channel_gmm_swiglu=False,
         )
+
+
+class TestQuantApplyMlpMxfpSwigluOAI(_GeluPathBase):
+    def setUp(self):
+        self._ctx_mock = MagicMock()
+        self._ctx_patch = patch(f"{MOE_MLP}._EXTRA_CTX", self._ctx_mock)
+        self._ctx_patch.start()
+        self.addCleanup(self._ctx_patch.stop)
+
+    def test_uses_small_op_swiglu_oai_and_dynamic_mx_quant_for_mc2_and_alltoall(self):
+        for comm_type in (MoECommType.MC2, MoECommType.ALLTOALL):
+            with self.subTest(comm_type=comm_type):
+                self._ctx_mock.moe_comm_type = comm_type
+                gate_up_out = torch.randn(1, 8, dtype=torch.bfloat16)
+                quantized_swiglu_out = torch.randn(1, 4)
+                swiglu_out_scale = torch.randn(1, 1)
+                expected = torch.randn(1, 4)
+                stream_patch, evt = _patch_npu_stream()
+
+                kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
+                kwargs.update(
+                    {
+                        "use_mxfp_quant": True,
+                        "mxfp_quant_dtype": QuantType.W8A8MXFP,
+                        "act_quant_type": torch.float8_e4m3fn,
+                    }
+                )
+
+                with (
+                    stream_patch,
+                    patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True) as mock_gmm1,
+                    patch(
+                        f"{MOE_MLP}._swiglu_oai_dynamic_mx_quant",
+                        return_value=(quantized_swiglu_out, swiglu_out_scale),
+                    ) as mock_small_ops_quant,
+                    patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=expected) as mock_gmm2,
+                    patch.object(DeviceOperator, "npu_dynamic_quant") as mock_dynamic_quant,
+                    patch("torch_npu.npu_clipped_swiglu", create=True) as mock_clipped_swiglu,
+                    patch(f"{MOE_MLP}.dispose_tensor"),
+                ):
+                    output, output_evt = quant_apply_mlp(**kwargs)
+
+                self.assertIs(output, expected)
+                self.assertIs(output_evt, evt)
+                gmm1_kwargs = mock_gmm1.call_args.kwargs
+                self.assertEqual(gmm1_kwargs["output_dtype"], torch.bfloat16)
+                self.assertEqual(gmm1_kwargs["scale_dtype"], torch_npu.float8_e8m0fnu)
+                self.assertEqual(gmm1_kwargs["per_token_scale_dtype"], torch_npu.float8_e8m0fnu)
+                mock_small_ops_quant.assert_called_once_with(
+                    gate_up_out,
+                    act_quant_type=torch.float8_e4m3fn,
+                    swiglu_limit=0.0,
+                    swiglu_alpha=1.0,
+                    swiglu_beta=0.0,
+                )
+                self.assertIs(mock_gmm2.call_args.kwargs["hidden_states"], quantized_swiglu_out)
+                self.assertIs(mock_gmm2.call_args.kwargs["per_token_scale"], swiglu_out_scale)
+                mock_dynamic_quant.assert_not_called()
+                mock_clipped_swiglu.assert_not_called()
 
 
 class TestQuantApplyMlpGeluPath(_GeluPathBase):

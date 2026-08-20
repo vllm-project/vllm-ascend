@@ -119,6 +119,25 @@ def test_collect_paths_and_basic_path_helpers():
     assert select_tests._is_ut_path("tests/ut/a.py")
     assert select_tests._is_e2e_path("tests/e2e")
     assert select_tests._is_e2e_path("tests/e2e/a.py")
+    assert select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(
+        [
+            "tests/e2e/pull_request/one_card/test_x.py",
+            ".github/workflows/schedule_nightly_test_a5.yaml",
+        ]
+    )
+    assert not select_tests._is_cpu_ut_scoped_change(["docs/source/developer_guide/testing.md"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py", "vllm_ascend/worker/model_runner_v1.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py", "csrc/build.sh"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py", ".github/workflows/pr_test.yaml"])
+    assert select_tests._is_cpu_ut_scoped_change(["tools/docs_codegen/scanner.py"])
+    assert select_tests._is_cpu_ut_scoped_change(
+        ["tools/docs_codegen/scanner.py", "tests/ut/_tools/test_docs_codegen.py"]
+    )
+    assert select_tests._is_cpu_ut_scoped_change(["tools/docs_codegen/scanner.py", "tests/ut/test_envs.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tools/docs_codegen/scanner.py", "vllm_ascend/envs.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tools/bisect/runner.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tools/bisect/runner.py", "tools/docs_codegen/scanner.py"])
     assert select_tests._configured_nodeid_targets_for_file(
         "tests/e2e/pull_request/two_card/test_split.py",
         nodeid_config,
@@ -483,10 +502,15 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
             str(config_path),
             "--changed-files",
             "tests/e2e/pull_request/two_card/test_two_card.py",
+            ".github/workflows/schedule_nightly_test_a5.yaml",
+            "--filtered-changed-files-json",
+            json.dumps(["tests/e2e/pull_request/two_card/test_two_card.py"]),
         ],
     )
     select_tests.main()
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "Detected CPU-UT-scoped change" in captured.err
+    out = captured.out
     groups_line = next(line for line in out.splitlines() if line.startswith("test_groups="))
     test_groups = json.loads(groups_line.removeprefix("test_groups="))
     selected_tests = set(test_groups[0]["tests"].split())
@@ -530,7 +554,7 @@ def test_bisect_tool_scoped_change_skips_global_modules(tmp_path, monkeypatch, c
         },
         {
             "name": "_tools",
-            "optional": False,
+            "optional": True,
             "source_file_dependencies": ["tools/"],
             "tests": ["tests/ut/_tools"],
         },
@@ -584,6 +608,31 @@ def test_bisect_tool_scoped_change_skips_global_modules(tmp_path, monkeypatch, c
     }
     assert "tests/ut/default/test_default.py" not in selected_tests
     assert "tests/e2e/pull_request/one_card/test_model.py" not in selected_tests
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "tools/docs_codegen/scanner.py",
+            "tests/ut/_tools/test_base_tool.py",
+        ],
+    )
+    select_tests.main()
+    captured = capsys.readouterr()
+    assert "Detected CPU-UT-scoped change" in captured.err
+    assert "matched_modules=default_cpu_ut" in captured.out
+    groups_line = next(line for line in captured.out.splitlines() if line.startswith("test_groups="))
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    selected_tests = {test for group in test_groups for test in group["tests"].split()}
+    assert selected_tests == {
+        "tests/ut/_tools/test_base_tool.py",
+        "tests/ut/default/test_default.py",
+        "tests/ut/tools/bisect/test_auto_bisect.py",
+    }
 
 
 def test_default_cpu_ut_always_runs(tmp_path, monkeypatch, capsys):
@@ -876,3 +925,72 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     a2_tests = {t for g in a2_groups for t in g["tests"].split()}
     assert a2_tests == {rel_one_a, rel_one_b}
     assert all(g["partition"].endswith("-5") for g in a2_groups)
+
+
+def test_load_test_list_file_ignores_comments_and_blank_lines(tmp_path):
+    list_file = tmp_path / "tests.txt"
+    list_file.write_text(
+        "\n".join(
+            [
+                "# full line comment",
+                "  tests/e2e/pull_request/one_card/test_a.py  # inline comment",
+                "",
+                "tests/ut/test_b.py::TestCase::test_method",
+            ]
+        )
+    )
+    assert select_tests._load_test_list_file(list_file) == [
+        "tests/e2e/pull_request/one_card/test_a.py",
+        "tests/ut/test_b.py::TestCase::test_method",
+    ]
+
+
+def test_test_list_file_routes_ut_and_e2e_targets(tmp_path, monkeypatch, capsys):
+    test_root = tmp_path / "tests"
+    e2e_one_card = test_root / "e2e" / "pull_request" / "one_card"
+    ut_dir = test_root / "ut" / "mod" / "a2"
+    for path in (e2e_one_card, ut_dir):
+        path.mkdir(parents=True)
+    e2e_file = e2e_one_card / "test_e2e.py"
+    ut_file = ut_dir / "test_ut.py"
+    for path in (e2e_file, ut_file):
+        path.write_text("")
+
+    config_modules = [
+        {
+            "name": "always_run",
+            "optional": False,
+            "source_file_dependencies": ["src/any.py"],
+            "tests": ["tests/e2e/pull_request/one_card", "tests/ut/mod"],
+        },
+    ]
+    runner_mapping = {
+        "tests/e2e/pull_request/one_card": {"default": "a2_x1"},
+        "tests/ut/mod/a2": {"default": "a2_x1"},
+    }
+    config_path = tmp_path / "config.yaml"
+    _write_two_doc_config(config_path, config_modules, {"runner_mapping": runner_mapping})
+    runner_file = tmp_path / "runner_label.json"
+    runner_file.write_text(json.dumps({"a2-runner": {"chip": "a2", "npu_num": 1}}))
+    monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)
+    monkeypatch.chdir(tmp_path)
+
+    list_file = tmp_path / "recommended.txt"
+    rel_e2e = "tests/e2e/pull_request/one_card/test_e2e.py"
+    rel_ut = "tests/ut/mod/a2/test_ut.py::TestClass::test_method"
+    list_file.write_text("\n".join([rel_e2e, rel_ut]))
+
+    capsys.readouterr()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["select_tests.py", "--config", str(config_path), "--test-list-file", str(list_file)],
+    )
+    select_tests.main()
+    captured = capsys.readouterr()
+    groups_line = next((line for line in captured.out.splitlines() if line.startswith("test_groups=")), None)
+    assert groups_line is not None
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    selected = {t for g in test_groups for t in g["tests"].split()}
+    assert selected == {rel_e2e, rel_ut}
+    assert captured.out.split("matched_modules=")[1].strip() == ""

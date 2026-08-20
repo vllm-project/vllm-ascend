@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 
-from vllm_ascend.models import deepseek_v4 as deepseek_v4_module
+from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_module
 
 
 class _FakeGate(nn.Module):

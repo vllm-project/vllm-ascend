@@ -74,7 +74,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of `enable_flashcomm1`; it improves performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
-| `enable_sleep_mode_extra_cleanup`   | bool | `False` | Enables extra sleep-mode cleanup for RL workloads, including HCCL process-group release and ACL graph workspace cleanup. Disabled by default because wakeup may need to restore HCCL and recapture ACL graphs. |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `enable_sparse_sfa_c8`              | bool | `False` | Whether to enable the packed C8 KV cache for Sparse Flash Attention in DSA models (e.g., DeepSeek V3.2 and GLM5). This option is independent of `enable_sparse_li_c8`. SFA prefill context parallelism and Ascend 950 DCP are not supported. |
@@ -93,6 +92,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See [rl_config](#rl_config) for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 
 The details of each configuration option are as follows:
@@ -241,6 +241,71 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 | `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be reserved. |
 | `low_available_tokens_threshold` | int | `4096` | Threshold for prioritising long vs short decode jobs. When available tokens > threshold, long decode jobs are prioritised; when ≤ threshold, short decode jobs are prioritised. |
 | `short_decode_token_threshold` | int | `32` | Threshold for classifying a job as "short decode". |
+
+**rl_config**
+
+`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it refreshes the global Ascend configuration on every initialization, forces `AscendConfig.weight_nz_mode=0`, synchronizes `VLLM_ASCEND_ENABLE_NZ=0`, sets `VLLM_SERVER_DEV_MODE=1`, and removes the `expandable_segments` entry from `PYTORCH_NPU_ALLOC_CONF` with an informational log. These fixed RL behaviors are not configurable as `rl_config` sub-fields. When `enabled` is `false`, all other sub-fields are ignored.
+
+When RL mode is enabled, its fixed NZ and developer-endpoint settings take precedence over top-level configuration and environment variables. `VLLM_BATCH_INVARIANT=1` remains enabled when `rl_config.enable_batch_invariant` is false.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `false` | Master switch for RL mode. When `true`, all RL best-practice defaults below are applied. |
+| `sleep_mode_extra_cleanup` | bool | `false` | Same-device mode. Enables HCCL process-group release + ACL graph workspace cleanup during sleep, returning more NPU memory to the trainer at the cost of increased wakeup latency. This option is available only under `rl_config`; the former top-level `enable_sleep_mode_extra_cleanup` key has been removed. |
+| `enable_training_consistency` | bool | `false` | Both modes. Enables the FA3 attention backend used for training-inference consistency. Requires the `flash_attn_npu_v3` package and does not implicitly enable batch invariance. |
+| `enable_batch_invariant` | bool | `false` | Both modes. Provides an additional way to enable batch-invariant deterministic computation: when `true`, sets `VLLM_BATCH_INVARIANT=1` before workers are started. Worker-side batch-invariant initialization then sets `HCCL_DETERMINISTIC=strict` and `LCCL_DETERMINISTIC=1`. When `false`, an existing `VLLM_BATCH_INVARIANT` environment setting is preserved. Requires building vllm-ascend from source with `COMPILE_CUSTOM_KERNELS=1`; RL mode already forces `weight_nz_mode=0`. |
+
+**Deployment modes**
+
+- **Same-device mode** (sleep/wake + IPC weight transfer): the inference engine and trainer share the same NPU card. Use `enable_sleep_mode=True` and optionally `sleep_mode_extra_cleanup=True` for extra memory.
+- **Cross-device mode** (pause/resume + HCCL weight transfer): the inference engine and trainer use different NPU cards. Use `--weight-transfer-config '{"backend": "nccl"}'`.
+
+**Example (online, same-device):**
+
+```bash
+vllm serve DeepSeek-V4 \
+    --enable-sleep-mode \
+    --enable-return-routed-experts \
+    --weight-transfer-config '{"backend": "ipc"}' \
+    --additional-config '{"rl_config": {"enabled": true, "enable_training_consistency": true, "enable_batch_invariant": true, "sleep_mode_extra_cleanup": true}}'
+```
+
+**Example (online, cross-device):**
+
+```bash
+vllm serve DeepSeek-V4 \
+    --weight-transfer-config '{"backend": "nccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+**Example (offline):**
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="DeepSeek-V4",
+    enable_sleep_mode=True,  # same-device mode only
+    additional_config={
+        "rl_config": {
+            "enabled": True,
+            "enable_training_consistency": True,
+            "enable_batch_invariant": True,
+        },
+    },
+)
+```
+
+**Migration guide**
+
+| Before | After |
+| ------ | ----- |
+| `export VLLM_ASCEND_ENABLE_NZ=0` | `"rl_config": {"enabled": true}` |
+| `export VLLM_SERVER_DEV_MODE=1` | `"rl_config": {"enabled": true}` |
+| `export VLLM_BATCH_INVARIANT=1` | `"rl_config": {"enabled": true, "enable_batch_invariant": true}` |
+| `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
+| top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
+| top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
 
 ### Example
 

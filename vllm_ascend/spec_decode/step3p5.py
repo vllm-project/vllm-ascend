@@ -23,6 +23,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_co
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
 
@@ -149,7 +150,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         if self.use_compress:
             extra_attn_metadata_args = dict(
                 common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
 
         for attn_group in self.draft_attn_groups:
@@ -193,7 +193,8 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 return draft_token_ids, None
             logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
             if lmhead_tp_enable():
-                logits = get_lmhead_tp_group().all_to_all(logits)
+                # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
+                logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
             else:
                 logits = self.model.model.logits_processor._gather_logits(logits)
         else:
