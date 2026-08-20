@@ -1,14 +1,15 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2025-2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * the BSD 3-Clause License (the "License").
+ * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_MULTI_HPP
-#define CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_MULTI_HPP
+#ifndef COMMON_BLOCK_MMAD_PINGPONG_TLA_HPP
+#define COMMON_BLOCK_MMAD_PINGPONG_TLA_HPP
 
 #include "catlass/catlass.hpp"
 #include "catlass/arch/resource.hpp"
@@ -18,28 +19,44 @@
 #include "catlass/gemm/helper.hpp"
 #include "catlass/gemm/tile/tile_copy.hpp"
 #include "catlass/gemm/tile/tile_mmad.hpp"
+#include "kernel_utils/tile/copy_l0c_to_ub.hpp"
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"
 
-namespace Catlass::Gemm {
+namespace Common {
 
+template <
+    class DispatchPolicy,
+    class L1TileShape,
+    class L0TileShape,
+    class ElementA,
+    class ElementB,
+    class ElementC,
+    class ElementBias = void,
+    class TileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<typename DispatchPolicy::ArchTag, ElementA, Catlass::layout::RowMajor,
+        ElementB, Catlass::layout::RowMajor, ElementC, Catlass::layout::RowMajor, ElementBias>,
+    class TileMmad =
+        Catlass::Gemm::Tile::TileMmadTla<typename DispatchPolicy::ArchTag, ElementA, typename TileCopy::LayoutTagL1A>
+>
+struct BlockMmadTla {
+    static_assert(DEPENDENT_FALSE<DispatchPolicy>, "BlockMmadTla is not implemented for this DispatchPolicy");
+};
+
+// Now ENABLE_UNIT_FLAG_ must be false when input element is int8
 template <class ArchTag_, bool ENABLE_UNIT_FLAG_ = false, bool USE_HF32_MODE_ = false, uint32_t L0C_STAGES_ = 1,
     bool ENABLE_L1_RESIDENT_ = false, uint32_t L1A_STAGES_ = 2, uint32_t L1B_STAGES_ = 2, uint32_t L0A_STAGES_ = 2,
-    uint32_t L0B_STAGES_ = 2>
-struct MmadPingpongTlaMulti : public MmadBase<ArchTag_, false> {
+    uint32_t L0B_STAGES_ = 2, uint32_t UB_STAGES_ = 2>
+struct MmadPingpong : public Catlass::Gemm::MmadBase<ArchTag_, false> {
     static constexpr uint32_t L1A_STAGES = L1A_STAGES_;
     static constexpr uint32_t L1B_STAGES = L1B_STAGES_;
     static constexpr uint32_t L0A_STAGES = L0A_STAGES_;
     static constexpr uint32_t L0B_STAGES = L0B_STAGES_;
     static constexpr uint32_t L0C_STAGES = L0C_STAGES_;
+    static constexpr uint32_t UB_STAGES = UB_STAGES_;
     static constexpr bool ENABLE_UNIT_FLAG = ENABLE_UNIT_FLAG_;
     static constexpr bool USE_HF32_MODE = USE_HF32_MODE_;
     static constexpr bool ENABLE_L1_RESIDENT = ENABLE_L1_RESIDENT_;
 };
-
-}  // namespace Catlass::Gemm
-
-namespace Catlass::Gemm::Block {
 
 template <
     class ArchTag_,
@@ -51,6 +68,7 @@ template <
     uint32_t L1B_STAGES_,
     uint32_t L0A_STAGES_,
     uint32_t L0B_STAGES_,
+    uint32_t UB_STAGES_,
     class L1TileShape_,
     class L0TileShape_,
     class ElementA_,
@@ -61,8 +79,8 @@ template <
     class TileMmad_
 >
 struct BlockMmadTla <
-    MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_, L1A_STAGES_,
-        L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>,
+    MmadPingpong<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_, L1A_STAGES_,
+        L1B_STAGES_, L0A_STAGES_, L0B_STAGES_, UB_STAGES_>,
     L1TileShape_,
     L0TileShape_,
     ElementA_,
@@ -74,8 +92,8 @@ struct BlockMmadTla <
 > {
 public:
     // Type Aliases
-    using DispatchPolicy = MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_,
-        L1A_STAGES_, L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>;
+    using DispatchPolicy = MmadPingpong<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_,
+        L1A_STAGES_, L1B_STAGES_, L0A_STAGES_, L0B_STAGES_, UB_STAGES_>;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using TileCopy = TileCopy_;
     using L1TileShape = L1TileShape_;
@@ -111,6 +129,7 @@ public:
     static_assert(tla::is_tuple<L0TileShape>::value && tla::is_static<L0TileShape>::value,
         "L0TileShape must be tla::tuple and static!");
 
+    static constexpr uint64_t FLAG_ID_MAX = 16;
     static constexpr bool ENABLE_UNIT_FLAG = DispatchPolicy::ENABLE_UNIT_FLAG;
     static constexpr bool USE_HF32_MODE = DispatchPolicy::USE_HF32_MODE;
     static constexpr bool ENABLE_L1_RESIDENT = DispatchPolicy::ENABLE_L1_RESIDENT;
@@ -125,6 +144,8 @@ public:
     static constexpr uint32_t L0_TILE_M = tla::get<0>(L0TileShape{});
     static constexpr uint32_t L0_TILE_N = tla::get<1>(L0TileShape{});
     static constexpr uint32_t L0_TILE_K = tla::get<2>(L0TileShape{});
+    static constexpr uint32_t UB_STAGES = UB_STAGES_;
+    static constexpr uint32_t MAX_CUBE_VEC_SYNC_NUM = 5;
 
     // L1 tile size
     static constexpr uint32_t L1A_TILE_SIZE = L1_TILE_M * L1_TILE_K * sizeof(ElementA);
@@ -191,69 +212,18 @@ public:
     {
         for (int i = 0; i < L1A_STAGES; ++i) {
             lastAddrA[i] = nullptr;
-            lastCoordA[i] = MatrixCoord{0U, 0U};
+            lastCoordA[i] = Catlass::MatrixCoord{0U, 0U};
         }
         for (int i = 0; i < L1B_STAGES; ++i) {
             lastAddrB[i] = nullptr;
-            lastCoordB[i] = MatrixCoord{0U, 0U};
+            lastCoordB[i] = Catlass::MatrixCoord{0U, 0U};
         }
     }
 
     /// Construct
     CATLASS_DEVICE
-    BlockMmadTla(Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart = 0)
+    BlockMmadTla(Catlass::Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart = 0)
     {
-        if ASCEND_IS_AIC {
-            uint32_t l1AOffset = l1BufAddrStart;
-            uint32_t l1BOffset = l1BufAddrStart + L1A_TILE_SIZE * L1A_STAGES;
-            // Init buffers
-            for (uint32_t i = 0; i < L1A_STAGES; i++) {
-                // Assign L1/L0A/L0B space for each stages
-                l1ATensorList[i] = resource.l1Buf.template GetBufferByByte<ElementA>(l1AOffset + L1A_TILE_SIZE * i);
-                // Assign event ID for each stages
-                l1AEventList[i] = i;
-            }
-            for (uint32_t i = 0; i < L1B_STAGES; i++) {
-                // Assign L1/L0A/L0B space for each stages
-                l1BTensorList[i] = resource.l1Buf.template GetBufferByByte<ElementB>(l1BOffset + L1B_TILE_SIZE * i);
-                // Assign event ID for each stages
-                l1BEventList[i] = i + L1A_STAGES;
-            }
-            for (uint32_t i = 0; i < L0A_STAGES; i++) {
-                // Assign L1/L0A/L0B space for each stages
-                l0ATensorList[i] = resource.l0ABuf.template GetBufferByByte<ElementA>(L0A_TILE_SIZE * i);
-                // Assign event ID for each stages
-                l0AEventList[i] = i;
-            }
-            for (uint32_t i = 0; i < L0B_STAGES; i++) {
-                // Assign L1/L0A/L0B space for each stages
-                l0BTensorList[i] = resource.l0BBuf.template GetBufferByByte<ElementB>(L0B_TILE_SIZE * i);
-                // Assign event ID for each stages
-                l0BEventList[i] = i + L0A_STAGES;
-            }
-            if constexpr(!ENABLE_UNIT_FLAG) {
-                for (uint32_t i = 0; i < L0C_STAGES; i++) {
-                    l0CTensorList[i] = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(L0C_TILE_SIZE * i);
-                    l0CEventList[i] = i;
-                }
-            } else {
-                l0CTensorList[0] = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(0);
-            }
-            if constexpr (HAS_BIAS) {
-                uint32_t l1BiasOffset = l1BOffset + L1B_TILE_SIZE * L1B_STAGES;
-                l1BiasTensor = resource.l1Buf.template GetBufferByByte<uint8_t>(l1BiasOffset);
-                l0BiasTensor = resource.btBuf.template GetBufferByByte<ElementAccumulator>(0);
-            }
-        }
-    }
-
-    /// Destructor
-    CATLASS_DEVICE
-    ~BlockMmadTla() {}
-
-    CATLASS_DEVICE
-    void preSetFlags() {
-
         if ASCEND_IS_AIC {
             // use HF32 when USE_HF32_MODE is true
             if constexpr (USE_HF32_MODE) {
@@ -264,24 +234,54 @@ public:
             if constexpr (ENABLE_UNIT_FLAG && tla::detail::isRowMajor<LayoutC>::value) {
                 AscendC::SetMMLayoutTransform(true);
             }
+            uint32_t l1AOffset = l1BufAddrStart;
+            uint32_t l1BOffset = l1BufAddrStart + L1A_TILE_SIZE * L1A_STAGES;
+            // Init buffers
             for (uint32_t i = 0; i < L1A_STAGES; i++) {
+                // Assign L1/L0A/L0B space for each stages
+                l1ATensorList[i] = resource.l1Buf.template GetBufferByByte<ElementA>(l1AOffset + L1A_TILE_SIZE * i);
+                // Assign event ID for each stages
+                l1AEventList[i] = i;
+                // The event id that needs to be set before the loop
                 AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[i]);
             }
             for (uint32_t i = 0; i < L1B_STAGES; i++) {
+                // Assign L1/L0A/L0B space for each stages
+                l1BTensorList[i] = resource.l1Buf.template GetBufferByByte<ElementB>(l1BOffset + L1B_TILE_SIZE * i);
+                // Assign event ID for each stages
+                l1BEventList[i] = i + L1A_STAGES;
+                // The event id that needs to be set before the loop
                 AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[i]);
             }
             for (uint32_t i = 0; i < L0A_STAGES; i++) {
+                // Assign L1/L0A/L0B space for each stages
+                l0ATensorList[i] = resource.l0ABuf.template GetBufferByByte<ElementA>(L0A_TILE_SIZE * i);
+                // Assign event ID for each stages
+                l0AEventList[i] = i;
+                // The event id that needs to be set before the loop
                 AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[i]);
             }
             for (uint32_t i = 0; i < L0B_STAGES; i++) {
+                // Assign L1/L0A/L0B space for each stages
+                l0BTensorList[i] = resource.l0BBuf.template GetBufferByByte<ElementB>(L0B_TILE_SIZE * i);
+                // Assign event ID for each stages
+                l0BEventList[i] = i + L0A_STAGES;
+                // The event id that needs to be set before the loop
                 AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[i]);
             }
             if constexpr(!ENABLE_UNIT_FLAG) {
                 for (uint32_t i = 0; i < L0C_STAGES; i++) {
+                    l0CTensorList[i] = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(L0C_TILE_SIZE * i);
+                    l0CEventList[i] = i;
                     AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CEventList[i]);
                 }
+            } else {
+                l0CTensorList[0] = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(0);
             }
             if constexpr (HAS_BIAS) {
+                uint32_t l1BiasOffset = l1BOffset + L1B_TILE_SIZE * L1B_STAGES;
+                l1BiasTensor = resource.l1Buf.template GetBufferByByte<uint8_t>(l1BiasOffset);
+                l0BiasTensor = resource.btBuf.template GetBufferByByte<ElementAccumulator>(0);
                 AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(L1A_STAGES + L1B_STAGES);
                 AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(L0A_STAGES + L0B_STAGES);
             }
@@ -292,8 +292,10 @@ public:
         }
     }
 
+    /// Destructor
     CATLASS_DEVICE
-    void finalWaitFlags() {
+    ~BlockMmadTla()
+    {
         if ASCEND_IS_AIC {
             if constexpr (USE_HF32_MODE) {
                 AscendC::SetHF32Mode(false);
@@ -326,9 +328,9 @@ public:
     }
 
     /// Perform a block-scoped matrix multiply-accumulate
-    template <class TensorA, class TensorB, class TensorC, class TensorBias = EmptyClass>
-    CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, GemmCoord const &actualShape,
-        TensorBias const &tensorBias = {}, bool clearL1Padding = false)
+    template <class TensorA, class TensorB, class TensorC, class TensorBias = Catlass::EmptyClass>
+    CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, Catlass::GemmCoord const &actualShape,
+        TensorBias const &tensorBias = {})
     {
         // Check L1TileShape
         if constexpr (HAS_BIAS) {
@@ -358,7 +360,7 @@ public:
         uint32_t nBlockActual = actualShape.n();
 
         uint32_t mL1Actual = mBlockActual;
-        if constexpr (std::is_same_v<ArchTag, Arch::AtlasA2>) {
+        if constexpr (std::is_same_v<ArchTag, Catlass::Arch::AtlasA2>) {
             // Avoid using the gemv mode in mmad
             if (mL1Actual == 1) {
                 mL1Actual = 16;
@@ -367,19 +369,13 @@ public:
         uint32_t nL1Actual = nBlockActual;
 
         auto layoutInL0C = tla::MakeLayoutL0C(mL1Actual, nL1Actual);
-        auto tensorL0C = tla::MakeTensor(l0CTensorList[l0CListId], layoutInL0C, Arch::PositionL0C{});
-        auto tensorL0Bias = tla::MakeTensor(l0BiasTensor, L0BIAS_LAYOUT, Arch::PositionBias{});
+        auto tensorL0C = tla::MakeTensor(l0CTensorList[l0CListId], layoutInL0C, Catlass::Arch::PositionL0C{});
+        auto tensorL0Bias = tla::MakeTensor(l0BiasTensor, L0BIAS_LAYOUT, Catlass::Arch::PositionBias{});
 
         uint32_t kL1Actual = min(kBlockActual, L1_TILE_K);
         // load first matrix A tile from GM to L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListId]);
-        if (clearL1Padding) {
-            AscendC::InitConstValueParams<ElementA> clearParams(
-                1, static_cast<uint16_t>(L1A_TILE_SIZE / 32), 0,
-                static_cast<ElementA>(0));
-            AscendC::InitConstValue(l1ATensorList[l1AListId], clearParams);
-        }
-        auto tensorL1A = tla::MakeTensor(l1ATensorList[l1AListId], L1A_LAYOUT, Arch::PositionL1{});
+        auto tensorL1A = tla::MakeTensor(l1ATensorList[l1AListId], L1A_LAYOUT, Catlass::Arch::PositionL1{});
         auto tensorTileA = GetTileA(tensorA, 0, 0, mBlockActual, kL1Actual);
         if constexpr (ENABLE_L1_RESIDENT) {
             // If the currently loaded GM pointer and block coordinates are the same as the last loaded ones,
@@ -388,9 +384,7 @@ public:
                 || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListId].row()
                 || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListId].column()) {
                 copyGmToL1A(tensorL1A, tensorTileA);
-                lastCoordA[l1AListId] = MatrixCoord{
-                    static_cast<uint32_t>(tla::get<0>(tensorTileA.coord())),
-                    static_cast<uint32_t>(tla::get<1>(tensorTileA.coord()))};
+                lastCoordA[l1AListId] = Catlass::MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
                 lastAddrA[l1AListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
                     tensorTileA.data().GetPhyAddr()
                 );
@@ -402,22 +396,14 @@ public:
 
         // load first matrix B tile from GM to L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListId]);
-        if (clearL1Padding) {
-            AscendC::InitConstValueParams<ElementB> clearParams(
-                1, static_cast<uint16_t>(L1B_TILE_SIZE / 32), 0,
-                static_cast<ElementB>(0));
-            AscendC::InitConstValue(l1BTensorList[l1BListId], clearParams);
-        }
-        auto tensorL1B = tla::MakeTensor(l1BTensorList[l1BListId], L1B_LAYOUT, Arch::PositionL1{});
+        auto tensorL1B = tla::MakeTensor(l1BTensorList[l1BListId], L1B_LAYOUT, Catlass::Arch::PositionL1{});
         auto tensorTileB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(kL1Actual, nBlockActual));
         if constexpr (ENABLE_L1_RESIDENT) {
             if (lastAddrB[l1BListId] != tensorTileB.data().GetPhyAddr()
                 || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListId].row()
                 || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListId].column()) {
                 copyGmToL1B(tensorL1B, tensorTileB);
-                lastCoordB[l1BListId] = MatrixCoord{
-                    static_cast<uint32_t>(tla::get<0>(tensorTileB.coord())),
-                    static_cast<uint32_t>(tla::get<1>(tensorTileB.coord()))};
+                lastCoordB[l1BListId] = Catlass::MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
                 lastAddrB[l1BListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
                     tensorTileB.data().GetPhyAddr()
                 );
@@ -427,12 +413,12 @@ public:
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1BListId]);
 
-        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, EmptyClass>) {
+        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, Catlass::EmptyClass>) {
             using CopyGmToL1Bias = typename TileCopy::template CopyGmToL1Bias<TensorBias>;
             CopyGmToL1Bias copyGmToL1Bias;
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(L1A_STAGES + L1B_STAGES);
             auto l1Bias = l1BiasTensor.template ReinterpretCast<ElementBias>();
-            auto tensorL1Bias = tla::MakeTensor(l1Bias, L1BIAS_LAYOUT, Arch::PositionL1{});
+            auto tensorL1Bias = tla::MakeTensor(l1Bias, L1BIAS_LAYOUT, Catlass::Arch::PositionL1{});
             copyGmToL1Bias(tensorL1Bias, tensorBias);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(L1A_STAGES + L1B_STAGES);
         }
@@ -458,8 +444,8 @@ public:
                 // Get L1 tensor for next stage
                 auto l1ATensor = l1ATensorList[l1AListIdNext];
                 auto l1BTensor = l1BTensorList[l1BListIdNext];
-                auto tensorL1A = tla::MakeTensor(l1ATensor, L1A_LAYOUT, Arch::PositionL1{});
-                auto tensorL1B = tla::MakeTensor(l1BTensor, L1B_LAYOUT, Arch::PositionL1{});
+                auto tensorL1A = tla::MakeTensor(l1ATensor, L1A_LAYOUT, Catlass::Arch::PositionL1{});
+                auto tensorL1B = tla::MakeTensor(l1BTensor, L1B_LAYOUT, Catlass::Arch::PositionL1{});
                 // Get GM tile for next stage
                 auto tensorTileA = GetTileA(tensorA, 0, kL1IdxNext * L1_TILE_K, mBlockActual, kL1ActualNext);
                 auto tensorTileB = GetTile(tensorB, tla::MakeCoord(kL1IdxNext * L1_TILE_K, 0),
@@ -467,20 +453,13 @@ public:
 
                 // load next matrix A tile from GM to L1
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListIdNext]);
-                if (clearL1Padding) {
-                    AscendC::InitConstValueParams<ElementA> clearParams(
-                        1, static_cast<uint16_t>(L1A_TILE_SIZE / 32), 0,
-                        static_cast<ElementA>(0));
-                    AscendC::InitConstValue(l1ATensorList[l1AListIdNext], clearParams);
-                }
                 if constexpr (ENABLE_L1_RESIDENT) {
                     if (lastAddrA[l1AListIdNext] != tensorTileA.data().GetPhyAddr()
                         || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].row()
                         || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].column()) {
                         copyGmToL1A(tensorL1A, tensorTileA);
-                        lastCoordA[l1AListIdNext] = MatrixCoord{
-                            static_cast<uint32_t>(tla::get<0>(tensorTileA.coord())),
-                            static_cast<uint32_t>(tla::get<1>(tensorTileA.coord()))};
+                        lastCoordA[l1AListIdNext] =
+                            Catlass::MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
                         lastAddrA[l1AListIdNext] =
                             const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
                                 tensorTileA.data().GetPhyAddr()
@@ -493,20 +472,13 @@ public:
 
                 // load next matrix B tile from GM to L1
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListIdNext]);
-                if (clearL1Padding) {
-                    AscendC::InitConstValueParams<ElementB> clearParams(
-                        1, static_cast<uint16_t>(L1B_TILE_SIZE / 32), 0,
-                        static_cast<ElementB>(0));
-                    AscendC::InitConstValue(l1BTensorList[l1BListIdNext], clearParams);
-                }
                 if constexpr (ENABLE_L1_RESIDENT) {
                     if (lastAddrB[l1BListIdNext] != tensorTileB.data().GetPhyAddr()
                         || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].row()
                         || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].column()) {
                         copyGmToL1B(tensorL1B, tensorTileB);
-                        lastCoordB[l1BListIdNext] = MatrixCoord{
-                            static_cast<uint32_t>(tla::get<0>(tensorTileB.coord())),
-                            static_cast<uint32_t>(tla::get<1>(tensorTileB.coord()))};
+                        lastCoordB[l1BListIdNext] =
+                            Catlass::MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
                         lastAddrB[l1BListIdNext] =
                             const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
                                 tensorTileB.data().GetPhyAddr()
@@ -521,8 +493,8 @@ public:
             // Get L1 tensor for current stage
             auto l1ATensor = l1ATensorList[l1AListId];
             auto l1BTensor = l1BTensorList[l1BListId];
-            tensorL1A = tla::MakeTensor(l1ATensor, L1A_LAYOUT, Arch::PositionL1{});
-            tensorL1B = tla::MakeTensor(l1BTensor, L1B_LAYOUT, Arch::PositionL1{});
+            tensorL1A = tla::MakeTensor(l1ATensor, L1A_LAYOUT, Catlass::Arch::PositionL1{});
+            tensorL1B = tla::MakeTensor(l1BTensor, L1B_LAYOUT, Catlass::Arch::PositionL1{});
             // Get the loop nums on L0
             uint32_t kL0Loop = CeilDiv<L0_TILE_K>(kL1Actual);
 
@@ -535,7 +507,7 @@ public:
                     // Locate the current tile on L0A
                     auto l0ATile = l0ATensorList[l0AListId];
                     auto layoutAInL0 = tla::MakeLayout<ElementA, LayoutTagL0A>(mL0Actual, kL0Actual);
-                    auto tensorL0A = tla::MakeTensor(l0ATile, layoutAInL0, Arch::PositionL0A{});
+                    auto tensorL0A = tla::MakeTensor(l0ATile, layoutAInL0, Catlass::Arch::PositionL0A{});
                     // Locate the current tile of matrix A on L1
                     auto tensorTileL1A = GetTileA(tensorL1A, mL0Idx * L0_TILE_M, kL0Idx * L0_TILE_K, mL0Actual, kL0Actual);
 
@@ -558,7 +530,7 @@ public:
                         // Locate the current tile on L0B
                         auto l0BTile = l0BTensorList[l0BListId];
                         auto layoutBInL0 = tla::MakeLayout<ElementB, LayoutTagL0B>(kL0Actual, nL0Actual);
-                        auto tensorL0B = tla::MakeTensor(l0BTile, layoutBInL0, Arch::PositionL0B{});
+                        auto tensorL0B = tla::MakeTensor(l0BTile, layoutBInL0, Catlass::Arch::PositionL0B{});
                         // Locate the current tile of matrix B on L1
                         auto tensorTileL1B = GetTile(tensorL1B,
                                                      tla::MakeCoord(kL0Idx * L0_TILE_K, nL0Idx * L0_TILE_N),
@@ -579,14 +551,14 @@ public:
                             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListId]);
                         }
 
-                        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, EmptyClass>) {
+                        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, Catlass::EmptyClass>) {
                             if (initC) {
                                 if (nL0Idx == 0) {
                                     AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(L1A_STAGES + L1B_STAGES);
                                 }
                                 AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(L0A_STAGES + L0B_STAGES);
                                 auto l1Bias = l1BiasTensor.template ReinterpretCast<ElementBias>();
-                                auto tensorL1Bias = tla::MakeTensor(l1Bias, L1BIAS_LAYOUT, Arch::PositionL1{});
+                                auto tensorL1Bias = tla::MakeTensor(l1Bias, L1BIAS_LAYOUT, Catlass::Arch::PositionL1{});
                                 auto tensorTileL1Bias = GetTile(tensorL1Bias,
                                                                 tla::MakeCoord(nL0Idx * L0_TILE_N),
                                                                 tla::MakeShape(nL0Actual));
@@ -621,7 +593,7 @@ public:
                             }
                         }
 
-                        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, EmptyClass>) {
+                        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, Catlass::EmptyClass>) {
                             if (initC) {
                                 tileMmad(tensorTileL0C, tensorL0A, tensorL0B, tensorL0Bias,
                                     mL0Actual, nL0Actual, kL0Actual, initC, unitFlag);
@@ -660,6 +632,378 @@ public:
         }
     }
 
+    /// Perform a block-scoped matrix multiply-accumulate
+    template <class TensorA, class TensorB, class TensorC, class TensorBias = Catlass::EmptyClass>
+    CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC tensorCList[MAX_CUBE_VEC_SYNC_NUM],
+        Catlass::GemmCoord const &actualShape, uint32_t ubRowNum, uint8_t beginSubBlockIdx, uint64_t l0C2UBAIVAICFlag,
+        uint64_t l0C2UBAICAIVFlag, uint32_t& ubListId, uint8_t sendVecNum, uint64_t ubNum = 2, TensorBias const &tensorBias = {})
+    {
+        // Check L1TileShape
+        if constexpr (HAS_BIAS) {
+            static constexpr uint32_t BIAS_BUF_SIZE = L0_TILE_N * sizeof(ElementAccumulator);
+            static constexpr uint32_t L1BIAS_SIZE = L1_TILE_N * sizeof(ElementBias);
+            static_assert(BIAS_BUF_SIZE <= ArchTag::BIAS_SIZE,
+                "BIAS_BUF_SIZE exceeding the BT space! Reduce L0_TILE_N");
+            static_assert(L1A_TILE_SIZE * L1A_STAGES + L1B_TILE_SIZE * L1B_STAGES + L1BIAS_SIZE <= ArchTag::L1_SIZE,
+                "L1TileShape exceeding the L1 space!");
+        }
+
+        using CopyGmToL1A = typename TileCopy_::template CopyGmToL1A<TensorA>;
+        using CopyGmToL1B = typename TileCopy_::template CopyGmToL1B<TensorB>;
+        using CopyL0CToDst = typename TileCopy_::template CopyL0CToDst<TensorC>;
+        CopyGmToL1A copyGmToL1A;
+        CopyGmToL1B copyGmToL1B;
+        CopyL0CToDst copyL0CToDst;
+
+        uint32_t mBlockActual = actualShape.m();
+        uint32_t kBlockActual = actualShape.k();
+        uint32_t nBlockActual = actualShape.n();
+
+        uint32_t mL1Actual = mBlockActual;
+        if constexpr (std::is_same_v<ArchTag, Catlass::Arch::AtlasA2>) {
+            // Avoid using the gemv mode in mmad
+            if (mL1Actual == 1) {
+                mL1Actual = 16;
+            }
+        }
+        uint32_t nL1Actual = nBlockActual;
+
+        auto layoutInL0C = tla::MakeLayoutL0C(mL1Actual, nL1Actual);
+        auto tensorL0C = tla::MakeTensor(l0CTensorList[l0CListId], layoutInL0C, Catlass::Arch::PositionL0C{});
+        auto tensorL0Bias = tla::MakeTensor(l0BiasTensor, L0BIAS_LAYOUT, Catlass::Arch::PositionBias{});
+
+        uint32_t kL1Actual = min(kBlockActual, L1_TILE_K);
+        // load first matrix A tile from GM to L1
+        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListId]);
+        auto tensorL1A = tla::MakeTensor(l1ATensorList[l1AListId], L1A_LAYOUT, Catlass::Arch::PositionL1{});
+        auto tensorTileA = GetTileA(tensorA, 0, 0, mBlockActual, kL1Actual);
+        if constexpr (ENABLE_L1_RESIDENT) {
+            // If the currently loaded GM pointer and block coordinates are the same as the last loaded ones,
+            // skip this loadding.
+            if (lastAddrA[l1AListId] != tensorTileA.data().GetPhyAddr()
+                || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListId].row()
+                || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListId].column()) {
+                copyGmToL1A(tensorL1A, tensorTileA);
+                lastCoordA[l1AListId] = Catlass::MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
+                lastAddrA[l1AListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
+                    tensorTileA.data().GetPhyAddr()
+                );
+            }
+        } else {
+            copyGmToL1A(tensorL1A, tensorTileA);
+        }
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1AListId]);
+
+        // load first matrix B tile from GM to L1
+        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListId]);
+        auto tensorL1B = tla::MakeTensor(l1BTensorList[l1BListId], L1B_LAYOUT, Catlass::Arch::PositionL1{});
+        auto tensorTileB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(kL1Actual, nBlockActual));
+        if constexpr (ENABLE_L1_RESIDENT) {
+            if (lastAddrB[l1BListId] != tensorTileB.data().GetPhyAddr()
+                || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListId].row()
+                || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListId].column()) {
+                copyGmToL1B(tensorL1B, tensorTileB);
+                lastCoordB[l1BListId] = Catlass::MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
+                lastAddrB[l1BListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
+                    tensorTileB.data().GetPhyAddr()
+                );
+            }
+        } else {
+            copyGmToL1B(tensorL1B, tensorTileB);
+        }
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1BListId]);
+
+        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, Catlass::EmptyClass>) {
+            using CopyGmToL1Bias = typename TileCopy::template CopyGmToL1Bias<TensorBias>;
+            CopyGmToL1Bias copyGmToL1Bias;
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(L1A_STAGES + L1B_STAGES);
+            auto l1Bias = l1BiasTensor.template ReinterpretCast<ElementBias>();
+            auto tensorL1Bias = tla::MakeTensor(l1Bias, L1BIAS_LAYOUT, Catlass::Arch::PositionL1{});
+            copyGmToL1Bias(tensorL1Bias, tensorBias);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(L1A_STAGES + L1B_STAGES);
+        }
+
+        if constexpr (!ENABLE_UNIT_FLAG) {
+            AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(l0CEventList[l0CListId]);
+        }
+
+        uint32_t mL0Loop = CeilDiv<L0_TILE_M>(mL1Actual);
+        uint32_t nL0Loop = CeilDiv<L0_TILE_N>(nL1Actual);
+
+        // main loop
+        uint32_t kL1Loop = CeilDiv<L1_TILE_K>(kBlockActual);
+        for (uint32_t kL1Idx = 0; kL1Idx < kL1Loop; kL1Idx++) {
+            uint32_t l1AListIdNext = (l1AListId + 1 < L1A_STAGES) ? (l1AListId + 1) : 0;
+            uint32_t l1BListIdNext = (l1BListId + 1 < L1B_STAGES) ? (l1BListId + 1) : 0;
+            uint32_t kL1ActualNext{0};
+            // preload next tile from GM to L1
+            if (kL1Idx < kL1Loop - 1) {
+                uint32_t kL1IdxNext = kL1Idx + 1;
+                kL1ActualNext = (kL1IdxNext < kL1Loop - 1) ? L1_TILE_K : (kBlockActual - kL1IdxNext * L1_TILE_K);
+
+                // Get L1 tensor for next stage
+                auto l1ATensor = l1ATensorList[l1AListIdNext];
+                auto l1BTensor = l1BTensorList[l1BListIdNext];
+                auto tensorL1A = tla::MakeTensor(l1ATensor, L1A_LAYOUT, Catlass::Arch::PositionL1{});
+                auto tensorL1B = tla::MakeTensor(l1BTensor, L1B_LAYOUT, Catlass::Arch::PositionL1{});
+                // Get GM tile for next stage
+                auto tensorTileA = GetTileA(tensorA, 0, kL1IdxNext * L1_TILE_K, mBlockActual, kL1ActualNext);
+                auto tensorTileB = GetTile(tensorB, tla::MakeCoord(kL1IdxNext * L1_TILE_K, 0),
+                    tla::MakeShape(kL1ActualNext, nBlockActual));
+
+                // load next matrix A tile from GM to L1
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListIdNext]);
+                if constexpr (ENABLE_L1_RESIDENT) {
+                    if (lastAddrA[l1AListIdNext] != tensorTileA.data().GetPhyAddr()
+                        || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].row()
+                        || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].column()) {
+                        copyGmToL1A(tensorL1A, tensorTileA);
+                        lastCoordA[l1AListIdNext] =
+                            Catlass::MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
+                        lastAddrA[l1AListIdNext] =
+                            const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
+                                tensorTileA.data().GetPhyAddr()
+                            );
+                    }
+                } else {
+                    copyGmToL1A(tensorL1A, tensorTileA);
+                }
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1AListIdNext]);
+
+                // load next matrix B tile from GM to L1
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListIdNext]);
+                if constexpr (ENABLE_L1_RESIDENT) {
+                    if (lastAddrB[l1BListIdNext] != tensorTileB.data().GetPhyAddr()
+                        || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].row()
+                        || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].column()) {
+                        copyGmToL1B(tensorL1B, tensorTileB);
+                        lastCoordB[l1BListIdNext] =
+                            Catlass::MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
+                        lastAddrB[l1BListIdNext] =
+                            const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
+                                tensorTileB.data().GetPhyAddr()
+                            );
+                    }
+                } else {
+                    copyGmToL1B(tensorL1B, tensorTileB);
+                }
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1BListIdNext]);
+            }
+
+            // Get L1 tensor for current stage
+            auto l1ATensor = l1ATensorList[l1AListId];
+            auto l1BTensor = l1BTensorList[l1BListId];
+            tensorL1A = tla::MakeTensor(l1ATensor, L1A_LAYOUT, Catlass::Arch::PositionL1{});
+            tensorL1B = tla::MakeTensor(l1BTensor, L1B_LAYOUT, Catlass::Arch::PositionL1{});
+            // Get the loop nums on L0
+            uint32_t kL0Loop = CeilDiv<L0_TILE_K>(kL1Actual);
+
+            for (int mL0Idx = 0; mL0Idx < mL0Loop; mL0Idx++) {
+                uint32_t mL0Actual = (mL0Idx < mL0Loop - 1) ? L0_TILE_M : (mL1Actual - mL0Idx * L0_TILE_M);
+
+                for (int kL0Idx = 0; kL0Idx < kL0Loop; kL0Idx++) {
+                    uint32_t kL0Actual = (kL0Idx < kL0Loop - 1) ? L0_TILE_K : (kL1Actual - kL0Idx * L0_TILE_K);
+
+                    // Locate the current tile on L0A
+                    auto l0ATile = l0ATensorList[l0AListId];
+                    auto layoutAInL0 = tla::MakeLayout<ElementA, LayoutTagL0A>(mL0Actual, kL0Actual);
+                    auto tensorL0A = tla::MakeTensor(l0ATile, layoutAInL0, Catlass::Arch::PositionL0A{});
+                    // Locate the current tile of matrix A on L1
+                    auto tensorTileL1A = GetTileA(tensorL1A, mL0Idx * L0_TILE_M, kL0Idx * L0_TILE_K, mL0Actual, kL0Actual);
+
+                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
+                    if ((mL0Idx == 0) && (kL0Idx == 0)) {
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1AListId]);
+                    }
+
+                    // Load current tile from L1 to L0A
+                    copyL1ToL0A(tensorL0A, tensorTileL1A);
+
+                    if ((mL0Idx == mL0Loop - 1) && (kL0Idx == kL0Loop - 1)) {
+                        AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListId]);
+                    }
+
+                    bool initC = ((kL1Idx == 0) && (kL0Idx == 0));
+                    for (int nL0Idx = 0; nL0Idx < nL0Loop; nL0Idx++) {
+                        uint32_t nL0Actual = (nL0Idx < nL0Loop - 1) ? L0_TILE_N : (nL1Actual - nL0Idx * L0_TILE_N);
+
+                        // Locate the current tile on L0B
+                        auto l0BTile = l0BTensorList[l0BListId];
+                        auto layoutBInL0 = tla::MakeLayout<ElementB, LayoutTagL0B>(kL0Actual, nL0Actual);
+                        auto tensorL0B = tla::MakeTensor(l0BTile, layoutBInL0, Catlass::Arch::PositionL0B{});
+                        // Locate the current tile of matrix B on L1
+                        auto tensorTileL1B = GetTile(tensorL1B,
+                                                     tla::MakeCoord(kL0Idx * L0_TILE_K, nL0Idx * L0_TILE_N),
+                                                     tla::MakeShape(kL0Actual, nL0Actual));
+
+                        // Wait for mmad finished
+                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
+                        // If the current tile is the first one on the k&n axis, wait for loading matrix B from GM to L1
+                        if ((mL0Idx == 0) && (kL0Idx == 0) && (nL0Idx == 0)) {
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1BListId]);
+                        }
+
+                        // Load current tile from L1 to L0B
+                        copyL1ToL0B(tensorL0B, tensorTileL1B);
+
+                        // If the current tile is the last one on the k&n axis, notify to load matrix B from GM to L1
+                        if ((mL0Idx == mL0Loop - 1) && (kL0Idx == kL0Loop - 1) && (nL0Idx == nL0Loop - 1)) {
+                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListId]);
+                        }
+
+                        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, Catlass::EmptyClass>) {
+                            if (initC) {
+                                if (nL0Idx == 0) {
+                                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(L1A_STAGES + L1B_STAGES);
+                                }
+                                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(L0A_STAGES + L0B_STAGES);
+                                auto l1Bias = l1BiasTensor.template ReinterpretCast<ElementBias>();
+                                auto tensorL1Bias = tla::MakeTensor(l1Bias, L1BIAS_LAYOUT, Catlass::Arch::PositionL1{});
+                                auto tensorTileL1Bias = GetTile(tensorL1Bias,
+                                                                tla::MakeCoord(nL0Idx * L0_TILE_N),
+                                                                tla::MakeShape(nL0Actual));
+                                // Load bias to l0 biastable
+                                copyL1ToBT(tensorL0Bias, tensorTileL1Bias);
+                                if (nL0Idx == nL0Loop - 1) {
+                                    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(L1A_STAGES + L1B_STAGES);
+                                }
+                            }
+                        }
+
+                        // Notify to do mmad
+                        AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(l0CEventList[l0CListId]);
+
+                        // Locate the current tile on L0C
+                        auto tensorTileL0C = GetTile(tensorL0C,
+                                                     tla::MakeCoord(mL0Idx * L0_TILE_M, nL0Idx * L0_TILE_N),
+                                                     tla::MakeShape(mL0Actual, nL0Actual));
+
+                        // Compute the matrix multiplication on L0A and L0B and write the result to the accumulator
+                        // Wait for loading L0B
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(l0CEventList[l0CListId]);
+
+                        // If the unit flag is enabled, the unit flag is set according to the calculation progress
+                        uint8_t unitFlag = 0b00;
+                        if constexpr (ENABLE_UNIT_FLAG) {
+                            if ((kL1Idx == kL1Loop - 1) && (mL0Idx == mL0Loop - 1) &&
+                                (kL0Idx == kL0Loop - 1) && (nL0Idx == nL0Loop - 1)) {
+                                unitFlag = 0b11;
+                            } else {
+                                unitFlag = 0b10;
+                            }
+                        }
+
+                        if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, Catlass::EmptyClass>) {
+                            if (initC) {
+                                tileMmad(tensorTileL0C, tensorL0A, tensorL0B, tensorL0Bias,
+                                    mL0Actual, nL0Actual, kL0Actual, initC, unitFlag);
+                                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(L0A_STAGES + L0B_STAGES);
+                            } else {
+                                tileMmad(tensorTileL0C, tensorL0A, tensorL0B,
+                                    mL0Actual, nL0Actual, kL0Actual, initC, unitFlag);
+                            }
+                        } else {
+                            tileMmad(tensorTileL0C, tensorL0A, tensorL0B,
+                                mL0Actual, nL0Actual, kL0Actual, initC, unitFlag);
+                        }
+
+                        // Notify to move the next L0B tile
+                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
+                        l0BListId = (l0BListId + 1 < L0B_STAGES) ? (l0BListId + 1) : 0;
+                    }
+                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
+                    l0AListId = (l0AListId + 1 < L0A_STAGES) ? (l0AListId + 1) : 0;
+                }
+            }
+            l1AListId = l1AListIdNext;
+            l1BListId = l1BListIdNext;
+            kL1Actual = kL1ActualNext;
+        }
+
+        // copy block out
+        if constexpr (!ENABLE_UNIT_FLAG) {
+            AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
+            AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
+            uint32_t leftRowNum = mL1Actual;
+            uint32_t twoVecRowNum = ubRowNum * sendVecNum;
+            uint32_t curRowNum = min(twoVecRowNum, leftRowNum);
+            uint32_t rowIdx = 0;
+            uint32_t tileNum = CeilDiv(mL1Actual, twoVecRowNum);
+            for (uint32_t i = 0; i < tileNum; i++) {
+                auto tensorTileL0C = GetTile(tensorL0C,
+                                            tla::MakeCoord(rowIdx, 0),
+                                            tla::MakeShape(curRowNum, nL1Actual));
+                if (sendVecNum == 2) {
+                    AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + ubListId);
+                    AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + FLAG_ID_MAX + ubListId);
+                    copyL0CToDst(tensorCList[ubListId], tensorTileL0C, ubRowNum, beginSubBlockIdx, sendVecNum);
+                    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + ubListId);
+                    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + FLAG_ID_MAX + ubListId);
+                    rowIdx += curRowNum;
+                    leftRowNum -= curRowNum;
+                    curRowNum = min(twoVecRowNum, leftRowNum);
+                    ubListId = (ubListId + 1 < ubNum) ? (ubListId + 1) : 0;
+                } else if (sendVecNum == 1) {
+                    if (beginSubBlockIdx == 0) {
+                        AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + ubListId);
+                    } else if (beginSubBlockIdx == 1) {
+                        AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + FLAG_ID_MAX + ubListId);
+                    }
+                    copyL0CToDst(tensorCList[ubListId], tensorTileL0C, ubRowNum, beginSubBlockIdx, sendVecNum);
+                    if (beginSubBlockIdx == 0) {
+                        AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + ubListId);
+                    } else if (beginSubBlockIdx == 1) {
+                        AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + FLAG_ID_MAX + ubListId);
+                    }
+                    rowIdx += curRowNum;
+                    leftRowNum -= curRowNum;
+                    curRowNum = min(twoVecRowNum, leftRowNum);
+                    ubListId = (ubListId + 1 < ubNum) ? (ubListId + 1) : 0;
+                }
+            }
+            AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CEventList[l0CListId]);
+            l0CListId = (l0CListId + 1 < L0C_STAGES) ? (l0CListId + 1) : 0;
+        } else {
+            uint32_t leftRowNum = mL1Actual;
+            uint32_t twoVecRowNum = ubRowNum * sendVecNum;
+            uint32_t curRowNum = min(twoVecRowNum, leftRowNum);
+            uint32_t rowIdx = 0;
+            uint32_t tileNum = CeilDiv(mL1Actual, twoVecRowNum);
+            for (uint32_t i = 0; i < tileNum; i++) {
+                auto tensorTileL0C = GetTile(tensorL0C,
+                                            tla::MakeCoord(rowIdx, 0),
+                                            tla::MakeShape(curRowNum, nL1Actual));
+                if (sendVecNum == 2) {
+                    AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + ubListId);
+                    AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + FLAG_ID_MAX + ubListId);
+                    copyL0CToDst(tensorCList[ubListId], tensorTileL0C, ubRowNum, beginSubBlockIdx, sendVecNum);
+                    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + ubListId);
+                    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + FLAG_ID_MAX + ubListId);
+                    rowIdx += curRowNum;
+                    leftRowNum -= curRowNum;
+                    curRowNum = min(twoVecRowNum, leftRowNum);
+                    ubListId = (ubListId + 1 < ubNum) ? (ubListId + 1) : 0;
+                } else if (sendVecNum == 1) {
+                    if (beginSubBlockIdx == 0) {
+                        AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + ubListId);
+                    } else if (beginSubBlockIdx == 1) {
+                        AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(l0C2UBAIVAICFlag + FLAG_ID_MAX + ubListId);
+                    }
+                    copyL0CToDst(tensorCList[ubListId], tensorTileL0C, ubRowNum, beginSubBlockIdx, sendVecNum);
+                    if (beginSubBlockIdx == 0) {
+                        AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + ubListId);
+                    } else if (beginSubBlockIdx == 1) {
+                        AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(l0C2UBAICAIVFlag + FLAG_ID_MAX + ubListId);
+                    }
+                    rowIdx += curRowNum;
+                    leftRowNum -= curRowNum;
+                    curRowNum = min(twoVecRowNum, leftRowNum);
+                    ubListId = (ubListId + 1 < ubNum) ? (ubListId + 1) : 0;
+                }
+            }
+        }
+    }
+
 protected:
     template<class TensorA>
     CATLASS_DEVICE auto GetTileA(TensorA &tensorA, uint32_t mIndex, uint32_t kIndex, uint32_t mSize, uint32_t kSize)
@@ -689,8 +1033,8 @@ protected:
 
     __gm__ typename AscendC::GlobalTensor<ElementA>::PrimType* lastAddrA[L1A_STAGES];
     __gm__ typename AscendC::GlobalTensor<ElementB>::PrimType* lastAddrB[L1B_STAGES];
-    MatrixCoord lastCoordA[L1A_STAGES];
-    MatrixCoord lastCoordB[L1B_STAGES];
+    Catlass::MatrixCoord lastCoordA[L1A_STAGES];
+    Catlass::MatrixCoord lastCoordB[L1B_STAGES];
 
     // The id of current stage
     uint32_t l1AListId{0};
@@ -705,6 +1049,6 @@ protected:
     CopyL1ToBT copyL1ToBT;
 };
 
-} // namespace Catlass::Gemm::Block
+} // namespace Common
 
-#endif // CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_MULTI_HPP
+#endif // CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_HPP

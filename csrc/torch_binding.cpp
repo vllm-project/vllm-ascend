@@ -1943,7 +1943,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 
     ops.def(
-        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor gk, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? return_intermediate=False, bool? safe_gate=False, bool? transpose_state_layout=False) -> (Tensor o, Tensor final_state, Tensor g, Tensor aqk, Tensor akk, Tensor w, Tensor u, Tensor qg, Tensor kg, Tensor v_new, Tensor h, Tensor initial_state_out)"
+        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? safe_gate=False, float? lower_bound=None, bool? use_gate_in_kernel=False, Tensor? A_log=None, Tensor? dt_bias=None, bool? disable_recompute=False, bool? return_intermediate_states=False, bool? state_v_first=False) -> (Tensor o, Tensor? final_state, Tensor? gk, Tensor aqk, Tensor akk, Tensor? w, Tensor? u, Tensor? qg, Tensor? kg, Tensor? v_new, Tensor? h, Tensor? initial_state_out)"
     );
     ops.impl("chunk_kda_fwd", torch::kPrivateUse1, &vllm_ascend::chunk_kda_fwd);
 
@@ -2594,7 +2594,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 
     ops.def(
-        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor gk, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? return_intermediate=False, bool? safe_gate=False, bool? transpose_state_layout=False) -> (Tensor o, Tensor final_state, Tensor g, Tensor aqk, Tensor akk, Tensor w, Tensor u, Tensor qg, Tensor kg, Tensor v_new, Tensor h, Tensor initial_state_out)"
+        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? safe_gate=False, float? lower_bound=None, bool? use_gate_in_kernel=False, Tensor? A_log=None, Tensor? dt_bias=None, bool? disable_recompute=False, bool? return_intermediate_states=False, bool? state_v_first=False) -> (Tensor o, Tensor? final_state, Tensor? gk, Tensor aqk, Tensor akk, Tensor? w, Tensor? u, Tensor? qg, Tensor? kg, Tensor? v_new, Tensor? h, Tensor? initial_state_out)"
     );
     ops.impl("chunk_kda_fwd", torch::kPrivateUse1, &vllm_ascend::chunk_kda_fwd);
 
