@@ -1,10 +1,45 @@
-# Decode Context Parallel (DCP)
+# Context Parallel (CP)
 
-Decode Context Parallel shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It eliminates redundant KV-cache storage without adding devices to the process world.
+Context Parallel distributes long-sequence work across devices. Prefill Context Parallel (PCP) adds ranks and splits prefill tokens to reduce time to first token, while Decode Context Parallel (DCP) reuses Tensor Parallel (TP) ranks and shards the KV cache to reduce duplicated storage. See the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide for the general design.
 
-Prefill Context Parallel is not supported by vLLM Ascend. This document describes only DCP and the separate DSA-CP sparse-attention path.
+DSA-CP is a separate sparse-attention optimization. It uses TP/SP communication and is enabled by `additional_config.enable_dsa_cp`; it does not use the PCP process layout.
 
-## KV-cache layout
+## Prefill Context Parallel (MRV2)
+
+PCP divides the new tokens of each prefill request among a dedicated PCP group. Each rank computes rank-local query tokens while retaining access to the complete sequence state needed by attention. The current MRV2 implementations use the partial-query, full-key/value strategy described by upstream vLLM.
+
+### Batch partitioning
+
+The upstream `PCPManager` retains the scheduler-global batch and rewrites each attention step into rank-local DualChunkSwap rows. A prefill request is divided into `2 * pcp_size` chunks: rank 0 receives the first and last chunks, rank 1 receives the second and second-to-last chunks, and so on. Pairing the head and tail balances causal-attention work across ranks.
+
+Each rank is padded to the same token count before collective communication. A restore index maps the gathered rank-major hidden states back to scheduler token order.
+
+![PCP token partition](../../assets/cp/head-tail-style.png)
+
+### GQA cache preparation
+
+The GQA backend all-gathers the padded K/V tensors and expanded slot mappings. Each rank then writes the complete PCP KV-cache view before running attention for its rank-local query tokens. The temporary gathered tensors are layer-local and do not change the persistent cache-shard count.
+
+### DSA cache preparation
+
+DeepSeek-V4 DSA has three stateful cache paths: sliding-window attention (SWA), the main compressor, and the indexer compressor. Updating them independently from rank-local token order would produce different cache state on each rank.
+
+The DSA PCP backend therefore:
+
+1. All-gathers padded hidden states and restores scheduler token order once.
+2. Builds canonical global DSA metadata from the scheduler-global batch.
+3. Updates the SWA, main compressor, and indexer compressor caches once each on every rank.
+4. Runs rank-local query and sparse attention with `cache_is_prepared=True`, which skips duplicate cache writes.
+
+The replicated caches remain identical across the PCP group, while attention output remains rank-local. This path uses a single stream because cache preparation has already completed before local attention, leaving no cache-update work for the auxiliary stream to overlap.
+
+DSA PCP is selected by `prefill_context_parallel_size > 1`. It is mutually exclusive with legacy DSA-CP, which is selected by `additional_config.enable_dsa_cp`.
+
+## Decode Context Parallel (DCP)
+
+DCP shards the KV cache along the sequence dimension across devices in a TP group. It eliminates redundant KV-cache storage without adding devices to the process world.
+
+### KV-cache layout
 
 DCP stores tokens in an interleaved layout across ranks. The interleaving granularity is controlled by `cp_kv_cache_interleave_size`, whose default value is `1`.
 
@@ -19,9 +54,9 @@ The slot-mapping calculation uses this layout so each DCP rank stores only its l
 
 ![DCP block table](../../assets/cp/blocktable.png)
 
-## Attention execution
+### Attention execution
 
-### Backend structure
+#### Backend structure
 
 DCP is implemented as a specialization of the corresponding v1 attention
 backend rather than as a parallel copy of it:
@@ -38,7 +73,7 @@ The normal v1 builders remain the source of truth for request classification,
 padding, masks, graph metadata, and common KV-cache metadata. DCP-specific
 metadata is kept out of the normal v1 metadata schemas.
 
-### Prefill and chunked prefill
+#### Prefill and chunked prefill
 
 During chunked or cached prefill, the local query must attend to KV-cache shards distributed across the DCP group.
 
@@ -47,13 +82,13 @@ During chunked or cached prefill, the local query must attend to KV-cache shards
 
 ![DCP prefill](../../assets/cp/dcp-prefill.png)
 
-### Decode
+#### Decode
 
 Decode gathers the query heads required by each DCP rank, computes attention against the local KV-cache shard, and combines partial outputs and LSE values across the DCP group.
 
 ![DCP decode](../../assets/cp/dcp-decode.png)
 
-### GLM-5.2 SFA DCP replicated indexer
+#### GLM-5.2 SFA DCP replicated indexer
 
 GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer. For DCP,
 the indexer needs a full-sequence view to select the same sparse top-k blocks
@@ -91,7 +126,7 @@ vllm serve <glm-5.2-model> \
 The replicated indexer increases indexer-cache memory in proportion to the
 DCP world size; the SFA KV cache itself remains sharded.
 
-### SFA DSA-CP `o_proj` Path
+#### SFA DSA-CP `o_proj` Path
 
 SFA DSA-CP execution intentionally reuses the normal TP-sharded `o_proj`.
 This applies both to a mixed-role instance and to a PD-disaggregated P node; it is not a standalone user-facing `o_proj` TP switch.
@@ -112,6 +147,9 @@ This coupling preserves the existing decode TP behavior, supports prefill/mixed 
 
 ## Related Files
 
+- MRV2 PCP batch partitioning: `vllm_ascend/worker/v2/pcp_manager.py`
+- MRV2 GQA PCP backend: `vllm_ascend/attention/attention_v1.py`
+- MRV2 DSA PCP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
 - Slot mapping: `vllm_ascend/worker/block_table.py`
 - Input and attention metadata: `vllm_ascend/worker/model_runner_v1.py`
 - Shared DCP backend capabilities: `vllm_ascend/attention/context_parallel/common_cp.py`

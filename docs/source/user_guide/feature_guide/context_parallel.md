@@ -1,14 +1,30 @@
-# Decode Context Parallel Guide
+# Context Parallel Guide
 
 ## Overview
 
-Decode Context Parallel (DCP) shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It removes redundant KV-cache copies and can increase the batch size available for long-context decoding.
+Context Parallel (CP) serves long-context requests by splitting work or KV-cache storage along the sequence dimension:
 
-Prefill Context Parallel is not supported by vLLM Ascend. The upstream `prefill_context_parallel_size` option must remain at its default value of `1`.
+- Prefill Context Parallel (PCP) splits the new tokens of a long prefill request across additional ranks. Each rank computes a different part of the sequence, reducing time to first token (TTFT).
+- Decode Context Parallel (DCP) shards the KV cache across ranks in an existing Tensor Parallel (TP) group. It reduces duplicated KV-cache storage and can increase decode throughput.
 
-DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
+For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
+
+DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. It does not use the PCP process layout. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
 
 ## Supported Scenarios
+
+### Prefill Context Parallel
+
+PCP support is experimental and available only with ModelRunner V2. The initial implementation supports the following attention backends:
+
+| Attention Backend | Status | Notes |
+| --- | --- | --- |
+| GQA | Experimental | Basic unquantized eager-mode prefill |
+| DeepSeek-V4 DSA | Experimental | Eager-mode support introduced by [#14037](https://github.com/vllm-project/vllm-ascend/pull/14037) |
+
+The DeepSeek-V4 DSA support documented here depends on #14037. Other attention backends and feature combinations are not covered by this initial MRV2 PCP path.
+
+### Decode Context Parallel
 
 DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
 
@@ -24,7 +40,32 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 - 🔴 **Not supported**: Combining the feature with DCP is not supported.
 - **Not applicable**: The feature does not apply to this attention backend.
 
-## Usage
+## Prefill Context Parallel Usage
+
+Enable ModelRunner V2 and set `prefill_context_parallel_size` to the number of PCP ranks:
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+vllm serve <supported-model> \
+    --tensor-parallel-size <tp-size> \
+    --prefill-context-parallel-size <pcp-size> \
+    --enforce-eager
+```
+
+Unlike DCP, PCP adds ranks to the process world. With pipeline parallelism disabled, the process world size is `tensor_parallel_size * prefill_context_parallel_size`.
+
+For a DeepSeek-V4 DSA model, setting `prefill_context_parallel_size` selects the DSA PCP backend automatically. Do not also set `additional_config.enable_dsa_cp`.
+
+### PCP Constraints
+
+- PCP and DCP cannot be enabled simultaneously on Ascend MRV2.
+- Pipeline parallelism must remain disabled (`pipeline_parallel_size=1`).
+- Encoder-decoder models, multimodal inputs, and LoRA are not supported.
+- Use eager mode for the initial GQA and DeepSeek-V4 DSA implementations.
+- DeepSeek-V4 DSA PCP and legacy DSA-CP (`additional_config.enable_dsa_cp`) are mutually exclusive.
+
+## Decode Context Parallel Usage
 
 Offline example:
 
@@ -52,7 +93,7 @@ vllm serve deepseek-ai/DeepSeek-V2-Lite \
 
 DCP reuses the TP devices and does not increase the world size.
 
-## Constraints
+### DCP Constraints
 
 - For an MLA model such as DeepSeek-R1:
     - `tensor_parallel_size >= decode_context_parallel_size`
@@ -70,4 +111,4 @@ DCP reuses the TP devices and does not increase the world size.
         --kv-transfer-config '{...}'
     ```
 
-For implementation details, see the [Decode Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
+For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
