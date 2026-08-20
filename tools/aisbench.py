@@ -37,7 +37,7 @@ DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
 
 class AisbenchRunner:
     RESULT_MSG = {"performance": "Performance Result files located in ", "accuracy": "write csv to "}
-    DATASET_RENAME = {"aime2024": "aime", "gsm8k-lite": "gsm8k", "textvqa-lite": "textvqa"}
+    DATASET_RENAME = {"aime2024": "aime", "gsm8k-lite": "gsm8k", "textvqa-lite": "textvqa","longbenchv2": "longbenchv2"}
 
     def _run_aisbench_task(self):
         dataset_conf = self.dataset_conf.split("/")[-1]
@@ -231,6 +231,10 @@ class AisbenchRunner:
         df = pd.read_csv(acc_file)
         self.result = float(df.iloc[0, -1])
 
+        if "longbenchv2" in str(self.dataset_conf):
+            self.result = float(df["accuracy"].mean())
+        else:
+            self.result = float(df.iloc[0, -1])
     def _performance_verify(self):
         self._get_result_performance()
         output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")

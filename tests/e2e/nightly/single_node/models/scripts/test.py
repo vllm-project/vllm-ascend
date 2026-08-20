@@ -1,10 +1,15 @@
-from typing import Any
+from typing import Any, Optional
 
 import requests
 
 
 def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
+    """Return the number of tokens the server would tokenize for `text`.
 
+    When `use_chat` is True, the text is wrapped as a single user message so
+    that the chat template is applied, matching what /v1/chat/completions
+    would count as prompt_tokens.
+    """
     url = server.url_for("tokenize")
     if use_chat:
         payload: dict[str, Any] = {"messages": [{"role": "user", "content": text}]}
@@ -57,7 +62,13 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int,
 
 
 def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, Optional[int]]:
+    """Resolve a raw prompt spec. If dict {'seed':..., 'target_tokens':...},
+    generate a prompt of that length and return (prompt, actual_count).
+    Otherwise return (raw_string, None).
 
+    Pass use_chat=True when the caller uses /v1/chat/completions so that the
+    chat template overhead is accounted for during tokenization.
+    """
     if isinstance(raw, dict):
         seed = str(raw.get("seed", ""))
         target = int(raw.get("target_tokens", 0))
@@ -147,3 +158,32 @@ def send_v1_chat_completions(prompt, model, server, request_args=None, expected:
     assert response_text, "empty response"
     validate_response(response_json, expected, max_model_len)
 
+# test_cases:
+#   - name: "MyModel-Test"
+#     model: "/path/to/model"
+#     envs:
+#       SERVER_PORT: "DEFAULT_PORT"
+#     server_cmd:
+#       - "--tensor-parallel-size"
+#       - "8"
+#       - "--port"
+#       - "$SERVER_PORT"
+#       - "--max-model-len"
+#       - "8192"
+#       - "--trust-remote-code"
+#     test_content:
+#       - chat_completion
+#     prompts:
+#       - seed: "Hello, how are you?"
+#         target_tokens: 512
+#       - seed: "请解释什么是大语言模型"
+#         target_tokens: 1024
+#       - "普通字符串也还可以用"
+#     api_keyword_args:
+#       max_tokens: 128
+#     expected_response:
+#       per_prompt:
+#         - completion_tokens: 80
+#         - completion_tokens: 120
+#         - prompt_tokens: 8
+#           completion_tokens: 30
