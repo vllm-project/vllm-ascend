@@ -368,7 +368,7 @@ Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` (dec
 > - `profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`
 > - `profiling_chunk_config.need_timing`: Enable/disable Online Calibration
 > - `profiling_chunk_config.max_fit_chunk`: Number of chunk-time data for Online Calibration. Should be more when profiling failed
-
+>
 > **Key points for PD disaggregation with CPP:**
 >
 > - CPP (`profiling_chunk_config.enabled`, `--pipeline-parallel-size > 1`) is configured **only on the P node**.

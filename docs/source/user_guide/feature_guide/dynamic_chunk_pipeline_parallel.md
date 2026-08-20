@@ -195,7 +195,7 @@ Note:
 
 The `--max-num-batched-tokens` and `smooth_factor` parameters need to be adjusted. It is recommended that you adjust the `--max-num-batched-tokens` parameter first and then adjust the `smooth_factor`.
 
-#### --max-num-batched-tokens
+**1. --max-num-batched-tokens**
 
 **Notably, the TTFT of CPP is very sensitive to `--max-num-batched-tokens` (considered as the initial chunk size for dynamic chunk calculation).** Because if it is too large, it will introduce significant computational waste, and if it is too small, it will lead to a decrease in operator efficiency.
 
@@ -208,7 +208,7 @@ Meanwhile, to leave enough room for dynamic adjustments, we recommend that the l
 | 64k             | 20480                    |
 | 128k            | 32768                    |
 
-#### smooth_factor
+**2. smooth_factor**
 
 Controls trust level in dynamic prediction
 
@@ -218,11 +218,11 @@ Controls trust level in dynamic prediction
 
 Enabling `need_timing` for correct online calibration can typically yield more accurate chunk-latency fitting results. Therefore, you are advised not to adjust `smooth_factor` when `need_timing` is enabled. If `need_timing` is disabled, you can adjust `smooth_factor` to a value ranging from 0.5 to 0.8 to achieve the effect of enabling `need_timing`.
 
-#### min_chunk
+**3. min_chunk**
 
 Generally doesn't need adjustment. Should be smaller than `max-num-batched-tokens`
 
-#### max_fit_chunk
+**4. max_fit_chunk**
 
 Generally doesn't need adjustment.
 
