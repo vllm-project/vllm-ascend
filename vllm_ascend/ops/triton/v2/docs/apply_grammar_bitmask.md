@@ -57,7 +57,6 @@
   4. **应用掩码**：仅对 bit 为 0 的 token 写入 `-inf`；bit 为 1 的位置不写回，保持
      原始 logits 不变。
 
-
 ## 参数说明
 
 | 参数名 | 输入/输出/属性 | 描述 | 数据类型 | 数据格式 |
@@ -67,7 +66,6 @@
 | bitmask | 输入 | 二维 `[num_masks, ceil(vocab_size / 32)]` packed grammar bitmask，每个 INT32 保存连续 32 个 token 的允许/禁止状态。 | INT32 | ND |
 | vocab_size | 属性 | 实际词表大小，用于限制最后一个 vocab block 的有效范围。 | INT | - |
 | BLOCK_SIZE | 属性 | 每个 logical task 负责的 vocab block 大小。当前 A2/A3 验证配置为 `8192`。 | INT | - |
-
 
 ## 约束说明
 
@@ -128,7 +126,6 @@
 
 - 图模式支持情况：待补充。
 
-
 ## 调用示例
 
 ```python
@@ -182,7 +179,6 @@ _apply_grammar_bitmask_kernel[grid](
     BLOCK_SIZE=block_size,
 )
 ```
-
 
 ## test ut
 
