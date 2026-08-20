@@ -57,6 +57,7 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.utils import vllm_version_is
 
@@ -184,6 +185,9 @@ class AscendMetadata:
     # should simplified these parameters once attention schema in vLLM-Ascend
     # is unified.
     seq_lens: torch.Tensor = None
+    # Device copy used by graph-captured operators whose sequence lengths must
+    # remain dynamic across replays.
+    seq_lens_device: torch.Tensor = None
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
@@ -258,6 +262,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.reorder_batch_threshold = self.decode_threshold
 
         scheduler_config = vllm_config.scheduler_config
+        # Draft verification expands each request into K+1 query rows, so this
+        # buffer must be sized by the token budget rather than max_num_seqs.
+        # The allocation stays fixed so graph replay never observes a new address.
+        self._seq_lens_device_buffer = torch.empty(
+            scheduler_config.max_num_batched_tokens + 1, dtype=torch.int32, device=self.device
+        )
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
@@ -380,6 +390,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
+        seq_lens_device = self._seq_lens_device_buffer[: len(seq_lens)]
+        # Copy before entering the compiled model; graph replay reuses this address.
+        seq_lens_device.copy_(seq_lens, non_blocking=True)
+
         backend_metadata = self._build_backend_metadata(
             common_attn_metadata,
             block_table=block_table,
@@ -394,6 +408,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
+            seq_lens_device=seq_lens_device,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens_list,
             max_query_len=common_attn_metadata.max_query_len,
@@ -848,6 +863,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
+            if (
+                self.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+                and query.shape[0] != attn_metadata.seq_lens.shape[0]
+            ):
+                return self._forward_large_head_graph_verify_attention(
+                    query,
+                    attn_metadata,
+                    output,
+                )
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -975,6 +999,95 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def _forward_large_head_graph_verify_attention(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run Gemma4 target verification with an ACL-graph-compatible FA."""
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError("Gemma4 graph verification requires initialized KV caches")
+
+        batch_size = attn_metadata.seq_lens.shape[0]
+        num_tokens = query.shape[0]
+        if num_tokens % batch_size != 0:
+            raise RuntimeError(
+                "Gemma4 graph verification requires uniform query lengths, "
+                f"got {num_tokens} tokens for {batch_size} requests"
+            )
+
+        query_len = num_tokens // batch_size
+        block_table = attn_metadata.block_tables[:batch_size]
+        num_blocks_per_req = block_table.shape[1]
+        block_size = self.key_cache.shape[1]
+        max_kv_len = num_blocks_per_req * block_size
+        seq_lens_for_blocks = attn_metadata.seq_lens_device
+        if seq_lens_for_blocks is None:
+            seq_lens_for_blocks = attn_metadata.seq_lens.to(device=query.device, non_blocking=True)
+        seq_lens_for_blocks = seq_lens_for_blocks[:batch_size]
+        valid_block_counts = (seq_lens_for_blocks + block_size - 1) // block_size
+        block_offsets = torch.arange(
+            num_blocks_per_req,
+            dtype=seq_lens_for_blocks.dtype,
+            device=query.device,
+        )
+        valid_block_mask = block_offsets.unsqueeze(0) < valid_block_counts.unsqueeze(1)
+        block_ids = (
+            block_table.long().masked_fill(~valid_block_mask, 0).reshape(-1).clamp_(0, self.key_cache.shape[0] - 1)
+        )
+
+        dense_shape = (
+            batch_size,
+            max_kv_len,
+            self.num_kv_heads,
+            self.head_size,
+        )
+        dense_key = self.key_cache.index_select(0, block_ids).reshape(dense_shape)
+        dense_value = self.value_cache.index_select(0, block_ids).reshape(dense_shape)
+        dense_key = dense_key.permute(0, 2, 1, 3).contiguous()
+        dense_value = dense_value.permute(0, 2, 1, 3).contiguous()
+        query_bnsd = (
+            query[:num_tokens]
+            .reshape(batch_size, query_len, self.num_heads, self.head_size)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+
+        seq_lens = attn_metadata.seq_lens_device
+        if seq_lens is None:
+            seq_lens = attn_metadata.seq_lens.to(device=query.device, non_blocking=True)
+        query_positions = torch.arange(
+            query_len,
+            dtype=torch.int32,
+            device=query.device,
+        ).view(1, 1, query_len, 1)
+        key_positions = torch.arange(
+            max_kv_len,
+            dtype=torch.int32,
+            device=query.device,
+        ).view(1, 1, 1, max_kv_len)
+        last_allowed_key = seq_lens[:batch_size].view(batch_size, 1, 1, 1) - query_len + query_positions
+        attn_mask = key_positions > last_allowed_key
+
+        attn_output = torch_npu.npu_fusion_attention_v3(
+            query=query_bnsd,
+            key=dense_key,
+            value=dense_value,
+            head_num=self.num_heads,
+            input_layout="BNSD",
+            atten_mask=attn_mask,
+            scale=self.scale,
+            sparse_mode=1,
+        )[0]
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(
+            num_tokens,
+            self.num_heads,
+            self.head_size,
+        )
+        output[:num_tokens] = attn_output
         return output
 
     def _forward_fia_chunked_prefill_split(
@@ -1215,11 +1328,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         with attention_transfer_window():
             num_tokens = query.shape[0]
+            single_token_per_request = num_tokens == attn_metadata.seq_lens.shape[0]
 
             if (
-                attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                attn_metadata.attn_state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
                 and self.sliding_window is None
                 and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
+                and (attn_metadata.attn_state != AscendAttentionState.SpecDecoding or single_token_per_request)
             ):
                 output = self.forward_paged_attention(query, attn_metadata, output)
             else:
@@ -1275,7 +1390,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
-        if key is not None and value is not None:
+        if key is not None and value is not None and getattr(layer, "kv_sharing_target_layer_name", None) is None:
             output_padded = output
             if self.pcp_enabled:
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
