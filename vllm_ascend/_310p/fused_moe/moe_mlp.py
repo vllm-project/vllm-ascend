@@ -22,6 +22,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
+# Expert weights are static during inference. Cache the FRACTAL_NZ view keyed by
+# the ND Parameter storage so every decode step does not re-cast + contiguous.
+_WEIGHT_NZ_CACHE: dict[int, torch.Tensor] = {}
+
 
 def _quant_grouped_matmul_dequant_310_impl(
     x: torch.Tensor,
@@ -33,9 +37,13 @@ def _quant_grouped_matmul_dequant_310_impl(
 
     ModelSlim stores ND ``[E, N, K]``. 310P WeightNZ accepts FRACTAL_NZ of
     that layout. torch.compile/GE strips format-29 from 3D Parameters, so
-    the cast happens inside this opaque custom op.
+    the cast happens inside this opaque custom op and is cached by data_ptr.
     """
-    weight_nz = torch_npu.npu_format_cast(quantized_weight.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+    key = quantized_weight.data_ptr()
+    weight_nz = _WEIGHT_NZ_CACHE.get(key)
+    if weight_nz is None:
+        weight_nz = torch_npu.npu_format_cast(quantized_weight.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+        _WEIGHT_NZ_CACHE[key] = weight_nz
     return torch_npu.npu_quant_grouped_matmul_dequant(
         x=x,
         quantized_weight=weight_nz,

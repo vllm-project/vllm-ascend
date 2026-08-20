@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers, init_attn_backend
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
@@ -42,7 +43,6 @@ from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
@@ -108,7 +108,17 @@ class NPUModelRunner310V2(NPUModelRunner):
                 f"unsupported parallel settings: {', '.join(enabled)}."
             )
 
-        cls.feature_support.validate_config(vllm_config)
+        if vllm_config.cache_config.enable_prefix_caching and not cls.feature_support.prefix_caching:
+            raise NotImplementedError(
+                "Prefix caching is deferred to a later 310P Model Runner V2 release; "
+                "the first-release feature boundary keeps it disabled."
+            )
+        if vllm_config.speculative_config is not None and not cls.feature_support.qwen3_5_mtp:
+            raise NotImplementedError(
+                "Qwen3.5 MTP/speculative decoding is deferred to a later 310P "
+                "Model Runner V2 release; the first-release feature boundary "
+                "keeps it disabled."
+            )
         if vllm_config.lora_config is not None:
             raise NotImplementedError("LoRA is outside the 310P Model Runner V2 V1-alignment scope.")
         if getattr(parallel_config, "enable_expert_parallel", False):
@@ -181,14 +191,23 @@ class NPUModelRunner310V2(NPUModelRunner):
             cp_interleave=self.cp_interleave,
         )
         initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
+        self.pcp_manager = pcp.maybe_build_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            self.req_states,
+            self.block_tables,
+            cls=self.pcp_manager_cls,
+        )
 
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self._get_uniform_decode_query_len(),
-            self.parallel_config.tensor_parallel_size,
-            self.kv_cache_config,
-            self.max_num_reqs,
+            use_v2_model_runner=True,
+            tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+            kv_cache_config=self.kv_cache_config,
+            max_num_reqs=self.max_num_reqs,
         )
         self.cudagraph_manager = self.aclgraph_manager_cls(
             self.vllm_config,
@@ -211,13 +230,6 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         self._init_kv_zero_meta_if_needed(kv_cache_config)
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
-        self.pcp_manager = maybe_build_ascend_pcp_manager(
-            self.vllm_config,
-            self.device,
-            self.supports_mm_inputs,
-            self.req_states,
-            self.block_tables,
-        )
 
     def _adjust_kernel_block_sizes_310p(self, kv_cache_config: KVCacheConfig) -> None:
         """Apply the 310P paged-attention block/head-size constraint."""

@@ -174,3 +174,28 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         # The upstream RoPE state is safe to construct but its Triton position
         # preparation cannot run on 310P. Replace it before the first request.
         self._replace_310p_rope_state(encoder_cache)
+
+    def postprocess_state(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+    ) -> None:
+        # Upstream uses Triton scatter kernels. On 310P Triton may be absent, so
+        # the decorated kernel becomes a plain python function and crashes when
+        # invoked as ``kernel[(...)]``. Keep the op Triton-free via NPU indexing.
+        # Also filter padding ``-1`` indices: ``index_fill_`` treats ``-1`` as the
+        # last slot and would corrupt ``max_num_reqs - 1``.
+        del num_computed_tokens
+
+        valid = idx_mapping >= 0
+        valid_indices = idx_mapping.masked_select(valid)
+        if valid_indices.numel() == 0:
+            return
+
+        if isinstance(num_sampled, int):
+            self.num_accepted_tokens_gpu.index_fill_(0, valid_indices, max(num_sampled, 1))
+            return
+
+        accepted = torch.clamp(num_sampled.masked_select(valid), min=1).to(self.num_accepted_tokens_gpu.dtype)
+        self.num_accepted_tokens_gpu.index_copy_(0, valid_indices, accepted)

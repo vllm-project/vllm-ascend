@@ -158,6 +158,22 @@ def test_310p_hybrid_model_state_keeps_ascend_hybrid_behavior() -> None:
     assert issubclass(Ascend310PMambaHybridModelState, AscendMambaHybridModelState)
 
 
+def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
+    state = object.__new__(Ascend310PMambaHybridModelState)
+    state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
+
+    idx_mapping = torch.tensor([0, -1, 2], dtype=torch.int64)
+    state.postprocess_state(idx_mapping, num_sampled=3)
+
+    assert state.num_accepted_tokens_gpu.tolist() == [3, 1, 3, 1]
+
+    idx_mapping = torch.tensor([1, -1], dtype=torch.int64)
+    num_sampled = torch.tensor([2, 9], dtype=torch.int32)
+    state.postprocess_state(idx_mapping, num_sampled=num_sampled)
+
+    assert state.num_accepted_tokens_gpu.tolist() == [3, 2, 3, 1]
+
+
 def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     config = MagicMock()

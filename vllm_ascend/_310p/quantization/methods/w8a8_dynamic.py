@@ -32,22 +32,11 @@ from .w8a8_base import AscendW8A8Linear310pScheme
 # 310P GE retile of FRACTAL_NZ W8A8-Dynamic weights during torch.compile
 # launches QuantBatchMatmulV3_NZ_NZ kernel 21 (hash 5247287448945562503).
 # Eager NZ works; compiled Qwen3.5-2B TP2 does not (fused qkv KV shard N=256
-# and MLP). Linear layers keep ND [N, K] and dequant to fp16. MoE experts
-# still use grouped-matmul NZ.
-# keep ND [E, N, K] for npu_quant_grouped_matmul_dequant (WeightNZ 3D
-# parameters lose FRACTAL_NZ under GE and fail tiling).
+# and MLP). Linear layers keep ND [N, K] and dequant to fp16 once at load.
+# MoE experts still use grouped-matmul NZ and keep ND [E, N, K] for
+# npu_quant_grouped_matmul_dequant (WeightNZ 3D parameters lose FRACTAL_NZ
+# under GE and fail tiling).
 _MIN_NZ_QUANT_MATMUL_N = 512
-
-
-def _needs_fp16_quant_matmul_fallback(_layer: torch.nn.Module, _weight: torch.Tensor) -> bool:
-    """310P W8A8-Dynamic linear always uses ND + fp16 dequant.
-
-    GE retile of FRACTAL_NZ weights during torch.compile launches
-    ``QuantBatchMatmulV3_NZ_NZ`` kernel 21 (hash 5247287448945562503). Eager NZ
-    works; compiled 2B TP2 does not, including fused qkv and MLP. Keep this
-    helper so tests can assert the fallback policy.
-    """
-    return True
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -166,15 +155,21 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        # Always ND [N, K] + fp16 dequant. torch.compile/GE cannot safely run
-        # 310P QuantBatchMatmulV3_NZ_NZ on these dynamic-quant linears.
-        scale = layer.weight_scale.data if hasattr(layer.weight_scale, "data") else layer.weight_scale
-        weight_fp = layer.weight.data.to(x.dtype) * scale.to(x.dtype).view(-1, 1)
+        # Always ND [N, K] + precomputed fp16 dequant. torch.compile/GE cannot
+        # safely run 310P QuantBatchMatmulV3_NZ_NZ on these dynamic-quant linears.
         bias_term = bias if (tp_rank is None or tp_rank == 0) else None
+        weight_fp = layer.weight_fp
+        if weight_fp.dtype != x.dtype:
+            weight_fp = weight_fp.to(x.dtype)
         return torch.nn.functional.linear(x, weight_fp, bias_term)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight.data = layer.weight.data.contiguous()
-        layer._310p_w8a8_dynamic_fp16_fallback = _needs_fp16_quant_matmul_fallback(layer, layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_offset.data = layer.weight_offset.data.flatten()
+        # Dequant once at load: scales are static and redoing int8->fp16 * scale
+        # on every forward is pure hot-path overhead.
+        params_dtype = getattr(layer, "params_dtype", torch.float16)
+        dtype = params_dtype if isinstance(params_dtype, torch.dtype) else torch.float16
+        scale = layer.weight_scale.data.to(dtype).view(-1, 1)
+        layer.weight_fp = torch.nn.Parameter(layer.weight.data.to(dtype) * scale, requires_grad=False)
