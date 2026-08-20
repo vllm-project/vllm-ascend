@@ -256,7 +256,7 @@ class MegaMoEBackend:
                     "A5 MegaMoE symmetric buffer is shared by the main and draft models and cannot be replaced "
                     f"during inference: initialized={state.key}, requested={key}."
                 )
-            logger.debug("A5 MegaMoE reuses the process-wide symmetric buffer: %s", key)
+            logger.info("A5 MegaMoE reuses the process-wide symmetric buffer: %s", key)
             return state.buffer
 
         get_symm_buffer_for_mega_moe, _ = _get_mega_moe_ops()
@@ -333,7 +333,7 @@ class MegaMoEBackend:
         weight_type = None if mxfp is None else mxfp.weight_quant_type
 
         _, mega_moe = _get_mega_moe_ops()
-        logger.debug(
+        logger.info(
             "A5 MegaMoE call: hidden_states_shape=%s, topk_ids_shape=%s, topk_weights_shape=%s, "
             "w1_shapes=%s, w2_shapes=%s, w1_scale_shapes=%s, w2_scale_shapes=%s, "
             "w1_scale_dtypes=%s, w2_scale_dtypes=%s, quant_type=%s, "
@@ -379,7 +379,7 @@ class MegaMoEBackend:
             mega_moe_kwargs["weight2_type"] = weight_type
 
         output, expert_tokens = mega_moe(**mega_moe_kwargs)
-        logger.debug(
+        logger.info(
             "A5 MegaMoE output: output_shape=%s, expert_tokens_shape=%s",
             tuple(output.shape),
             None if expert_tokens is None else tuple(expert_tokens.shape),
