@@ -622,6 +622,7 @@ class AscendModelSlimConfig(QuantizationConfig):
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Upstream use staticmethod, but we need to use instance attribute"""
         suffix_map = {}
+        regex_map = {}
         if self.enable_c8_quant:
             suffix_map.update(
                 {
@@ -632,26 +633,32 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if self.enable_fa_quant:
-            suffix_map.update(
+            # Nested model wrappers can apply AutoWeightsLoader more than once.
+            # Match only the source form so a name already mapped under
+            # ``mla_attn.mla_attn`` remains unchanged.
+            regex_map.update(
                 {
-                    ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
-                    ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
-                    ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
-                    ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
-                    ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
-                    ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
+                    re.compile(
+                        r"(?<!\.mla_attn\.mla_attn)\.fa_([qkv])\.(scale|offset)$"
+                    ): r".mla_attn.mla_attn.fa_\1.\2",
                 }
             )
         if self.enable_indexer_quant:
-            suffix_map.update(
+            # Keep the same idempotency guarantee for indexer scales, which
+            # are loaded through the same nested model-loader path.
+            regex_map.update(
                 {
-                    ".indexer.q_rot": ".mla_attn.mla_attn.indexer.q_rot",
-                    ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
+                    re.compile(
+                        r"(?<!\.mla_attn\.mla_attn)\.indexer\.([qk]_rot)$"
+                    ): r".mla_attn.mla_attn.indexer.\1",
                 }
             )
-        if not suffix_map:
+        if not suffix_map and not regex_map:
             return QuantizationConfig.get_cache_scale_mapper()
-        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
+        cache_scale_mapper = WeightsMapper(
+            orig_to_new_regex=regex_map,
+            orig_to_new_suffix=suffix_map,
+        )
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
@@ -736,6 +743,14 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            if ".shared_experts." in prefix:
+                # Per-channel W4A8 shared-expert linears use the single-expert
+                # grouped-matmul path. Select it from quantization metadata,
+                # independent of the model architecture that owns the layer.
+                from .methods.w4a8 import AscendW4A8DynamicLinearMethod
+
+                if isinstance(scheme, AscendW4A8DynamicLinearMethod) and scheme.is_per_channel_weight:
+                    scheme.enable_per_channel_shared_expert()
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (
