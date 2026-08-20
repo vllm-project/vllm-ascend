@@ -226,6 +226,111 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
+    @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=True)
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_a5_fa_quant_mla_cache_accounts_for_mixed_dtype_bytes(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+        _mock_enable_fa_quant,
+    ):
+        runner = self._build_runner()
+        runner.block_size = 16
+        runner.shared_kv_cache_layers = {}
+        runner.model_config.dtype = torch.bfloat16
+        runner.attn_backend.get_kv_cache_shape.side_effect = (
+            lambda num_blocks, block_size, num_kv_heads, head_size: (
+                num_blocks,
+                block_size,
+                num_kv_heads,
+                head_size,
+            )
+        )
+
+        layer_name = "model.layers.5.self_attn.attn"
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.head_size = 576
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        attn_module.impl = SimpleNamespace(
+            fa_quant_layer=True,
+            dtype=torch.float8_e4m3fn,
+        )
+        attn_module.get_kv_cache_spec = MagicMock(
+            return_value=AscendMLAAttentionSpec(
+                block_size=runner.block_size,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                cache_dtype_str="auto",
+            )
+        )
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        layer_spec = runner.get_kv_cache_spec()[layer_name]
+        spec = AscendMLAAttentionSpec.merge([layer_spec])
+        expected_bytes_per_token = 512 + 64 * 2
+        self.assertEqual(spec.dtype, torch.float8_e4m3fn)
+        self.assertEqual(spec.head_size, expected_bytes_per_token)
+        self.assertEqual(spec.page_size_bytes, runner.block_size * expected_bytes_per_token)
+
+        num_blocks = 2
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_k_cache, raw_v_cache = raw_caches[layer_name]
+        runner.vllm_config.quant_config.get_kv_quant_split_factor.assert_not_called()
+        self.assertEqual(raw_k_cache.numel(), num_blocks * runner.block_size * 512)
+        self.assertEqual(raw_v_cache.numel(), num_blocks * runner.block_size * 64 * 2)
+
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+        )[layer_name]
+        runner.vllm_config.quant_config.get_kv_quant_dtype.assert_not_called()
+        self.assertEqual(k_cache.dtype, torch.float8_e4m3fn)
+        self.assertEqual(k_cache.shape, (num_blocks, runner.block_size, 1, 512))
+        self.assertEqual(v_cache.dtype, torch.bfloat16)
+        self.assertEqual(v_cache.shape, (num_blocks, runner.block_size, 1, 64))
+
+        runner.use_hybrid_blocks = True
+        runner.hybrid_with_attn_and_mamba = True
+        runner.attn_backend.get_supported_kernel_block_sizes.return_value = [runner.block_size]
+        hybrid_raw_cache = torch.zeros(
+            spec.page_size_bytes * num_blocks,
+            dtype=torch.int8,
+        )
+        hybrid_k_cache, hybrid_v_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            {layer_name: hybrid_raw_cache},
+        )[layer_name]
+        self.assertEqual(hybrid_k_cache.dtype, torch.float8_e4m3fn)
+        self.assertEqual(hybrid_k_cache.shape, (num_blocks, runner.block_size, 1, 512))
+        self.assertEqual(hybrid_v_cache.dtype, torch.bfloat16)
+        self.assertEqual(hybrid_v_cache.shape, (num_blocks, runner.block_size, 1, 64))
+
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_sparse_layer_without_indexer_allocates_only_mla_kv_cache(

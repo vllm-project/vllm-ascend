@@ -257,6 +257,76 @@ def test_kimi_k3_weight_mapper_adds_inner_language_model_prefix():
 
 
 @pytest.mark.parametrize(
+    ("device_type", "has_rot_proj"),
+    [
+        (kimi_k3.AscendDeviceType.A2, False),
+        (kimi_k3.AscendDeviceType.A3, True),
+        (kimi_k3.AscendDeviceType.A5, True),
+    ],
+)
+def test_kimi_k3_projector_creates_rot_proj_on_supported_devices(
+    monkeypatch: pytest.MonkeyPatch,
+    device_type,
+    has_rot_proj: bool,
+):
+    class StubLinear(nn.Module):
+        def __init__(self, *args, prefix: str, **kwargs):
+            super().__init__()
+            self.prefix = prefix
+
+        def forward(self, value):
+            return value, None
+
+    monkeypatch.setattr(kimi_k3, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(kimi_k3, "ReplicatedLinear", StubLinear)
+    monkeypatch.setattr(kimi_k3, "get_act_fn", lambda _name: nn.Identity())
+    monkeypatch.setattr(kimi_k3, "RMSNorm", lambda *args, **kwargs: nn.Identity())
+    config = SimpleNamespace(
+        merge_kernel_size=(2, 2),
+        mm_hidden_size=2,
+        mm_projector_type="patchmergerv2",
+        text_hidden_size=8,
+        projector_hidden_act="silu",
+        projector_ln_eps=1e-5,
+    )
+
+    projector = KimiK3MultiModalProjector(config, prefix="mm_projector")
+
+    assert (projector.rot_proj is not None) is has_rot_proj
+    assert projector.use_rot_proj is False
+
+
+@pytest.mark.parametrize("loaded_rot_proj", [False, True])
+def test_kimi_k3_load_weights_enables_only_loaded_rot_proj(
+    monkeypatch: pytest.MonkeyPatch,
+    loaded_rot_proj: bool,
+):
+    model = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
+    nn.Module.__init__(model)
+    model.mm_projector = nn.Module()
+    model.mm_projector.rot_proj = nn.Linear(2, 2, bias=False)
+    model.mm_projector.use_rot_proj = False
+    loaded_weights = {"mm_projector.rot_proj.weight"} if loaded_rot_proj else set()
+
+    class StubLoader:
+        def __init__(self, module, skip_prefixes):
+            assert module is model
+            assert skip_prefixes == []
+
+        def load_weights(self, weights, mapper):
+            assert list(weights) == []
+            assert mapper is model.hf_to_vllm_mapper
+            return loaded_weights
+
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
+
+    result = model.load_weights([])
+
+    assert result == loaded_weights
+    assert model.mm_projector.use_rot_proj is loaded_rot_proj
+
+
+@pytest.mark.parametrize(
     ("weight_name", "expected_layer"),
     [
         ("model.layers.93.self_attn.q_proj.weight", 93),

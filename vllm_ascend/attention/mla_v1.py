@@ -954,6 +954,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
+        if not self.use_mla_rope and self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+            logger.warning_once("FA quant for no-RoPE MLA layers is supported only on A5; falling back to BF16.")
+            self.fa_quant_layer = False
         if self.fa_quant_layer:
             self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:
@@ -1566,13 +1569,40 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
-        DeviceOperator.reshape_and_cache(
-            key=kv_c_normed,
-            value=k_pe,
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots,
-        )
+        cache_kv_c = kv_c_normed
+        if self.fa_quant_layer:
+            assert get_ascend_device_type() == AscendDeviceType.A5
+            cache_kv_c = torch_npu.npu_quantize(
+                kv_c_normed,
+                self.fak_descale_reciprocal.to(torch.bfloat16),
+                None,
+                torch.float8_e4m3fn,
+                -1,
+                False,
+            )
+            # reshape_and_cache requires key and value to have the same dtype.
+            DeviceOperator.reshape_and_cache(
+                key=cache_kv_c,
+                value=cache_kv_c,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[0],
+                slot_mapping=slots,
+            )
+            DeviceOperator.reshape_and_cache(
+                key=k_pe,
+                value=k_pe,
+                key_cache=kv_cache[1],
+                value_cache=kv_cache[1],
+                slot_mapping=slots,
+            )
+        else:
+            DeviceOperator.reshape_and_cache(
+                key=cache_kv_c,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=slots,
+            )
         return k_pe, kv_c_normed
 
     def exec_kv_decode(
@@ -1697,6 +1727,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
         num_tokens = q_nope.size(0)
+        if self.fa_quant_layer:
+            dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
+            if self.head_padding > 0:
+                dequant_scale_q_nope = F.pad(
+                    dequant_scale_q_nope,
+                    (0, self.head_padding),
+                    "constant",
+                    1.0,
+                )
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
@@ -1757,8 +1796,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sparse_mode = 3
                 attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
-            if self.fa_quant_layer:
-                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
         elif self.fa_quant_layer:
             attn_mask = None
             sparse_mode = 0
@@ -1770,7 +1807,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if self.head_padding > 0:
                     q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
-                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
+                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads_padded, 1)
                 attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
             else:
                 input_layout = "BSND_NBSD"
@@ -1779,7 +1816,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if self.head_padding > 0:
                     q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
-                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
+                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads_padded)
                 attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
@@ -1960,10 +1997,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 seq_lens_device=decode_meta.seq_lens_device,
                 chunk_tokens=fia_blocks_per_split * block_size,
             )
-        elif self.enable_mla_fia_split and input_layout.startswith("BNSD"):
-            # AttentionUpdate is unnecessary for the BS>=32 bucket, but the
-            # unsplit A5 FA-quant output is batch-major and _v_up_proj expects
-            # head-major input.
+        elif input_layout == "BNSD":
+            # The unsplit A5 FA-quant output is batch-major, while _v_up_proj
+            # consumes head-major input.
             attn_output = (
                 _normalize_mla_fia_output(
                     attn_output,
@@ -2021,7 +2057,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         dequant_scale_q_nope = None
         if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
-                decode_ql_nope, dst_type=torch.float8_e4m3fn
+                decode_ql_nope,
+                dst_type=self.dtype,
             )
             decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(torch.bfloat16)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
@@ -2140,8 +2177,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(gate_input)[0]
 
         # MLA Preprocess
-        if (self.fa_quant_layer or self.enable_mlapo) and (
-            attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0
+        if (
+            (self.fa_quant_layer or self.enable_mlapo)
+            and (attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0)
         ):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
