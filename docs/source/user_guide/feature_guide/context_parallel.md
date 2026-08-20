@@ -26,7 +26,7 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 - 🔴 **Not supported**: Combining the feature with DCP is not supported.
 - **Not applicable**: The feature does not apply to this attention backend.
 
-DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D disaggregation on the model and hardware combinations documented by vLLM Ascend
+DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D disaggregation on the model and hardware combinations documented by vLLM Ascend.
 
 ## Usage
 
