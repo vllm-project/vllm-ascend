@@ -126,6 +126,11 @@ if not _npu_available:
     sys.modules["torch_npu"].npu_moe_gating_top_k_softmax = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_quant_matmul = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_rms_norm = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_interleave_rope = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_dynamic_block_quant = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_dynamic_quant = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_mla_prolog_v3 = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_kv_rmsnorm_rope_cache = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_swiglu = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_convert_weight_to_int4pack = MagicMock()  # type: ignore[attr-defined]
 
