@@ -414,13 +414,15 @@ On this 64K/3K concurrency-10 run, MXFP8 did not outperform W8A8.
 
 ## 9 Performance Tuning
 
-## 9 Performance Tuning
+Use the deployment values above as a baseline. Adjust `max-model-len`,
+`max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization`
+together for the target workload.
 
-### 9.1 Recommended Configurations
+Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
+and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md)
+for additional guidance.
 
-## 9 Performance Tuning
-
-##### Optimizations That Require Explicit Enabling
+### 9.1 Optimizations That Require Explicit Enabling
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | --- | --- | --- | --- | --- |
