@@ -44,6 +44,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import is_950
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -333,6 +334,9 @@ class FusedMC2CommImpl(MoECommMethod):
             # P nodes and PD-mixed nodes use the configured value. This keeps
             # the existing memory/performance tradeoff for prefill workloads.
             max_recv_token_num = get_ascend_config().mega_moe_max_tokens
+            # absolute_safe_max_recv_token_num is the max value required by mega moe api
+            if max_recv_token_num > absolute_safe_max_recv_token_num:
+                max_recv_token_num = absolute_safe_max_recv_token_num
             logger.warning_once(
                 "MegaMoe symm buffer: max_recv_token_num is set from "
                 "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
@@ -416,17 +420,22 @@ class FusedMC2CommImpl(MoECommMethod):
 
         activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
-        if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
-            # mc2_mask comes from the reserved bool buffer in
-            # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
-            # the per-token active mask, so cast only when the dtype does
-            # not already match — saves the kernel launch when an upstream
-            # change ever flips the reserved buffer to int8.
-            raw_mask = fused_experts_input.routing.mc2_mask
-            if raw_mask.dtype == torch.int8:
-                x_active_mask = raw_mask.contiguous()
-            else:
-                x_active_mask = raw_mask.to(torch.int8).contiguous()
+        # Ascend 950 (A5) MegaMoe only support a null x_active_mask, and it
+        # must be passed as None. But on A2/A3 it must be valid.
+        if is_950():
+            x_active_mask = None
+        else:
+            if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
+                # mc2_mask comes from the reserved bool buffer in
+                # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
+                # the per-token active mask, so cast only when the dtype does
+                # not already match — saves the kernel launch when an upstream
+                # change ever flips the reserved buffer to int8.
+                raw_mask = fused_experts_input.routing.mc2_mask
+                if raw_mask.dtype == torch.int8:
+                    x_active_mask = raw_mask.contiguous()
+                else:
+                    x_active_mask = raw_mask.to(torch.int8).contiguous()
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = weights.w1_scale_bias
         l2_bias = weights.w2_scale_bias

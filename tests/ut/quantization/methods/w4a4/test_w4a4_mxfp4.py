@@ -150,7 +150,9 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
-    def test_process_weights_transposes_weights(self):
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False)
+    def test_process_weights_transposes_weights(self, mock_use_cann_megamoe, mock_vllm):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
@@ -173,7 +175,9 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(weight_view.shape[0], self.num_experts)
             self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
 
-    def test_process_weights_pads_odd_scale_groups(self):
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False)
+    def test_process_weights_pads_odd_scale_groups(self, mock_use_cann_megamoe, mock_vllm):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
