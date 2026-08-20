@@ -74,7 +74,11 @@ def get_gva_layerwise_config(kv_transfer_config: Any) -> dict[str, Any] | None:
 
     connector_name = getattr(kv_transfer_config, "kv_connector", None)
     root_extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
-    if connector_name in ("AscendStoreConnector", "MooncakeConnectorStoreV1"):
+    if connector_name in (
+        "AscendStoreConnector",
+        "MooncakeConnectorStoreV1",
+        "MooncakeStoreConnector",
+    ):
         connector_configs = [
             {
                 "kv_connector": connector_name,
@@ -92,6 +96,7 @@ def get_gva_layerwise_config(kv_transfer_config: Any) -> dict[str, Any] | None:
         if connector_config.get("kv_connector") not in (
             "AscendStoreConnector",
             "MooncakeConnectorStoreV1",
+            "MooncakeStoreConnector",
         ):
             continue
         extra_config = connector_config.get("kv_connector_extra_config") or {}

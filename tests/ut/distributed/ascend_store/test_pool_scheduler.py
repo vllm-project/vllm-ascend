@@ -23,6 +23,7 @@ import pytest
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    ReqMeta,
     RequestTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
@@ -283,7 +284,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         delay, _ = scheduler.request_finished(request, [1, 2])
-        self.assertTrue(delay)
+        self.assertFalse(delay)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_request_finished_empty_blocks(self, mock_client_cls):
@@ -361,7 +362,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             num_prompt_tokens=64,
         )
 
-    def _make_running_chunk_output(self, new_block_ids):
+    def _make_running_chunk_output(self, new_block_ids, num_computed_tokens=16):
         sched_output = MagicMock()
         sched_output.finished_req_ids = set()
         sched_output.preempted_req_ids = set()
@@ -369,6 +370,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         sched_output.num_scheduled_tokens = {"r1": 16}
         sched_output.scheduled_cached_reqs.req_ids = ["r1"]
         sched_output.scheduled_cached_reqs.new_block_ids = [new_block_ids]
+        sched_output.scheduled_cached_reqs.num_computed_tokens = [num_computed_tokens]
         return sched_output
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
@@ -454,7 +456,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             token_ids=list(range(32)),
             num_prompt_tokens=32,
         )
-        sched_output = self._make_running_chunk_output([])
+        sched_output = self._make_running_chunk_output([], num_computed_tokens=32)
         sched_output.num_scheduled_tokens = {"r1": 1}
 
         meta = scheduler.build_connector_meta(sched_output)
@@ -539,6 +541,122 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         _meta = scheduler.build_connector_meta(sched_output)
         # Consumer with no consumer_is_to_put => force_skip_save
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_consumer_save_decode_cache_skips_prefill(self, mock_client_cls):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"save_decode_cache": True},
+        )
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        request = MagicMock()
+        request.request_id = "r1"
+        request.prompt_token_ids = list(range(32))
+        request.num_tokens = 32
+        request.num_computed_tokens = 0
+        request.block_hashes = [b"h0", b"h1"]
+        request.all_token_ids = list(range(32))
+        blocks = MagicMock()
+        blocks.get_block_ids.return_value = [[0, 1]]
+        scheduler.update_state_after_alloc(request, blocks, 0)
+
+        new_req_data = MagicMock()
+        new_req_data.req_id = "r1"
+        new_req_data.num_computed_tokens = 0
+        new_req_data.block_ids = [0, 1]
+        new_req_data.prompt_token_ids = list(range(32))
+
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = [new_req_data]
+        sched_output.num_scheduled_tokens = {"r1": 32}
+        sched_output.scheduled_cached_reqs.req_ids = []
+
+        meta = scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(meta.requests, [])
+        tracker = scheduler._request_trackers["r1"]
+        self.assertEqual(tracker.num_saved_tokens, 0)
+        self.assertIsNone(tracker.token_ids)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_consumer_saves_full_decode_block_without_new_allocation(self, mock_client_cls):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"save_decode_cache": True},
+        )
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        request = MagicMock()
+        request.num_computed_tokens = 47
+        request.num_prompt_tokens = 35
+        request.prompt_token_ids = list(range(35))
+        request.all_token_ids = list(range(48))
+        request.block_hashes = [b"h0", b"h1", b"h2"]
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        scheduler._unfinished_request_ids.add("r1")
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=47,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=0,
+            token_ids=list(range(47)),
+            num_prompt_tokens=35,
+            prefill_end_tokens=35,
+        )
+        sched_output = self._make_running_chunk_output([], num_computed_tokens=47)
+        sched_output.num_scheduled_tokens = {"r1": 1}
+
+        meta = scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(len(meta.requests), 1)
+        req_meta = meta.requests[0]
+        self.assertTrue(req_meta.can_save)
+        self.assertEqual(req_meta.save_start_token, 32)
+        self.assertEqual(req_meta.save_end_token, 48)
+        self.assertEqual(req_meta.target_token_len, 48)
+        self.assertEqual(req_meta.token_ids, list(range(32, 48)))
+        self.assertEqual(req_meta.get_event_token_ids(32, 48), list(range(32, 48)))
+        self.assertEqual(req_meta.get_event_token_ids(0, 16), [])
+        self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 48)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_consumer_does_not_offload_unaccepted_speculative_tokens(self, mock_client_cls):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"save_decode_cache": True},
+        )
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        request = MagicMock()
+        request.num_computed_tokens = 47
+        request.num_prompt_tokens = 32
+        request.prompt_token_ids = list(range(32))
+        # Scheduled draft tokens have not been accepted into all_token_ids.
+        request.all_token_ids = list(range(47))
+        request.block_hashes = [b"h0", b"h1", b"h2"]
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        scheduler._unfinished_request_ids.add("r1")
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=47,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=0,
+            token_ids=list(range(47)),
+            num_prompt_tokens=32,
+            prefill_end_tokens=32,
+        )
+        sched_output = self._make_running_chunk_output([], num_computed_tokens=47)
+        sched_output.num_scheduled_tokens = {"r1": 4}
+
+        meta = scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(meta.requests, [])
+        tracker = scheduler._request_trackers["r1"]
+        self.assertEqual(tracker.token_len, 47)
+        self.assertEqual(tracker.num_saved_tokens, 32)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_preempted(self, mock_client_cls):
@@ -1047,6 +1165,31 @@ class TestKVPoolSchedulerBindBlockPool(unittest.TestCase):
         scheduler.bind_gpu_block_pool(mock_pool)
         self.assertIs(scheduler._block_pool, mock_pool)
 
+    def test_dense_store_job_references_blocks_and_marks_pending(self):
+        scheduler = object.__new__(KVPoolScheduler)
+        scheduler.layerwise_offload = False
+        scheduler._block_pool = MagicMock()
+        scheduler._block_pool.blocks = [MagicMock(), MagicMock()]
+        scheduler.mamba_group_ids = []
+        scheduler.sending_event_id = 0
+        scheduler.sending_events = {}
+        scheduler.sending_blocks = {}
+        req_meta = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids_by_group=[[0, 1]],
+            block_hashes=[b"h0"],
+            can_save=True,
+        )
+
+        scheduler.reference_sending_blocks(req_meta)
+
+        self.assertEqual(req_meta.event_id, 0)
+        self.assertEqual(req_meta.store_job_id, 0)
+        scheduler._block_pool.touch.assert_called_once_with(scheduler._block_pool.blocks)
+        self.assertEqual(scheduler.sending_blocks, {0: [0, 1]})
+        self.assertTrue(scheduler.has_pending_push_work())
+
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
     """Test update_connector_output."""
@@ -1178,7 +1321,7 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r_nonexist"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
-        self.assertTrue(delay)
+        self.assertFalse(delay)
 
     def test_tracker_not_saved(self):
         scheduler = self._make_scheduler()
@@ -1198,8 +1341,8 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
-        self.assertTrue(delay)
-        self.assertIn("r1", scheduler._delayed_free_req_ids)
+        self.assertFalse(delay)
+        self.assertNotIn("r1", scheduler._delayed_free_req_ids)
 
     def test_no_delay_empty_blocks(self):
         scheduler = self._make_scheduler()

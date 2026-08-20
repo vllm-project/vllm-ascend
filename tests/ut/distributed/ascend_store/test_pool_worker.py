@@ -509,21 +509,27 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         mock_dcp_rank.return_value = 0
         mock_importlib.import_module.return_value = MagicMock()
 
-        config = self._make_vllm_config(
-            kv_role="kv_consumer",
-            extra_config={
-                "backend": "mooncake",
-                "consumer_is_to_put": True,
-                "prefill_pp_layer_partition": "16,16",
-                "prefill_pp_size": "2",
-            },
-        )
-        config.model_config.hf_text_config.num_hidden_layers = 32
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
-        self.assertIsNotNone(worker.token_database.partitions)
-        self.assertEqual(worker.token_database.partitions, [16, 16])
+        for put_config in (
+            {"consumer_is_to_put": True},
+            {"save_decode_cache": True},
+        ):
+            config = self._make_vllm_config(
+                kv_role="kv_consumer",
+                extra_config={
+                    "backend": "mooncake",
+                    **put_config,
+                    "prefill_pp_layer_partition": "16,16",
+                    "prefill_pp_size": "2",
+                },
+            )
+            config.model_config.hf_text_config.num_hidden_layers = 32
+
+            worker = KVPoolWorker(config, use_layerwise=False)
+            self.assertTrue(worker.can_put)
+            self.assertIsNotNone(worker.token_database.partitions)
+            self.assertEqual(worker.token_database.partitions, [16, 16])
 
 
 class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
@@ -731,7 +737,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_called_with("r1")
+        worker.kv_send_thread.add_stored_request.assert_called_with(req)
         worker.kv_send_thread.add_request.assert_called_once()
         worker.kv_send_thread.request_queue.join.assert_called_once()
 
@@ -750,6 +756,26 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
+
+    def test_wait_for_save_is_async_when_blocks_are_referenced(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = MagicMock()
+
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=["h0"],
+            can_save=True,
+            event_id=7,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.wait_for_save(meta)
+
+        worker.kv_send_thread.add_request.assert_called_once_with(req)
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
     def test_get_finished_producer(self):
@@ -1097,10 +1123,26 @@ class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
         for p in self._patches.values():
             p.stop()
 
-    def test_build_connector_worker_meta_non_mamba(self):
+    def test_build_connector_worker_meta_non_mamba_no_send_thread(self):
         worker = self._make_worker()
         worker.use_mamba = False
+        worker.kv_send_thread = None
         self.assertIsNone(worker.build_connector_worker_meta())
+
+    def test_build_connector_worker_meta_non_mamba_with_completed_events(self):
+        worker = self._make_worker()
+        worker.use_mamba = False
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
+
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.get_completed_events.return_value = {7: 1}
+        worker.kv_send_thread = send_thread
+
+        result = worker.build_connector_worker_meta()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.completed_events, {7: 1})
 
     def test_build_connector_worker_meta_mamba_no_send_thread(self):
         worker = self._make_worker()
@@ -2238,6 +2280,29 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(block_ids, [10, 10])
         self.assertTrue(keys[0].endswith(f"@{b'h1'.hex()}"))
 
+    def test_build_tp_mismatch_keys_and_addrs_honors_save_start_token(self):
+        worker = self._make_worker(
+            tp_rank=0, tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+        worker.token_database.block_size = [4]
+        worker.token_database.hash_block_size = 4
+
+        keys, _, _, block_ids = worker._build_tp_mismatch_keys_and_addrs(
+            block_hashes=[b"h0", b"h1", b"h2"],
+            block_ids=[10, 11, 12],
+            token_len=12,
+            save_start_token=8,
+        )
+
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(block_ids, [12, 12])
+        self.assertTrue(all(key.endswith(f"@{b'h2'.hex()}") for key in keys))
+
     def test_load_kv_tp_mismatch_calls_backend_get(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
         worker.block_size = 4
@@ -2256,14 +2321,14 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
     def test_store_kv_tp_mismatch_skips_when_not_stored(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
         worker.kv_send_thread = MagicMock()
-        worker.kv_send_thread.is_stored_request.return_value = False
+        worker.kv_send_thread.is_live_store_job.return_value = False
         req = ReqMeta(
             req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
         )
         worker._store_kv_tp_mismatch(req)
-        worker.kv_send_thread.dec_stored_request.assert_not_called()
+        worker.m_store.put.assert_not_called()
 
-    def test_store_kv_tp_mismatch_puts_missing_and_decrements(self):
+    def test_store_kv_tp_mismatch_puts_missing(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
         worker.block_size = 4
         worker.group_kv_caches_base_addr = {0: [0]}
@@ -2276,7 +2341,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.token_database.hash_block_size = 4
 
         send_thread = MagicMock()
-        send_thread.is_stored_request.return_value = True
+        send_thread.is_live_store_job.return_value = True
+        send_thread.get_saved_offset.return_value = 0
         # 2 sub-keys: first missing, second present -> only the first is put.
         send_thread.lookup.return_value = [False, True]
         worker.kv_send_thread = send_thread
@@ -2288,9 +2354,9 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.m_store.put.assert_called_once()
         put_keys = worker.m_store.put.call_args.args[0]
         self.assertEqual(len(put_keys), 1)
-        send_thread.dec_stored_request.assert_called_once_with("r1")
+        send_thread.finish_store_job.assert_not_called()
 
-    def test_store_kv_tp_mismatch_decrements_on_put_exception(self):
+    def test_store_kv_tp_mismatch_leaves_lifecycle_to_sending_thread_on_exception(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
         worker.block_size = 4
         worker.group_kv_caches_base_addr = {0: [0]}
@@ -2304,7 +2370,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.token_database.hash_block_size = 4
 
         send_thread = MagicMock()
-        send_thread.is_stored_request.return_value = True
+        send_thread.is_live_store_job.return_value = True
+        send_thread.get_saved_offset.return_value = 0
         send_thread.lookup.return_value = [False, False]
         worker.kv_send_thread = send_thread
 
@@ -2313,7 +2380,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         )
         with self.assertRaises(RuntimeError):
             worker._store_kv_tp_mismatch(req)
-        send_thread.dec_stored_request.assert_called_once_with("r1")
+        send_thread.finish_store_job.assert_not_called()
 
     def test_get_group_tp_size_uses_effective_tp(self):
         worker = self._make_worker(

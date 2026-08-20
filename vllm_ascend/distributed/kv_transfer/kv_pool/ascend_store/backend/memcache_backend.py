@@ -207,7 +207,7 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", key)
             return None
 
-    def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]) -> list[bool] | bool:
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -225,6 +225,7 @@ class MemcacheBackend(Backend):
                 logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return [int(value) == 0 for value in res]
         except Exception as e:
             logger.error(
                 "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
@@ -236,3 +237,4 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", key)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return False

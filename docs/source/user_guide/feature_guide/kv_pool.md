@@ -37,6 +37,7 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | `load_async` | Whether to Enable Asynchronous Loading. The default value is false. |
 | `backend` | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`. |
 | `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
+| `save_decode_cache` | Offload newly completed Decode KV blocks. On a `kv_consumer`, this enables Decode-only writes and continues to skip Prefill writes. The default value is false. |
 | `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |
 | `use_layerwise` | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the `memcache` backend. The default value is false. |
 | `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
@@ -309,6 +310,36 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
         "consumer_is_to_put": true,
         "prefill_pp_size": 2,
         "prefill_pp_layer_partition": "30,31"
+    }
+}
+```
+
+To offload only newly completed Decode KV blocks, set
+`save_decode_cache: true` on the Decode node instead. Unlike
+`consumer_is_to_put`, this does not turn the Decode node into a Prefill KV
+producer. A block is submitted only after it reaches the connector's transfer
+granularity, so the Decode hot path does not issue a store for every token.
+On the first Decode save, existing prefix keys are deduplicated against the
+store; missing prefix ancestors may be restored so the new block remains a
+recoverable hash chain. Later saves resume from the last successful offset.
+Non-layerwise saves run asynchronously: the connector holds references to all
+blocks a Store Job may read and releases them only after every worker reports
+completion, so Mooncake I/O is not joined into the Decode forward path.
+Prefill and Decode instances should use the same TP size and compatible KV
+cache layouts when this option is enabled. On Ascend, the upstream
+`MooncakeStoreConnector` name is an alias of `AscendStoreConnector`, so either
+name enables the NPU-native implementation. Decode-only offload cannot be
+combined with `use_layerwise: true`, because layerwise cache reuse must save
+partial blocks on every Decode step.
+
+```python
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "save_decode_cache": true
     }
 }
 ```

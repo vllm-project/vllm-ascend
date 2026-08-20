@@ -469,7 +469,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
             current_event=None,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 1)
@@ -485,10 +485,74 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 0)
+
+    def test_handle_request_only_scans_newly_savable_suffix(self):
+        t, store = self._make_thread([0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            save_start_token=32,
+            block_ids=[0, 1, 2],
+            block_hashes=[b"h0", b"h1", b"h2"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request(req)
+        t.record_saved_offset(req, 32)
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(len(store.put_calls), 1)
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys[0].endswith(f"@{b'h2'.hex()}"))
+        self.assertEqual(t.get_saved_offset("r1"), 48)
+
+    def test_failed_store_keeps_offset_and_kv_event_tokens_for_retry(self):
+        t, store = self._make_thread([0, 0], enable_kv_event=True)
+        store.put = MagicMock(return_value=False)
+        failed_req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            save_start_token=0,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            token_ids=list(range(16)),
+            original_block_size=16,
+        )
+        t.add_stored_request(failed_req)
+        t.request_queue.put(failed_req)
+
+        t._handle_request(failed_req)
+
+        self.assertEqual(t.get_saved_offset("r1"), 0)
+        self.assertEqual(t.get_kv_events(), [])
+
+        store.put = MagicMock()
+        retry_req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=16,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            token_ids=list(range(16, 32)),
+            original_block_size=16,
+        )
+        t.add_stored_request(retry_req)
+        t.request_queue.put(retry_req)
+
+        t._handle_request(retry_req)
+
+        self.assertEqual(t.get_saved_offset("r1"), 32)
+        events = t.get_kv_events()
+        self.assertEqual([event.token_ids for event in events], [list(range(16)), list(range(16, 32))])
+
+        t.reset_saved_request("r1")
+        self.assertEqual(t.get_saved_offset("r1"), 0)
 
     def test_handle_request_not_in_stored(self):
         t, store = self._make_thread([0])
@@ -514,7 +578,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             token_ids=list(range(16)),
             original_block_size=16,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         events = t.get_kv_events()
@@ -529,24 +593,89 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 1)
 
-    def test_add_dec_delete_stored_request(self):
+    def test_consumer_prefill_pp_partial_put_is_retried_as_logical_block(self):
+        t, store = self._make_thread([0, 0, 0, 0], kv_role="kv_consumer", enable_kv_event=True)
+        t.token_database.partitions = [1, 1]
+        store.put = MagicMock(return_value=[True, True, True, False])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            token_ids=list(range(32)),
+            original_block_size=16,
+        )
+        t.add_stored_request(req)
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        # Both PP keys of the first logical block succeeded, so only its event
+        # is visible. The second block remains below the durable high-water
+        # mark and will be queried/stored again by the next Decode job.
+        self.assertEqual(len(store.put.call_args.args[0]), 4)
+        self.assertEqual(len(t.get_kv_events()), 1)
+        self.assertEqual(t.get_saved_offset("r1"), 0)
+
+    def test_consumer_prefill_pp_lookup_requires_every_partition(self):
+        t, _ = self._make_thread([1, 0, 1, 1], kv_role="kv_consumer")
+        t.token_database.partitions = [1, 1]
+
+        self.assertEqual(t.lookup_store_keys(["block0", "block1"]), [False, True])
+
+    def test_add_finish_delete_stored_request(self):
         t, _ = self._make_thread()
-        t.add_stored_request("r1")
-        t.add_stored_request("r1")
-        self.assertEqual(t.stored_requests["r1"], 2)
-        t.dec_stored_request("r1")
-        self.assertEqual(t.stored_requests["r1"], 1)
+        req1 = ReqMeta("r1", store_job_id=1)
+        req2 = ReqMeta("r1", store_job_id=2)
+        t.add_stored_request(req1)
+        t.add_stored_request(req2)
+        self.assertEqual(t.stored_requests["r1"], {1, 2})
+        self.assertEqual(t.finish_store_job(req1), 1)
+        self.assertEqual(t.stored_requests["r1"], {2})
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
 
-    def test_dec_nonexistent_request(self):
+    def test_finish_nonexistent_request(self):
         t, _ = self._make_thread()
-        t.dec_stored_request("nonexist")  # should not raise
+        self.assertIsNone(t.finish_store_job(ReqMeta("nonexist", store_job_id=1)))
+
+    def test_stale_store_job_cannot_mutate_reused_request_id(self):
+        t, store = self._make_thread([0])
+        stale_req = ReqMeta(
+            req_id="reused",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"old"],  # type: ignore[arg-type]
+            event_id=1,
+            store_job_id=1,
+        )
+        t.add_stored_request(stale_req)
+
+        # Preemption retires the old generation. A later request is allowed to
+        # reuse the public request id while the old queue item still exists.
+        t.delete_finished_stored_request("reused")
+        fresh_req = ReqMeta(
+            req_id="reused",
+            token_len_chunk=16,
+            block_ids=[1],
+            block_hashes=[b"new"],  # type: ignore[arg-type]
+            event_id=2,
+            store_job_id=2,
+        )
+        t.add_stored_request(fresh_req)
+
+        t.request_queue.put(stale_req)
+        t._handle_request(stale_req)
+
+        self.assertEqual(store.put_calls, [])
+        self.assertEqual(t.stored_requests["reused"], {2})
+        self.assertEqual(t.get_saved_offset("reused"), 0)
+        self.assertEqual(t.get_completed_events(), {1: 1})
 
     def test_delete_nonexistent_request(self):
         t, _ = self._make_thread()
@@ -562,7 +691,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=event,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         event.synchronize.assert_called_once()
@@ -588,7 +717,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         # dcp_size > 1 means no slicing
@@ -615,7 +744,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         keys, _, _ = store.put_calls[0]
@@ -636,7 +765,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 can_load=True,
             ),
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         keys, addrs, _ = store.put_calls[0]
@@ -652,7 +781,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_ids=[0],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
@@ -952,7 +1081,7 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],
             current_event=None,
         )
-        t.add_stored_request("r1")
+        t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 1)  # normal path executed

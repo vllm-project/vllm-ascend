@@ -704,6 +704,11 @@ class RequestTracker:
 
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
+
+    # End of the range being (re)prefilled. For a resumed request this also
+    # includes previously generated tokens, so decode-only offload does not
+    # publish intermediate recomputation state.
+    prefill_end_tokens: int | None = None
     block_gvas: list[int] = field(default_factory=list)
     block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
@@ -734,6 +739,7 @@ class RequestTracker:
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
+        prefill_end_tokens: int | None = None,
         block_gvas: list[int] | None = None,
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
@@ -758,6 +764,7 @@ class RequestTracker:
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
+        self.prefill_end_tokens = prefill_end_tokens
         self.block_gvas = [] if block_gvas is None else block_gvas
         self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
@@ -790,6 +797,7 @@ class RequestTracker:
             allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
             num_saved_tokens=0,
             num_prompt_tokens=len(new_request.prompt_token_ids),
+            prefill_end_tokens=len(new_request.prompt_token_ids),
         )
 
     def update(
@@ -870,6 +878,11 @@ class ReqMeta:
     original_block_size: list[int] | int | None = None
 
     event_id: int | None = None
+    # Monotonic identity of one queued store operation. Unlike req_id, this
+    # value is never reused while the engine is alive, so an old asynchronous
+    # operation cannot update the save progress of a new request generation
+    # that happens to reuse the same req_id.
+    store_job_id: int | None = None
 
     def __init__(
         self,
@@ -889,6 +902,7 @@ class ReqMeta:
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
+        store_job_id: int | None = None,
         save_end_token: int | None = None,
         target_token_len: int | None = None,
         save_start_token: int = 0,
@@ -930,6 +944,7 @@ class ReqMeta:
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
+        self.store_job_id = store_job_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.starts = starts
@@ -953,6 +968,20 @@ class ReqMeta:
     @block_ids.setter
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
+
+    def get_event_token_ids(self, start: int, end: int) -> list[int] | None:
+        """Return token ids for an absolute request range.
+
+        Metadata carries only the newly savable suffix to avoid repeatedly
+        serializing the full request history during long decode sequences.
+        An empty list means this metadata does not cover the requested range.
+        """
+        if self.token_ids is None:
+            return None
+        token_ids_end = self.save_start_token + len(self.token_ids)
+        if start < self.save_start_token or end > token_ids_end:
+            return []
+        return self.token_ids[start - self.save_start_token : end - self.save_start_token]
 
     last_block_gva: int | None = None
     partial_block_index: int | None = None
@@ -1045,8 +1074,12 @@ class ReqMeta:
             )
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # The worker consumes metadata asynchronously. Own a stable,
+            # bounded snapshot rather than sharing the scheduler's growing
+            # full-history list.
+            token_ids_end = target_token_len if should_save_partial_block else num_tokens_to_save
+            token_ids = tracker.token_ids[previous_saved_tokens:token_ids_end].copy()
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(

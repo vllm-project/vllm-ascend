@@ -48,7 +48,12 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_write_finish")
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool | list[bool] | None:
+        """Store a batch, returning False for a detected backend failure.
+
+        A per-key boolean list preserves partial-success information. ``None``
+        remains valid for legacy backends that report failures by raising.
+        """
         pass
 
     @abstractmethod
