@@ -27,11 +27,14 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import compute_mega_moe_buffer_tokens_per_rank, get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.distributed.parallel_state import get_mega_moe_group
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    get_a5_mega_moe_buffer_tokens_per_rank,
+)
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -332,11 +335,7 @@ class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
     ) -> MoEPrepareOutput:
         self.num_tokens = hidden_states.shape[0]
         ascend_config = get_ascend_config()
-        target_num_tokens = compute_mega_moe_buffer_tokens_per_rank(
-            ascend_config.mega_moe_max_tokens,
-            ascend_config.vllm_config.scheduler_config.max_num_batched_tokens,
-            get_mega_moe_group().world_size,
-        )
+        target_num_tokens = get_a5_mega_moe_buffer_tokens_per_rank(ascend_config.vllm_config)
         max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
         if max_tokens_across_dp is None:
             max_tokens_across_dp = self.num_tokens
@@ -349,6 +348,13 @@ class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
 
         self.padded_num_tokens = target_num_tokens
         pad_size = target_num_tokens - self.num_tokens
+        logger.debug(
+            "A5 MegaMoE prepare: local_num_tokens=%s, max_tokens_across_dp=%s, target_num_tokens=%s, pad_size=%s",
+            self.num_tokens,
+            max_tokens_across_dp,
+            target_num_tokens,
+            pad_size,
+        )
         if pad_size > 0:
             hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
             router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))

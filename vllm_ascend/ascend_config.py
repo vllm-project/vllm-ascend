@@ -26,19 +26,22 @@ if TYPE_CHECKING:
 
 def compute_mega_moe_buffer_tokens_per_rank(
     mega_moe_max_tokens: int,
-    max_num_batched_tokens: int,
+    mc2_tokens_capacity: int,
     expert_parallel_size: int,
 ) -> int:
     """Compute the per-rank token capacity used to allocate the MegaMoE buffer."""
+    if mc2_tokens_capacity <= 0:
+        raise ValueError(f"mc2_tokens_capacity must be positive, got {mc2_tokens_capacity}")
     if expert_parallel_size <= 0:
         raise ValueError(f"expert_parallel_size must be positive, got {expert_parallel_size}")
 
-    buffer_tokens_per_rank = min(mega_moe_max_tokens, max_num_batched_tokens) // expert_parallel_size
+    configured_tokens_per_rank = mega_moe_max_tokens // expert_parallel_size
+    buffer_tokens_per_rank = min(configured_tokens_per_rank, mc2_tokens_capacity)
     if buffer_tokens_per_rank <= 0:
         raise ValueError(
-            "MegaMoE token capacity must be at least the expert parallel size: "
+            "MegaMoE per-rank token capacity must be positive: "
             f"mega_moe_max_tokens={mega_moe_max_tokens}, "
-            f"max_num_batched_tokens={max_num_batched_tokens}, "
+            f"mc2_tokens_capacity={mc2_tokens_capacity}, "
             f"expert_parallel_size={expert_parallel_size}."
         )
     return buffer_tokens_per_rank
@@ -309,9 +312,9 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
-        # Per-rank token capacity for dispatch_ffn_combine. A5 MegaMoE treats
-        # this as a global chunk limit and derives its per-rank symmetric-buffer
-        # capacity from the scheduler limit and expert-parallel size.
+        # Global token ceiling for dispatch_ffn_combine. A5 MegaMoE derives its
+        # per-rank symmetric-buffer capacity from this ceiling and the current
+        # process's MC2 execution capacity.
         # Default 65536.
         self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
         if not isinstance(self.mega_moe_max_tokens, int):

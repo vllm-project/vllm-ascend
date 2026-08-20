@@ -227,6 +227,35 @@ def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
 
+def get_a5_mega_moe_buffer_tokens_per_rank(
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int | None = None,
+) -> int:
+    if mc2_tokens_capacity is None:
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+    if mc2_tokens_capacity is None:
+        raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
+
+    ascend_config = get_ascend_config()
+    expert_parallel_size = vllm_config.parallel_config.world_size_across_dp
+    buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
+        ascend_config.mega_moe_max_tokens,
+        mc2_tokens_capacity,
+        expert_parallel_size,
+    )
+    logger.debug(
+        "A5 MegaMoE buffer capacity resolved: mega_moe_max_tokens=%s, "
+        "configured_tokens_per_rank=%s, mc2_tokens_capacity=%s, "
+        "expert_parallel_size=%s, buffer_tokens_per_rank=%s",
+        ascend_config.mega_moe_max_tokens,
+        ascend_config.mega_moe_max_tokens // expert_parallel_size,
+        mc2_tokens_capacity,
+        expert_parallel_size,
+        buffer_tokens_per_rank,
+    )
+    return buffer_tokens_per_rank
+
+
 def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
@@ -517,12 +546,10 @@ def _select_a5_moe_comm_method(
     has_expert_parallel_world = world_size > 1
     mix_placement = bool(getattr(ascend_config, "mix_placement", False))
     mega_moe_max_tokens = ascend_config.mega_moe_max_tokens
-    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     mega_moe_buffer_tokens_per_rank = (
-        compute_mega_moe_buffer_tokens_per_rank(
-            mega_moe_max_tokens,
-            max_num_batched_tokens,
-            world_size,
+        get_a5_mega_moe_buffer_tokens_per_rank(
+            vllm_config,
+            mc2_tokens_capacity,
         )
         if fused_mc2_mode_1
         else 0
@@ -549,7 +576,8 @@ def _select_a5_moe_comm_method(
         "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, supported_placement=%s, "
         "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, activation=%s, "
         "group_size=%s, enable_fused_mc2=%s, "
-        "mega_moe_max_tokens=%s, max_num_batched_tokens=%s, mega_moe_buffer_tokens_per_rank=%s, "
+        "mega_moe_max_tokens=%s, configured_tokens_per_rank=%s, mc2_tokens_capacity=%s, "
+        "mega_moe_buffer_tokens_per_rank=%s, "
         "dynamic_eplb=%s, num_redundant_experts=%s, mix_placement=%s, supported_quant_types=%s",
         a5_mega_moe_enable,
         fused_mc2_mode_1,
@@ -568,7 +596,8 @@ def _select_a5_moe_comm_method(
         group_size,
         enable_fused_mc2,
         mega_moe_max_tokens,
-        max_num_batched_tokens,
+        mega_moe_max_tokens // world_size,
+        mc2_tokens_capacity,
         mega_moe_buffer_tokens_per_rank,
         dynamic_eplb,
         num_redundant_experts,
@@ -579,7 +608,8 @@ def _select_a5_moe_comm_method(
         logger.debug(
             "A5 MoE comm selected FUSED_MC2/MegaMoE: num_tokens=%s, world_size=%s, "
             "top_k=%s, quant_type=%s, activation=%s, group_size=%s, enable_fused_mc2=%s, "
-            "mega_moe_max_tokens=%s, max_num_batched_tokens=%s, mega_moe_buffer_tokens_per_rank=%s",
+            "mega_moe_max_tokens=%s, configured_tokens_per_rank=%s, mc2_tokens_capacity=%s, "
+            "mega_moe_buffer_tokens_per_rank=%s",
             num_tokens,
             world_size,
             num_experts_per_tok,
@@ -588,7 +618,8 @@ def _select_a5_moe_comm_method(
             group_size,
             enable_fused_mc2,
             mega_moe_max_tokens,
-            max_num_batched_tokens,
+            mega_moe_max_tokens // world_size,
+            mc2_tokens_capacity,
             mega_moe_buffer_tokens_per_rank,
         )
         return MoECommType.FUSED_MC2
@@ -602,7 +633,7 @@ def _select_a5_moe_comm_method(
         "A5 MoE comm selected fallback: method=%s, num_tokens=%s, world_size=%s, top_k=%s, "
         "quant_type=%s, activation=%s, enable_fused_mc2=%s, supported_mega_moe_quant=%s, "
         "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, supported_placement=%s, "
-        "mc2_tokens_capacity=%s, mega_moe_max_tokens=%s, max_num_batched_tokens=%s, "
+        "mc2_tokens_capacity=%s, mega_moe_max_tokens=%s, configured_tokens_per_rank=%s, "
         "mega_moe_buffer_tokens_per_rank=%s",
         moe_comm_type,
         num_tokens,
@@ -618,7 +649,7 @@ def _select_a5_moe_comm_method(
         supported_placement,
         mc2_tokens_capacity,
         mega_moe_max_tokens,
-        max_num_batched_tokens,
+        mega_moe_max_tokens // world_size,
         mega_moe_buffer_tokens_per_rank,
     )
     return moe_comm_type
