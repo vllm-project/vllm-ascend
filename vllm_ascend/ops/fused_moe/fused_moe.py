@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, cache_a5_moe_quant_type
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -43,7 +44,6 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedEx
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     maybe_trans_nz,
@@ -349,7 +349,7 @@ else:
                 )
 
             self.quant_type = self._get_quant_type()
-            cache_a5_moe_quant_type(getattr(self, "vllm_config", None), self.quant_type, self.layer_name)
+            cache_a5_moe_quant_type(getattr(self, "vllm_config", None), self.quant_type)
 
             self.moe_config.tp_group = get_tp_group()
             self.moe_config.dp_group = get_dp_group()
@@ -499,13 +499,6 @@ else:
             if method is not None:
                 quant_type = getattr(method, "quant_type", QuantType.NONE)
 
-            logger.info_once(
-                "MoE runner quant type resolved: runner=%s, quant_method=%s, inner_method=%s, quant_type=%s",
-                type(self).__name__,
-                type(self._quant_method).__name__,
-                type(method).__name__ if method is not None else None,
-                quant_type,
-            )
             return quant_type
 
         @property
@@ -813,9 +806,7 @@ else:
                 gate = self.gate
                 assert gate is not None
                 before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = DeviceOperator.compute_gate_logits(
-                    hidden_states, gate.weight, gate.weight_fp32
-                )
+                router_logits = DeviceOperator.compute_gate_logits(hidden_states, gate.weight, gate.weight_fp32)
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()

@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import compute_mega_moe_buffer_tokens_per_rank, get_ascend_config
@@ -256,11 +255,9 @@ class MegaMoEBackend:
                     "A5 MegaMoE symmetric buffer is shared by the main and draft models and cannot be replaced "
                     f"during inference: initialized={state.key}, requested={key}."
                 )
-            logger.info("A5 MegaMoE reuses the process-wide symmetric buffer: %s", key)
             return state.buffer
 
         get_symm_buffer_for_mega_moe, _ = _get_mega_moe_ops()
-        logger.info("A5 MegaMoE creates the process-wide symmetric buffer: %s", key)
         buffer = get_symm_buffer_for_mega_moe(
             mega_moe_group.device_group,
             num_experts=key.num_experts,
@@ -333,35 +330,6 @@ class MegaMoEBackend:
         weight_type = None if mxfp is None else mxfp.weight_quant_type
 
         _, mega_moe = _get_mega_moe_ops()
-        logger.info(
-            "A5 MegaMoE call: hidden_states_shape=%s, topk_ids_shape=%s, topk_weights_shape=%s, "
-            "w1_shapes=%s, w2_shapes=%s, w1_scale_shapes=%s, w2_scale_shapes=%s, "
-            "w1_scale_dtypes=%s, w2_scale_dtypes=%s, quant_type=%s, "
-            "is_mxfp=%s, mxfp_act_quant_type=%s, mxfp_weight_quant_type=%s, mxfp_scale_dtype=%s, "
-            "mxfp_per_token_scale_dtype=%s, mxfp_use_bf16=%s, comm_quant_mode=%s, activation=%s, "
-            "activation_clamp=%s, has_log2phy=%s, dynamic_eplb=%s",
-            tuple(fused_experts_input.hidden_states.shape),
-            tuple(topk_ids.shape),
-            tuple(fused_experts_input.topk_weights.shape),
-            [tuple(weight.shape) for weight in w1],
-            [tuple(weight.shape) for weight in w2],
-            [tuple(scale.shape) for scale in w1_scale],
-            [tuple(scale.shape) for scale in w2_scale],
-            [scale.dtype for scale in w1_scale],
-            [scale.dtype for scale in w2_scale],
-            fused_experts_input.quant.quant_type,
-            fused_experts_input.quant.is_mxfp,
-            None if mxfp is None else mxfp.act_quant_type,
-            None if mxfp is None else mxfp.weight_quant_type,
-            None if mxfp is None else mxfp.scale_dtype,
-            None if mxfp is None else mxfp.per_token_scale_dtype,
-            None if mxfp is None else mxfp.use_bf16,
-            fused_experts_input.quant.comm_quant_mode,
-            activation,
-            activation_clamp,
-            fused_experts_input.routing.log2phy is not None,
-            fused_experts_input.dynamic_eplb,
-        )
         mega_moe_kwargs = {
             "x": fused_experts_input.hidden_states,
             "topk_ids": topk_ids.to(torch.int32),
@@ -379,11 +347,6 @@ class MegaMoEBackend:
             mega_moe_kwargs["weight2_type"] = weight_type
 
         output, expert_tokens = mega_moe(**mega_moe_kwargs)
-        logger.info(
-            "A5 MegaMoE output: output_shape=%s, expert_tokens_shape=%s",
-            tuple(output.shape),
-            None if expert_tokens is None else tuple(expert_tokens.shape),
-        )
         return output, expert_tokens
 
 

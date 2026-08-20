@@ -356,17 +356,10 @@ def _get_moe_quant_type(vllm_config: VllmConfig) -> str | None:
     hf_text_config = vllm_config.model_config.hf_text_config
     quant_config = getattr(vllm_config, "quant_config", None)
     quant_description = getattr(quant_config, "quant_description", None)
-    logger.info(
-        "MoE quant type detection input: quant_config_type=%s, quant_description=%s",
-        type(quant_config).__name__ if quant_config is not None else None,
-        quant_description,
-    )
 
     quant_type = _get_first_config_value(hf_text_config, ("moe_quantize", "quantize"))
     if quant_type is not None:
-        quant_type = _normalize_quant_type(quant_type)
-        logger.info_once("MoE quant type detected: quant_type=%s, source=hf_text_config", quant_type)
-        return quant_type
+        return _normalize_quant_type(quant_type)
 
     quantization_config = _get_config_value(hf_text_config, "quantization_config")
     quant_type = _get_first_config_value(
@@ -374,22 +367,16 @@ def _get_moe_quant_type(vllm_config: VllmConfig) -> str | None:
         ("moe_quantize", "quantize", "moe_quant_type", "quant_type", "model_quant_type"),
     )
     if quant_type is not None:
-        quant_type = _normalize_quant_type(quant_type)
-        logger.info_once("MoE quant type detected: quant_type=%s, source=hf_quantization_config", quant_type)
-        return quant_type
+        return _normalize_quant_type(quant_type)
 
     quant_type = _extract_quant_type_from_description(quant_description)
     if quant_type is not None:
-        logger.info_once("MoE quant type detected: quant_type=%s, source=quant_description", quant_type)
         return quant_type
 
     quant_type = _normalize_quant_type(getattr(vllm_config.model_config, "quantization", None))
     if _is_global_fp8_quantization(quant_type):
         # Ascend fp8 maps FusedMoE layers to the DS W4A8 MXFP implementation.
-        quant_type = "W4A8_MXFP"
-        logger.info_once("MoE quant type detected: quant_type=%s, source=ascend_fp8_moe", quant_type)
-        return quant_type
-    logger.info_once("MoE quant type detected: quant_type=%s, source=model_config.quantization", quant_type)
+        return "W4A8_MXFP"
     return quant_type
 
 
@@ -459,21 +446,10 @@ def _get_a5_moe_group_size(vllm_config: VllmConfig) -> int | None:
 def cache_a5_moe_quant_type(
     vllm_config: VllmConfig | None,
     quant_type: QuantType,
-    layer_name: str,
 ) -> None:
     if vllm_config is None:
-        logger.info_once(
-            "A5 MoE quant type cache skipped: layer_name=%s, quant_type=%s, reason=missing_vllm_config",
-            layer_name,
-            quant_type,
-        )
         return
     _A5_MOE_QUANT_TYPES_BY_CONFIG_ID[id(vllm_config)] = quant_type
-    logger.info_once(
-        "A5 MoE quant type cached: layer_name=%s, quant_type=%s, source=fused_moe_get_quant_type",
-        layer_name,
-        quant_type,
-    )
 
 
 def _get_a5_moe_quant_type(
@@ -482,15 +458,12 @@ def _get_a5_moe_quant_type(
 ) -> QuantType | None:
     quant_type = _get_moe_quant_type_from_model_instance(model_instance)
     if quant_type is not None:
-        logger.info_once("A5 MoE quant type detected: quant_type=%s, source=model_instance", quant_type)
         return quant_type
 
     quant_type = _A5_MOE_QUANT_TYPES_BY_CONFIG_ID.get(id(vllm_config))
     if quant_type is not None:
-        logger.info_once("A5 MoE quant type detected: quant_type=%s, source=vllm_config_cache", quant_type)
         return quant_type
 
-    logger.info_once("A5 MoE quant type detected: quant_type=%s, source=unavailable", None)
     return None
 
 
@@ -543,54 +516,7 @@ def _select_a5_moe_comm_method(
         and supported_eplb
         and supported_placement
     )
-    logger.info(
-        "A5 MegaMoE condition check: enabled=%s, fused_mc2_mode_1=%s, "
-        "has_expert_parallel_world=%s, within_mega_moe_buffer_capacity=%s, supported_quant=%s, "
-        "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, supported_placement=%s, "
-        "num_tokens=%s, world_size=%s, top_k=%s, quant_type=%s, activation=%s, "
-        "group_size=%s, enable_fused_mc2=%s, "
-        "mega_moe_max_tokens=%s, max_num_batched_tokens=%s, mega_moe_buffer_tokens_per_rank=%s, "
-        "dynamic_eplb=%s, num_redundant_experts=%s, mix_placement=%s, supported_quant_types=%s",
-        a5_mega_moe_enable,
-        fused_mc2_mode_1,
-        has_expert_parallel_world,
-        within_mega_moe_buffer_capacity,
-        supported_quant,
-        supported_activation,
-        supported_group_size,
-        supported_eplb,
-        supported_placement,
-        num_tokens,
-        world_size,
-        num_experts_per_tok,
-        quant_type,
-        activation,
-        group_size,
-        enable_fused_mc2,
-        mega_moe_max_tokens,
-        max_num_batched_tokens,
-        mega_moe_buffer_tokens_per_rank,
-        dynamic_eplb,
-        num_redundant_experts,
-        mix_placement,
-        sorted(quant_type.name for quant_type in _A5_MEGA_MOE_QUANT_TYPES),
-    )
     if a5_mega_moe_enable:
-        logger.info(
-            "A5 MoE comm selected FUSED_MC2/MegaMoE: num_tokens=%s, world_size=%s, "
-            "top_k=%s, quant_type=%s, activation=%s, group_size=%s, enable_fused_mc2=%s, "
-            "mega_moe_max_tokens=%s, max_num_batched_tokens=%s, mega_moe_buffer_tokens_per_rank=%s",
-            num_tokens,
-            world_size,
-            num_experts_per_tok,
-            quant_type,
-            activation,
-            group_size,
-            enable_fused_mc2,
-            mega_moe_max_tokens,
-            max_num_batched_tokens,
-            mega_moe_buffer_tokens_per_rank,
-        )
         return MoECommType.FUSED_MC2
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
         moe_comm_type = MoECommType.MC2
@@ -598,29 +524,6 @@ def _select_a5_moe_comm_method(
         moe_comm_type = MoECommType.ALLGATHER
     else:
         moe_comm_type = MoECommType.ALLTOALL
-    logger.info(
-        "A5 MoE comm selected fallback: method=%s, num_tokens=%s, world_size=%s, top_k=%s, "
-        "quant_type=%s, activation=%s, enable_fused_mc2=%s, supported_mega_moe_quant=%s, "
-        "supported_activation=%s, supported_group_size=%s, supported_eplb=%s, supported_placement=%s, "
-        "mc2_tokens_capacity=%s, mega_moe_max_tokens=%s, max_num_batched_tokens=%s, "
-        "mega_moe_buffer_tokens_per_rank=%s",
-        moe_comm_type,
-        num_tokens,
-        world_size,
-        num_experts_per_tok,
-        quant_type,
-        activation,
-        enable_fused_mc2,
-        supported_quant,
-        supported_activation,
-        supported_group_size,
-        supported_eplb,
-        supported_placement,
-        mc2_tokens_capacity,
-        mega_moe_max_tokens,
-        max_num_batched_tokens,
-        mega_moe_buffer_tokens_per_rank,
-    )
     return moe_comm_type
 
 
