@@ -52,7 +52,6 @@ from vllm_ascend.distributed.parallel_state import (
 )
 from vllm_ascend.utils import (
     enable_dsa_cp,
-    enable_sp,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -320,8 +319,14 @@ def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
-    shared_expert_weights_replicated = _is_shared_expert_layer(prefix) and (shared_expert_dp_enabled() or enable_sp())
-    if disable_tp or shared_expert_weights_replicated:
+    if _is_shared_expert_layer(prefix):
+        # Shared-expert weight layout is decoupled from sequence parallelism:
+        # only the shared-expert DP switch replicates weights. Models still
+        # pass disable_tp=is_sequence_parallel for shared experts, so SP alone
+        # must not force replication here.
+        if shared_expert_dp_enabled():
+            return None, 0, 1
+    elif disable_tp:
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp

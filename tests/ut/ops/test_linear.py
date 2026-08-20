@@ -245,7 +245,6 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
         self.mock_group.world_size = 2
         self._patches = [
             patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
-            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
         ]
         for p in self._patches:
             p.start()
@@ -272,16 +271,14 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
                 self.assertEqual(tp_rank, 0)
                 self.assertEqual(tp_size, 1)
 
-    def test_sequence_parallel_replicates_shared_expert_weights(self):
-        with (
-            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True),
-        ):
+    def test_sequence_parallel_does_not_replicate_shared_expert_weights(self):
+        """After decoupling, SP alone keeps TP (weights not replicated)."""
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False):
             custom_op, tp_rank, tp_size = self._call("model.layers.0.mlp.shared_experts.gate_up_proj")
 
         self.assertIsNone(custom_op)
-        self.assertEqual(tp_rank, 0)
-        self.assertEqual(tp_size, 1)
+        self.assertEqual(tp_rank, 1)
+        self.assertEqual(tp_size, 2)
 
     def test_shared_expert_keeps_tp_without_dp_or_sequence_parallel(self):
         with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False):
@@ -290,6 +287,26 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
         self.assertIsNone(custom_op)
         self.assertEqual(tp_rank, 1)
         self.assertEqual(tp_size, 2)
+
+    def test_shared_expert_ignores_disable_tp_from_model(self):
+        """Models pass disable_tp=is_sequence_parallel for shared experts; after
+        decoupling, only the shared-expert DP switch replicates weights."""
+        from vllm_ascend.ops.linear_op import get_parallel_op
+
+        prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False):
+            custom_op, tp_rank, tp_size = get_parallel_op(True, prefix, self.mock_layer, False)
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 1)
+        self.assertEqual(tp_size, 2)
+
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True):
+            custom_op, tp_rank, tp_size = get_parallel_op(True, prefix, self.mock_layer, False)
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 0)
+        self.assertEqual(tp_size, 1)
 
 
 if __name__ == "__main__":

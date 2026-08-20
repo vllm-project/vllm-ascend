@@ -166,7 +166,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
 
         if (
-            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL
+            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY
             and not fused_output_is_reduced
         ):
             fused_output = tensor_model_parallel_all_reduce(fused_output)

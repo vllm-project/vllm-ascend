@@ -23,6 +23,9 @@ from vllm import SamplingParams
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
 
 TEST_MODEL = os.environ.get("SP_TEST_MODEL", "Qwen/Qwen3-30B-A3B")
+# A model with real shared experts, covering the decoupled SP/shared-expert
+# paths that Qwen3-30B-A3B (no shared experts) cannot exercise.
+SHARED_EXPERT_TEST_MODEL = os.environ.get("SP_SHARED_EXPERT_TEST_MODEL", "deepseek-ai/DeepSeek-V2-Lite")
 
 
 @wait_until_npu_memory_free()
@@ -71,9 +74,10 @@ TEACHER_PAIRS = [
 def _teacher_logprobs(
     all2all_backend: str,
     enable_shared_expert_dp: bool,
+    model: str = TEST_MODEL,
 ) -> list[list[dict[int, float]]]:
     with DPVllmRunner(
-        TEST_MODEL,
+        model,
         data_parallel_size=2,
         tensor_parallel_size=2,
         enable_expert_parallel=True,
@@ -95,16 +99,7 @@ def _teacher_logprobs(
     ]
 
 
-@wait_until_npu_memory_free()
-def test_sequence_parallel_moe_dp2_tp2_precision() -> None:
-    """Validate the SP/shared-expert-DP 2x2 matrix against one baseline."""
-    outputs = {
-        "shared-expert-dp": _teacher_logprobs("flashinfer_all2allv", True),
-        "sequence-parallel": _teacher_logprobs("allgather_reducescatter", False),
-        "sequence-parallel-with-shared-expert-dp": _teacher_logprobs("allgather_reducescatter", True),
-    }
-    baseline = _teacher_logprobs("flashinfer_all2allv", False)
-
+def _assert_logprobs_close(outputs: dict[str, list], baseline: list) -> None:
     for mode, candidate in outputs.items():
         deltas = []
         for pair_idx, (candidate_steps, baseline_steps) in enumerate(zip(candidate, baseline)):
@@ -125,3 +120,35 @@ def test_sequence_parallel_moe_dp2_tp2_precision() -> None:
         mean_delta = sum(delta[0] for delta in deltas) / len(deltas)
         assert max_delta < 1.0, f"{mode} distribution corruption: max |delta|={max_delta:.4f}"
         assert mean_delta < 0.15, f"{mode} distribution drift: mean |delta|={mean_delta:.4f}"
+
+
+@wait_until_npu_memory_free()
+def test_sequence_parallel_moe_dp2_tp2_precision() -> None:
+    """Validate the SP/shared-expert-DP 2x2 matrix against one baseline."""
+    outputs = {
+        "shared-expert-dp": _teacher_logprobs("flashinfer_all2allv", True),
+        "sequence-parallel": _teacher_logprobs("allgather_reducescatter", False),
+        "sequence-parallel-with-shared-expert-dp": _teacher_logprobs("allgather_reducescatter", True),
+    }
+    baseline = _teacher_logprobs("flashinfer_all2allv", False)
+
+    _assert_logprobs_close(outputs, baseline)
+
+
+@wait_until_npu_memory_free()
+def test_sequence_parallel_moe_shared_expert_dp2_tp2_precision() -> None:
+    """Same SP matrix on a model with real shared experts.
+
+    SP-only now runs shared experts with TP-sharded weights (all-gather +
+    unpad up front, pad + reduce-scatter on exit), SP+shared-expert-DP keeps
+    replicated weights on the SP shard. Both must match the non-SP baseline.
+    """
+    outputs = {
+        "sequence-parallel": _teacher_logprobs("allgather_reducescatter", False, SHARED_EXPERT_TEST_MODEL),
+        "sequence-parallel-with-shared-expert-dp": _teacher_logprobs(
+            "allgather_reducescatter", True, SHARED_EXPERT_TEST_MODEL
+        ),
+    }
+    baseline = _teacher_logprobs("flashinfer_all2allv", False, SHARED_EXPERT_TEST_MODEL)
+
+    _assert_logprobs_close(outputs, baseline)
