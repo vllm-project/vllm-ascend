@@ -20,7 +20,6 @@ _server_cmd: &server_cmd
   - "128"
   - "--max-num-batched-tokens"
   - "16384"
-  - "--enable-expert-parallel"
   - "--quantization"
   - "ascend"
   - "--allowed-local-media-path"
@@ -52,7 +51,7 @@ test_cases:
       - "--max-model-len"
       - "70000"
       - "--speculative-config"
-      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
+      - '{"method":"eagle3","model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
   - name: "Eagle3_Base_Step_Function_Test_02"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -64,7 +63,7 @@ test_cases:
       - "--max-model-len"
       - "70000"
       - "--speculative-config"
-      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
+      - '{"method":"eagle3","model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
   - name: "Eagle3_Base_Step_Function_Test_03"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -76,7 +75,7 @@ test_cases:
       - "--max-model-len"
       - "70000"
       - "--speculative-config"
-      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
+      - '{"method":"eagle3","model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
   - name: "Eagle3_Base_Step_Function_Test_04"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -88,7 +87,7 @@ test_cases:
       - "--max-model-len"
       - "70000"
       - "--speculative-config"
-      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
+      - '{"method":"eagle3","model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
   - name: "Eagle3_Base_Acceptance_Rate_Boundary_Test_02"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -100,7 +99,7 @@ test_cases:
       - "--max-model-len"
       - "70000"
       - "--speculative-config"
-      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
+      - '{"method":"eagle3","model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
   - name: "Qwen36_27B_A5_Single_Maximum_Context_Test_01"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
@@ -110,4 +109,4 @@ test_cases:
       - "--max-model-len"
       - "262144"
       - "--speculative-config"
-      - '{"method":"eagle3","model":"vllm_ascend/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
+      - '{"method":"eagle3","model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'

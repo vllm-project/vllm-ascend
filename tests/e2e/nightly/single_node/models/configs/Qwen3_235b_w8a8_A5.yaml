@@ -23,13 +23,11 @@ _benchmarks_gpqa: &benchmarks_gpqa
     dataset_path: vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_chat_prompt
-    max_out_len: 65536
-    batch_size: 32
-    baseline: 85
+    max_out_len: 32768
+    batch_size: 64
+    baseline: 72.12
     threshold: 5
     temperature: 0.6
-    top_p: 0.95
-    top_k: 20
     ignore_eos: false
 _benchmarks_perf1: &benchmarks_perf1
   acc:
