@@ -62,7 +62,7 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
         expected_list = [expected] * len(prompts)
 
     for prompt_raw, api_args, exp in zip(prompts, api_args_list, expected_list):
-        prompt, actual_prompt_tokens = resolve_prompt(server, prompt_raw)
+        prompt, actual_prompt_tokens = resolve_prompt(server, prompt_raw, use_chat=True)
         if actual_prompt_tokens is not None:
             exp = dict(exp) if exp else {}
             exp.setdefault("prompt_tokens", actual_prompt_tokens)

@@ -1,57 +1,72 @@
+import string
 from typing import Any, Optional
 
 import requests
 
+_PAD_ALPHABET = string.ascii_letters
 
-def _tokenize_count(server, prompt: str) -> int:
-    """Return the number of tokens the server would tokenize for `prompt`."""
+
+def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
+    """Return the number of tokens the server would tokenize for `text`.
+
+    When `use_chat` is True, the text is wrapped as a single user message so
+    that the chat template is applied, matching what /v1/chat/completions
+    would count as prompt_tokens.
+    """
     url = server.url_for("tokenize")
-    r = requests.post(url, json={"prompt": prompt}, timeout=60)
+    if use_chat:
+        payload: dict[str, Any] = {"messages": [{"role": "user", "content": text}]}
+    else:
+        payload = {"prompt": text}
+    r = requests.post(url, json=payload, timeout=60)
     r.raise_for_status()
     body = r.json()
     return len(body.get("tokens") or body.get("token_ids", []))
 
 
-def _generate_prompt_for_length(server, seed: str, target_tokens: int) -> tuple[str, int]:
-    """Repeat `seed` until its tokenized length equals `target_tokens` (best-effort <=).
-
-    Uses binary search on the repetition count via the server's /tokenize endpoint.
-    Returns (generated_prompt, actual_token_count).
-    """
-    if target_tokens <= 0:
-        base_count = _tokenize_count(server, seed)
-        return seed, base_count
-
-    single_count = _tokenize_count(server, seed)
+def _generate_prompt_for_length(server, seed: str, target_tokens: int,
+                                use_chat: bool = False) -> tuple[str, int]:
+    single_count = _tokenize_count(server, seed, use_chat=use_chat)
     if single_count == 0:
         raise ValueError(f"seed {seed!r} tokenizes to 0 tokens")
 
-    lo, hi = 1, max(1, target_tokens)
-    while _tokenize_count(server, "\n".join([seed] * hi)) < target_tokens:
-        hi *= 2
+    if target_tokens <= single_count:
+        return seed, single_count
 
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if _tokenize_count(server, "\n".join([seed] * mid)) <= target_tokens:
-            lo = mid
-        else:
-            hi = mid - 1
+    est = max(1, target_tokens // single_count)
+    body = seed + "\n" + (seed + "\n") * (est - 1)
+    actual = _tokenize_count(server, body, use_chat=use_chat)
 
-    prompt = "\n".join([seed] * lo)
-    return prompt, _tokenize_count(server, prompt)
+    while actual < target_tokens and (actual + single_count) <= target_tokens:
+        body += seed + "\n"
+        actual = _tokenize_count(server, body, use_chat=use_chat)
+
+    for ch in _PAD_ALPHABET:
+        if actual == target_tokens or actual > target_tokens:
+            break
+        candidate = body + ch
+        cand_count = _tokenize_count(server, candidate, use_chat=use_chat)
+        if cand_count <= target_tokens:
+            body = candidate
+            actual = cand_count
+
+    return body, actual
 
 
-def resolve_prompt(server, raw) -> tuple[str, Optional[int]]:
+def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, Optional[int]]:
     """Resolve a raw prompt spec. If dict {'seed':..., 'target_tokens':...},
     generate a prompt of that length and return (prompt, actual_count).
     Otherwise return (raw_string, None).
+
+    Pass use_chat=True when the caller uses /v1/chat/completions so that the
+    chat template overhead is accounted for during tokenization.
     """
     if isinstance(raw, dict):
         seed = str(raw.get("seed", ""))
         target = int(raw.get("target_tokens", 0))
         if not seed or not target:
             raise ValueError(f"prompt dict needs both 'seed' and 'target_tokens', got {raw}")
-        prompt, actual = _generate_prompt_for_length(server, seed, target)
+        prompt, actual = _generate_prompt_for_length(server, seed, target, use_chat=use_chat)
         print(f"[generate_prompt] seed={seed!r} target_tokens={target} actual={actual}")
         return prompt, actual
     return raw, None
@@ -93,6 +108,8 @@ def send_v1_completions(prompt, model, server, request_args=None, expected: Opti
     data: dict[str, Any] = {"model": model, "prompt": prompt}
     if request_args:
         data.update(request_args)
+    if expected and "completion_tokens" in expected and "max_tokens" not in data:
+        data["max_tokens"] = expected["completion_tokens"]
     url = server.url_for("v1", "completions")
     response = requests.post(url, json=data)
     print(f"Status Code: {response.status_code}")
@@ -117,6 +134,8 @@ def send_v1_chat_completions(prompt, model, server, request_args=None, expected:
     }
     if request_args:
         data.update(request_args)
+    if expected and "completion_tokens" in expected and "max_tokens" not in data:
+        data["max_tokens"] = expected["completion_tokens"]
     url = server.url_for("v1", "chat", "completions")
     response = requests.post(url, json=data)
     print(f"Status Code: {response.status_code}")
