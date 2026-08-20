@@ -78,10 +78,10 @@ def measure_acceptance_rate(
 def validate_acceptance_rate(
     actual: float, baseline: float, tolerance: float = 0.05
 ) -> None:
-    """Assert actual is within ±tolerance of baseline."""
+    """Assert actual (pos0) is within ±tolerance of baseline."""
     lower = baseline * (1 - tolerance)
     upper = baseline * (1 + tolerance)
     assert lower <= actual <= upper, (
-        f"acceptance rate {actual:.4f} not within ±{tolerance:.0%} of baseline {baseline:.4f} "
+        f"acceptance rate pos0: {actual:.4f} not within ±{tolerance:.0%} of baseline {baseline:.4f} "
         f"(range: {lower:.4f} ~ {upper:.4f})"
     )

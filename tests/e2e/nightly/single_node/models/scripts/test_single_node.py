@@ -186,8 +186,8 @@ async def run_spec_decode_acceptance_test(
     if spec_baseline is None:
         spec_baseline = (0, [0] * num_speculative_tokens)
 
-    pos0_rate, _ = measure_acceptance_rate(server, num_speculative_tokens, spec_baseline)
-    validate_acceptance_rate(pos0_rate, float(baseline_val), float(tolerance))
+    _, all_rates = measure_acceptance_rate(server, num_speculative_tokens, spec_baseline)
+    validate_acceptance_rate(all_rates[0], float(baseline_val), float(tolerance))
 # test_content:
 #   - chat_completion
 #   - spec_decode_acceptance
