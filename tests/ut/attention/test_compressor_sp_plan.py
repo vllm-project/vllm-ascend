@@ -9,6 +9,7 @@ def _plan(**overrides):
     params = dict(
         enabled=True,
         has_prefill=True,
+        has_decode=False,
         need_gather_q_kv=True,
         tp_size=4,
         compress_ratio=4,
@@ -138,6 +139,13 @@ def test_adaptive_gate_rejects_small_chunks_before_planning():
 
     assert not plan.enabled
     assert plan.reason == "adaptive_small_chunk"
+
+
+def test_mixed_decode_prefill_falls_back_before_planning():
+    plan = _plan(has_decode=True)
+
+    assert not plan.enabled
+    assert plan.reason == "mixed_decode_prefill"
 
 
 def test_zero_output_row_rank_still_participates_in_collective():

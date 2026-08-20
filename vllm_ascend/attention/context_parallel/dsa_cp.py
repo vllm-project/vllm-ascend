@@ -916,6 +916,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         plan = build_compressor_sp_plan(
             enabled=True,
             has_prefill=self.num_prefills > 0,
+            has_decode=self.num_decodes > 0,
             need_gather_q_kv=True,
             tp_size=tp_group.world_size,
             compress_ratio=self.compressor_ratio,

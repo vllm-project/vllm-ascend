@@ -136,6 +136,7 @@ def build_compressor_sp_plan(
     *,
     enabled: bool,
     has_prefill: bool,
+    has_decode: bool,
     need_gather_q_kv: bool,
     tp_size: int,
     compress_ratio: int,
@@ -167,6 +168,8 @@ def build_compressor_sp_plan(
         return disabled("disabled")
     if not has_prefill:
         return disabled("unsupported_attention_state")
+    if has_decode:
+        return disabled("mixed_decode_prefill")
     if not need_gather_q_kv or tp_size <= 1:
         return disabled("no_sequence_parallelism")
     if compress_ratio not in (4, 128):
