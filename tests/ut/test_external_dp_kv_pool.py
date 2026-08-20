@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from tests.e2e.nightly.kv_pool.config import (
+from tests.e2e.common.kv_pool.config import (
     KVPoolConfig,
     MemcacheKVPoolConfig,
     MooncakeKVPoolConfig,
