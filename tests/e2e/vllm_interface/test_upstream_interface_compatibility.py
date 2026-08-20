@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from tools.vllm_interface_contracts.range_analysis import git_head
-from tools.vllm_interface_contracts.upstream_ci import (
+from tests.e2e.vllm_interface.vllm_interface_contracts.range_analysis import git_head
+from tests.e2e.vllm_interface.vllm_interface_contracts.upstream_ci import (
     build_analysis_command,
     resolve_vllm_range,
     run_analysis,

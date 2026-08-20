@@ -14,19 +14,19 @@
 # This file is a part of the vllm-ascend project.
 """Static vLLM/vllm-ascend interface contract analysis engine."""
 
-from tools.vllm_interface_contracts.analysis_plans import (
+from .analysis_plans import (
     ANALYSIS_PLAN_VERSION,
     MAIN2MAIN_SCENARIO,
     VLLM_INTERFACE_SCENARIO,
     AnalysisPlan,
     resolve_analysis_plan,
 )
-from tools.vllm_interface_contracts.call_contracts import (
+from .call_contracts import (
     DirectCallDetector,
     ReturnContract,
     ReturnUse,
 )
-from tools.vllm_interface_contracts.generator import (
+from .generator import (
     GENERATOR_VERSION,
     SCHEMA_VERSION,
     InterfaceBoundaryGenerator,

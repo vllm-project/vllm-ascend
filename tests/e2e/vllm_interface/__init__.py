@@ -12,11 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Run the shared interface-contract CLI."""
-
-from __future__ import annotations
-
-from tools.vllm_interface_contracts.cli import main
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+"""vLLM upstream interface compatibility tests and source analyzer."""

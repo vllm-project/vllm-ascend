@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.vllm_interface_contracts.analysis_plans import resolve_analysis_plan
+from tests.e2e.vllm_interface.vllm_interface_contracts.analysis_plans import resolve_analysis_plan
 
 
 def test_main2main_plan_keeps_full_exact_contract_analysis() -> None:

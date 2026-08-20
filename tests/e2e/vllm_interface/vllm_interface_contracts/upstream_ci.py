@@ -72,7 +72,7 @@ def build_analysis_command(
     return [
         sys.executable,
         "-m",
-        "tools.vllm_interface_contracts",
+        "tests.e2e.vllm_interface.vllm_interface_contracts",
         "analyze-range",
         "--vllm-root",
         str(vllm_root),

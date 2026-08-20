@@ -5,12 +5,23 @@ This directory is collected by vLLM's existing Ascend NPU job. In addition to th
 and the vllm-ascend revision installed by that job. The analysis does not import either project and does not require NPU
 execution.
 
+All implementation and validation code for this check is kept in this directory:
+
+```text
+tests/e2e/vllm_interface/
+├── vllm_interface_contracts/  # source analyzer and CLI
+├── unit_tests/                # source-only analyzer tests
+├── test_upstream_interface_compatibility.py
+├── singlecard/                # existing NPU sampler test
+└── README.md
+```
+
 ## Overall flow
 
 1. Detect the vLLM source checkout at `/workspace/vllm`.
 2. Fetch upstream `main` and calculate the exact `merge-base -> HEAD` PR range.
 3. Record the current vllm-ascend Git revision.
-4. Run `tools.vllm_interface_contracts` with the `vllm-interface` analysis plan.
+4. Run `python -m tests.e2e.vllm_interface.vllm_interface_contracts` with the `vllm-interface` analysis plan.
 5. Print the executed capability states, phase timings, and generated Markdown summary to the pytest job log.
 6. Fail the pytest case only when the analyzer reports an introduced break or cannot complete a valid analysis.
 
@@ -53,7 +64,7 @@ and sampler duration fits the existing job timeout.
 Run the source-only unit tests without NPU hardware:
 
 ```bash
-pytest -q tests/ut/tools/vllm_interface_contracts
+pytest -q tests/e2e/vllm_interface/unit_tests
 ```
 
 Running the E2E entry outside the upstream vLLM NPU image skips it because `/workspace/vllm` is not present:

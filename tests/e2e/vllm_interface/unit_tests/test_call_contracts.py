@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from tools.vllm_interface_contracts.call_contracts import (
+from tests.e2e.vllm_interface.vllm_interface_contracts.call_contracts import (
     CallShape,
     DirectCallDetector,
     ReturnContract,
@@ -15,7 +15,10 @@ from tools.vllm_interface_contracts.call_contracts import (
     replacement_return_compatible,
     return_use_compatible,
 )
-from tools.vllm_interface_contracts.generator import InterfaceBoundaryGenerator, _jsonable_signature
+from tests.e2e.vllm_interface.vllm_interface_contracts.generator import (
+    InterfaceBoundaryGenerator,
+    _jsonable_signature,
+)
 
 
 def _function(source: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
