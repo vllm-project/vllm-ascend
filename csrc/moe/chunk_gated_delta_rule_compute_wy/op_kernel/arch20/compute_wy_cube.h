@@ -165,6 +165,10 @@ class WyCubeGemm {
   }
   __aicore__ inline void LoadSnap(LocalTensor<float> pUb)
   {
+    // pUb (A) was last read/written by V or Cube; order that before the MTE2 write.
+    event_t evtV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+    SetFlag<HardEvent::V_MTE2>(evtV);
+    WaitFlag<HardEvent::V_MTE2>(evtV);
     DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
     DataCopy(pUb, snapGm_, params);
     event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));

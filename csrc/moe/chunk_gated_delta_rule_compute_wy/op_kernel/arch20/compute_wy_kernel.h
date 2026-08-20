@@ -453,6 +453,8 @@ class KernelComputeWy {
     LoadBetaChunk(betaLocal, qHalf, FIXED_CHUNK_SIZE * maxAlign_, b, tokenStart, vHeadIdx);
     for (uint32_t k0 = 0; k0 < kHeadDim_; k0 += FIXED_CHUNK_SIZE) {
       const uint32_t kCur = (kHeadDim_ - k0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - k0) : FIXED_CHUNK_SIZE;
+      // MTE2 write below races prior V work on halfLocal/scratch without this.
+      SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
       LoadBthdChunkSlice(kGm_, halfLocal, b, tokenStart, kHeadIdx, kNumHead_, kHeadDim_, alignK_, k0, kCur);
       SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
       for (uint32_t row = 0; row < FIXED_CHUNK_SIZE; ++row) {
@@ -464,7 +466,10 @@ class KernelComputeWy {
                             FIXED_CHUNK_SIZE);
     }
     // reduceScratch holds gRaw; attnLocal is the g-load scratch
-    // (Hv<=64 ⇒ FIXED_CHUNK*Hv <= ATTEN_ELEMS). Both are free until the gram.
+    // (Hv<=64 ⇒ FIXED_CHUNK*Hv <= ATTEN_ELEMS). attnLocal was just V-written
+    // (Brcb workspace) and is DataCopy'd (MTE2) inside — sync or it corrupts
+    // both the g gather source and the in-flight Kβ product.
+    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, reduceScratch, attnLocal, ATTEN_ELEMS);
 
     // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
