@@ -44,4 +44,7 @@ dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_
 metrics_logits.libdevice = triton.language.extra.cann.libdevice
 # triton ops that filed in ops/triton
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_triton
+# This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
+# support the upstream implementation of fill_logprob_token_ids_kernel.
+# For now, use the Ascend-specific implementation.
 logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
