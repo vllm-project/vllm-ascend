@@ -144,11 +144,11 @@ def test_invalid_request_does_not_break_following_requests(
         timeout=120,
     )
 
+    valid_case = STRUCTURED_OUTPUT_CASES[0]
+    text = create_structured_chat_completion(openai_client, SERVED_MODEL_NAME, valid_case)
+    assert_structured_output(text, valid_case)
+
     assert response.status_code in {
         400,
         422,
     }, f"{case_id} unexpectedly returned {response.status_code}: {response.text}"
-
-    valid_case = STRUCTURED_OUTPUT_CASES[0]
-    text = create_structured_chat_completion(openai_client, SERVED_MODEL_NAME, valid_case)
-    assert_structured_output(text, valid_case)
