@@ -65,6 +65,7 @@ def register_dense_attention_score_op() -> None:
     """Load DenseAttentionScore torch extension wrapper (whl first, then source)."""
     try:
         import cann_ops_transformer.ops.dense_attention_score  # noqa: F401
+
         print("[INFO] loaded cann_ops_transformer.ops.dense_attention_score from whl")
         return
     except Exception as err:  # noqa: BLE001
@@ -96,13 +97,20 @@ def generate_case(batch, q_seqlen, kv_seqlen, q_heads, kv_heads, seed):
 
     gen = torch.Generator().manual_seed(seed)
     query = (torch.rand(total_q_tokens, q_heads, HEAD_DIM, generator=gen, dtype=torch.float32) * 2 - 1).to(FP8_DTYPE)
-    key = (torch.rand(total_physical_blocks, BLOCK_SIZE, kv_heads, HEAD_DIM, generator=gen, dtype=torch.float32) * 2 - 1).to(FP8_DTYPE)
-    value = (torch.rand(total_physical_blocks, BLOCK_SIZE, kv_heads, HEAD_DIM, generator=gen, dtype=torch.float32) * 2 - 1).to(FP8_DTYPE)
+    key = (
+        torch.rand(total_physical_blocks, BLOCK_SIZE, kv_heads, HEAD_DIM, generator=gen, dtype=torch.float32) * 2 - 1
+    ).to(FP8_DTYPE)
+    value = (
+        torch.rand(total_physical_blocks, BLOCK_SIZE, kv_heads, HEAD_DIM, generator=gen, dtype=torch.float32) * 2 - 1
+    ).to(FP8_DTYPE)
 
     # shuffled paged layout: logical order != physical storage order
     layout_gen = torch.Generator().manual_seed(seed + 1000)
-    block_table = torch.randperm(total_physical_blocks, generator=layout_gen, dtype=torch.int64).reshape(
-        batch, max_blocks_per_batch).to(torch.int32)
+    block_table = (
+        torch.randperm(total_physical_blocks, generator=layout_gen, dtype=torch.int64)
+        .reshape(batch, max_blocks_per_batch)
+        .to(torch.int32)
+    )
 
     q_seqlens = [q_seqlen] * batch
     kv_seqlens = [kv_seqlen] * batch
@@ -114,8 +122,8 @@ def generate_case(batch, q_seqlen, kv_seqlen, q_heads, kv_heads, seed):
     v_dequant_scale = torch.ones(batch, kv_heads, max_blocks_per_batch, 1, dtype=torch.float32)
 
     return {
-        "query": query,                      # TND [T, N, D] fp8 (golden layout)
-        "key": key,                          # BSND [blocks, bs, kvh, D] fp8
+        "query": query,  # TND [T, N, D] fp8 (golden layout)
+        "key": key,  # BSND [blocks, bs, kvh, D] fp8
         "value": value,
         "block_table": block_table,
         "q_seqlens": q_seqlens,
@@ -131,8 +139,8 @@ def generate_case(batch, q_seqlen, kv_seqlen, q_heads, kv_heads, seed):
 
 def cpu_dense_attention_score_fp32(case):
     """Causal dense attention golden in fp32 on dequantized fp8 inputs (TND output)."""
-    query = case["query"]            # [T, N, D]
-    key = case["key"]                # [blocks, bs, kvh, D]
+    query = case["query"]  # [T, N, D]
+    key = case["key"]  # [blocks, bs, kvh, D]
     value = case["value"]
     block_table = case["block_table"].to(torch.int64)
     q_seqlens = case["q_seqlens"]
@@ -192,8 +200,8 @@ def cpu_dense_attention_score_fp32(case):
 
 def run_npu_dense(case, device, attention_out_dtype):
     """Call npu_dense_attention_score with Q=NTD, KV=BNSD; returns TND fp32 cpu tensor."""
-    query_ntd = case["query"].permute(1, 0, 2).contiguous()          # [N, T, D]
-    key_bnsd = case["key"].permute(0, 2, 1, 3).contiguous()          # [blocks, kvh, bs, D]
+    query_ntd = case["query"].permute(1, 0, 2).contiguous()  # [N, T, D]
+    key_bnsd = case["key"].permute(0, 2, 1, 3).contiguous()  # [blocks, kvh, bs, D]
     value_bnsd = case["value"].permute(0, 2, 1, 3).contiguous()
 
     torch_npu.npu.set_device(device)
@@ -222,8 +230,8 @@ def run_npu_dense(case, device, attention_out_dtype):
 
 def run_npu_dense_hybrid(case, device, attention_out_dtype):
     """Call npu_dense_attention_score with Q=TND, KV=BNSD; returns TND fp32 cpu tensor."""
-    query_tnd = case["query"]                                          # [T, N, D]
-    key_bnsd = case["key"].permute(0, 2, 1, 3).contiguous()            # [blocks, kvh, bs, D]
+    query_tnd = case["query"]  # [T, N, D]
+    key_bnsd = case["key"].permute(0, 2, 1, 3).contiguous()  # [blocks, kvh, bs, D]
     value_bnsd = case["value"].permute(0, 2, 1, 3).contiguous()
 
     torch_npu.npu.set_device(device)
@@ -259,23 +267,23 @@ def check_precision(name, ref, npu_out, prec=2e-2):
     diff = (npu_out - ref).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
-    cos_sim = torch.nn.functional.cosine_similarity(
-        npu_out.flatten().unsqueeze(0), ref.flatten().unsqueeze(0)).item()
+    cos_sim = torch.nn.functional.cosine_similarity(npu_out.flatten().unsqueeze(0), ref.flatten().unsqueeze(0)).item()
     deno = torch.maximum(ref.abs(), npu_out.abs())
     elem_ok = (diff <= prec) | (diff / (deno + 1e-6) <= prec)
     pass_rate = elem_ok.float().mean().item()
     passed = pass_rate >= 1.0 - 1e-3 and cos_sim > 0.999
     status = "PASS" if passed else "FAIL"
-    print(f"[{status}] {name}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, "
-          f"cos_sim={cos_sim:.8f}, elem_pass_rate={pass_rate:.6f}")
+    print(
+        f"[{status}] {name}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, "
+        f"cos_sim={cos_sim:.8f}, elem_pass_rate={pass_rate:.6f}"
+    )
     return passed
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--attention-out-dtype", default="bfloat16",
-                        choices=("bfloat16", "float16"))
+    parser.add_argument("--attention-out-dtype", default="bfloat16", choices=("bfloat16", "float16"))
     return parser.parse_args()
 
 
@@ -287,8 +295,10 @@ def main():
     failed = []
     for name, batch, q_seqlen, kv_seqlen, q_heads, kv_heads, seed in _DENSE_NTD_CASES:
         print("=" * 70)
-        print(f"[CASE] {name}: batch={batch}, q_seqlen={q_seqlen}, kv_seqlen={kv_seqlen}, "
-              f"q_heads={q_heads}, kv_heads={kv_heads}, seed={seed}")
+        print(
+            f"[CASE] {name}: batch={batch}, q_seqlen={q_seqlen}, kv_seqlen={kv_seqlen}, "
+            f"q_heads={q_heads}, kv_heads={kv_heads}, seed={seed}"
+        )
         case = generate_case(batch, q_seqlen, kv_seqlen, q_heads, kv_heads, seed)
         ref = cpu_dense_attention_score_fp32(case)
         npu_out = run_npu_dense(case, args.device, out_dtype)
@@ -297,11 +307,13 @@ def main():
 
     print("=" * 70)
     for name, batch, q_seqlen, kv_seqlen, q_heads, kv_heads, seed in _HYBRID_CASES:
-        print(f"[CASE] {name}: batch={batch}, q_seqlen={q_seqlen}, kv_seqlen={kv_seqlen}, "
-              f"q_heads={q_heads}, kv_heads={kv_heads}, seed={seed}")
+        print(
+            f"[CASE] {name}: batch={batch}, q_seqlen={q_seqlen}, kv_seqlen={kv_seqlen}, "
+            f"q_heads={q_heads}, kv_heads={kv_heads}, seed={seed}"
+        )
         case = generate_case(batch, q_seqlen, kv_seqlen, q_heads, kv_heads, seed)
         ref = cpu_dense_attention_score_fp32(case)
-        out_ntd = run_npu_dense(case, args.device, out_dtype)      # baseline TND view
+        out_ntd = run_npu_dense(case, args.device, out_dtype)  # baseline TND view
         out_hybrid = run_npu_dense_hybrid(case, args.device, out_dtype)
 
         exact = torch.equal(out_hybrid, out_ntd)
@@ -318,8 +330,9 @@ def main():
     if failed:
         print(f"[RESULT] FAILED: {len(failed)}/{total} cases failed: {failed}")
         sys.exit(1)
-    print(f"[RESULT] ALL {total} cases PASSED "
-          f"(11 NTD + {len(_HYBRID_CASES)} hybrid Q=TND/KV=BNSD, out dtype={out_dtype})")
+    print(
+        f"[RESULT] ALL {total} cases PASSED (11 NTD + {len(_HYBRID_CASES)} hybrid Q=TND/KV=BNSD, out dtype={out_dtype})"
+    )
 
 
 if __name__ == "__main__":

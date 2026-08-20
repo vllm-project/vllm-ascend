@@ -28,7 +28,7 @@ struct TileCopyTla<
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementSrc);
     static constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(ElementSrc);
 
-    // Mehtods
+    // Methods
 
     __aicore__ inline
     TileCopyTla() {};
@@ -103,7 +103,7 @@ struct TileCopyTla<
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementSrc);
     static constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(ElementSrc);
 
-    // Mehtods
+    // Methods
 
     __aicore__ inline
     TileCopyTla() {};
@@ -188,7 +188,7 @@ struct TileCopyTla<
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementSrc);
     static constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(ElementSrc);
 
-    // Mehtods
+    // Methods
 
     __aicore__ inline
     TileCopyTla() {};
