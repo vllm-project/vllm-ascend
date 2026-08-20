@@ -190,11 +190,11 @@ build_info.__spec__ = importlib.util.spec_from_loader("vllm_ascend._build_info",
 setattr(build_info, "__device_type__", "A2")  # noqa: B010
 sys.modules.setdefault("vllm_ascend._build_info", build_info)
 
+from vllm_ascend.ops.registry import register_all_custom_ops  # noqa: E402
 from vllm_ascend.utils import (  # noqa: E402
     adapt_patch,
     clear_enable_sp,
     enable_custom_op,
-    register_ascend_customop,
 )
 
 # Mock torch_npu AFTER vllm_ascend import to avoid circular import in accelerate
@@ -243,7 +243,7 @@ adapt_patch()
 adapt_patch(True)
 
 # register Ascend CustomOp here because uts will use this
-register_ascend_customop()
+register_all_custom_ops()
 
 if not _npu_available:
     import torch
