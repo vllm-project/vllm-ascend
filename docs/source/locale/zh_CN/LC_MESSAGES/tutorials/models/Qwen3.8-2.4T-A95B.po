@@ -1,0 +1,646 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-16 01:57+0000\n"
+"PO-Revision-Date: 2026-08-16 01:57+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Qwen3.8-2.4T-A95B"
+msgstr "# Qwen3.8-2.4T-A95B"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid ""
+"Qwen3.8-2.4T-A95B is a large-scale MoE model with 2400 billion total\n"
+"parameters and 95 billion activated parameters. It is built on the Qwen3.5\n"
+"architecture and improves coding, professional work, scientific research, and\n"
+"long-horizon agent tasks."
+msgstr ""
+"Qwen3.8-2.4T-A95B 是一个大规模 MoE 模型，总参数量为 24000 亿，激活参数量为 950 亿。它基于 Qwen3.5 "
+"架构构建，在编程、专业工作、科学研究和长周期智能体任务方面均有提升。"
+
+msgid ""
+"This document describes the main validation steps for the model, including\n"
+"supported features, prerequisites, installation, multi-node deployment,\n"
+"functional verification, accuracy and performance evaluation, performance\n"
+"tuning, and FAQs. All configurations in this document are for Atlas A3."
+msgstr ""
+"本文档描述了该模型的主要验证步骤，包括支持特性、前提条件、安装、多节点部署、功能验证、精度与性能评估、性能调优以及常见问题。本文档中的所有配置均针对 "
+"Atlas A3。"
+
+msgid ""
+"This document is validated and written based on **vLLM-Ascend 0.23.0**. The\n"
+"current model (Qwen3.8-2.4T-A95B) is first supported in this version."
+msgstr ""
+"本文档基于 **vLLM-Ascend 0.23.0** 进行验证和编写。当前模型（Qwen3.8-2.4T-A95B）在该版本中首次获得支持。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持特性"
+
+msgid ""
+"Refer to [supported features](../../user_guide/support_matrix/supported_features.md)\n"
+"to get the model's supported feature matrix."
+msgstr ""
+"请参阅[支持特性](../../user_guide/support_matrix/supported_features.md)获取该模型的支持特性矩阵。"
+
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature\n"
+"configuration details."
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性配置详情。"
+
+msgid ""
+":::{note}\n"
+"The support matrix records the maximum verified capability for this model.\n"
+"Adjust `--max-model-len`, `--max-num-seqs`, and\n"
+"`--max-num-batched-tokens` based on your service workload and available KV\n"
+"cache.\n"
+":::"
+msgstr ""
+":::{note}\n"
+"支持矩阵记录了该模型的最大已验证能力。请根据您的服务负载和可用 KV 缓存调整 `--max-model-len`、`--max-num-seqs` 和 `--max-num-batched-tokens`。\n"
+":::"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid "The following model weights are available:"
+msgstr "以下模型权重可用："
+
+msgid ""
+"- `Qwen3.8-2.4T-A95B` (FP16/BF16): approximately 4.89 TB of storage and weight\n"
+"  memory. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B).\n"
+"- `Qwen3.8-2.4T-A95B-w8a8`: approximately 2.33 TiB of storage and weight\n"
+"  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8).\n"
+"- `Qwen3.8-2.4T-A95B-w4a8`:\n"
+"  [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8)."
+msgstr ""
+"- `Qwen3.8-2.4T-A95B`（FP16/BF16）：约 4.89 TB 存储和权重内存。[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B)。\n"
+"- `Qwen3.8-2.4T-A95B-w8a8`：约 2.33 TiB 存储和权重内存。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8)。\n"
+"- `Qwen3.8-2.4T-A95B-w4a8`：[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8)。"
+
+msgid ""
+"This guide includes the following validated A3 deployment configuration:"
+msgstr "本指南包含以下已验证的 A3 部署配置："
+
+msgid "| Platform | Deployment | Topology |"
+msgstr "| 平台 | 部署方式 | 拓扑 |"
+
+msgid ""
+"| 4 × Atlas 800 A3 (64G × 16) | Mixed Prefill/Decode deployment | "
+"DP4/TP16/EP64 |"
+msgstr ""
+"| 4 × Atlas 800 A3 (64G × 16) | 混合 Prefill/Decode 部署 | DP4/TP16/EP64 |"
+
+msgid ""
+"The checkpoint and tokenizer directories must be available at the same paths\n"
+"on all serving nodes. The W8A8 deployment uses the lazy Safetensors strategy to\n"
+"avoid prefetching the complete checkpoint from shared storage."
+msgstr ""
+"检查点和分词器目录必须在所有服务节点上以相同路径可用。W8A8 部署使用惰性 Safetensors 策略，以避免从共享存储预取完整检查点。"
+
+msgid ""
+"It is recommended to download the model weight to the shared directory of\n"
+"multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
+
+msgid "### 3.2 Verify Multi-node Communication (Optional)"
+msgstr "### 3.2 验证多节点通信（可选）"
+
+msgid ""
+"If you want to deploy the model in a multi-node environment, verify the\n"
+"communication environment according to\n"
+"[verify multi-node communication environment](../../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果要在多节点环境中部署模型，请按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
+"communication)验证通信环境。"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid ""
+"Select the A3 image and start the docker image on each node. Refer to\n"
+"[using docker](../../installation.md#set-up-using-docker)."
+msgstr ""
+"选择 A3 镜像并在每个节点上启动 docker 镜像。请参阅[使用 docker](../../installation.md#set-up-"
+"using-docker)。"
+
+msgid ""
+"After entering the container, verify that vLLM and vLLM-Ascend can be "
+"imported:"
+msgstr "进入容器后，验证 vLLM 和 vLLM-Ascend 是否可以导入："
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"You can also build and install `vllm-ascend` from source. Refer to\n"
+"[set up using Python](../../installation.md#set-up-using-python)."
+msgstr ""
+"您也可以从源码构建并安装 `vllm-ascend`。请参阅[使用 Python 设置](../../installation.md#set-up-"
+"using-python)。"
+
+msgid ""
+"If you want to deploy a multi-node service, install the same version of vLLM\n"
+"and vLLM-Ascend on each node."
+msgstr "如果要部署多节点服务，请在每个节点上安装相同版本的 vLLM 和 vLLM-Ascend。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid "### 5.1 Atlas 800 A3 Multi-Node Deployment"
+msgstr "### 5.1 Atlas 800 A3 多节点部署"
+
+msgid ""
+"The validated mixed deployment uses four Atlas 800 A3 (64G × 16) nodes. Data\n"
+"parallelism spans the four nodes, each node runs one DP rank, and tensor\n"
+"parallelism uses all 16 NPUs in the node. The resulting topology is\n"
+"DP4/TP16/EP64."
+msgstr ""
+"已验证的混合部署使用四个 Atlas 800 A3（64G × 16）节点。数据并行跨越四个节点，每个节点运行一个 DP "
+"rank，张量并行使用节点内的全部 16 个 NPU。最终拓扑为 DP4/TP16/EP64。"
+
+msgid "Before starting the service:"
+msgstr "启动服务之前："
+
+msgid ""
+"- Replace the model path, node count, parallel sizes, local IP address, network\n"
+"  interface, service port, and RPC port with values from the target\n"
+"  environment.\n"
+"- `NIC_NAME` must be the interface that owns `LOCAL_IP`.\n"
+"- Start Node 0 first. `NODE0_IP` on every worker must equal `LOCAL_IP` on Node\n"
+"  0.\n"
+"- Assign every worker a unique `DP_START_RANK`."
+msgstr ""
+"- 将模型路径、节点数、并行大小、本地 IP 地址、网络接口、服务端口和 RPC 端口替换为目标环境中的值。\n"
+"- `NIC_NAME` 必须是拥有 `LOCAL_IP` 的接口。\n"
+"- 先启动 Node 0。每个 worker 上的 `NODE0_IP` 必须等于 Node 0 上的 `LOCAL_IP`。\n"
+"- 为每个 worker 分配唯一的 `DP_START_RANK`。"
+
+msgid ""
+":::::{tab-set}\n"
+":sync-group: mixed-deployment"
+msgstr ""
+":::::{tab-set}\n"
+":sync-group: mixed-deployment"
+
+msgid ""
+"::::{tab-item} Node 0\n"
+":sync: node-0"
+msgstr ""
+"::::{tab-item} Node 0\n"
+":sync: node-0"
+
+msgid ""
+"::::\n"
+"::::{tab-item} Nodes 1-3\n"
+":sync: worker-nodes"
+msgstr ""
+"::::\n"
+"::::{tab-item} Nodes 1-3\n"
+":sync: worker-nodes"
+
+msgid ""
+"Run this command on every worker. Set `LOCAL_IP` and `NIC_NAME` to the current\n"
+"node and set `DP_START_RANK` to `1`, `2`, or `3`."
+msgstr ""
+"在每个 worker 上运行此命令。将 `LOCAL_IP` 和 `NIC_NAME` 设置为当前节点，并将 `DP_START_RANK` 设置为 "
+"`1`、`2` 或 `3`。"
+
+msgid "The following values differ between the master and worker nodes:"
+msgstr "主节点和 worker 节点之间的以下值有所不同："
+
+msgid "| Setting | Node 0 | Nodes 1-3 | Description |"
+msgstr "| 设置项 | Node 0 | Nodes 1-3 | 描述 |"
+
+msgid ""
+"| `LOCAL_IP` | Node 0 IP | Current worker IP | Each node uses its own "
+"communication IP. |"
+msgstr "| `LOCAL_IP` | Node 0 IP | 当前 worker IP | 每个节点使用自己的通信 IP。 |"
+
+msgid ""
+"| `NODE0_IP` | Not required | Node 0 IP | Workers use this address to join "
+"the DP group. |"
+msgstr "| `NODE0_IP` | 不需要 | Node 0 IP | Workers 使用此地址加入 DP 组。 |"
+
+msgid ""
+"| `--headless` | Omitted | Enabled | Workers do not expose an API endpoint. "
+"|"
+msgstr "| `--headless` | 省略 | 启用 | Workers 不暴露 API 端点。 |"
+
+msgid ""
+"| `--data-parallel-address` | `$LOCAL_IP` | `$NODE0_IP` | Always resolves to"
+" Node 0. |"
+msgstr ""
+"| `--data-parallel-address` | `$LOCAL_IP` | `$NODE0_IP` | 始终解析为 Node 0。 |"
+
+msgid ""
+"| `--data-parallel-start-rank` | `0` by default | `1`, `2`, or `3` | Every "
+"node must own a unique DP rank. |"
+msgstr ""
+"| `--data-parallel-start-rank` | 默认为 `0` | `1`、`2` 或 `3` | 每个节点必须拥有唯一的 DP "
+"rank。 |"
+
+msgid "Key deployment parameters:"
+msgstr "关键部署参数："
+
+msgid "| Parameter | Description |"
+msgstr "| 参数 | 描述 |"
+
+msgid ""
+"| `--tensor-parallel-size 16` | Uses all 16 NPUs in one A3 node for tensor "
+"parallelism. |"
+msgstr "| `--tensor-parallel-size 16` | 使用一个 A3 节点中的全部 16 个 NPU 进行张量并行。 |"
+
+msgid ""
+"| `--data-parallel-size 4` | Creates four global DP ranks across four nodes."
+" |"
+msgstr "| `--data-parallel-size 4` | 在四个节点上创建四个全局 DP rank。 |"
+
+msgid ""
+"| `--data-parallel-size-local 1` | Runs one DP rank on the current node. |"
+msgstr "| `--data-parallel-size-local 1` | 在当前节点上运行一个 DP rank。 |"
+
+msgid ""
+"| `--data-parallel-start-rank` | Selects the global DP rank of a worker "
+"node. |"
+msgstr "| `--data-parallel-start-rank` | 选择 worker 节点的全局 DP rank。 |"
+
+msgid ""
+"| `--enable-expert-parallel` | Enables expert parallelism for the MoE "
+"layers. |"
+msgstr "| `--enable-expert-parallel` | 为 MoE 层启用专家并行。 |"
+
+msgid ""
+"| `--max-model-len 131072` | Sets the maximum combined input and output "
+"length. |"
+msgstr "| `--max-model-len 131072` | 设置输入和输出的最大总长度。 |"
+
+msgid "| `--quantization ascend` | Enables Ascend W8A8 quantization. |"
+msgstr "| `--quantization ascend` | 启用Ascend W8A8量化。 |"
+
+msgid ""
+"| `--safetensors-load-strategy lazy` | Avoids prefetching the complete 2.33 "
+"TiB checkpoint from NFS. |"
+msgstr "| `--safetensors-load-strategy lazy` | 避免从NFS预取完整的2.33 TiB检查点。 |"
+
+msgid ""
+"| `--max-num-seqs 8` | Sets eight active sequences for each DP group and 32 "
+"across DP4. |"
+msgstr "| `--max-num-seqs 8` | 为每个DP组设置8个活动序列，在DP4下共32个。 |"
+
+msgid ""
+"| `--max-num-batched-tokens 16384` | Controls the scheduler token budget. |"
+msgstr "| `--max-num-batched-tokens 16384` | 控制调度器的token预算。 |"
+
+msgid ""
+"| `--gpu-memory-utilization 0.85` | Reserves HBM headroom for runtime "
+"memory. |"
+msgstr "| `--gpu-memory-utilization 0.85` | 为运行时内存预留HBM空间。 |"
+
+msgid "| `--enable-prefix-caching` | Enables automatic prefix caching. |"
+msgstr "| `--enable-prefix-caching` | 启用自动前缀缓存。 |"
+
+msgid ""
+"| `--speculative-config` | Enables one Qwen3.5 MTP speculative token. |"
+msgstr "| `--speculative-config` | 启用一个Qwen3.5 MTP推测token。 |"
+
+msgid "| `--compilation-config` | Uses `FULL_DECODE_ONLY` ACL Graph replay. |"
+msgstr "| `--compilation-config` | 使用`FULL_DECODE_ONLY` ACL图重放。 |"
+
+msgid ""
+"| `--additional-config` | Enables CPU binding and Fused MC2 while disabling "
+"FlashComm1. |"
+msgstr "| `--additional-config` | 启用CPU绑定和Fused MC2，同时禁用FlashComm1。 |"
+
+msgid ""
+"If a worker exits immediately, confirm that Node 0 is already running,\n"
+"`--data-parallel-address` resolves to Node 0, all nodes use the same RPC port,\n"
+"and every worker uses a unique DP start rank."
+msgstr ""
+"如果某个worker立即退出，请确认Node 0已在运行，\n"
+"`--data-parallel-address`解析到Node 0，所有节点使用相同的RPC端口，\n"
+"并且每个worker使用唯一的DP起始rank。"
+
+msgid "### 5.2 Prefill-Decode Disaggregation (A3)"
+msgstr "### 5.2 Prefill-Decode分离部署（A3）"
+
+msgid ""
+"PD disaggregation separates Prefill and Decode into different service groups.\n"
+"Prefill nodes process prompt chunks, Decode nodes serve token generation, and\n"
+"a proxy forwards requests between them."
+msgstr ""
+"PD分离部署将Prefill和Decode划分为不同的服务组。\n"
+"Prefill节点处理提示词块，Decode节点负责token生成，\n"
+"代理在两者之间转发请求。"
+
+msgid ""
+"The current validated configuration covers mixed Prefill/Decode deployment.\n"
+"The following PD topology is based on the Kimi-K3 reference and has not been\n"
+"validated with Qwen3.8: 16 Atlas 800 A3 (64G × 16) nodes, with eight Prefill\n"
+"nodes and eight Decode nodes. Both sides use DP8/TP16/PP1."
+msgstr ""
+"当前已验证的配置涵盖混合Prefill/Decode部署。\n"
+"以下PD拓扑基于Kimi-K3参考，尚未使用Qwen3.8验证：\n"
+"16个Atlas 800 A3（64G × 16）节点，其中8个Prefill\n"
+"节点和8个Decode节点。两侧均使用DP8/TP16/PP1。"
+
+msgid ""
+"Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for\n"
+"the general PD disaggregation workflow. Use the following values in the engine\n"
+"templates and `launch_online_dp.py`:"
+msgstr ""
+"有关通用PD分离部署工作流，请参阅[Mooncake](../features/pd_disaggregation_mooncake_multi_node.md)。\n"
+"在引擎模板和`launch_online_dp.py`中使用以下值："
+
+msgid "| Setting | Value | Description |"
+msgstr "| 设置项 | 值 | 描述 |"
+
+msgid "| Topology | 8P8D | Eight Prefill and eight Decode nodes. |"
+msgstr "| 拓扑 | 8P8D | 8个Prefill节点和8个Decode节点。 |"
+
+msgid "| `--dp-size` | `8` | Eight DP ranks on each side. |"
+msgstr "| `--dp-size` | `8` | 每侧8个DP rank。 |"
+
+msgid "| `--tp-size` | `16` | Uses all 16 NPUs in one A3 node. |"
+msgstr "| `--tp-size` | `16` | 使用一个A3节点中的所有16个NPU。 |"
+
+msgid "| `--pp-size` | `1` | Uses one pipeline stage in each engine. |"
+msgstr "| `--pp-size` | `1` | 每个引擎使用一个流水线阶段。 |"
+
+msgid "| `--dp-size-local` | `1` | Runs one DP rank on each node. |"
+msgstr "| `--dp-size-local` | `1` | 每个节点运行一个DP rank。 |"
+
+msgid ""
+"| `--max-model-len` | `133120` | Sets the combined input and output limit. |"
+msgstr "| `--max-model-len` | `133120` | 设置输入和输出的总长度限制。 |"
+
+msgid ""
+"| `--max-num-batched-tokens` | `8192` | Controls the scheduler token budget."
+" |"
+msgstr "| `--max-num-batched-tokens` | `8192` | 控制调度器的token预算。 |"
+
+msgid ""
+"| `--max-num-seqs` | `16` | Sets the maximum active sequences for each DP "
+"group. |"
+msgstr "| `--max-num-seqs` | `16` | 设置每个DP组的最大活动序列数。 |"
+
+msgid ""
+"Use ranks `0` through `7` for each eight-node side. The `prefill` and `decode`\n"
+"parallel settings in `--kv-transfer-config` must match the actual engine\n"
+"settings."
+msgstr ""
+"每个八节点侧使用rank `0`到`7`。`--kv-transfer-config`中的`prefill`和`decode`\n"
+"并行设置必须与实际引擎设置匹配。"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "### 6.1 Atlas 800 A3"
+msgstr "### 6.1 Atlas 800 A3"
+
+msgid ""
+"After all DP ranks are ready, send a text request to the Node 0 API endpoint.\n"
+"The open-weight model always uses thinking mode and does not support\n"
+"multimodal input."
+msgstr ""
+"在所有DP rank就绪后，向Node 0 API端点发送文本请求。\n"
+"开放权重模型始终使用思考模式，不支持\n"
+"多模态输入。"
+
+msgid ""
+"Each response begins with reasoning wrapped in `<think>...</think>`, followed\n"
+"by the final answer. The service should return HTTP 200 and a `choices` field\n"
+"containing generated text. Worker nodes are headless and do not accept HTTP\n"
+"requests directly."
+msgstr ""
+"每个响应以`<think>...</think>`包裹的推理内容开头，随后\n"
+"是最终答案。服务应返回HTTP 200和包含生成文本的`choices`字段。\n"
+"Worker节点为无头模式，不直接接受HTTP请求。"
+
+msgid "The model officially supports these reasoning effort levels:"
+msgstr "该模型官方支持以下推理力度级别："
+
+msgid ""
+"- `xhigh`: default; deeper reasoning for complex tasks.\n"
+"- `medium`: balances accuracy and speed.\n"
+"- `low`: prioritizes speed and cost."
+msgstr ""
+"- `xhigh`：默认；针对复杂任务进行更深层次的推理。\n"
+"- `medium`：在准确性和速度之间取得平衡。\n"
+"- `low`：优先考虑速度和成本。"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "### 7.1 Prepare the Evaluation Environment"
+msgstr "### 7.1 准备评估环境"
+
+msgid ""
+"Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md)\n"
+"and [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for the\n"
+"evaluation environment and dataset preparation."
+msgstr ""
+"有关评估环境和数据集准备，请参阅[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)\n"
+"和[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
+
+msgid "### 7.2 Check the Service"
+msgstr "### 7.2 检查服务"
+
+msgid ""
+"Before running the benchmark, verify that the service exposes the expected\n"
+"model name:"
+msgstr ""
+"在运行基准测试之前，请验证服务是否暴露了预期的\n"
+"模型名称："
+
+msgid "The response must contain `qwen3.8` before running the evaluation."
+msgstr "在运行评估之前，响应必须包含`qwen3.8`。"
+
+msgid "### 7.3 Run the Evaluation"
+msgstr "### 7.3 运行评估"
+
+msgid ""
+"Set the evaluation tool's model name to `qwen3.8` and its base URL to the Node\n"
+"0 API endpoint. Keep thinking mode enabled and preserve the reasoning output."
+msgstr ""
+"将评估工具的模型名称设置为`qwen3.8`，其基础URL设置为Node\n"
+"0 API端点。保持思考模式启用并保留推理输出。"
+
+msgid ""
+"The official model card recommends the following sampling configuration:"
+msgstr "官方模型卡推荐以下采样配置："
+
+msgid ""
+"The supported `reasoning_effort` values are `xhigh`, `medium`, and `low`.\n"
+"Keep the model revision, reasoning effort, context length, prompt template,\n"
+"sampling parameters, and evaluation framework fixed when comparing accuracy."
+msgstr ""
+"支持的`reasoning_effort`值为`xhigh`、`medium`和`low`。\n"
+"在比较精度时，请保持模型版本、推理力度、上下文长度、提示词模板、\n"
+"采样参数和评估框架不变。"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### 8.1 Install AISBench"
+msgstr "### 8.1 安装AISBench"
+
+msgid ""
+"Run AISBench in a separate environment or container so that the load generator\n"
+"does not affect the serving processes. Refer to\n"
+"[Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)."
+msgstr ""
+"在独立的环境或容器中运行AISBench，以便负载生成器\n"
+"不影响服务进程。请参阅\n"
+"[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+msgid "### 8.2 Performance Service Configuration"
+msgstr "### 8.2 性能服务配置"
+
+msgid ""
+"Use the deployment in Section 5 as the baseline. Change the following values\n"
+"on all four nodes:"
+msgstr "以第5节中的部署为基线。在所有四个节点上更改以下值："
+
+msgid "| Parameter | Standard deployment | Performance test |"
+msgstr "| 参数 | 标准部署 | 性能测试 |"
+
+msgid "### 8.3 Run the Tests"
+msgstr "### 8.3 运行测试"
+
+msgid ""
+"Run performance evaluation of `Qwen3.8-2.4T-A95B` as an example. Refer to\n"
+"[vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details."
+msgstr ""
+"以`Qwen3.8-2.4T-A95B`为例运行性能评估。有关更多详细信息，请参阅\n"
+"[vLLM基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid ""
+"Record the A3 node count, TP/PP/EP topology, context length, concurrency,\n"
+"reasoning effort, and weight revision together with the result."
+msgstr ""
+"记录A3节点数量、TP/PP/EP拓扑、上下文长度、并发数、\n"
+"推理力度和权重版本，并与结果一起保存。"
+
+msgid "### 8.4 Enabled Optimizations"
+msgstr "### 8.4 已启用的优化"
+
+msgid "| Feature | Description |"
+msgstr "| 特性 | 描述 |"
+
+msgid ""
+"| Chunked Prefill | Splits long prefill inputs into chunks to reduce per-"
+"step memory peaks. |"
+msgstr "| 分块Prefill | 将较长的prefill输入拆分为多个块，以减少每一步的内存峰值。 |"
+
+msgid "| Prefix Cache | Reuses KV state for repeated prefixes. |"
+msgstr "| 前缀缓存 | 对重复前缀复用KV状态。 |"
+
+msgid "| DP + TP + EP | Uses DP4/TP16/EP64 across four A3 nodes. |"
+msgstr "| DP + TP + EP | 在四个A3节点上使用DP4/TP16/EP64。 |"
+
+msgid "| W8A8 | Uses Ascend quantization for the validated checkpoint. |"
+msgstr "| W8A8 | 对已验证的检查点使用Ascend量化。 |"
+
+msgid "| Lazy Safetensors | Avoids prefetching the complete NFS checkpoint. |"
+msgstr "| Lazy Safetensors | 避免预取完整的NFS检查点。 |"
+
+msgid "| MTP | Uses one speculative token with the `qwen3_5_mtp` method. |"
+msgstr "| MTP | 使用`qwen3_5_mtp`方法配合一个推测性token。 |"
+
+msgid "| ACL Graph | Uses `FULL_DECODE_ONLY` replay. |"
+msgstr "| ACL Graph | 使用`FULL_DECODE_ONLY`重放。 |"
+
+msgid ""
+"| Fused MC2 | Enabled through the environment and additional configuration. "
+"|"
+msgstr "| Fused MC2 | 通过环境变量和额外配置启用。 |"
+
+msgid "| FlashComm1 | Disabled in the validated configuration. |"
+msgstr "| FlashComm1 | 在已验证的配置中禁用。 |"
+
+msgid "| CPU Binding | Reduces cross-core scheduling overhead. |"
+msgstr "| CPU绑定 | 减少跨核调度开销。 |"
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid ""
+"Use the deployment values above as a baseline. Adjust `max-model-len`,\n"
+"`max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together\n"
+"for the target workload."
+msgstr ""
+"以上述部署参数为基线。根据目标工作负载，同时调整`max-model-len`、\n"
+"`max-num-seqs`、`max-num-batched-tokens`和`gpu-memory-utilization`。"
+
+msgid ""
+"Refer to the\n"
+"[performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)\n"
+"and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for\n"
+"additional guidance."
+msgstr ""
+"更多指导请参考\n"
+"[性能调优指南](../../developer_guide/performance_and_debug/optimization_and_tuning.md)\n"
+"和[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
+
+msgid ""
+"For common environment, installation, and general parameter issues, refer to\n"
+"the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"有关常见的环境、安装和通用参数问题，请参考\n"
+"[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "- **Q: Which inputs are supported by the open-weight model?**"
+msgstr "- **问：开放权重模型支持哪些输入？**"
+
+msgid ""
+"A: Qwen3.8-2.4T-A95B is a text-only model. It does not support multimodal\n"
+"  input."
+msgstr ""
+"答：Qwen3.8-2.4T-A95B是纯文本模型。它不支持多模态\n"
+"  输入。"
+
+msgid "- **Q: Can thinking mode be disabled?**"
+msgstr "- **问：可以禁用思考模式吗？**"
+
+msgid ""
+"A: No. Keep `enable_thinking=true`. The response starts with reasoning in a\n"
+"  `<think>` block and then returns the final answer."
+msgstr ""
+"答：不可以。请保持`enable_thinking=true`。响应会先在\n"
+"  `<think>`块中输出推理过程，然后返回最终答案。"
+
+msgid "- **Q: How should the parallel sizes be selected?**"
+msgstr "- **问：如何选择并行度参数？**"
+
+msgid ""
+"A: Select TP, PP, DP, and EP together according to model compatibility,\n"
+"  weight memory, KV-cache capacity, and communication performance. Validate\n"
+"  the complete topology on the target A3 cluster."
+msgstr ""
+"答：根据模型兼容性、\n"
+"  权重内存、KV缓存容量和通信性能，综合选择TP、PP、DP和EP。\n"
+"  请在目标A3集群上验证完整的拓扑配置。"

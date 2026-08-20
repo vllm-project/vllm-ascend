@@ -263,7 +263,8 @@
 - name: kv_offload
   optional: false
   source_file_dependencies:
-    - vllm_ascend/kv_offload
+    - vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload/__init__.py
+    - vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload/native
   tests:
     - tests/ut/kv_offload
     - tests/e2e/pull_request/one_card/test_cpu_offloading.py
@@ -303,6 +304,8 @@
   source_file_dependencies:
     - vllm_ascend/models
   tests:
+    - tests/ut/models/test_deepseek_v4_compressor.py
+    - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
@@ -465,9 +468,9 @@
 - name: simple_kv_offload
   optional: false
   source_file_dependencies:
-    - vllm_ascend/simple_kv_offload
-    - vllm_ascend/distributed/kv_transfer/kv_pool/simple_cpu_offload
+    - vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload/simple
   tests:
+    - tests/ut/simple_kv_offload
     - tests/e2e/pull_request/one_card/test_simple_cpu_offload.py
 
 # Spec Decode
@@ -499,7 +502,7 @@
   base: spec_decode_base
   source_file_dependencies:
     - vllm_ascend/spec_decode/dspark_proposer.py
-    - vllm_ascend/models/deepseek_v4_dspark.py
+    - vllm_ascend/models/deepseek_v4/dspark.py
   tests:
     - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
     - tests/e2e/pull_request/eight_card/test_glm5_2.py
@@ -698,6 +701,14 @@
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
+- name: ms_metrics_observability
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - vllm_ascend/observability
+  tests:
+    - tests/ut/observability/test_ms_metrics_provider.py
+
 # === Features ===
 - name: quantization_gqa_mla_c8
   optional: false
@@ -735,7 +746,7 @@
     - tests/ut/tools/bisect
 
 - name: _tools
-  optional: false
+  optional: true
   source_file_dependencies:
     - tools/
   tests:
