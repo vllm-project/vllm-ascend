@@ -9,16 +9,23 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 
 from vllm_ascend.ops.triton.v2.sample.apply_top_k_top_p_triton import apply_top_k_top_p_triton
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import _prepare_dflash_inputs_kernel_ascend
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    _prepare_dflash_inputs_kernel_ascend,
+    _prepare_dflash_inputs_kernel_ascend_v2,
+)
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
 )
-from vllm_ascend.worker.v2.structured_outputs import _apply_grammar_bitmask_kernel
+from vllm_ascend.worker.v2.structured_outputs import (
+    _apply_grammar_bitmask_kernel,
+    _apply_grammar_bitmask_kernel_v2,
+)
 
 # triton ops that need to be filed in ops/triton
 penalties.apply_penalties = apply_penalties
@@ -36,10 +43,14 @@ gumbel.gumbel_sample = gumbel_sample
 gumbel.apply_temperature = apply_temperature
 states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
-structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
+structured_outputs._apply_grammar_bitmask_kernel = (
+    _apply_grammar_bitmask_kernel if vllm_version_is("0.27.1") else _apply_grammar_bitmask_kernel_v2
+)
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
-dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
+dflash_speculator._prepare_dflash_inputs_kernel = (
+    _prepare_dflash_inputs_kernel_ascend if vllm_version_is("0.27.1") else _prepare_dflash_inputs_kernel_ascend_v2
+)
 metrics_logits.libdevice = triton.language.extra.cann.libdevice
 # triton ops that filed in ops/triton
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_triton

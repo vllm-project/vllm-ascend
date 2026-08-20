@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import torch
@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendInputBuffers(InputBuffers):
@@ -68,7 +69,7 @@ class AscendInputBatch(InputBatch):
 
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
-    seq_lens_np: np.ndarray
+    seq_lens_np: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int32))
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
 
@@ -78,13 +79,22 @@ class AscendInputBatch(InputBatch):
         num_reqs: int,
         num_tokens: int,
         input_buffers: AscendInputBuffers,
+        max_query_len: int | None = None,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
-        input_batch = InputBatch.make_dummy(
-            num_reqs,
-            num_tokens,
-            input_buffers,
-        )
+        if vllm_version_is("0.27.1"):
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                input_buffers,
+            )
+        else:
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                input_buffers,
+                max_query_len=max_query_len,
+            )
         # Evenly distribute num_tokens across requests instead of dumping the
         # whole remainder on the last request.
         # The old distribution could make the last dummy request's seq_len
