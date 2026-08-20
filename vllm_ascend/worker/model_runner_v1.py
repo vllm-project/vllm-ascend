@@ -159,6 +159,7 @@ from vllm_ascend.utils import (
     get_c_env,
     global_stream,
     is_hidden_state_cache_spec,
+    is_moe_model,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
@@ -647,6 +648,11 @@ class NPUModelRunner(GPUModelRunner):
             return num_tokens, None, cudagraph_mode
 
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+            if not is_draft_model and is_moe_model(self.vllm_config) and self.use_aclgraph:
+                # MC2 supports per-rank token counts, but graph/eager HCCL submissions must match across DP ranks.
+                mode_tensor = torch.tensor(cudagraph_mode.value, device="cpu", dtype=torch.int32)
+                dist.all_reduce(mode_tensor, op=dist.ReduceOp.MIN, group=get_dp_group().cpu_group)
+                cudagraph_mode = CUDAGraphMode(mode_tensor.item())
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
