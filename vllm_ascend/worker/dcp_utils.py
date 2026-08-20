@@ -492,6 +492,7 @@ class DCPManager:
         seq_lens: torch.Tensor,
         draft_index: int,
         seq_lens_cpu: torch.Tensor | None = None,
+        parallel_drafting: bool = False,
     ) -> None:
         """Prepare draft-local DCP metadata before the backend metadata build.
 
@@ -513,35 +514,53 @@ class DCPManager:
 
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
         if is_mla:
-            if dcp_metadata.draft_base_seq_lens is None:
-                local_seq_lens = torch.as_tensor(
-                    dcp_metadata.num_computed_tokens_of_dcp,
+            if parallel_drafting:
+                # The parallel drafter has already removed rejected tokens
+                # from seq_lens and appended the whole proposal query block.
+                draft_query_lens = query_lens_cpu.to(
                     device=seq_lens.device,
+                    dtype=seq_lens.dtype,
                 )
-                draft_base_seq_lens = local_seq_lens.sum(dim=-1)
-                if original_is_prefilling is not None:
-                    is_prefilling = original_is_prefilling[: draft_base_seq_lens.shape[0]].to(
-                        device=draft_base_seq_lens.device
-                    )
-                    prefill_query_lens = original_query_lens_cpu[: draft_base_seq_lens.shape[0]].to(
-                        device=draft_base_seq_lens.device,
-                        dtype=draft_base_seq_lens.dtype,
-                    )
-                    draft_base_seq_lens = draft_base_seq_lens + torch.where(
-                        is_prefilling,
-                        prefill_query_lens,
-                        0,
-                    )
+                num_draft_reqs = draft_query_lens.shape[0]
+                draft_base_seq_lens = seq_lens[:num_draft_reqs] - draft_query_lens
                 dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
+            else:
+                if dcp_metadata.draft_base_seq_lens is None:
+                    local_seq_lens = torch.as_tensor(
+                        dcp_metadata.num_computed_tokens_of_dcp,
+                        device=seq_lens.device,
+                    )
+                    draft_base_seq_lens = local_seq_lens.sum(dim=-1)
+                    if original_is_prefilling is not None:
+                        is_prefilling = original_is_prefilling[: draft_base_seq_lens.shape[0]].to(
+                            device=draft_base_seq_lens.device
+                        )
+                        prefill_query_lens = original_query_lens_cpu[: draft_base_seq_lens.shape[0]].to(
+                            device=draft_base_seq_lens.device,
+                            dtype=draft_base_seq_lens.dtype,
+                        )
+                        draft_base_seq_lens = draft_base_seq_lens + torch.where(
+                            is_prefilling,
+                            prefill_query_lens,
+                            0,
+                        )
+                    dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
             seq_lens_for_dcp = dcp_metadata.draft_base_seq_lens
+            if parallel_drafting:
+                seq_lens_for_dcp = seq_lens_for_dcp + draft_query_lens
         else:
             seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
+        if not parallel_drafting:
+            seq_lens_for_dcp = seq_lens_for_dcp + draft_index + 1
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp)
         dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
         if is_mla and getattr(self, "speculative_config", None) is not None:
             num_draft_reqs = query_lens_cpu.shape[0]
-            draft_histories = (dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
+            draft_histories = dcp_metadata.draft_base_seq_lens[:num_draft_reqs]
+            if not parallel_drafting:
+                draft_histories = draft_histories + draft_index
+            draft_histories = draft_histories.to("cpu")
             mask = self.generate_mtp_attention_mask_for_decode(
                 draft_histories.tolist(),
                 query_lens_cpu[:num_draft_reqs].numpy(),

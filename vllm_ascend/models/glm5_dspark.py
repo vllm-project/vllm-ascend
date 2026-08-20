@@ -43,6 +43,8 @@ def _load_original_dspark_config(draft_model_config: Any) -> dict[str, Any]:
 def normalize_glm5_dspark_config(speculative_config: Any) -> bool:
     """Restore GLM-5 fields that upstream DSpark normalization overwrites."""
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    if draft_model_config is None:
+        return False
     hf_config = getattr(draft_model_config, "hf_config", None)
     if hf_config is None:
         return False
@@ -63,6 +65,11 @@ def normalize_glm5_dspark_config(speculative_config: Any) -> bool:
         hf_config.sliding_window_non_causal = raw_config.get("sliding_window_non_causal", True)
 
     speculative_config.update_arch_()
+    # vLLM's native-model MLA detection is based on a model-type allowlist.
+    # GLM-5 DSpark is registered by vLLM Ascend and is therefore not present in
+    # that list. Mark the reconstructed architecture explicitly so draft
+    # VllmConfig validation applies MLA DCP rules instead of GQA/MQA rules.
+    draft_model_config.model_arch_config.is_deepseek_mla = True
     return True
 
 

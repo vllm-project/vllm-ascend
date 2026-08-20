@@ -14,15 +14,12 @@ def _ascend_update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         "qk_rope_head_dim",
         "v_head_dim",
     )
-    is_glm5_dspark = (
-        pre_trained_config.get("model_type") == "glm5_dspark"
-        or "Glm5DSparkForCausalLM" in config_dict.get("architectures", [])
-    )
+    is_glm5_dspark = pre_trained_config.get(
+        "model_type"
+    ) == "glm5_dspark" or "Glm5DSparkForCausalLM" in config_dict.get("architectures", [])
     if is_glm5_dspark and all(pre_trained_config.get(name) is not None for name in mla_fields):
         pre_trained_config["architectures"] = ["Glm5DSparkForCausalLM"]
-        pre_trained_config["sliding_window_non_causal"] = config_dict.get(
-            "sliding_window_non_causal", True
-        )
+        pre_trained_config["sliding_window_non_causal"] = config_dict.get("sliding_window_non_causal", True)
 
 
 def _dspark_post_init(self):

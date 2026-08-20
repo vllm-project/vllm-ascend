@@ -969,7 +969,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             dcp_mtp_inputs = dcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
@@ -2187,9 +2187,39 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                dcp_manager = getattr(self.runner, "dcp_manager", None)
+                is_mla_dcp = dcp_manager is not None and dcp_manager._is_mla_kv_cache_spec(attn_group.kv_cache_spec)
+                if is_mla_dcp:
+                    assert dcp_manager is not None
+                    # DSpark evaluates the whole proposal block in one MLA
+                    # call. Build rank-local KV lengths and the causal mask for
+                    # the final token in that block before backend metadata is
+                    # materialized.
+                    dcp_draft_index = 0
+                    seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+                    if seq_lens_cpu is None:
+                        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+                    dcp_manager.prepare_spec_decode_drafting_cp_metadata(
+                        common_attn_metadata=common_attn_metadata,
+                        kv_cache_spec=attn_group.kv_cache_spec,
+                        seq_lens=common_attn_metadata.seq_lens,
+                        draft_index=dcp_draft_index,
+                        seq_lens_cpu=seq_lens_cpu,
+                        parallel_drafting=True,
+                    )
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
+                if is_mla_dcp:
+                    assert dcp_manager is not None
+                    dcp_manager.update_spec_decode_drafting_cp_metadata(
+                        attn_metadata=attn_metadata,
+                        kv_cache_spec=attn_group.kv_cache_spec,
+                        seq_lens=common_attn_metadata.seq_lens,
+                        draft_index=dcp_draft_index,
+                        seq_lens_cpu=seq_lens_cpu,
+                        attn_metadata_builder=builder,
+                    )
             else:
                 attn_metadata = builder.build(
                     0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
