@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Any
 
 from .analysis_plans import (
-    MAIN2MAIN_SCENARIO,
     AnalysisPlan,
     resolve_analysis_plan,
 )
@@ -76,8 +75,8 @@ from .models import (
     SourceEndpoint,
 )
 
-RANGE_SCHEMA_VERSION = 9
-RANGE_ANALYZER_VERSION = "1.9.0"
+RANGE_SCHEMA_VERSION = 10
+RANGE_ANALYZER_VERSION = "2.0.0"
 CLASSIFICATIONS = (
     "introduced_break",
     "compatibility_warning",
@@ -1345,7 +1344,6 @@ def _changed_python_files(root: Path, old: str, new: str) -> tuple[str, ...]:
 def _state(
     upstream: SourceEndpoint,
     downstream_signature: list[object] | None,
-    relation: str,
     installed_descriptor: str | None = None,
     upstream_contract: SignatureContract | None = None,
 ) -> CompatibilityState:
@@ -1354,12 +1352,6 @@ def _state(
         return CompatibilityState(False, False, "upstream target does not exist")
     if presence is None:
         return CompatibilityState(None, None, "upstream target binding could not be proven")
-    if relation == "inheritance":
-        return (
-            CompatibilityState(True, True, "upstream base class exists")
-            if upstream.symbol_kind == "class"
-            else CompatibilityState(True, False, "upstream base target is no longer a class")
-        )
     if upstream.symbol_kind != "callable":
         return CompatibilityState(True, False, "upstream target is no longer callable")
     if (
@@ -1520,15 +1512,11 @@ def _suggestion(relation: str, classification: str, old: SourceEndpoint, new: So
     if classification == "fixed":
         return "上游已经恢复兼容，确认下游兼容代码是否仍需保留。"
     if new.file is None:
-        return "更新下游依赖目标；若上游已删除该能力，需要移除 patch/继承并补充替代实现。"
+        return "更新下游 override 目标；若上游已删除该能力，需要移除重写并补充替代实现。"
     if old.name != new.name:
         return f"把下游依赖从 {old.name} 更新到 {new.name}，并重新核对参数转发。"
-    if relation == "monkey_patch":
-        return "调整 replacement 签名，使其接受上游新调用方式，并确认 patch 安装路径仍生效。"
     if relation == "override":
         return "同步 override 参数并检查 super() 调用和关键字转发。"
-    if relation == "inheritance":
-        return "核对新基类路径和 MRO；不要在继承链不完整时猜测替代类。"
     if relation == "direct_import":
         return "更新 import 模块或符号路径，并补充导入边界测试。"
     if relation == "direct_call":
@@ -1900,17 +1888,15 @@ def _relation_findings(
     ]
     findings: list[RangeFinding] = []
     if contract_changed:
-        contract_kind = "base_presence" if relation.relation == "inheritance" else "call_arguments"
+        contract_kind = "call_arguments"
         old_state = _state(
             old_endpoint,
             downstream.signature,
-            relation.relation,
             downstream.descriptor,
         )
         new_state = _state(
             new_endpoint,
             downstream.signature,
-            relation.relation,
             downstream.descriptor,
             _snapshot_signature_contract(new_endpoint),
         )
@@ -1918,9 +1904,7 @@ def _relation_findings(
             old_state,
             new_state,
             contract_changed,
-            newly_introduced_contract=(
-                relation.relation in {"monkey_patch", "override"} and old_exists is False and new_exists is True
-            ),
+            newly_introduced_contract=old_exists is False and new_exists is True,
         )
         parameter_delta = (
             _signature_delta(old_endpoint.signature, new_endpoint.signature)
@@ -2015,11 +1999,7 @@ def _relation_findings(
                 ),
                 classification=classification,
                 relation=relation.relation,
-                priority=(
-                    "P0"
-                    if relation.relation == "monkey_patch" and action == "modify"
-                    else ("P1" if action == "modify" else "P2")
-                ),
+                priority="P1" if action == "modify" else "P2",
                 action=action,
                 confidence="high" if classification != "analysis_unresolved" else "medium",
                 upstream_old=old_endpoint,
@@ -2049,7 +2029,7 @@ def _relation_findings(
     return_changed = new_exists is True and (
         old_exists is not True or old_endpoint.return_contract != new_endpoint.return_contract
     )
-    if relation.relation in {"monkey_patch", "override"} and return_changed:
+    if return_changed:
         old_state = _replacement_return_state(old_endpoint, downstream)
         new_state = _replacement_return_state(new_endpoint, downstream)
         classification = _classify(
@@ -2075,9 +2055,7 @@ def _relation_findings(
                 ),
                 classification=classification,
                 relation=relation.relation,
-                priority="P0"
-                if relation.relation == "monkey_patch" and action == "modify"
-                else ("P1" if action == "modify" else "P2"),
+                priority="P1" if action == "modify" else "P2",
                 action=action,
                 confidence="high" if classification != "analysis_unresolved" else "medium",
                 upstream_old=old_endpoint,
@@ -2088,7 +2066,7 @@ def _relation_findings(
                 change=_change_text(old_endpoint, new_endpoint, "replacement_return"),
                 evidence=evidence,
                 gates=gates,
-                suggestion="同步 patch/override 的返回协议，使其满足上游新接口约定，并补充返回值回归测试。",
+                suggestion="同步 override 的返回协议，使其满足上游新接口约定，并补充返回值回归测试。",
                 contract_kind="replacement_return",
                 direction="upstream_contract_to_downstream_implementation",
                 details={
@@ -2620,7 +2598,7 @@ def validate_current_contracts(
     """Validate exact call/return contracts for one checked-out source pair."""
 
     plan = plan or resolve_analysis_plan()
-    discovered_dependencies = DirectCallDetector(engine).discover() if plan.analyze_direct_calls else []
+    discovered_dependencies = DirectCallDetector(engine).discover()
     dependencies: list[DirectCallDependency] = []
     findings: list[dict[str, Any]] = []
     for dependency in discovered_dependencies:
@@ -2673,7 +2651,7 @@ def validate_current_contracts(
     for relation in relations:
         if (
             relation.upstream_package != "vllm"
-            or relation.relation not in {"monkey_patch", "override"}
+            or relation.relation != "override"
             or relation.relation not in plan.relation_types
         ):
             continue
@@ -2725,26 +2703,20 @@ def analyze_range(
     expect_ascend_sha: str,
     external_roots: dict[str, Path] | None = None,
     external_shas: dict[str, str] | None = None,
-    profile: str = "exact-contracts",
-    scenario: str = MAIN2MAIN_SCENARIO,
     analysis_workers: int = 3,
     downstream_index_cache_dir: Path | None = None,
     upstream_file_index_cache_dir: Path | None = None,
     index_workers: int = 1,
 ) -> dict[str, Any]:
-    """Run the selected source-analysis plan for an exact vLLM range."""
+    """Run the upstream vLLM interface CI analysis for an exact range."""
     analysis_started = time.perf_counter()
     phase_started = time.perf_counter()
     timings: dict[str, float | None] = {}
-    plan = resolve_analysis_plan(scenario)
+    plan = resolve_analysis_plan()
     if analysis_workers < 1:
         raise ValueError("analysis_workers must be at least 1")
     if index_workers < 1:
         raise ValueError("index_workers must be at least 1")
-    if profile not in {"exact-contracts", "expanded"}:
-        raise ValueError(f"unsupported profile: {profile}")
-    if scenario != MAIN2MAIN_SCENARIO and profile != "exact-contracts":
-        raise ValueError("vllm-interface scenario supports only the exact-contracts profile")
     old_sha, new_sha = verify_range(vllm_root, old, new)
     verify_head("vLLM new", vllm_root, new_sha)
     ascend_sha = verify_head("vllm-ascend", ascend_root, expect_ascend_sha)
@@ -2769,7 +2741,7 @@ def analyze_range(
     timings.update(
         {f"repository_indexing.{name}": duration for name, duration in generator.repository_index_timings.items()}
     )
-    relations, generator_findings = generator.generate(plan)
+    relations, _generator_findings = generator.generate(plan)
     timings.update({f"relation_generation.{name}": duration for name, duration in generator.phase_timings.items()})
     phase_started = time.perf_counter()
     old_snapshot = GitSnapshot(vllm_root, old_sha)
@@ -2847,126 +2819,33 @@ def analyze_range(
             time.perf_counter() - comparison_started,
         )
 
-    branch_count = 1 + int(plan.analyze_direct_imports) + int(plan.analyze_direct_calls)
-    effective_workers = min(analysis_workers, branch_count)
+    effective_workers = min(analysis_workers, 3)
     if effective_workers > 1:
         with ThreadPoolExecutor(
             max_workers=effective_workers,
             thread_name_prefix="vllm-interface",
         ) as executor:
             relation_future = executor.submit(analyze_relations)
-            import_future = executor.submit(analyze_imports) if plan.analyze_direct_imports else None
-            direct_call_future = executor.submit(analyze_direct_calls) if plan.analyze_direct_calls else None
+            import_future = executor.submit(analyze_imports)
+            direct_call_future = executor.submit(analyze_direct_calls)
             relation_result = relation_future.result()
-            import_result = import_future.result() if import_future is not None else None
-            direct_call_result = direct_call_future.result() if direct_call_future is not None else None
+            import_result = import_future.result()
+            direct_call_result = direct_call_future.result()
     else:
         relation_result = analyze_relations()
-        import_result = analyze_imports() if plan.analyze_direct_imports else None
-        direct_call_result = analyze_direct_calls() if plan.analyze_direct_calls else None
+        import_result = analyze_imports()
+        direct_call_result = analyze_direct_calls()
 
     findings, relation_elapsed = relation_result
     _record_diagnostic_timing("relation_comparison", relation_elapsed, timings)
-    if import_result is not None:
-        import_findings, import_elapsed = import_result
-        findings.extend(import_findings)
-        _record_diagnostic_timing("direct_import_analysis", import_elapsed, timings)
-    else:
-        timings["direct_import_analysis"] = None
+    import_findings, import_elapsed = import_result
+    findings.extend(import_findings)
+    _record_diagnostic_timing("direct_import_analysis", import_elapsed, timings)
 
-    direct_call_dependencies: list[DirectCallDependency] = []
-    if direct_call_result is not None:
-        direct_call_findings, direct_call_dependencies, discovery_elapsed, comparison_elapsed = direct_call_result
-        findings.extend(direct_call_findings)
-        _record_diagnostic_timing("direct_call_discovery", discovery_elapsed, timings)
-        _record_diagnostic_timing("direct_call_comparison", comparison_elapsed, timings)
-    else:
-        timings["direct_call_discovery"] = None
-        timings["direct_call_comparison"] = None
-
-    generator_finding_started = time.perf_counter()
-    for candidate in generator_findings if plan.include_generator_findings else []:
-        if candidate.status not in {"review", "risk"}:
-            continue
-        old_endpoint = old_snapshot.expression_endpoint(candidate.target_expression)
-        new_endpoint = new_snapshot.expression_endpoint(candidate.target_expression)
-        old_endpoint = old_endpoint or SourceEndpoint(None, None, candidate.target_expression)
-        new_endpoint = new_endpoint or SourceEndpoint(None, None, candidate.target_expression)
-        old_exists = old_endpoint.file is not None and (old_endpoint.name is None or old_endpoint.line is not None)
-        new_exists = new_endpoint.file is not None and (new_endpoint.name is None or new_endpoint.line is not None)
-        verified_removal = (
-            old_exists and not new_exists and candidate.status == "risk" and not candidate.generator_issue
-        )
-        classification = "introduced_break" if verified_removal else "analysis_unresolved"
-        old_state = CompatibilityState(
-            old_exists,
-            True if verified_removal else None,
-            "upstream target exists at old" if verified_removal else candidate.reason,
-        )
-        new_state = CompatibilityState(
-            new_exists,
-            False if verified_removal else None,
-            "upstream target was removed at new" if verified_removal else candidate.reason,
-        )
-        gates = {
-            "relationship_verified": not candidate.generator_issue,
-            "contract_changed": verified_removal,
-            "runtime_reachable": verified_removal,
-            "version_lane_matches": True,
-        }
-        findings.append(
-            RangeFinding(
-                finding_id=_finding_id(candidate.as_dict(), old_sha, new_sha),
-                classification=classification,
-                relation=candidate.relation,
-                priority=(
-                    "P0"
-                    if verified_removal and candidate.relation == "monkey_patch"
-                    else "P1"
-                    if verified_removal
-                    else "P2"
-                ),
-                action="modify" if verified_removal else "review",
-                confidence=("high" if verified_removal else "low" if candidate.generator_issue else "medium"),
-                upstream_old=old_endpoint,
-                upstream_new=new_endpoint,
-                downstream=SourceEndpoint(
-                    candidate.downstream_file,
-                    candidate.downstream_owner,
-                    candidate.downstream_name,
-                    candidate.evidence_line,
-                ),
-                old_state=old_state,
-                new_state=new_state,
-                change=(
-                    "upstream target existed at old and was removed at new" if verified_removal else candidate.reason
-                ),
-                evidence=[candidate.as_dict()["evidence"]],
-                gates=gates,
-                suggestion=(
-                    _suggestion(
-                        candidate.relation,
-                        classification,
-                        old_endpoint,
-                        new_endpoint,
-                    )
-                    if verified_removal
-                    else "静态证据不足，先人工确认目标绑定或补充分析规则，不要直接修改下游代码。"
-                ),
-                source="generator_finding",
-                contract_kind="target_presence" if verified_removal else "analysis_evidence",
-                direction="upstream_contract_to_downstream_implementation",
-            )
-        )
-
-    if plan.include_generator_findings:
-        _diagnostic_timing(
-            "generator_finding_conversion",
-            generator_finding_started,
-            timings,
-        )
-    else:
-        timings["generator_finding_conversion"] = None
+    direct_call_findings, direct_call_dependencies, discovery_elapsed, comparison_elapsed = direct_call_result
+    findings.extend(direct_call_findings)
+    _record_diagnostic_timing("direct_call_discovery", discovery_elapsed, timings)
+    _record_diagnostic_timing("direct_call_comparison", comparison_elapsed, timings)
 
     deduplicated = {item.finding_id: item for item in findings}
     ordered = sorted(
@@ -2992,7 +2871,7 @@ def analyze_range(
         "metadata": {
             "range_analyzer_version": RANGE_ANALYZER_VERSION,
             "generator_version": GENERATOR_VERSION,
-            "profile": profile,
+            "profile": "exact-contracts",
             "scenario": plan.scenario,
             "analysis_plan": plan.as_dict(),
             "vllm_old_sha": old_sha,
@@ -3005,8 +2884,8 @@ def analyze_range(
                 "parallel_branches": effective_workers > 1,
                 "branches": [
                     "relation_comparison",
-                    *(["direct_import_analysis"] if plan.analyze_direct_imports else []),
-                    *(["direct_call_analysis"] if plan.analyze_direct_calls else []),
+                    "direct_import_analysis",
+                    "direct_call_analysis",
                 ],
             },
             "repository_index_cache": generator.repository_index_cache,
@@ -3016,7 +2895,7 @@ def analyze_range(
             "relations": analyzed_relation_count,
             "relations_collected": len(relations),
             "direct_call_dependencies": len(direct_call_dependencies),
-            "generator_findings": (len(generator_findings) if plan.include_generator_findings else 0),
+            "generator_findings": 0,
             "total": len(ordered),
             "by_relation": dict(sorted(relation_counts.items())),
             "by_contract": dict(sorted(contract_counts.items())),
@@ -3093,98 +2972,6 @@ def _write_csv(path: Path, findings: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
-
-
-def _markdown(report: dict[str, Any]) -> str:
-    meta = report["metadata"]
-    summary = report["summary"]
-    lines = [
-        "# vLLM main2main 接口兼容报告",
-        "",
-        f"- vLLM 区间：`{meta['vllm_old_sha']}` → `{meta['vllm_new_sha']}`",
-        f"- vllm-ascend 基线：`{meta['vllm_ascend_sha']}`",
-        f"- 本次升级需修改：{summary['actionable_introduced_break']}",
-        f"- 严格契约不兼容（含 review）：{summary['introduced_break']}",
-        f"- 兼容性提醒：{summary['compatibility_warning']}",
-        f"- 历史问题：{summary['preexisting']}",
-        f"- 无法静态确认：{summary['analysis_unresolved']}",
-        "",
-        "## 本次升级需要处理",
-        "",
-    ]
-    introduced = [
-        item
-        for item in report["findings"]
-        if item["classification"] == "introduced_break" and item["action"] == "modify"
-    ]
-    if not introduced:
-        lines.append("没有发现能够确认由本次区间引入的接口 break。")
-    for item in introduced:
-        downstream = item["downstream"]
-        contract_labels = {
-            "call_arguments": "调用参数",
-            "call_target_presence": "调用目标",
-            "return_usage": "返回值消费",
-            "replacement_return": "替代实现返回协议",
-            "symbol_presence": "导入符号",
-            "target_presence": "上游目标",
-            "base_presence": "继承目标",
-        }
-        contract_label = contract_labels.get(item.get("contract_kind"), item.get("contract_kind", "接口契约"))
-        lines.extend(
-            [
-                f"### {item['relation']} / {contract_label}：{downstream['file']}:{downstream['line'] or ''}",
-                "",
-                f"- 变化：{item['change']}",
-                f"- 下游接口：`{downstream['owner'] or ''}.{downstream['name'] or ''}`",
-                f"- 建议：{item['suggestion']}",
-                "",
-            ]
-        )
-    reviews = [
-        item
-        for item in report["findings"]
-        if item["action"] == "review"
-        and (
-            item.get("details", {}).get("optional_contract_only")
-            or item.get("details", {}).get("new_delta_on_preexisting_break")
-        )
-    ]
-    lines.extend(["## 本次升级需人工审视", ""])
-    if not reviews:
-        lines.append("没有发现可证明的可选契约或历史不兼容遮蔽增量。")
-    for item in reviews:
-        details = item.get("details", {})
-        downstream = item["downstream"]
-        if details.get("optional_contract_only"):
-            optional_parameters = details.get("new_optional_parameters") or []
-            parameter_names = "、".join(f"`{name}`" for name in optional_parameters)
-            parameter_reference = "该参数" if len(optional_parameters) == 1 else "这些参数"
-            reason = (
-                f"下游重写的方法未接收上游新增的可选参数 {parameter_names}，"
-                f"但目前没有证据表明运行时会把{parameter_reference}传给该下游实现"
-            )
-        else:
-            reason = "下游在 old 已不兼容，但本区间又新增了精确参数差异"
-        lines.extend(
-            [
-                f"### {item['relation']} / review：{downstream['file']}:{downstream['line'] or ''}",
-                "",
-                f"- 原因：{reason}",
-                f"- 建议：{item['suggestion']}",
-                "",
-            ]
-        )
-    lines.extend(
-        [
-            "## 说明",
-            "",
-            "`preexisting` 表示 old 和 new 都不兼容，不归因于这次升级；"
-            "`analysis_unresolved` 表示证据不足，脚本没有猜测。",
-            "",
-        ]
-    )
-    return "\n".join(lines)
 
 
 def _upstream_pr_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3376,26 +3163,4 @@ def _write_upstream_pr_reports(
 
 def write_reports(report: dict[str, Any], output_dir: Path) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    if report.get("metadata", {}).get("scenario") == "vllm-interface":
-        return _write_upstream_pr_reports(report, output_dir)
-    json_path = output_dir / "main2main-range-report.json"
-    all_csv = output_dir / "main2main-all-findings.csv"
-    introduced_csv = output_dir / "main2main-introduced-breaks.csv"
-    markdown_path = output_dir / "main2main-range-report.md"
-    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    _write_csv(all_csv, report["findings"])
-    _write_csv(
-        introduced_csv,
-        [
-            item
-            for item in report["findings"]
-            if item["classification"] == "introduced_break" and item["action"] == "modify"
-        ],
-    )
-    markdown_path.write_text(_markdown(report), encoding="utf-8")
-    return {
-        "json": str(json_path),
-        "all_csv": str(all_csv),
-        "introduced_csv": str(introduced_csv),
-        "markdown": str(markdown_path),
-    }
+    return _write_upstream_pr_reports(report, output_dir)

@@ -88,8 +88,6 @@ def build_analysis_command(
         new_sha,
         "--expect-ascend-sha",
         ascend_sha,
-        "--scenario",
-        "vllm-interface",
         "--fail-on",
         "introduced",
         "--output-dir",
