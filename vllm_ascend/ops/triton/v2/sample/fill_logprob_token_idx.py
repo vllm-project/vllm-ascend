@@ -42,10 +42,13 @@ def _fill_logprob_token_ids_kernel(
         tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
     else:
         # Fill with topk indices (no-op when NUM_TOPK == 0).
-        src = topk_indices_ptr + batch_idx * topk_indices_stride
         valid = col < NUM_TOPK
-        # fix dynamic addr ptr by placing load inside the if-else block
-        tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
+        if NUM_TOPK > 0:
+            # fix dynamic addr ptr by placing load inside the if-else block
+            src = topk_indices_ptr + batch_idx * topk_indices_stride
+            tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
+        else:
+            tokens = tl.full([PADDED_COLS], 0, tl.int64)
 
     tl.store(tid_base + col, tokens, mask=valid)
     tl.store(mask_base + col, tl.full([PADDED_COLS], 1, tl.int1), mask=valid)
