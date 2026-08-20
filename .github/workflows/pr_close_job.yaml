@@ -58,8 +58,14 @@ jobs:
       - name: Checkout merge commit
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
+
+      - name: Resolve merged commit
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git checkout "${{ github.event.pull_request.merge_commit_sha }}"
 
       - name: Collect new or moved tests
         id: collect
@@ -69,7 +75,6 @@ jobs:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 .github/workflows/scripts/collect_merged_new_tests.py \
             --diff-base "${BASE_SHA}" \
             --output merged_new_tests.yaml \
