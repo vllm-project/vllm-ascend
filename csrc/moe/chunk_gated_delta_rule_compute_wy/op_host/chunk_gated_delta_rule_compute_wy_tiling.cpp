@@ -1,7 +1,6 @@
 #include "chunk_gated_delta_rule_compute_wy_tiling.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <register/op_impl_registry.h>
 #include <tiling/tiling_api.h>
 
@@ -140,12 +139,6 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     tiling.set_localWorkspaceSize(LOCAL_WORKSPACE_BYTES);
     tiling.set_perCoreWorkspaceBytes(PER_CORE_STAGING_BYTES);
     tiling.set_usedCoreNum(usedCoreNum);
-    // Debug bisect knob: kernel early-returns after stage N (0 = full run).
-    uint32_t debugStage = 0;
-    if (const char *ds = std::getenv("WY_DEBUG_STAGE")) {
-        debugStage = static_cast<uint32_t>(std::atoi(ds));
-    }
-    tiling.set_debugStage(debugStage);
     const uint64_t workspaceOffset = ascendcPlatform.GetLibApiWorkSpaceSize();
     tiling.set_workspaceOffset(workspaceOffset);
 

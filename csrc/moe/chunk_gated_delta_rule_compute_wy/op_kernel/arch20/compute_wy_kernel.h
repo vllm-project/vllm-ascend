@@ -54,7 +54,6 @@ class KernelComputeWy {
     kHeadDim_ = static_cast<uint32_t>(tiling->kHeadDim);
     vHeadDim_ = static_cast<uint32_t>(tiling->vHeadDim);
     chunkSize_ = static_cast<uint32_t>(tiling->chunkSize);
-    debugStage_ = tiling->debugStage;
     numChunks_ = static_cast<uint32_t>(tiling->numChunks);
     localWorkspaceSize_ = tiling->localWorkspaceSize;
     perCoreWorkspaceBytes_ = tiling->perCoreWorkspaceBytes;
@@ -521,7 +520,6 @@ class KernelComputeWy {
   uint32_t chunkSize_{0}, numChunks_{0}, headGroups_{0}, alignK_{0}, alignV_{0}, chunkKElems_{0}, chunkVElems_{0};
   uint32_t maxAlign_{0};
   uint32_t localWorkspaceSize_{0}, perCoreWorkspaceBytes_{0}, usedCoreNum_{1};
-  uint32_t debugStage_{0};
   GlobalTensor<half> qGm_, kGm_, vGm_, betaGm_, qKernelGm_, kKernelGm_, wKernelGm_, uKernelGm_;
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;
