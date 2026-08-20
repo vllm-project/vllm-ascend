@@ -251,7 +251,7 @@ jobs:
             python3 -m pip install --break-system-packages regex
           fi
           python3 -c "import regex; print('regex ok:', regex.__file__)"
-          PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
+          PR_SPEC="${{ github.repository }}#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
           python3 .github/workflows/scripts/test_selector.py \
             --github-pr "${PR_SPEC}" \
