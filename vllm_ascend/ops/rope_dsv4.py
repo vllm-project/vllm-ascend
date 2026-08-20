@@ -116,6 +116,17 @@ def get_cos_and_sin_dsa(
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
 
+                # This is semantically equivalent to the previous
+                # `full_rope_cos[pos_tensor] / full_rope_sin[pos_tensor]`
+                # indexing followed by `copy_`; the change only combines the
+                # indexing and the write into the preallocated output buffers.
+                #
+                # gather_idx is built so torch.gather picks the same rows: each
+                # row contains the token index repeated along the rotary dim.
+                # pos_tensor -> reshape(-1, 1, 1, 1) gives each token its own
+                # row; expand() broadcasts that row across the rotary dim to
+                # match full_rope_* (which is [max_pos, 1, 1, rotary_dim]),
+                # so torch.gather(..., dim=0) selects row pos_tensor[i].
                 gather_idx = (
                     pos_tensor.to(torch.long).reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, full_rope_cos.size(-1))
                 )
