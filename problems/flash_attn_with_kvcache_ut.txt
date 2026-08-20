@@ -1,27 +1,96 @@
-python tests/standalone/fa3/test_fa3_graph_permb_isolation.py 
-[W820 09:11:00.406148139 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+python tests/standalone/fa3/test_fa3_graph_scatter_chain.py 
+[W820 09:22:59.048509993 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C18 perm_B isolation   kv=2048  nblk=16
+C19 scattered-chain   kv=2048  nblk=16
 ========================================================================
-[W820 09:11:05.693445210 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[W820 09:23:05.305089277 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
 ------------------------------------------------------------------------
-perm_A[:16] = [29, 14, 41, 44, 60, 22, 18, 57, 7, 9, 59, 17, 19, 6, 27, 55]
-perm_B[:16] = [27, 19, 16, 9, 44, 10, 45, 55, 60, 2, 36, 47, 22, 63, 4, 0]
-perm_A[:nblk] ids>=16 count = 12
-perm_B[:nblk] ids>=16 count = 11
+[Q1] perm_A -> perm_B, 3 repeats (fresh meta each):
+  repeat 0: diff = 0.000351
+  repeat 1: diff = 0.000351
+  repeat 2: diff = 0.000351
 ------------------------------------------------------------------------
-[S1] perm_B  first-call (fresh meta, no warm-up) : 0.000351
-[S2] perm_A  first-call (fresh meta, no warm-up) : 0.000418
-[S3] perm_B  after warm-up=identity            : 0.000351
-[S4] perm_B  after [perm_A, identity]          : 0.149113
-[S4] swap    after [perm_A,identity,perm_B]    : 0.000464
-[S5] swap    clean (fresh meta, warm-up identity): 0.000464
+[Q2] perm_A -> perm_A (same scattered table twice):
+  diff = 0.000418
+------------------------------------------------------------------------
+[Q3] perm_C -> perm_B (third scattered table as first call):
+  diff = 0.000351
+------------------------------------------------------------------------
+[Q4] per-head diff of perm_B under perm_A -> perm_B:
+  head -> kv-head : max-abs-diff
+     0  ->  kv0      : 0.000276
+     1  ->  kv0      : 0.000277
+     2  ->  kv0      : 0.000194
+     3  ->  kv0      : 0.000269
+     4  ->  kv1      : 0.000340
+     5  ->  kv1      : 0.000231
+     6  ->  kv1      : 0.000351
+     7  ->  kv1      : 0.000240
+     8  ->  kv2      : 0.000248
+     9  ->  kv2      : 0.000337
+    10  ->  kv2      : 0.000343
+    11  ->  kv2      : 0.000290
+    12  ->  kv3      : 0.000333
+    13  ->  kv3      : 0.000309
+    14  ->  kv3      : 0.000268
+    15  ->  kv3      : 0.000247
+    16  ->  kv4      : 0.000285
+    17  ->  kv4      : 0.000216
+    18  ->  kv4      : 0.000257
+    19  ->  kv4      : 0.000278
+    20  ->  kv5      : 0.000294
+    21  ->  kv5      : 0.000211
+    22  ->  kv5      : 0.000300
+    23  ->  kv5      : 0.000248
+    24  ->  kv6      : 0.000232
+    25  ->  kv6      : 0.000218
+    26  ->  kv6      : 0.000244
+    27  ->  kv6      : 0.000299
+    28  ->  kv7      : 0.000339
+    29  ->  kv7      : 0.000247
+    30  ->  kv7      : 0.000308
+    31  ->  kv7      : 0.000253
+------------------------------------------------------------------------
+[Q4c] per-head diff of perm_B under identity -> perm_B (control):
+     0  ->  kv0      : 0.000276
+     1  ->  kv0      : 0.000277
+     2  ->  kv0      : 0.000194
+     3  ->  kv0      : 0.000269
+     4  ->  kv1      : 0.000340
+     5  ->  kv1      : 0.000231
+     6  ->  kv1      : 0.000351
+     7  ->  kv1      : 0.000240
+     8  ->  kv2      : 0.000248
+     9  ->  kv2      : 0.000337
+    10  ->  kv2      : 0.000343
+    11  ->  kv2      : 0.000290
+    12  ->  kv3      : 0.000333
+    13  ->  kv3      : 0.000309
+    14  ->  kv3      : 0.000268
+    15  ->  kv3      : 0.000247
+    16  ->  kv4      : 0.000285
+    17  ->  kv4      : 0.000216
+    18  ->  kv4      : 0.000257
+    19  ->  kv4      : 0.000278
+    20  ->  kv5      : 0.000294
+    21  ->  kv5      : 0.000211
+    22  ->  kv5      : 0.000300
+    23  ->  kv5      : 0.000248
+    24  ->  kv6      : 0.000232
+    25  ->  kv6      : 0.000218
+    26  ->  kv6      : 0.000244
+    27  ->  kv6      : 0.000299
+    28  ->  kv7      : 0.000339
+    29  ->  kv7      : 0.000247
+    30  ->  kv7      : 0.000308
+    31  ->  kv7      : 0.000253
 ------------------------------------------------------------------------
 Read:
-  S1 large AND S2 small      => H1: perm_B is a table-content kernel bug.
-  S1 small, but S4-swap large while S5-swap small
-                            => H2: pollution chain (perm_B corrupts workspace).
-  S1 small AND S3 large      => perm_B needs warm-up=identity to fail (odd).
-  S4 == S1                   => warm-up/context has NO effect (pure content).
+  Q1 flaky            => race, not deterministic state.
+  Q2 OK               => needs TWO DIFFERENT scattered tables.
+  Q2 BAD              => 'first scattered' poisons all scattered.
+  Q3 BAD              => generic scattered first-call, not perm_A-specific.
+  Q4 whole 4-head groups wrong => a whole kv-head's blocks mis-read.
+  Q4 all heads uniformly off   => global softmax/lse error.
 ------------------------------------------------------------------------
