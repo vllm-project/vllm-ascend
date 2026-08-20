@@ -325,7 +325,9 @@ class NPUModelRunner(GPUModelRunner):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
-        self.sampler = AscendSampler()
+        self.sampler = AscendSampler(
+            logprobs_mode=self.model_config.logprobs_mode,
+        )
         self.attn_state: AscendAttentionState | None = None
 
         # Ascend-specific configurations
