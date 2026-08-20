@@ -697,6 +697,14 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                     attn_metadata.non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
                     attn_metadata.non_spec_state_indices_tensor,
                 )
+                # recurrent_kda leaves graph-padding token outputs
+                # uninitialized. Clear the uncovered non-spec decode tail
+                # before it reaches the residual and MoE layers, matching
+                # the existing spec-decode handling above.
+                core_non_spec = _zero_padded_spec_output(
+                    core_non_spec,
+                    attn_metadata.non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                )
 
         if core_spec is not None and core_non_spec is not None:
             merged = torch.empty(

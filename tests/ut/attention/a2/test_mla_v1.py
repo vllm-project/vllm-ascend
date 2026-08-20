@@ -22,6 +22,7 @@ from vllm_ascend.attention.mla_v1 import (
     PrefillMLAPreprocessResult,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendMLABackend(TestBase):
@@ -1120,10 +1121,110 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(impl.fa_quant_layer)
         self.assertTrue(impl.enable_mlapo)
 
+    @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_kimi_k3_no_rope_disables_c8_and_mlapo_on_a2(
+        self,
+        mock_get_device_type,
+        mock_get_current_vllm_config,
+        mock_enabling_mlapo,
+        mock_enable_fa_quant,
+    ):
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        kwargs = {
+            "kv_lora_rank": 32,
+            "qk_nope_head_dim": 64,
+            "qk_rope_head_dim": 32,
+            "qk_head_dim": 96,
+            "v_head_dim": 128,
+            "q_lora_rank": 64,
+            "q_proj": MagicMock(),
+            "q_b_proj": MagicMock(),
+            "kv_b_proj": MagicMock(),
+            "o_proj": MagicMock(),
+            "kv_a_proj_with_mqa": MagicMock(),
+            "fused_qkv_a_proj": MagicMock(),
+            "kv_a_layernorm": MagicMock(),
+            "rotary_emb": None,
+            "use_mla_rope": False,
+        }
+        impl = AscendMLAImpl(
+            num_heads=12,
+            head_size=96,
+            scale=0.1,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            blocksparse_params=None,
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            **kwargs,
+        )
+        self.assertFalse(impl.fa_quant_layer)
+        self.assertFalse(impl.enable_mlapo)
+        self.assertEqual(impl.dtype, self.impl.vllm_config.model_config.dtype)
+
+    @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=False)
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=False)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_kimi_k3_no_rope_enables_a3_c8_without_kv_consumer(
+        self,
+        mock_get_device_type,
+        mock_get_current_vllm_config,
+        mock_enabling_mlapo,
+        mock_enable_fa_quant,
+    ):
+        quant_config = SimpleNamespace(
+            enable_fa_quant=True,
+            is_fa_quant_layer=MagicMock(return_value=True),
+        )
+        self.impl.vllm_config.quant_config = quant_config
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        kwargs = {
+            "kv_lora_rank": 32,
+            "qk_nope_head_dim": 64,
+            "qk_rope_head_dim": 32,
+            "qk_head_dim": 96,
+            "v_head_dim": 128,
+            "q_lora_rank": 64,
+            "q_proj": MagicMock(),
+            "q_b_proj": MagicMock(),
+            "kv_b_proj": MagicMock(),
+            "o_proj": MagicMock(),
+            "kv_a_proj_with_mqa": MagicMock(),
+            "fused_qkv_a_proj": MagicMock(),
+            "kv_a_layernorm": MagicMock(),
+            "rotary_emb": None,
+            "use_mla_rope": False,
+            "layer_name": "model.layers.3.self_attn.attn",
+        }
+        impl = AscendMLAImpl(
+            num_heads=12,
+            head_size=96,
+            scale=0.1,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            blocksparse_params=None,
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            **kwargs,
+        )
+        self.assertTrue(impl.fa_quant_layer)
+        self.assertEqual(impl.dtype, torch.int8)
+        quant_config.is_fa_quant_layer.assert_called_once_with(kwargs["layer_name"])
+
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", side_effect=lambda value, enabled: value)
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
-    def test_kimi_k3_forwards_no_rope_to_fused_decode_preprocess(
+    def test_no_rope_bypasses_fused_decode_preprocess(
         self,
         mock_device_operator,
         mock_gather_unpad,
@@ -1144,7 +1245,7 @@ class TestAscendMLAImpl(TestBase):
             k_nope=MagicMock(),
             k_pe=MagicMock(),
         )
-        mock_device_operator.mla_preprocess_only_decode.return_value = (decode_result, None)
+        self.impl._mla_preprocess = MagicMock(return_value=(decode_result, None))
         self.impl._forward_decode = MagicMock(return_value=attention_output)
         self.impl.o_proj = MagicMock(return_value=(projected,))
         attn_metadata = SimpleNamespace(
@@ -1165,12 +1266,13 @@ class TestAscendMLAImpl(TestBase):
                 output=output,
             )
 
-        mock_device_operator.mla_preprocess_only_decode.assert_called_once_with(
-            self.impl,
+        mock_device_operator.mla_preprocess_only_decode.assert_not_called()
+        self.impl._mla_preprocess.assert_called_once_with(
+            "model.layers.3.self_attn.attn",
             hidden_states,
             kv_cache,
             attn_metadata,
-            use_mla_rope=False,
+            False,
         )
         torch.testing.assert_close(output, projected)
 
@@ -1617,6 +1719,7 @@ class TestAscendMLAImpl(TestBase):
         mock_layer = MagicMock()
         mock_layer.quant_kscale = torch.randn(128)
         mock_layer.fak_descale_float = torch.randn(1)
+        mock_layer.fak_descale_reciprocal = torch.randn(1)
         self.impl.vllm_config = MagicMock()
         self.impl.vllm_config.compilation_config = MagicMock()
         self.impl.vllm_config.compilation_config.static_forward_context = {"layer_0": mock_layer}
@@ -1628,6 +1731,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(hasattr(self.impl, "wu_q"))
         self.assertTrue(hasattr(self.impl, "wd_q"))
         self.assertTrue(hasattr(self.impl, "wd_kv"))
+        self.assertIs(self.impl.fak_descale_reciprocal, mock_layer.fak_descale_reciprocal)
 
     @patch("vllm_ascend.attention.mla_v1.trans_rope_weight")
     @patch("vllm_ascend.attention.mla_v1.transdata")
@@ -2195,6 +2299,92 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(out.shape, prefix_out.shape)
 
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast", side_effect=lambda cache, *_: cache)
+    @patch("vllm_ascend.attention.mla_v1.DeviceOperator.kv_cache_load")
+    @patch("torch_npu.npu_attention_update")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_compute_prefill_context_dequantizes_a3_c8_latent_cache(
+        self,
+        mock_fia,
+        mock_update,
+        mock_cache_load,
+        _mock_format_cast,
+        mock_get_device_type,
+    ):
+        self.impl.fa_quant_layer = True
+        self.impl.use_mla_rope = False
+        self.impl.num_heads = 2
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 32
+        self.impl.qk_nope_head_dim = 32
+        self.impl.qk_rope_head_dim = 16
+        self.impl.v_head_dim = 3
+        self.impl.vllm_config.model_config.dtype = torch.bfloat16
+        self.impl.fak_descale_float = torch.tensor([0.25])
+
+        quantized_kv = torch.arange(32, dtype=torch.int8).view(1, 32)
+        loaded_k_pe = torch.ones(1, self.impl.qk_rope_head_dim, dtype=torch.bfloat16)
+
+        def load_cache(*args, key, value, **_):
+            if key.dtype == torch.int8:
+                key.copy_(quantized_kv.view_as(key))
+                value.copy_(quantized_kv.view_as(value))
+            else:
+                key.copy_(loaded_k_pe.view_as(key))
+                value.copy_(loaded_k_pe.view_as(value))
+
+        mock_cache_load.side_effect = load_cache
+        captured_kv_b_inputs = []
+
+        def kv_b_proj(value):
+            captured_kv_b_inputs.append(value)
+            return (torch.zeros(1, self.impl.num_heads, self.impl.qk_nope_head_dim + self.impl.v_head_dim),)
+
+        self.impl.kv_b_proj = MagicMock(side_effect=kv_b_proj)
+        mock_fia.return_value = (
+            torch.zeros(1, self.impl.num_heads, self.impl.v_head_dim),
+            torch.zeros(self.impl.num_heads, 1),
+        )
+        mock_update.return_value = (torch.zeros(self.impl.num_heads, self.impl.v_head_dim), None)
+
+        chunked_context = MagicMock()
+        chunked_context.seq_tot = [1]
+        chunked_context.starts = [torch.tensor([0])]
+        chunked_context.chunk_seq_lens_npu = [torch.tensor([1])]
+        chunked_context.chunk_actual_seq_lengths_kv_list = [[1]]
+        prefill_metadata = MagicMock(
+            actual_seq_lengths_q=[1],
+            block_table=torch.tensor([[0]]),
+            chunked_context=chunked_context,
+        )
+        attn_metadata = MagicMock(prefill=prefill_metadata)
+        kv_cache = (
+            torch.empty(1, 1, 1, self.impl.kv_lora_rank, dtype=torch.int8),
+            torch.empty(1, 1, 1, self.impl.qk_rope_head_dim, dtype=torch.bfloat16),
+        )
+        q_nope = torch.zeros(1, self.impl.num_heads, self.impl.qk_nope_head_dim, dtype=torch.bfloat16)
+        q_pe = torch.zeros(1, self.impl.num_heads, self.impl.qk_rope_head_dim, dtype=torch.bfloat16)
+        prefix_output = torch.zeros(1, self.impl.num_heads, self.impl.v_head_dim)
+        prefix_lse = torch.zeros(self.impl.num_heads, 1)
+
+        self.impl._compute_prefill_context(
+            q_nope,
+            q_pe,
+            kv_cache,
+            self.impl.qk_rope_head_dim,
+            attn_metadata,
+            prefix_output,
+            prefix_lse,
+        )
+
+        self.assertEqual(mock_cache_load.call_count, 2)
+        latent_call, rope_call = mock_cache_load.call_args_list
+        self.assertEqual(latent_call.args[0].shape, (1, 1, 1, 32))
+        self.assertEqual(rope_call.args[0].shape, (1, 1, 1, 16))
+        expected = (quantized_kv.squeeze().to(torch.float32) * self.impl.fak_descale_float).to(torch.bfloat16)
+        torch.testing.assert_close(captured_kv_b_inputs[0], expected)
+
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("torch_npu.npu_gather_pa_kv_cache")
     @patch("torch_npu.npu_attention_update")
@@ -2235,6 +2425,7 @@ class TestAscendMLAImpl(TestBase):
             kv_sharing_target_layer_name=None,
             **kwargs,
         )
+        impl.fa_quant_layer = False
         S, N, D, VD = 2, num_heads, impl.qk_head_dim, impl.v_head_dim
         latent_kv_dim = impl.kv_lora_rank
         num_blocks, block_size = 100, 20
@@ -2430,6 +2621,74 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(cache_call["value_cache"], kv_cache[1])
         self.assertIs(cache_call["slot_mapping"], slots)
 
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_scatter_pa_kv_cache")
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_quantize")
+    def test_kimi_k3_exec_kv_prefill_quantizes_and_writes_a3_nz_cache(
+        self,
+        mock_npu_quantize,
+        mock_scatter_pa_kv_cache,
+        mock_get_device_type,
+    ):
+        self.impl.use_mla_rope = False
+        self.impl.fa_quant_layer = True
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 32
+        self.impl.qk_rope_head_dim = 16
+        self.impl.fak_descale_reciprocal = torch.tensor([4.0])
+        self.impl.dtype = torch.int8
+        kv_no_split = torch.arange(96, dtype=torch.bfloat16).view(2, 1, 48)
+        kv_c_normed = kv_no_split[..., :32] + 100
+        raw_k_pe = kv_no_split[..., 32:]
+        quantized_kv_c = torch.zeros(kv_c_normed.shape, dtype=torch.int8)
+        self.impl.kv_a_layernorm = MagicMock(return_value=kv_c_normed)
+        mock_npu_quantize.return_value = quantized_kv_c
+        kv_cache = (
+            torch.empty(2, 4, 1, 32, dtype=torch.int8),
+            torch.empty(2, 4, 1, 16, dtype=torch.bfloat16),
+        )
+        slots = torch.tensor([3, 7])
+
+        k_pe, k_nope = self.impl.exec_kv_prefill(
+            kv_no_split,
+            MagicMock(),
+            MagicMock(),
+            kv_cache,
+            slots,
+        )
+
+        torch.testing.assert_close(k_pe, raw_k_pe)
+        torch.testing.assert_close(k_nope, kv_c_normed)
+        mock_npu_quantize.assert_called_once()
+        quantize_args = mock_npu_quantize.call_args.args
+        torch.testing.assert_close(quantize_args[0], kv_c_normed)
+        self.assertIs(quantize_args[1], self.impl.fak_descale_reciprocal)
+        self.assertIsNone(quantize_args[2])
+        self.assertIs(quantize_args[3], torch.qint8)
+        self.assertEqual(quantize_args[4:], (-1, False))
+        self.assertEqual(mock_scatter_pa_kv_cache.call_count, 2)
+        latent_call, position_call = mock_scatter_pa_kv_cache.call_args_list
+        latent_call = latent_call.kwargs
+        position_call = position_call.kwargs
+
+        torch.testing.assert_close(latent_call["key"], quantized_kv_c)
+        torch.testing.assert_close(latent_call["value"], quantized_kv_c)
+        self.assertEqual(latent_call["key_cache"].shape, (2, 1, 1, 4, 32))
+        self.assertIs(latent_call["key_cache"]._base, kv_cache[0])
+        self.assertIs(latent_call["value_cache"]._base, kv_cache[0])
+        torch.testing.assert_close(latent_call["slot_mapping"], slots)
+        self.assertEqual(latent_call["key"].dtype, latent_call["value"].dtype)
+        self.assertEqual(latent_call["cache_mode"], "PA_NZ")
+
+        torch.testing.assert_close(position_call["key"], raw_k_pe)
+        torch.testing.assert_close(position_call["value"], raw_k_pe)
+        self.assertEqual(position_call["key_cache"].shape, (2, 1, 1, 4, 16))
+        self.assertIs(position_call["key_cache"]._base, kv_cache[1])
+        self.assertIs(position_call["value_cache"]._base, kv_cache[1])
+        torch.testing.assert_close(position_call["slot_mapping"], slots)
+        self.assertEqual(position_call["key"].dtype, position_call["value"].dtype)
+        self.assertEqual(position_call["cache_mode"], "PA_NZ")
+
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
     def test_kimi_k3_exec_kv_decode_returns_full_raw_position_cache(
@@ -2463,6 +2722,45 @@ class TestAscendMLAImpl(TestBase):
         torch.testing.assert_close(cache_call["key"], kv_c_normed)
         torch.testing.assert_close(cache_call["value"], raw_k_pe)
         self.assertIs(cache_call["slot_mapping"], slots)
+
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_dynamic_quant")
+    def test_kimi_k3_decode_a3_c8_quantizes_latent_query_to_int8(
+        self,
+        mock_dynamic_quant,
+        mock_get_device_type,
+    ):
+        num_tokens = 2
+        self.impl.use_mla_rope = False
+        self.impl.fa_quant_layer = True
+        self.impl.dtype = torch.int8
+        self.impl.fak_descale_float = torch.tensor([0.25])
+        q_c = torch.randn(num_tokens, self.impl.q_lora_rank)
+        kv_no_split = torch.randn(num_tokens, self.impl.kv_lora_rank + self.impl.qk_rope_head_dim)
+        ql_nope = torch.randn(num_tokens, self.impl.num_heads, self.impl.kv_lora_rank)
+        raw_q_pe = torch.randn(num_tokens, self.impl.num_heads, self.impl.qk_rope_head_dim)
+        quantized_ql_nope = torch.zeros(ql_nope.shape, dtype=torch.int8)
+        query_scale = torch.full((num_tokens, self.impl.num_heads), 0.5)
+        self.impl._q_proj_and_k_up_proj = MagicMock(return_value=(ql_nope, raw_q_pe))
+        self.impl.rope_single = MagicMock(side_effect=lambda value, cos, sin: value)
+        mock_dynamic_quant.return_value = (quantized_ql_nope, query_scale)
+        k_pe_cache = MagicMock(name="k_pe_cache")
+        k_nope_cache = MagicMock(name="k_nope_cache")
+        self.impl.exec_kv_decode = MagicMock(return_value=(k_pe_cache, k_nope_cache))
+        attn_metadata = MagicMock(
+            num_decode_tokens=num_tokens,
+            slot_mapping=torch.tensor([3, 7]),
+        )
+
+        result = self.impl.mla_preprocess_decode(q_c, kv_no_split, MagicMock(), attn_metadata)
+
+        self.assertIs(result.ql_nope, quantized_ql_nope)
+        expected_q_pe = (raw_q_pe / query_scale.unsqueeze(-1) / self.impl.fak_descale_float).to(torch.bfloat16)
+        torch.testing.assert_close(result.q_pe, expected_q_pe)
+        self.assertIs(result.k_nope, k_nope_cache)
+        self.assertIs(result.k_pe, k_pe_cache)
+        self.assertIs(result.dequant_scale_q_nope, query_scale)
+        mock_dynamic_quant.assert_called_once_with(ql_nope, dst_type=torch.int8)
 
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     def test_exec_kv_prefill_with_fa_quant(self, mock_kv_rmsnorm_rope_cache):
@@ -2736,3 +3034,67 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.num_kv_heads)
         self.assertEqual(result.shape[2], HD)
+
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("torch_npu.npu_fused_infer_attention_score_v2")
+    def test_forward_decode_a3_fa_quant_pads_query_descale_with_heads(
+        self,
+        mock_npu_fused_infer_attention_score_v2,
+        mock_get_forward_context,
+        _mock_get_device_type,
+    ):
+        """FIA's per-token-per-head query descale must match padded Q heads."""
+        num_heads = 6
+        padded_heads = 8
+        block_size = 128
+        self.impl.num_heads = num_heads
+        self.impl.num_heads_padded = padded_heads
+        self.impl.head_padding = padded_heads - num_heads
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 512
+        self.impl.qk_nope_head_dim = 512
+        self.impl.qk_rope_head_dim = 64
+        self.impl.enable_kv_nz = False
+        self.impl.enable_mla_fia_split = False
+        self.impl.fa_quant_layer = True
+        self.impl.use_mla_rope = False
+        self.impl.speculative_config = None
+        self.impl.fak_descale_float = torch.ones(1)
+        self.impl._v_up_proj = MagicMock(return_value=torch.empty(1, num_heads, self.impl.v_head_dim))
+
+        q_nope = torch.randn(1, num_heads, self.impl.qk_nope_head_dim)
+        q_pe = torch.randn(1, num_heads, self.impl.qk_rope_head_dim)
+        k_nope = torch.randint(
+            -128,
+            127,
+            (block_size, self.impl.num_kv_heads, self.impl.kv_lora_rank),
+            dtype=torch.int8,
+        )
+        k_pe = torch.randn(block_size, self.impl.num_kv_heads, self.impl.qk_rope_head_dim)
+        descale = torch.ones(1, num_heads)
+        attn_metadata = MagicMock()
+        attn_metadata.attn_state = AscendAttentionState.DecodeOnly
+        attn_metadata.decode = MagicMock()
+        attn_metadata.decode.block_table = torch.zeros((1, 1), dtype=torch.int32)
+        attn_metadata.decode.seq_lens_list = [block_size]
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_fused_infer_attention_score_v2.return_value = [
+            torch.empty(padded_heads, 1, 1, self.impl.kv_lora_rank),
+            None,
+        ]
+
+        self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, block_size, attn_metadata, descale)
+
+        call_args = mock_npu_fused_infer_attention_score_v2.call_args
+        self.assertEqual(call_args.args[0].shape, (1, 1, padded_heads, self.impl.qk_nope_head_dim))
+        self.assertEqual(call_args.args[1].shape, (1, 1, 16, block_size, 32))
+        self.assertEqual(call_args.kwargs["key_rope"].shape, (1, 1, 4, block_size, 16))
+        expected_descale = torch.nn.functional.pad(
+            descale.view(1, 1, num_heads),
+            (0, padded_heads - num_heads),
+            "constant",
+            0,
+        )
+        torch.testing.assert_close(call_args.kwargs["dequant_scale_query"], expected_descale)
