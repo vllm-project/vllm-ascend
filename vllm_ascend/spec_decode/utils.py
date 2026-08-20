@@ -451,6 +451,23 @@ class DynamicSpecScheduler:
         draft_token_ids: torch.Tensor | None = None,
         num_reqs: int | None = None,
     ) -> torch.Tensor:
+        # A full hardware budget does not need confidence estimation.  This
+        # is the saturated, non-adaptive mode: the configured confidence
+        # budget already covers the current physical draft width, so running
+        # the DSpark confidence head would only add scheduler overhead before
+        # returning the same full-width decision.
+        if (
+            self.hardware_policy is not None
+            and self.hardware_min_budget_ratio >= 1.0
+            and num_reqs is not None
+            and draft_token_ids is not None
+        ):
+            physical_k = max(int(draft_token_ids.shape[1]) - 1, 0)
+            if physical_k <= self.budget_k:
+                self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
+                self.num_verify_tokens.fill_(physical_k)
+                return self.num_verify_tokens
+
         if self.method == "dflash":
             if logits is None:
                 raise ValueError("DFlash requires logits.")
