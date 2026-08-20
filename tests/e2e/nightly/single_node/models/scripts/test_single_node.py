@@ -257,8 +257,6 @@ def _extract_hardware(runner: str) -> str:
 _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
 
 _FEATURE_ENVS: dict[str, str] = {
-    "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
     "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",

@@ -69,6 +69,66 @@ setup_vllm_cache_root() {
   export VLLM_CACHE_ROOT
   VLLM_CACHE_ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vllm-cache-${npu_type}-${num_npus}card.XXXXXX")"
   echo "Using vLLM cache root: ${VLLM_CACHE_ROOT}"
+
+  # torch.utils.cpp_extension uses a file baton in its build directory.
+  # A cancelled self-hosted job can leave that baton behind and make every
+  # later NPU job sharing the default cache wait forever before ninja starts.
+  export TORCH_EXTENSIONS_DIR
+  TORCH_EXTENSIONS_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-extensions-${npu_type}-${num_npus}card.XXXXXX")"
+  echo "Using Torch extensions directory: ${TORCH_EXTENSIONS_DIR}"
+}
+
+terminate_process_group() {
+  local process_group="$1"
+  if ! kill -0 -- "-${process_group}" 2>/dev/null; then
+    return
+  fi
+
+  echo "Cleaning up processes left by pytest (process group ${process_group})"
+  kill -TERM -- "-${process_group}" 2>/dev/null || true
+  for _ in {1..10}; do
+    if ! kill -0 -- "-${process_group}" 2>/dev/null; then
+      return
+    fi
+    sleep 0.5
+  done
+  kill -KILL -- "-${process_group}" 2>/dev/null || true
+}
+
+run_logged_command() {
+  local log_file="$1"
+  shift
+  local command_pid
+  local process_group=""
+  local tail_pid
+
+  : > "${log_file}"
+  if command -v setsid >/dev/null 2>&1; then
+    # Keep each pytest target in its own process group. EngineCore and HCCL
+    # workers can outlive pytest after a forced shutdown; without this cleanup
+    # they retain NPU memory, port 16666, and the stdout pipe used by tee.
+    setsid "$@" > "${log_file}" 2>&1 &
+    command_pid=$!
+    process_group="${command_pid}"
+  else
+    echo "Warning: setsid is unavailable; descendant cleanup is disabled"
+    "$@" > "${log_file}" 2>&1 &
+    command_pid=$!
+  fi
+
+  # Redirecting pytest to a regular file prevents leaked descendants from
+  # keeping a tee pipeline open forever. Stream that file while pytest runs so
+  # the Actions log still has live output.
+  tail --pid="${command_pid}" -n +1 -f "${log_file}" &
+  tail_pid=$!
+  wait "${command_pid}"
+  local status=$?
+
+  if [ -n "${process_group}" ]; then
+    terminate_process_group "${process_group}"
+  fi
+  wait "${tail_pid}" || true
+  return "${status}"
 }
 
 print_test_info() {
@@ -120,12 +180,12 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   else
     set +e
-    pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
   fi
-  local status=${PIPESTATUS[0]}
+  local status=$?
   set -e
   # When a target fails, mark its covdata dir so the downstream coverage
   # assembler treats it as unusable and backfills from the OBS history
@@ -168,12 +228,12 @@ run_pytest_batch() {
     echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
     set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
     set +e
-    pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+    run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
   fi
-  local status=${PIPESTATUS[0]}
+  local status=$?
   set -e
   if [ "${status}" -ne 0 ] && [ "${enable_coverage}" = "true" ]; then
     echo "1" > "$(dirname "${COVERAGE_FILE}")/FAILED"

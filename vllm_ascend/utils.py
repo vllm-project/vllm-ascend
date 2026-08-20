@@ -73,7 +73,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
@@ -137,8 +136,6 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
 
 def clear_enable_sp():
-    global _ENABLE_SP
-    _ENABLE_SP = None
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
     _libc_getenv.cache_clear()
@@ -807,12 +804,7 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
-def enable_sp_by_pass():
-    return get_ascend_config().enable_sp_by_pass
-
-
 def enable_sp(vllm_config=None) -> bool:
-    global _ENABLE_SP
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -821,19 +813,10 @@ def enable_sp(vllm_config=None) -> bool:
         except AssertionError:
             vllm_config = None
 
-    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
+    if vllm_config is None:
+        return False
 
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
-        else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-
-    return bool(_ENABLE_SP)
+    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 
 # TODO remove it after vllm has this func
@@ -1338,11 +1321,11 @@ def enable_dsa_cp() -> bool:
     if additional_config is not None and "enable_dsa_cp" in additional_config:
         dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
 
-    if dsa_cp_enable and not enable_sp():
-        raise ValueError(
-            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
-        )
-    return dsa_cp_enable and enable_sp()
+    # DSA-CP shards attention work with its own TP/CP collectives.  It used to
+    # be gated by ``enable_sp`` only because that helper represented the
+    # FlashComm switch.  Native MoE sequence parallelism is a separate layout
+    # contract and must not be required to enable attention context parallel.
+    return dsa_cp_enable
 
 
 @lru_cache(maxsize=1)

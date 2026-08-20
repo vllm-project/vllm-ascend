@@ -289,14 +289,6 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
-        # Set sp_min_token_num=1 when enable_sp and not set.
-        pass_config = vllm_config.compilation_config.pass_config
-        if pass_config.enable_sp and pass_config.sp_min_token_num is None:
-            from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
-
-            pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
-            logger.info("Set sp_min_token_num. sp_min_token_num=%s", pass_config.sp_min_token_num)
-
         default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
         if default_max_cg_capture_size is not None:
             vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
@@ -386,7 +378,12 @@ class NPUPlatform(Platform):
         _update_compilation_modes(vllm_config, ascend_config)
 
         # 7.Recompute cudagraph sizes and setup compile backend (vllm_config).
-        _setup_compile_backend(vllm_config, compile_backend=cls.get_compile_backend())
+        _setup_compile_backend(
+            vllm_config,
+            compile_backend=cls.get_compile_backend(),
+            enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
+            enable_dsa_cp=bool((vllm_config.additional_config or {}).get("enable_dsa_cp", False)),
+        )
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
@@ -468,33 +465,17 @@ class NPUPlatform(Platform):
         # due to multiple warmups before actual capturing.
         capturing = False
 
-        # set for sequence parallelism, 1000 is the batch size concurrency
-        # threshold for enabling the flashcomm_v1 or sequence_parallelism feature.
-        # Currently, it is an empirical value. In normal scenarios,
-        # if the concurrency exceeds this threshold,
-        # the performance benefits can be maximized. Conversely,
-        # if the concurrency is below the threshold,
-        # the performance may degrade due to the switching of
-        # communication methods.
         mmrs_fusion = True
         if is_moe_model(vllm_config):
-            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
-        else:
-            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
-        pad_size = 0
         padded_length = None
-        if flash_comm_v1_enabled:
-            pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
-            if flash_comm_v1_enabled:
-                padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
-                pad_size = padded_length - num_tokens
+            padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
         else:
             max_tokens_across_dp = num_tokens
 
@@ -523,8 +504,6 @@ class NPUPlatform(Platform):
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
-            "flash_comm_v1_enabled": flash_comm_v1_enabled,
-            "pad_size": pad_size,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
             "mc2_mask": mc2_mask,
@@ -1029,12 +1008,19 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         compilation_config.cudagraph_mode = cudagraph_mode
 
 
-def _setup_compile_backend(vllm_config: VllmConfig, compile_backend: str) -> None:
+def _setup_compile_backend(
+    vllm_config: VllmConfig,
+    compile_backend: str,
+    *,
+    enable_shared_expert_dp: bool = False,
+    enable_dsa_cp: bool = False,
+) -> None:
     """Recompute cudagraph sizes and setup the compile backend.
 
-    Recomputes cudagraph capture sizes (SP-aware), then configures the oot
-    compiler and disables npugraph_ex / static kernel when the cudagraph mode
-    does not support them. Writes back into additional_config for workers.
+    Recomputes cudagraph capture sizes (TP token-layout-aware), then configures
+    the oot compiler and disables npugraph_ex / static kernel when the
+    cudagraph mode does not support them. Writes back into additional_config
+    for workers.
     """
     from vllm.config import CompilationMode
     from vllm.config.compilation import CUDAGraphMode
@@ -1049,13 +1035,17 @@ def _setup_compile_backend(vllm_config: VllmConfig, compile_backend: str) -> Non
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    # TODO delete graph size update here when compilation_config.pass_config.enable_sp
-    # is supported by vllm-ascend.
+    # Upstream MoE SP shards tokens before the MoE runner, independent shared-
+    # expert DP shards them inside AscendSharedExperts, and DSA-CP shards Q at
+    # its attention boundary. All three layouts require TP-aligned graph gears
+    # so every captured graph has a stable local token shape. Keep the layout
+    # constraint separate from the feature switches so none enables another.
+    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
         and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         and not vllm_config.model_config.enforce_eager
-        and enable_sp(vllm_config)
+        and requires_tp_aligned_capture_sizes
     ):
         original_sizes = compilation_config.cudagraph_capture_sizes
         sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
@@ -1134,9 +1124,6 @@ def _setup_worker_and_scheduler(
     # Select worker class and refresh block size
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
-        # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
-        if not vllm_config.compilation_config.pass_config.enable_sp:
-            parallel_config.all2all_backend = "flashinfer_all2allv"
         if is_310p():
             parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
         elif ascend_config.xlite_graph_config.enabled:
@@ -1212,10 +1199,10 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     if enable_sp(vllm_config):
         if vllm_config.parallel_config.tensor_parallel_size <= 1:
-            raise AssertionError("Flash Comm v1 is only supported when tp_size > 1.")
+            raise AssertionError("Sequence parallelism is only supported when tp_size > 1.")
 
         if is_moe_model(vllm_config) and not vllm_config.parallel_config.enable_expert_parallel:
-            raise AssertionError("Flash Comm v1 requires enable_expert_parallel=True for MoE models.")
+            raise AssertionError("Sequence parallelism requires enable_expert_parallel=True for MoE models.")
 
 
 def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:

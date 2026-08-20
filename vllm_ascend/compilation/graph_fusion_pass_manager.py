@@ -65,10 +65,3 @@ class GraphFusionPassManager:
             from .passes.muls_add_pass import MulsAddFusionPass
 
             self.passes.append(MulsAddFusionPass(config))
-
-        if config.compilation_config.pass_config.enable_sp:
-            from .passes.sequence_parallelism import SequenceParallelismPass
-            from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
-
-            self.passes.append(SequenceParallelismPass(config))
-            self.passes.append(SequenceParallelismMoePass(config))

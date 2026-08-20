@@ -1333,13 +1333,89 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         scale = scale.reshape(scale.shape[0], num_groups, -1, *scale.shape[2:])
         return scale.permute(1, 0, 2, *range(3, scale.ndim))
 
+    @staticmethod
+    def _split_full_hidden_states_for_cp(
+        hidden_states: torch.Tensor,
+        cp_metadata: DSACPMetadata,
+    ) -> torch.Tensor:
+        """Return this TP rank's token shard from the replicated model state.
+
+        FlashComm used to reduce-scatter every row-parallel output, so DSA-CP
+        received an already sharded tensor and gathered a second copy for KV
+        updates. Without FlashComm, normal TP keeps the model state replicated:
+        DSA-CP must slice Q locally while continuing to use the full tensor for
+        KV cache updates.
+        """
+        expected_tokens = cp_metadata.num_tokens_pad
+        actual_tokens = hidden_states.shape[0]
+        if actual_tokens > expected_tokens:
+            raise RuntimeError(
+                "DSA-CP input exceeds its TP-aligned metadata, "
+                f"got {actual_tokens} tokens and num_tokens_pad={expected_tokens}."
+            )
+        if actual_tokens < expected_tokens:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, expected_tokens - actual_tokens))
+
+        local_hidden_states = hidden_states[cp_metadata.local_start : cp_metadata.local_end]
+        if local_hidden_states.shape[0] != cp_metadata.tokens_per_rank:
+            raise RuntimeError(
+                "DSA-CP local token slice does not match tokens_per_rank, "
+                f"got {local_hidden_states.shape[0]} and expected "
+                f"{cp_metadata.tokens_per_rank}."
+            )
+        return local_hidden_states
+
+    def _gather_cp_output(
+        self,
+        local_output: torch.Tensor,
+        cp_metadata: DSACPMetadata,
+        num_output_tokens: int | None = None,
+    ) -> torch.Tensor:
+        """Restore the replicated model-state layout after DSA-CP.
+
+        DSA-CP computes a contiguous token shard on every physical TP rank.
+        FlashComm used to keep that sharded layout between transformer layers;
+        normal TP does not, so the local attention output must be gathered
+        before it is returned to the residual path. Decode and speculative
+        decoding take the regular TP all-to-all path, which has already
+        restored the full token layout before the output projection.
+        """
+        if local_output.shape[0] == cp_metadata.num_tokens_pad:
+            full_output = local_output
+        elif local_output.shape[0] == cp_metadata.tokens_per_rank:
+            full_output = local_output
+            if self.tp_size > 1:
+                full_output = self.tp_group.all_gather(local_output.contiguous(), dim=0)
+        else:
+            raise RuntimeError(
+                "DSA-CP local output does not match tokens_per_rank, "
+                f"got {local_output.shape[0]} and expected "
+                f"{cp_metadata.tokens_per_rank}."
+            )
+
+        if full_output.shape[0] != cp_metadata.num_tokens_pad:
+            raise RuntimeError(
+                "DSA-CP gathered output does not match num_tokens_pad, "
+                f"got {full_output.shape[0]} and expected "
+                f"{cp_metadata.num_tokens_pad}."
+            )
+        if num_output_tokens is None:
+            num_output_tokens = cp_metadata.num_tokens_pad
+        if not 0 <= num_output_tokens <= cp_metadata.num_tokens_pad:
+            raise RuntimeError(
+                "DSA-CP output token count must fit the TP-aligned state, "
+                f"got {num_output_tokens} and num_tokens_pad={cp_metadata.num_tokens_pad}."
+            )
+        if num_output_tokens == cp_metadata.num_tokens_pad:
+            return full_output
+        return full_output[:num_output_tokens]
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor],
         attn_metadata: DSACPMetadataDict,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
@@ -1365,7 +1441,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             hidden_states,
             kv_cache,
             layer_metadata,
-            need_gather_q_kv,
             full_gather_wo_a_enabled,
         )
         o_proj_input = self._restore_tp_head_layout(
@@ -1401,7 +1476,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                         perm_y=(1, 0, 2),
                     )
                 o = o.reshape(num_tokens, -1)
-                output[...] = self._apply_wo_b(o, full_gather_wo_a_enabled)
+                local_output = self._apply_wo_b(o, full_gather_wo_a_enabled)
             else:
                 o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 if olora_tp_enable():
@@ -1420,7 +1495,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                         batch_split_factor=1,
                     )
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
-                output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+                local_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+
+            req_metadata = common_attn_metadata.req_metadata
+            assert req_metadata is not None
+            cp_metadata = req_metadata.cp_metadata
+            output[...] = self._gather_cp_output(local_output, cp_metadata, output.shape[0])
         finally:
             if full_gather_wo_a_enabled:
                 self._switch_o_proj_to_tp_weight()
@@ -1432,10 +1512,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
     def _forward(
         self,
         layer_name,
-        hidden_states_local: torch.Tensor,
+        hidden_states: torch.Tensor,
         kv_cache: tuple,
         layer_metadata: AscendDSACPLayerMetadata,
-        need_gather_q_kv: bool = False,
         full_gather_wo_a_enabled: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
@@ -1447,12 +1526,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if common_attn_metadata is None:
             common_attn_metadata = swa_metadata
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
+        hidden_states_local = self._split_full_hidden_states_for_cp(hidden_states, cp_metadata)
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
         local_cos = cp_metadata.local_cos[layer_name]

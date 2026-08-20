@@ -105,16 +105,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # handles it for the shared output. Signal this to the upstream
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
-        return _EXTRA_CTX.moe_comm_type in {
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        return moe_comm_type in {
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
-        } or (_EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+        } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
 
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
         shared_experts = getattr(self, "ascend_shared_experts", None)
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
-            return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
+            return SharedExpertParallelMode.TENSOR_PARALLEL
         return shared_experts.parallel_mode()
 
     def _reduce_shared_output_if_needed(
@@ -125,7 +126,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if (
             shared_output is not None
             and fused_output_is_reduced
-            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
+            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.TENSOR_PARALLEL
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
@@ -165,7 +166,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
 
         if (
-            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_ON
+            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL
             and not fused_output_is_reduced
         ):
             fused_output = tensor_model_parallel_all_reduce(fused_output)
@@ -182,8 +183,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     ) -> torch.Tensor:
         if output_is_reduced is None:
             output_is_reduced = self._fused_output_is_reduced
-        if not output_is_reduced:
-            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        if not output_is_reduced and not self.moe_config.is_sequence_parallel:
+            # Use the normal TP collective when the upstream reduction
+            # contract requires it. Sequence-parallel outputs are token
+            # shards, so reducing them position-wise would corrupt the result.
+            states = tensor_model_parallel_all_reduce(states)
         if trunc_size is not None and trunc_size > 0:
             return states[..., :trunc_size]
         return states

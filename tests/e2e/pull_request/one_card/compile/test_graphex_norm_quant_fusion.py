@@ -7,7 +7,11 @@ import torch.nn as nn
 import torch_npu
 import vllm.config
 from vllm.config import ModelConfig, VllmConfig
-from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+    tensor_model_parallel_all_gather,
+)
 from vllm.utils.system_utils import update_environment_variables
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
@@ -110,7 +114,7 @@ class ModelWithBias(nn.Module):
 class ModelSPWithoutBias(nn.Module):
     """
     A minimal test model that simulates the pattern:
-        AddRMSNorm → maybe_allgather → Quantization (without bias)
+        AddRMSNorm → all_gather → Quantization (without bias)
     """
 
     def __init__(self, hidden_size: int, dtype: torch.bfloat16, eps: float = 1e-6, device="npu"):
@@ -126,7 +130,7 @@ class ModelSPWithoutBias(nn.Module):
         """
         Forward pass:
           1. Perform npu_add_rms_norm
-          2. Perform a fake maybe_all_gather_and_maybe_unpad
+          2. Perform a TP all_gather
           3. Quantize the normalized output to int8
         Returns both quantized output and updated residual.
         """
@@ -134,7 +138,7 @@ class ModelSPWithoutBias(nn.Module):
 
         norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
 
-        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
+        norm_output = tensor_model_parallel_all_gather(norm_output, 0)
 
         quantized_output = torch.ops.vllm.quantize(
             norm_output, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
@@ -146,7 +150,7 @@ class ModelSPWithoutBias(nn.Module):
 class ModelSPWithBias(nn.Module):
     """
     A minimal test model that simulates the pattern:
-        AddRMSNorm → Add bias → maybe_allgather → Quantization (without bias)
+        AddRMSNorm → Add bias → all_gather → Quantization (without bias)
     """
 
     def __init__(self, hidden_size: int, dtype: torch.bfloat16, eps: float = 1e-6, device="npu"):
@@ -164,7 +168,7 @@ class ModelSPWithBias(nn.Module):
         Forward pass:
           1. Perform npu_add_rms_norm
           2. Add bias
-          3. Perform a fake maybe_all_gather_and_maybe_unpad
+          3. Perform a TP all_gather
           4. Quantize the normalized output to int8
         Returns both quantized output and updated residual.
         """
@@ -175,7 +179,7 @@ class ModelSPWithBias(nn.Module):
         # Add bias
         norm_output_with_bias = norm_output + self.bias
 
-        norm_output_with_bias = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output_with_bias, True)
+        norm_output_with_bias = tensor_model_parallel_all_gather(norm_output_with_bias, 0)
 
         quantized_output = torch.ops.vllm.quantize(
             norm_output_with_bias, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
@@ -193,7 +197,7 @@ def assert_addrmsnorm_quant(after_gm, expect_fused=True, use_bias=False, sp_enab
     if use_bias:
         check_rules.append((torch.ops.aten.add.Tensor, not expect_fused))
     if sp_enable:
-        check_rules.append((torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default, expect_fused))
+        check_rules.append((torch.ops.vllm.all_gather.default, expect_fused))
     for torch_op, expect_exist in check_rules:
         found = find_op(after_gm, torch_op)
         if expect_exist:

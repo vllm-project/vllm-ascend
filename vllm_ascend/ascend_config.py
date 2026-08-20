@@ -40,6 +40,13 @@ class AscendConfig:
                 "additional_config.enable_sleep_mode_extra_cleanup has been removed. "
                 "Use additional_config.rl_config.sleep_mode_extra_cleanup instead."
             )
+
+        if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
+            logger.warning(
+                "FlashComm is deprecated; remove enable_flashcomm1 and "
+                "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
+            )
+
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -88,12 +95,6 @@ class AscendConfig:
                 "or disable profiling_chunk_config."
             )
 
-        self.enable_flashcomm1 = self._get_config_value(
-            additional_config,
-            "enable_flashcomm1",
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1",
-            ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
-        )
         if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
             raise ValueError(
                 "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
@@ -126,7 +127,7 @@ class AscendConfig:
                     cdiv(vllm_config.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
                 )
                 logger.warning_once(
-                    "When using FLASHCOMM1, the max_num_batched_tokens should be divisible "
+                    "When using sequence parallelism, the max_num_batched_tokens should be divisible "
                     "by tp_size * pcp_size (%s). It has been adjusted to %s.",
                     str(tp_pcp_size),
                     str(vllm_config.scheduler_config.max_num_batched_tokens),
@@ -269,12 +270,6 @@ class AscendConfig:
             self._sparse_li_c8_layer_names,
         ) = self._parse_sparse_li_c8_layers_from_quant_config(quant_config)
         self._sparse_li_c8_layer_filter_enabled = self._has_sparse_li_c8_layer_config(quant_config)
-        self.enable_sp_by_pass = (
-            vllm_config.model_config is not None
-            and not vllm_config.model_config.enforce_eager
-            and vllm_config.compilation_config.pass_config.enable_sp
-        )
-
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
         self._validate_mc2_hierarchy_comm()
@@ -1340,9 +1335,6 @@ def init_ascend_config(vllm_config):
 def clear_ascend_config():
     global _ASCEND_CONFIG
     _ASCEND_CONFIG = None
-    from vllm_ascend.utils import clear_enable_sp
-
-    clear_enable_sp()
 
 
 def get_ascend_config():

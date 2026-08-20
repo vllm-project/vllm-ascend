@@ -15,6 +15,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -32,6 +33,7 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
+        utils.enable_dsa_cp.cache_clear()
         utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
 
     def test_nd_to_nz_2d(self):
@@ -142,6 +144,46 @@ class TestUtils(TestBase):
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
             self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_sp_uses_upstream_parallel_config(self):
+        sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=True,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertTrue(utils.enable_sp(sequence_parallel_config))
+
+        shared_expert_dp_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=True,
+            )
+        )
+        self.assertFalse(utils.enable_sp(shared_expert_dp_config))
+
+        no_sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
+
+    def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
+        dsa_cp_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            additional_config={"enable_dsa_cp": True},
+            parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=dsa_cp_config),
+            mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
+        ):
+            self.assertTrue(utils.enable_dsa_cp())
+
+        mock_enable_sp.assert_not_called()
 
     def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
         mock_vllm_config = mock.MagicMock()

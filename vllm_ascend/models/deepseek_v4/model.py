@@ -844,8 +844,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -884,25 +882,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        # Skipped entirely when speculative decoding is disabled: the buffer
-        # is None and the all_gather below would be pure overhead. When
-        # FlashComm1 (sequence parallelism) is enabled, tokens are
-        # partitioned across TP ranks via reduce_scatter in each layer's
-        # row-parallel output projection.  We must all_gather here so the
-        # MTP layers receive the full token set — otherwise only rank 0's
-        # partition is valid and the rest of the buffer holds stale data,
-        # leading to NaN values and low acceptance rate.
         if self._mtp_hidden_buffer is not None:
-            if _EXTRA_CTX.flash_comm_v1_enabled:
-                h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
-                pad_size = _EXTRA_CTX.pad_size
-                if pad_size > 0:
-                    h_states_flat = h_states_flat[:-pad_size]
-                num_tokens = h_states_flat.shape[0]
-                self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
-            else:
-                num_tokens = hidden_states.shape[0]
-                self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
