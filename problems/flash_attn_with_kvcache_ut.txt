@@ -1,70 +1,32 @@
-python tests/standalone/fa3/test_fa3_graph_three_step.py 
-[W820 09:34:31.874412718 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+MODE=sync python tests/standalone/fa3/test_fa3_graph_sync.py 
+[W820 09:45:32.501862108 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
 [import] FA3 loaded from flash_attn_npu_3
 ========================================================================
-C20 three-step chain   kv=2048  nblk=16
+C21 sync-structure   MODE=sync  kv=2048  nblk=16
 ========================================================================
-[W820 09:34:36.153466949 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
-------------------------------------------------------------------------
-[Q1] perm_A -> identity -> perm_B, 3 repeats (shared meta each):
-  repeat 0: diff = 0.000351
-  repeat 1: diff = 0.000351
-  repeat 2: diff = 0.000351
-------------------------------------------------------------------------
-[Q2] perm_A -> X -> perm_B  (X varies):
-  X=identity : diff = 0.000351
-  X=perm_A   : diff = 0.000351
-  X=swap     : diff = 0.000351
-  X=perm_C   : diff = 0.000351
-------------------------------------------------------------------------
-[Q3] X -> identity -> perm_B  (X varies):
-  X=perm_A   : diff = 0.000351
-  X=perm_B   : diff = 0.000351
-  X=identity : diff = 0.000351
-  X=swap     : diff = 0.000351
-------------------------------------------------------------------------
-[Q4] perm_A -> identity -> perm_B, fresh meta per call:
-  diff = 0.000351
-------------------------------------------------------------------------
-[Q5] per-head diff of perm_B under perm_A -> identity -> perm_B:
-     0  ->  kv0      : 0.000276
-     1  ->  kv0      : 0.000277
-     2  ->  kv0      : 0.000194
-     3  ->  kv0      : 0.000269
-     4  ->  kv1      : 0.000340
-     5  ->  kv1      : 0.000231
-     6  ->  kv1      : 0.000351
-     7  ->  kv1      : 0.000240
-     8  ->  kv2      : 0.000248
-     9  ->  kv2      : 0.000337
-    10  ->  kv2      : 0.000343
-    11  ->  kv2      : 0.000290
-    12  ->  kv3      : 0.000333
-    13  ->  kv3      : 0.000309
-    14  ->  kv3      : 0.000268
-    15  ->  kv3      : 0.000247
-    16  ->  kv4      : 0.000285
-    17  ->  kv4      : 0.000216
-    18  ->  kv4      : 0.000257
-    19  ->  kv4      : 0.000278
-    20  ->  kv5      : 0.000294
-    21  ->  kv5      : 0.000211
-    22  ->  kv5      : 0.000300
-    23  ->  kv5      : 0.000248
-    24  ->  kv6      : 0.000232
-    25  ->  kv6      : 0.000218
-    26  ->  kv6      : 0.000244
-    27  ->  kv6      : 0.000299
-    28  ->  kv7      : 0.000339
-    29  ->  kv7      : 0.000247
-    30  ->  kv7      : 0.000308
-    31  ->  kv7      : 0.000253
+[W820 09:45:37.821536186 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+  [mode=sync] FA3 -> manual_ref (implicit sync) between cells:
+    A identity   : diff = 0.000405
+    B reorder    : diff = 0.000351
+    C reversed   : diff = 0.000405
+    D swap       : diff = 0.000464
+    E identity   : diff = 0.000405
 ------------------------------------------------------------------------
 Read:
-  Q1 flaky            => race, not deterministic state.
-  Q2 only identity middle => contiguous middle is special.
-  Q2 any middle       => just 'three calls', content-independent.
-  Q3 any scattered first => generic scattered first-call.
-  Q4 fresh OK / shared BAD => meta object is mutated after all.
-  Q5 whole 4-head groups  => a kv-head's blocks mis-read.
+  sync B large / nosync B small => inter-cell sync is the trigger.
+  both small                    => sync is NOT it; C15/C18 error was one-off.
+------------------------------------------------------------------------
+root@node-37-167:/home/code/vllm_ascend/ascend/zty/vllm-ascend# MODE=nosync python tests/standalone/fa3/test_fa3_graph_sync.py 
+[W820 09:46:30.019754560 FunctionLoader.cpp:48] Warning: LD_PRELOAD detected, FunctionLoader prefers RTLD_DEFAULT for symbol resolution. (function operator())
+[import] FA3 loaded from flash_attn_npu_3
+========================================================================
+C21 sync-structure   MODE=nosync  kv=2048  nblk=16
+========================================================================
+[W820 09:46:36.293518809 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+  [mode=nosync] back-to-back FA3, no inter-cell sync:
+    B reorder     : diff = 0.000351
+------------------------------------------------------------------------
+Read:
+  sync B large / nosync B small => inter-cell sync is the trigger.
+  both small                    => sync is NOT it; C15/C18 error was one-off.
 ------------------------------------------------------------------------
