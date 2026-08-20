@@ -19,7 +19,6 @@ import pytest
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer
-from tests.e2e.nightly.single_node.models.scripts.single_node_config import SingleNodeConfig
 from tools.send_mm_request import send_image_request
 
 MODELS = [
@@ -95,27 +94,4 @@ async def test_models(model: str, tp_size: int) -> None:
     ]
 
     with RemoteEPDServer(vllm_serve_args=vllm_server_args) as _, DisaggEpdProxy(proxy_args=proxy_args) as proxy:
-        config = SingleNodeConfig(
-            name=model,
-            model=model,
-            mm_request={
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "What is the content of this image?"},
-                            {"type": "image_url", "image_url": {"url": "{IMAGE_0}"}},
-                        ],
-                    }
-                ],
-                "api_args": {
-                    "eos_token_id": [1, 106],
-                    "pad_token_id": 0,
-                    "top_k": 64,
-                    "top_p": 0.95,
-                    "max_tokens": 8192,
-                    "stream": False,
-                },
-            },
-        )
-        send_image_request(config, proxy)
+        send_image_request(model, proxy)
