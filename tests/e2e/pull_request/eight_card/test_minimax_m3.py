@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import regex as re
@@ -80,12 +79,6 @@ def _configure_jemalloc() -> None:
     hardware="A3",
     quantization="W8A8",
     graph_mode="full_decode_only",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    },
 )
 @wait_until_npu_memory_free()
 def test_minimax_m3_gsm8k_one_case() -> None:

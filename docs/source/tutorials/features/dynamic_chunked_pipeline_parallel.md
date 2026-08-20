@@ -75,8 +75,6 @@ export VLLM_USE_V1=1
 export TASK_QUEUE_ENABLE=1
 export ASCEND_LAUNCH_BLOCKING=0
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
@@ -99,7 +97,9 @@ vllm serve /mnt/weight/DeepSeek-V3.1-w8a8 \
   --trust-remote-code \
   --quantization ascend \
   --additional-config '{
-    "profiling_chunk_config":{"enabled":true, "smooth_factor":1.0, "min_chunk":4096}
+    "profiling_chunk_config":{"enabled":true, "smooth_factor":1.0, "min_chunk":4096},
+    "enable_flashcomm1":true,
+    "enable_fused_mc2":1
   }'
 ```
 

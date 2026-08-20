@@ -8,7 +8,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   OMP_NUM_THREADS: "1"
   TASK_QUEUE_ENABLE: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -30,8 +29,6 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--mm-processor-cache-gb"
   - "0"
-  - "--additional-config"
-  - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}'
   - "--api-server-count"
   - "1"
 
@@ -161,9 +158,10 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":1,"enable_flashcomm1":true}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "8000"
@@ -179,9 +177,10 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":1,"enable_flashcomm1":true}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "18432"
@@ -199,6 +198,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":1,"enable_flashcomm1":false}'
       - "--max-model-len"
       - "18432"
       - "--max-num-batched-tokens"
@@ -213,9 +214,10 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":1,"enable_flashcomm1":true}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "34304"
@@ -233,6 +235,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":1,"enable_flashcomm1":false}'
       - "--max-model-len"
       - "34304"
       - "--max-num-batched-tokens"
@@ -247,9 +251,10 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":1,"enable_flashcomm1":true}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "67584"
@@ -266,9 +271,10 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":1,"enable_flashcomm1":false}'
       - "--max-model-len"
       - "67584"
       - "--max-num-batched-tokens"

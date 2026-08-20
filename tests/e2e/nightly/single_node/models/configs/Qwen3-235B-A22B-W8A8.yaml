@@ -7,7 +7,6 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -55,6 +54,8 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"enable_flashcomm1":true}'
     benchmarks:
       <<: *benchmarks
 
@@ -66,6 +67,8 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode": "PIECEWISE"}'
+      - --additional-config
+      - '{"enable_flashcomm1":true}'
     benchmarks:
       <<: *benchmarks
 
@@ -77,7 +80,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"eplb_config": {"dynamic_eplb": "true", "expert_heat_collection_interval": 600, "algorithm_execution_interval": 50, "num_redundant_experts": 16, "eplb_policy_type": 2}}'
+      - '{"eplb_config":{"dynamic_eplb":"true","expert_heat_collection_interval":600,"algorithm_execution_interval":50,"num_redundant_experts":16,"eplb_policy_type":2},"enable_flashcomm1":true}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:

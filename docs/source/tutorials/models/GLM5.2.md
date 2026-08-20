@@ -140,8 +140,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=0
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --host 0.0.0.0 \
 --port 8077 \
@@ -162,7 +160,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
+--additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8":true,"enable_balance_scheduling":true,"multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_fused_mc2":0}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
 ```
@@ -179,13 +177,13 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--tool-call-parser glm47` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable function calling for GLM-5.2.
 - `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.2. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.2 does not support graph-mode speculative decoding.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2=0`: Disables the fused `dispatch_ffn_combine`/`mega_moe` operators in this scenario because they conflict with `multistream_overlap_shared_expert`; turn them on in multi-node scenarios where they are beneficial.
+- `additional_config.enable_fused_mc2=0`: Disables the fused `dispatch_ffn_combine`/`mega_moe` operators in this scenario because they conflict with `multistream_overlap_shared_expert`; turn them on in multi-node scenarios where they are beneficial.
 
 **`--additional-config` fields (Ascend-specific optimizations):**
 
 - `"enable_dsa_cp": true`: Enables DSA context parallelism to accelerate long-context prefill. Since v0.21.0, DSA-CP is decoupled from FlashComm1 and must be enabled explicitly. With DSA-CP enabled, `layer_sharding` cannot include `o_proj`.
 - `"enable_sparse_li_c8": true`: Sparse attention optimizations of the C8 quantized model. `enable_sparse_li_c8` accelerates the layer-index (LI) sparse attention and is recommended to keep `true`; If the GPU memory is insufficient due to a long sequence length, you are advised to enable `enable_sparse_sfa_c8`.
-- `"enable_balance_scheduling": true`: Balance scheduling improves output throughput and reduces TPOT in the v1 scheduler. It replaces the deprecated environment variable `VLLM_ASCEND_BALANCE_SCHEDULING`; TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
+- `"enable_balance_scheduling": true`: Balance scheduling improves output throughput and reduces TPOT in the v1 scheduler. This config field replaces the removed environment setting; TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
 - `"multistream_overlap_shared_expert": true`: Overlaps shared-expert computation on an additional stream, improving decode efficiency.
 
 ##### 5.1.1.2 Multi-Node Co-Located Deployment
@@ -217,8 +215,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --host 0.0.0.0 \
@@ -244,7 +240,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --gpu-memory-utilization 0.90 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true}'  \
+--additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8":true,"enable_balance_scheduling":true,"enable_flashcomm1":true,"enable_fused_mc2":1}'  \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -271,8 +267,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --host 0.0.0.0 \
@@ -298,7 +292,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --gpu-memory-utilization 0.90 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true}'  \
+--additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8":true,"enable_balance_scheduling":true,"enable_flashcomm1":true,"enable_fused_mc2":1}'  \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -315,7 +309,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
 
 **Notice:**
-This scenario enables `VLLM_ASCEND_ENABLE_FUSED_MC2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
+This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
 ##### 5.1.1.3 Prefill-Decode Disaggregation
 
@@ -443,7 +437,6 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -460,7 +453,6 @@ Before you start, please
         export ASCEND_A3_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -476,7 +468,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}' \
+            --additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8":true,"c8_enable_reshape_optim":true,"enable_fused_mc2":1,"enable_flashcomm1":true}' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -512,7 +504,6 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -529,7 +520,6 @@ Before you start, please
         export ASCEND_A3_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -545,7 +535,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"enable_dsa_cp":true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}' \
+            --additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8":true,"c8_enable_reshape_optim":true,"enable_fused_mc2":1,"enable_flashcomm1":true}' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -598,7 +588,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -616,7 +605,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_li_c8": true}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_li_c8":true,"enable_fused_mc2":1}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -667,7 +656,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -685,7 +673,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_li_c8": true}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_li_c8":true,"enable_fused_mc2":1}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -813,8 +801,8 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 
 **Prefill node-specific configurations:**
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm optimization to reduce communication and computation overhead on prefill nodes. With FlashComm enabled, `layer_sharding` cannot include `o_proj` as an element.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Enables the `dispatch_ffn_combine`/`mega_moe` fused operators. Note: fused MC2 conflicts with `multistream_overlap_shared_expert`.
+- `additional_config.enable_flashcomm1=true`: Enables FlashComm optimization to reduce communication and computation overhead on prefill nodes. With FlashComm enabled, `layer_sharding` cannot include `o_proj` as an element.
+- `additional_config.enable_fused_mc2=1`: Enables the `dispatch_ffn_combine`/`mega_moe` fused operators. Note: fused MC2 conflicts with `multistream_overlap_shared_expert`.
 - `ACL_OP_INIT_MODE=1` / `ASCEND_A3_ENABLE=1`: A3-specific optimizations for operator initialization and communication aggregation.
 - `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
 
@@ -865,17 +853,14 @@ For the 1P1D (2+2) scenario, configure the logical SuperPod ID as follows:
 | Decode node 0 | `export HCCL_LOGIC_SUPERPOD_ID=2` |
 | Decode node 1 | `export HCCL_LOGIC_SUPERPOD_ID=3` |
 
-Apply the following Fused MC2 setting on every node:
-
-```shell
-export VLLM_ASCEND_ENABLE_FUSED_MC2=0
-```
-
-Merge `"enable_mc2_hierarchy_comm": true` into the existing `--additional-config` JSON object. The following pattern uses `...` to represent the existing fields:
+Disable Fused MC2 in the `--additional-config` object on every node:
 
 ```text
---additional-config '{..., "enable_mc2_hierarchy_comm": true}'
+--additional-config '{..., "enable_fused_mc2": 0, "enable_mc2_hierarchy_comm": true}'
 ```
+
+The `...` above represents the existing fields; merge both settings into the
+command's existing JSON object rather than adding a second option.
 
 #### 5.1.2 Atlas 800 A2
 
@@ -1023,7 +1008,6 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
 export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
 export HCCL_INTRA_ROCE_ENABLE=1
@@ -1110,7 +1094,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=2560
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1182,7 +1165,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     '{
         "cudagraph_mode": "FULL_DECODE_ONLY",
     }' \
-    --additional-config '{"multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "recompute_scheduler_enable": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "recompute_scheduler_enable": true, "enable_mlapo": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
 ```
 
@@ -1249,7 +1232,7 @@ This 8-node A2 layout splits the global P/D topology across 8 Atlas 800 A2 nodes
 
 **Decode node-specific configurations (A2):**
 
-- `VLLM_ASCEND_ENABLE_MLAPO=1`: MLAPO fusion on decode nodes for memory-bandwidth-bound token generation.
+- `additional_config.enable_mlapo=true`: MLAPO fusion on decode nodes for memory-bandwidth-bound token generation.
 - `--max-num-batched-tokens 256`: Small batch token limit on decode nodes.
 
 **Multi-connector KV transfer configuration (`--kv-transfer-config`):**
@@ -1293,7 +1276,6 @@ The 1M context scenarios are validated on Atlas 800 A3 only; the A2 series is no
 Recommended command:
 
 ```shell
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1322,7 +1304,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 16 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
+  --additional-config '{"enable_flashcomm1":true,"enable_dsa_cp":true,"ascend_compilation_config":{"enable_npugraph_ex":true},"multistream_overlap_shared_expert":true,"enable_sparse_li_c8":true,"enable_cpu_binding":true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1333,7 +1315,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 
 **1M-specific environment variables:**
 
-- `VLLM_ASCEND_ENABLE_NZ=1`: Enables NZ format memory layout for the C8 quantized tensors, required for the 1M context deployment.
+- `additional_config.weight_nz_mode=1`: Enables NZ format memory layout for the C8 quantized tensors, required for the 1M context deployment.
 - `VLLM_WORKER_MULTIPROC_METHOD=spawn`: Uses the spawn start method for multi-process workers (required in this scenario).
 
 **1M-specific vllm serve parameters:**
@@ -1359,7 +1341,6 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1392,7 +1373,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
+  --additional-config '{"enable_flashcomm1":true,"enable_dsa_cp":true,"ascend_compilation_config":{"enable_npugraph_ex":true},"multistream_overlap_shared_expert":true,"enable_sparse_li_c8":true,"enable_cpu_binding":true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1425,7 +1406,6 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1459,7 +1439,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --enforce-eager \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"enable_flashcomm1":true,"enable_dsa_cp":true,"ascend_compilation_config":{"enable_npugraph_ex":true},"multistream_overlap_shared_expert":true,"enable_sparse_li_c8":true,"enable_cpu_binding":true,"recompute_scheduler_enable":true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1498,7 +1478,6 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1532,7 +1511,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true},"multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true},"multistream_overlap_shared_expert":true,"enable_sparse_li_c8":true,"enable_cpu_binding":true,"recompute_scheduler_enable":true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1673,8 +1652,8 @@ The tables below provide recommended parameter configurations for different depl
 |`enable_dsa_cp`|Optional|Enable (prefill nodes)|Enable (prefill nodes)|DSA context parallelism accelerates long-context prefill. Decoupled from FlashComm1 since v0.21.0.|
 |`enable_sparse_sfa_c8` / `enable_sparse_li_c8`|`false` / `true`|`true` / `true` (PD)|`false` / `true`|`enable_sparse_sfa_c8` is an experimental SFA optimization for the C8 quantized model; do not combine it with DCP in v0.23.0 because of known issues. `enable_sparse_li_c8` is independent and remains recommended.|
 |`enable_balance_scheduling`|Enable (single-node)|Enable|Disable in PD mode|Improves output throughput and reduces TPOT in the v1 scheduler. TTFT may degrade in some scenarios; not recommended when Prefill-Decode is separated.|
-|`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1 (prefill nodes)|1 (prefill nodes)|Communication optimization. Conflicts with `layer_sharding` containing `o_proj`.|
-|`VLLM_ASCEND_ENABLE_MLAPO`|—|1 (A2 P/D nodes)|—|Fusion operator that significantly improves performance but consumes more NPU memory. On A3 used on decode nodes only.|
+|`additional_config.enable_flashcomm1`|1|1 (prefill nodes)|1 (prefill nodes)|Communication optimization. Conflicts with `layer_sharding` containing `o_proj`.|
+|`additional_config.enable_mlapo`|—|1 (A2 P/D nodes)|—|Fusion operator that significantly improves performance but consumes more NPU memory. On A3 used on decode nodes only.|
 |`cudagraph_mode`|FULL_DECODE_ONLY|FULL_DECODE_ONLY (decode)|FULL_DECODE_ONLY (decode)|Graph capture for the decode phase only. Prefill nodes in PD mode use `--enforce-eager` instead.|
 
 ### 9.2 Tuning Guidelines

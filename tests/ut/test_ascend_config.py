@@ -196,6 +196,13 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.enable_flashcomm1)
+        self.assertFalse(ascend_config.msmonitor_use_daemon)
+        self.assertTrue(ascend_config.enable_mlapo)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
+        self.assertEqual(ascend_config.enable_fused_mc2, 0)
+        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
+        self.assertFalse(ascend_config.scheduler_config.enable_balance_scheduling)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -402,11 +409,8 @@ class TestAscendConfig(TestBase):
         )
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.AscendConfig._is_megamoe_supported_by_config")
-    @patch("vllm_ascend.ascend_config.logger.info_once")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once, mock_is_megamoe):
-        mock_is_megamoe.return_value = True
+    def test_removed_environment_variables_are_ignored(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         with patch.dict(
@@ -418,64 +422,7 @@ class TestAscendConfig(TestBase):
                 "MSMONITOR_USE_DAEMON": "1",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
                 "VLLM_ASCEND_ENABLE_NZ": "2",
-            },
-        ):
-            ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertEqual(ascend_config.enable_fused_mc2, 1)
-        self.assertFalse(ascend_config.enable_mlapo)
-        self.assertTrue(ascend_config.enable_flashcomm1)
-        self.assertTrue(ascend_config.msmonitor_use_daemon)
-        self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
-        self.assertEqual(ascend_config.weight_nz_mode, 2)
-        mock_info_once.assert_any_call(
-            "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
-            "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be "
-            "removed in the next release."
-        )
-        mock_info_once.assert_any_call(
-            "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2. "
-            "Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed "
-            "in the next release."
-        )
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_skips_default_env_fallback_logs(self, mock_fix_incompatible_config, mock_info_once):
-        test_vllm_config = VllmConfig()
-        with patch.dict(os.environ, {}, clear=True):
-            init_ascend_config(test_vllm_config)
-
-        fallback_logs = [
-            call.args[0]
-            for call in mock_info_once.call_args_list
-            if "falls back to environment variable" in call.args[0]
-        ]
-        self.assertEqual(fallback_logs, [])
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {
-            "enable_fused_mc2": 0,
-            "enable_mlapo": True,
-            "enable_flashcomm1": False,
-            "msmonitor_use_daemon": False,
-            "enable_transpose_kv_cache_by_block": True,
-            "weight_nz_mode": 1,
-        }
-        with patch.dict(
-            os.environ,
-            {
-                "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
-                "VLLM_ASCEND_ENABLE_MLAPO": "0",
-                "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-                "MSMONITOR_USE_DAEMON": "1",
-                "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
-                "VLLM_ASCEND_ENABLE_NZ": "2",
+                "VLLM_ASCEND_BALANCE_SCHEDULING": "1",
             },
         ):
             ascend_config = init_ascend_config(test_vllm_config)
@@ -486,29 +433,44 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.msmonitor_use_daemon)
         self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
-        mock_info_once.assert_any_call("AscendConfig.enable_mlapo is set from additional_config with value True.")
-        mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
+        self.assertFalse(ascend_config.scheduler_config.enable_balance_scheduling)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True)
-    def test_enable_flashcomm1_config_overrides_disabled_env(self, mock_fix_incompatible_config):
+    def test_additional_config_sets_migrated_options(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "enable_fused_mc2": 0,
+            "enable_mlapo": True,
+            "enable_flashcomm1": False,
+            "msmonitor_use_daemon": False,
+            "enable_transpose_kv_cache_by_block": True,
+            "weight_nz_mode": 1,
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.enable_fused_mc2, 0)
+        self.assertTrue(ascend_config.enable_mlapo)
+        self.assertFalse(ascend_config.enable_flashcomm1)
+        self.assertFalse(ascend_config.msmonitor_use_daemon)
+        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_flashcomm1_from_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"enable_flashcomm1": True}
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}, clear=True):
-            ascend_config = init_ascend_config(test_vllm_config)
+        ascend_config = init_ascend_config(test_vllm_config)
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertTrue(enable_sp(test_vllm_config))
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_sp_falls_back_to_env_without_current_config(self, mock_check_and_update_config):
+    def test_enable_sp_defaults_to_false_without_current_config(self, mock_check_and_update_config):
         clear_enable_sp()
-        with (
-            patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}),
-            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError),
-        ):
-            self.assertTrue(enable_sp())
+        with patch("vllm.config.get_current_vllm_config", side_effect=AssertionError):
+            self.assertFalse(enable_sp())
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -637,7 +599,6 @@ class TestAscendConfig(TestBase):
             ascend_config = init_ascend_config(test_vllm_config)
 
             self.assertEqual(ascend_config.weight_nz_mode, 0)
-            self.assertEqual(os.environ.get("VLLM_ASCEND_ENABLE_NZ"), "0")
             self.assertEqual(os.environ.get("VLLM_SERVER_DEV_MODE"), "1")
             self.assertNotIn("VLLM_BATCH_INVARIANT", os.environ)
             self.assertFalse(ascend_config.rl_config.sleep_mode_extra_cleanup)
@@ -681,23 +642,19 @@ class TestAscendConfig(TestBase):
                 "enabled": False,
                 "sleep_mode_extra_cleanup": True,
                 "enable_batch_invariant": True,
-            }
+            },
+            "weight_nz_mode": 2,
         }
         allocator_config = "page_size:1g,expandable_segments:True"
         with patch.dict(
             os.environ,
-            {
-                "VLLM_ASCEND_ENABLE_NZ": "2",
-                "PYTORCH_NPU_ALLOC_CONF": allocator_config,
-            },
+            {"PYTORCH_NPU_ALLOC_CONF": allocator_config},
             clear=True,
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
-            # rl_config is a no-op when the master switch is off: the env var is
-            # neither overridden by the sub-field nor rewritten by rl_config.
+            # rl_config is a no-op when the master switch is off.
             self.assertEqual(ascend_config.weight_nz_mode, 2)
-            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "2")
             self.assertNotIn("VLLM_SERVER_DEV_MODE", os.environ)
             self.assertNotIn("VLLM_BATCH_INVARIANT", os.environ)
             self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], allocator_config)
@@ -713,7 +670,6 @@ class TestAscendConfig(TestBase):
         }
         with patch.dict(os.environ, {}, clear=True):
             ascend_config = init_ascend_config(test_vllm_config)
-            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
 
         self.assertEqual(ascend_config.weight_nz_mode, 0)
         mock_warning.assert_called_once_with(
@@ -976,7 +932,7 @@ class TestDyntraLBConfig(TestBase):
 
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
-        config = SchedulerConfig({}, balance_env_value=False)
+        config = SchedulerConfig({})
 
         self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
@@ -991,7 +947,6 @@ class TestSchedulerConfig(TestBase):
                 "scheduler_config": None,
                 "recompute_scheduler_enable": True,
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
@@ -999,7 +954,7 @@ class TestSchedulerConfig(TestBase):
 
     def test_non_dict_config_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "scheduler_config must be a dict, got list"):
-            SchedulerConfig({"scheduler_config": []}, balance_env_value=False)
+            SchedulerConfig({"scheduler_config": []})
 
     def test_nested_config_overrides_all_scheduler_settings(self):
         config = SchedulerConfig(
@@ -1022,7 +977,6 @@ class TestSchedulerConfig(TestBase):
                     },
                 }
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -1047,7 +1001,6 @@ class TestSchedulerConfig(TestBase):
                 "short_request_first_config": {"enabled": True},
                 "profiling_chunk_config": {"enabled": True},
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -1068,18 +1021,9 @@ class TestSchedulerConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "short_request_first_config": {"enabled": False},
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
         self.assertTrue(config.short_request_first_config.enabled)
         self.assertTrue(config.enable_balance_scheduling)
         self.assertEqual(mock_warning_once.call_count, 3)
-
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    def test_balance_falls_back_to_environment_default(self, mock_info_once):
-        with patch.dict(os.environ, {"VLLM_ASCEND_BALANCE_SCHEDULING": "1"}):
-            config = SchedulerConfig({}, balance_env_value=True)
-
-        self.assertTrue(config.enable_balance_scheduling)
-        mock_info_once.assert_called_once()

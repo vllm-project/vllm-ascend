@@ -60,12 +60,10 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "256"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "1800"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
 
 templates:
   - node_index: 0
@@ -107,6 +105,8 @@ templates:
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
+      - --additional-config
+      - '{"enable_flashcomm1":true}'
   - node_index: 1
     envs:
       <<: *env_prefill
@@ -146,6 +146,8 @@ templates:
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
+      - --additional-config
+      - '{"enable_flashcomm1":true}'
   - node_index: 2
     envs:
       <<: *env_decode
@@ -182,7 +184,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}'
       - --speculative-config
       - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config
@@ -224,7 +226,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}'
       - --speculative-config
       - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config

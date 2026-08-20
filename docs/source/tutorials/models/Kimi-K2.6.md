@@ -135,7 +135,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_MLAPO=1
 
 # [Optional] jemalloc
 # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
@@ -146,8 +145,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=600
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
@@ -170,13 +167,13 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --additional-config '{"enable_balance_scheduling": true}' \
+    --additional-config '{"enable_balance_scheduling":true,"enable_mlapo":true,"enable_flashcomm1":true,"scheduler_config":{"enable_balance_scheduling":false}}' \
     --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
@@ -322,7 +319,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -347,7 +343,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -404,7 +400,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -429,7 +424,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -485,7 +480,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -510,7 +504,7 @@ Parameter descriptions:
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}' \
         --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -566,7 +560,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -591,7 +584,7 @@ Parameter descriptions:
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}' \
         --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -613,8 +606,8 @@ Parameter descriptions:
 
     Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `additional_config.enable_flashcomm1=true`: enables the communication optimization function on the prefill nodes.
+    - `additional_config.enable_mlapo=true`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 

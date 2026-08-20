@@ -9,6 +9,9 @@ serve:
   trust_remote_code: true
   enforce_eager: true
   block_size: 128
+  additional_config:
+    enable_mlapo: true
+    enable_flashcomm1: true
 
 envs:
   HCCL_OP_EXPANSION_MODE: "AIV"
@@ -16,9 +19,7 @@ envs:
   OMP_NUM_THREADS: "10"
   VLLM_USE_V1: "1"
   HCCL_BUFFSIZE: "200"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 tasks:
   - name: "ceval-valid"

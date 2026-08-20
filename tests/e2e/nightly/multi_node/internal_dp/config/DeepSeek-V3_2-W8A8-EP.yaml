@@ -30,7 +30,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -42,18 +41,18 @@ deployment:
           --data-parallel-rpc-port 13389
           --tensor-parallel-size 16
           --enable-expert-parallel
-          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
           --max-num-seqs 16
-          --max-model-len 133000 
+          --max-model-len 133000
           --max-num-batched-tokens 8192
           --trust-remote-code
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true}'
-          --tokenizer-mode deepseek_v32 
+          --additional-config '{"enable_cpu_binding":false,"enable_dsa_cp":true,"enable_flashcomm1":true}'
+          --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -75,7 +74,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -88,18 +86,18 @@ deployment:
           --data-parallel-rpc-port 13389
           --tensor-parallel-size 16
           --enable-expert-parallel
-          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
           --max-num-seqs 16
-          --max-model-len 133000 
+          --max-model-len 133000
           --max-num-batched-tokens 8192
           --trust-remote-code
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":false}'
-          --tokenizer-mode deepseek_v32 
+          --additional-config '{"enable_cpu_binding":false,"enable_dsa_cp":false,"enable_flashcomm1":true}'
+          --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -119,7 +117,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
       HCCL_BUFFSIZE: 1100
     server_cmd: >
@@ -136,14 +133,14 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
-          --max-model-len 133000 
+          --max-model-len 133000
           --max-num-batched-tokens 42
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
           --trust-remote-code
           --max-num-seqs 14
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
+          --additional-config '{"enable_cpu_binding":false,"recompute_scheduler_enable":true,"enable_mlapo":true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -165,7 +162,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
       HCCL_BUFFSIZE: 1100
     server_cmd: >
@@ -183,17 +179,17 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
-          --max-model-len 133000 
+          --max-model-len 133000
           --max-num-batched-tokens 42
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
           --trust-remote-code
           --max-num-seqs 14
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
+          --additional-config '{"enable_cpu_binding":false,"recompute_scheduler_enable":true,"enable_mlapo":true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
-          --kv-transfer-config 
+          --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",

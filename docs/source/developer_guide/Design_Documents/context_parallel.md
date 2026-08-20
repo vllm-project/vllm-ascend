@@ -77,15 +77,13 @@ For a GLM-5.2 DSA-CP deployment, enable FlashComm1 and DSA-CP and keep the CP
 interleave size equal to the KV-cache block size:
 
 ```bash
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
   --prefill-context-parallel-size 1 \
   --decode-context-parallel-size <N> \
   --block-size <B> \
   --cp-kv-cache-interleave-size <B> \
-  --additional-config '{"enable_dsa_cp": true}'
+  --additional-config '{"enable_dsa_cp": true, "enable_flashcomm1": true}'
 ```
 
 The replicated indexer increases indexer-cache memory in proportion to the

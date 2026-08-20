@@ -62,7 +62,7 @@ env_common: &env_common
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   HCCL_BUFFSIZE: "256"
   SERVER_PORT: "${PORT}"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+  additional_config.enable_flashcomm1: "0"
 
 templates:
   - node_index: 0

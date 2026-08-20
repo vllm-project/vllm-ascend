@@ -191,7 +191,6 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=100
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
@@ -215,7 +214,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
       --async-scheduling \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true}'
+      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
     ```
 
 === "A3 series"
@@ -638,7 +637,6 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_CONNECT_TIMEOUT=180
 export HCCL_BUFFSIZE=300
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -668,7 +666,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --async-scheduling \
   --enforce-eager \
   --speculative-config '{"num_speculative_tokens": 1, "method": "qwen3_5_mtp", "enforce_eager": true}' \
-  --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_flashcomm1": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_producer",
