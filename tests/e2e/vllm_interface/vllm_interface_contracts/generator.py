@@ -37,13 +37,20 @@ from __future__ import annotations
 import argparse
 import ast
 import builtins
+import contextlib
 import hashlib
 import inspect
 import json
+import os
+import pickle
+import sqlite3
 import subprocess
+import sys
+import tempfile
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -52,7 +59,9 @@ from . import schema as _boundary_schema
 from .analysis_plans import MAIN2MAIN_PLAN, AnalysisPlan
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.38.0"
+GENERATOR_VERSION = "0.40.0"
+REPOSITORY_INDEX_CACHE_SCHEMA_VERSION = 1
+REPOSITORY_FILE_FRAGMENT_CACHE_SCHEMA_VERSION = 1
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -2609,6 +2618,8 @@ class RepositoryIndex:
         package_name: str,
         *,
         ordinary_descriptor_decorators: set[str] | frozenset[str] = frozenset(),
+        _source_paths: Sequence[Path] | None = None,
+        _finalize: bool = True,
     ):
         self.repo_root = repo_root.resolve()
         self.package_name = package_name
@@ -2643,11 +2654,83 @@ class RepositoryIndex:
         ] = {}
         self._class_alias_descriptor_kinds: dict[tuple[str, int], str | None] = {}
         self.parse_errors: list[dict[str, str]] = []
+        self._source_paths = tuple(_source_paths) if _source_paths is not None else None
+        self._finalize_after_parse = _finalize
         self._parse()
+        del self._source_paths
+        del self._finalize_after_parse
+
+    def __getstate__(self) -> dict[str, object]:
+        """Preserve AST identity-based maps when the index is serialized.
+
+        Several resolver maps use ``id(ast_node)`` for fast lookup.  Numeric
+        identities are process-local, so a plain pickle would silently retain
+        stale keys after loading.  Store the AST node objects beside their
+        values and rebuild the numeric keys in ``__setstate__`` instead.
+        """
+
+        state = dict(self.__dict__)
+        nodes_by_id = {id(node): node for module in self.modules.values() for node in ast.walk(module.tree)}
+        for name in (
+            "_descriptor_kinds_by_node",
+            "_descriptor_variants_by_node",
+            "_decorator_references_by_node",
+        ):
+            mapping = state.pop(name)
+            serialized: list[tuple[ast.AST, object]] = []
+            for node_id, value in mapping.items():
+                node = nodes_by_id.get(node_id)
+                if node is None:
+                    raise ValueError(f"repository index contains an unreachable AST identity in {name}")
+                serialized.append((node, value))
+            state[f"__serialized{name}"] = serialized
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        for name in (
+            "_descriptor_kinds_by_node",
+            "_descriptor_variants_by_node",
+            "_decorator_references_by_node",
+        ):
+            serialized = state.pop(f"__serialized{name}")
+            state[name] = {id(node): value for node, value in serialized}
+        self.__dict__.update(state)
+
+    @classmethod
+    def _from_serial_file_fragments(
+        cls,
+        repo_root: Path,
+        package_name: str,
+        *,
+        ordinary_descriptor_decorators: set[str] | frozenset[str] = frozenset(),
+    ) -> RepositoryIndex:
+        """Build an index through isolated file fragments for parity tests."""
+
+        package_root = repo_root.resolve() / package_name
+        paths = sorted(package_root.rglob("*.py"))
+        combined = cls(
+            repo_root,
+            package_name,
+            ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+            _source_paths=(),
+            _finalize=False,
+        )
+        for path in paths:
+            fragment = cls(
+                repo_root,
+                package_name,
+                ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+                _source_paths=(path,),
+                _finalize=False,
+            )
+            combined._merge_pre_final_fragment(fragment)
+        combined._finalize_index()
+        return combined
 
     def _parse(self) -> None:
         """Parse repository modules and build the static symbol indexes."""
-        for path in sorted(self.package_root.rglob("*.py")):
+        paths = sorted(self.package_root.rglob("*.py")) if self._source_paths is None else sorted(self._source_paths)
+        for path in paths:
             relative_file = path.relative_to(self.repo_root).as_posix()
             try:
                 tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -3279,11 +3362,47 @@ class RepositoryIndex:
                 self.aliases[f"{module}.{export_name}"] = target
                 self.typed_instance_aliases.add(f"{module}.{export_name}")
 
+        if self._finalize_after_parse:
+            self._finalize_index()
+
+    def _finalize_index(self) -> None:
         self._aggregate_class_variants()
         self._materialize_star_import_aliases()
         self._materialize_dataclass_initializers()
         self._materialize_class_callable_aliases()
         self._validate_index_consistency()
+
+    def _merge_pre_final_fragment(self, fragment: RepositoryIndex) -> None:
+        """Merge one source-ordered file fragment before global finalization."""
+
+        for name in (
+            "modules",
+            "classes",
+            "callables",
+            "callable_variants",
+            "final_bindings",
+            "values",
+            "aliases",
+            "_descriptor_kinds_by_node",
+            "_descriptor_variants_by_node",
+            "_decorator_references_by_node",
+            "_class_alias_descriptor_kinds",
+        ):
+            getattr(self, name).update(getattr(fragment, name))
+        for name in ("class_variants", "_class_variant_bindings"):
+            destination = getattr(self, name)
+            for key, values in getattr(fragment, name).items():
+                destination[key].extend(values)
+        for name in (
+            "class_base_conflicts",
+            "typed_instance_aliases",
+            "unconditional_exports",
+            "unconditional_symbols",
+            "_unconditional_star_imports",
+        ):
+            getattr(self, name).update(getattr(fragment, name))
+        self._pending_method_aliases.extend(fragment._pending_method_aliases)
+        self.parse_errors.extend(fragment.parse_errors)
 
     def _validate_index_consistency(self) -> None:
         """Fail closed when representative and variant indexes drift apart."""
@@ -4039,6 +4158,411 @@ class RepositoryIndex:
         return self.values.get(self.canonical_name(qualified_name))
 
 
+def _repository_fragment_batch(
+    args: tuple[str, str, tuple[str, ...], tuple[str, ...]],
+) -> list[tuple[str, RepositoryIndex]]:
+    repo_root_value, package_name, relative_files, ordinary_decorators = args
+    repo_root = Path(repo_root_value)
+    results: list[tuple[str, RepositoryIndex]] = []
+    for relative_file in relative_files:
+        path = repo_root.joinpath(*relative_file.split("/"))
+        results.append(
+            (
+                relative_file,
+                RepositoryIndex(
+                    repo_root,
+                    package_name,
+                    ordinary_descriptor_decorators=frozenset(ordinary_decorators),
+                    _source_paths=(path,),
+                    _finalize=False,
+                ),
+            )
+        )
+    return results
+
+
+def _repository_file_cache_identities(
+    repo_root: Path,
+    package_name: str,
+    source_version: str | None,
+    relative_files: Sequence[str],
+    ordinary_descriptor_decorators: frozenset[str],
+) -> tuple[dict[str, tuple[str, str]] | None, str | None]:
+    if not source_version:
+        return None, "source version is unavailable"
+    try:
+        dirty = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                package_name,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if dirty:
+            return None, f"{package_name} contains uncommitted source changes"
+        tree = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-tree", "-r", source_version, "--", package_name],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        return None, f"Git file-cache identity failed: {error}"
+
+    blob_ids: dict[str, str] = {}
+    for line in tree.splitlines():
+        metadata, separator, relative_file = line.partition("\t")
+        if not separator or not relative_file.endswith(".py"):
+            continue
+        parts = metadata.split()
+        if len(parts) == 3 and parts[1] == "blob":
+            blob_ids[relative_file] = parts[2]
+    missing = sorted(set(relative_files) - blob_ids.keys())
+    if missing:
+        return None, f"Git file-cache identity is missing {len(missing)} Python files"
+
+    identities: dict[str, tuple[str, str]] = {}
+    for relative_file in relative_files:
+        identity = {
+            "cache_schema_version": REPOSITORY_FILE_FRAGMENT_CACHE_SCHEMA_VERSION,
+            "generator_version": GENERATOR_VERSION,
+            "python_cache_tag": sys.implementation.cache_tag,
+            "package_name": package_name,
+            "relative_file": relative_file,
+            "blob_sha": blob_ids[relative_file],
+            "ordinary_descriptor_decorators": sorted(ordinary_descriptor_decorators),
+        }
+        serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        identities[relative_file] = (
+            hashlib.sha256(serialized.encode()).hexdigest(),
+            serialized,
+        )
+    return identities, None
+
+
+def _sqlite_rows(
+    connection: sqlite3.Connection,
+    keys: Sequence[str],
+) -> Iterable[tuple[str, str, bytes]]:
+    for start in range(0, len(keys), 500):
+        batch = keys[start : start + 500]
+        placeholders = ",".join("?" for _ in batch)
+        yield from connection.execute(
+            f"SELECT cache_key, identity, payload FROM fragments WHERE cache_key IN ({placeholders})",  # noqa: S608
+            batch,
+        )
+
+
+def _repository_index_from_file_fragments(
+    repo_root: Path,
+    package_name: str,
+    *,
+    ordinary_descriptor_decorators: frozenset[str],
+    source_version: str | None,
+    cache_dir: Path | None,
+    index_workers: int,
+) -> tuple[RepositoryIndex, dict[str, object]]:
+    if index_workers < 1:
+        raise ValueError("index_workers must be at least 1")
+    repo_root = repo_root.resolve()
+    package_root = repo_root / package_name
+    paths = sorted(package_root.rglob("*.py"))
+    relative_files = tuple(path.relative_to(repo_root).as_posix() for path in paths)
+    status: dict[str, object] = {
+        "enabled": cache_dir is not None,
+        "status": "disabled",
+        "database": None,
+        "files_total": len(relative_files),
+        "cache_hits": 0,
+        "cache_misses": len(relative_files),
+        "invalid_entries": 0,
+        "workers_requested": index_workers,
+        "workers_used": 1,
+        "load_seconds": 0.0,
+        "build_seconds": 0.0,
+        "write_seconds": 0.0,
+        "merge_finalize_seconds": 0.0,
+        "database_bytes": None,
+        "hit_ratio": 0.0,
+        "reason": None,
+    }
+    identities: dict[str, tuple[str, str]] | None = None
+    connection: sqlite3.Connection | None = None
+    fragments: dict[str, RepositoryIndex] = {}
+    load_started = time.perf_counter()
+    if cache_dir is not None:
+        identities, reason = _repository_file_cache_identities(
+            repo_root,
+            package_name,
+            source_version,
+            relative_files,
+            ordinary_descriptor_decorators,
+        )
+        if identities is None:
+            status.update(status="bypassed", reason=reason)
+        else:
+            database = cache_dir.resolve() / (
+                f"{package_name}-file-fragments-v{REPOSITORY_FILE_FRAGMENT_CACHE_SCHEMA_VERSION}.sqlite3"
+            )
+            status["database"] = str(database)
+            try:
+                database.parent.mkdir(parents=True, exist_ok=True)
+                connection = sqlite3.connect(database, timeout=30)
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS fragments ("
+                    "cache_key TEXT PRIMARY KEY, identity TEXT NOT NULL, payload BLOB NOT NULL)"
+                )
+                keys = [identities[name][0] for name in relative_files]
+                key_to_file = {identities[name][0]: name for name in relative_files}
+                for cache_key, identity, payload in _sqlite_rows(connection, keys):
+                    relative_file = key_to_file.get(cache_key)
+                    if relative_file is None or identity != identities[relative_file][1]:
+                        status["invalid_entries"] = int(status["invalid_entries"]) + 1
+                        continue
+                    try:
+                        fragment = pickle.loads(payload)  # noqa: S301 - trusted CI cache, documented in README.
+                    except Exception:
+                        status["invalid_entries"] = int(status["invalid_entries"]) + 1
+                        continue
+                    if not isinstance(fragment, RepositoryIndex):
+                        status["invalid_entries"] = int(status["invalid_entries"]) + 1
+                        continue
+                    fragment.repo_root = repo_root
+                    fragment.package_root = package_root
+                    fragments[relative_file] = fragment
+            except (OSError, sqlite3.DatabaseError) as error:
+                if connection is not None:
+                    connection.close()
+                    connection = None
+                identities = None
+                status.update(status="unavailable", reason=f"{type(error).__name__}: {error}")
+    status["load_seconds"] = round(time.perf_counter() - load_started, 6)
+
+    missing_files = tuple(name for name in relative_files if name not in fragments)
+    status["cache_hits"] = len(fragments)
+    status["cache_misses"] = len(missing_files)
+    status["hit_ratio"] = round(len(fragments) / len(relative_files), 6) if relative_files else 1.0
+    build_started = time.perf_counter()
+    effective_workers = min(index_workers, len(missing_files)) if missing_files else 0
+    status["workers_used"] = effective_workers
+    if missing_files:
+        task_count = max(1, effective_workers * 4)
+        batch_size = max(1, min(64, (len(missing_files) + task_count - 1) // task_count))
+        tasks = [
+            (
+                str(repo_root),
+                package_name,
+                missing_files[start : start + batch_size],
+                tuple(sorted(ordinary_descriptor_decorators)),
+            )
+            for start in range(0, len(missing_files), batch_size)
+        ]
+        batches: Iterable[list[tuple[str, RepositoryIndex]]]
+        if effective_workers > 1:
+            with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+                batches = executor.map(_repository_fragment_batch, tasks)
+                for batch in batches:
+                    fragments.update(batch)
+        else:
+            for task in tasks:
+                fragments.update(_repository_fragment_batch(task))
+    status["build_seconds"] = round(time.perf_counter() - build_started, 6)
+
+    write_started = time.perf_counter()
+    if connection is not None and identities is not None and missing_files:
+        try:
+            with connection:
+                connection.executemany(
+                    "INSERT OR REPLACE INTO fragments(cache_key, identity, payload) VALUES (?, ?, ?)",
+                    [
+                        (
+                            identities[name][0],
+                            identities[name][1],
+                            pickle.dumps(fragments[name], protocol=pickle.HIGHEST_PROTOCOL),
+                        )
+                        for name in missing_files
+                    ],
+                )
+        except Exception as error:  # Cache serialization must not invalidate source analysis.
+            status.update(status="write_error", reason=f"{type(error).__name__}: {error}")
+    status["write_seconds"] = round(time.perf_counter() - write_started, 6)
+    if connection is not None:
+        connection.close()
+    if status["database"] is not None:
+        with contextlib.suppress(OSError):
+            status["database_bytes"] = Path(str(status["database"])).stat().st_size
+
+    merge_started = time.perf_counter()
+    combined = RepositoryIndex(
+        repo_root,
+        package_name,
+        ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+        _source_paths=(),
+        _finalize=False,
+    )
+    for relative_file in relative_files:
+        combined._merge_pre_final_fragment(fragments[relative_file])
+    combined._finalize_index()
+    status["merge_finalize_seconds"] = round(time.perf_counter() - merge_started, 6)
+    if status["status"] not in {"bypassed", "unavailable", "write_error"}:
+        hits = int(status["cache_hits"])
+        status["status"] = "hit" if hits == len(relative_files) else "partial_hit" if hits else "miss"
+    return combined, status
+
+
+def _repository_index_cache_identity(
+    repo_root: Path,
+    package_name: str,
+    source_version: str | None,
+    ordinary_descriptor_decorators: frozenset[str],
+) -> tuple[dict[str, object] | None, str | None]:
+    if not source_version:
+        return None, "source version is unavailable"
+    try:
+        dirty = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                package_name,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if dirty:
+            return None, f"{package_name} contains uncommitted source changes"
+        tree_sha = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", f"{source_version}:{package_name}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        return None, f"Git cache identity failed: {error}"
+
+    return (
+        {
+            "cache_schema_version": REPOSITORY_INDEX_CACHE_SCHEMA_VERSION,
+            "generator_version": GENERATOR_VERSION,
+            "python_cache_tag": sys.implementation.cache_tag,
+            "package_name": package_name,
+            "source_version": source_version,
+            "tree_sha": tree_sha,
+            "ordinary_descriptor_decorators": sorted(ordinary_descriptor_decorators),
+        },
+        None,
+    )
+
+
+def _repository_index_with_cache(
+    repo_root: Path,
+    package_name: str,
+    *,
+    ordinary_descriptor_decorators: frozenset[str],
+    source_version: str | None,
+    cache_dir: Path | None,
+) -> tuple[RepositoryIndex, dict[str, object]]:
+    status: dict[str, object] = {
+        "enabled": cache_dir is not None,
+        "status": "disabled",
+        "key": None,
+        "path": None,
+        "reason": None,
+    }
+    if cache_dir is None:
+        return (
+            RepositoryIndex(
+                repo_root,
+                package_name,
+                ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+            ),
+            status,
+        )
+
+    identity, reason = _repository_index_cache_identity(
+        repo_root,
+        package_name,
+        source_version,
+        ordinary_descriptor_decorators,
+    )
+    if identity is None:
+        status.update(status="bypassed", reason=reason)
+        return (
+            RepositoryIndex(
+                repo_root,
+                package_name,
+                ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+            ),
+            status,
+        )
+
+    serialized_identity = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    cache_key = hashlib.sha256(serialized_identity.encode()).hexdigest()
+    cache_path = cache_dir.resolve() / f"{package_name}-{cache_key}.pickle"
+    status.update(key=cache_key, path=str(cache_path))
+    invalid_cache = False
+    try:
+        if cache_path.is_file():
+            with cache_path.open("rb") as stream:
+                payload = pickle.load(stream)  # noqa: S301 - the configured cache directory is trusted CI state.
+            if not isinstance(payload, dict) or payload.get("identity") != identity:
+                raise ValueError("repository index cache identity does not match")
+            index = payload.get("index")
+            if not isinstance(index, RepositoryIndex):
+                raise ValueError("repository index cache payload has an invalid index")
+            index.repo_root = repo_root.resolve()
+            index.package_root = index.repo_root / package_name
+            status["status"] = "hit"
+            return index, status
+    except Exception as error:  # Cache corruption must not invalidate source analysis.
+        invalid_cache = True
+        status.update(status="invalid", reason=f"{type(error).__name__}: {error}")
+
+    index = RepositoryIndex(
+        repo_root,
+        package_name,
+        ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+    )
+    temporary_path: Path | None = None
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=cache_dir,
+            prefix=f".{package_name}-{cache_key}-",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            pickle.dump(
+                {"identity": identity, "index": index},
+                stream,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, cache_path)
+        status["status"] = "invalid_rebuilt" if invalid_cache else "miss"
+    except Exception as error:  # A cache write failure must fall back to the fresh index.
+        status.update(status="write_error", reason=f"{type(error).__name__}: {error}")
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return index, status
+
+
 class InterfaceBoundaryGenerator:
     def __init__(
         self,
@@ -4047,6 +4571,9 @@ class InterfaceBoundaryGenerator:
         external_roots: dict[str, Path] | None = None,
         *,
         source_versions: dict[str, str] | None = None,
+        downstream_index_cache_dir: Path | None = None,
+        upstream_file_index_cache_dir: Path | None = None,
+        index_workers: int = 1,
     ):
         source_versions = source_versions or {}
         self.source_versions = dict(source_versions)
@@ -4058,16 +4585,44 @@ class InterfaceBoundaryGenerator:
                 (),
             )
         }
-        self.upstream = RepositoryIndex(
-            vllm_root,
-            "vllm",
-            ordinary_descriptor_decorators=ordinary_descriptor_decorators,
-        )
-        self.downstream = RepositoryIndex(
+        self.repository_index_timings: dict[str, float] = {}
+        index_started = time.perf_counter()
+        if upstream_file_index_cache_dir is not None or index_workers > 1:
+            self.upstream, upstream_file_cache = _repository_index_from_file_fragments(
+                vllm_root,
+                "vllm",
+                ordinary_descriptor_decorators=frozenset(ordinary_descriptor_decorators),
+                source_version=source_versions.get("vllm"),
+                cache_dir=upstream_file_index_cache_dir,
+                index_workers=index_workers,
+            )
+        else:
+            self.upstream = RepositoryIndex(
+                vllm_root,
+                "vllm",
+                ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+            )
+            upstream_file_cache = {
+                "enabled": False,
+                "status": "disabled",
+                "workers_requested": index_workers,
+                "workers_used": 1,
+            }
+        self.repository_index_timings["upstream"] = round(time.perf_counter() - index_started, 6)
+        index_started = time.perf_counter()
+        self.downstream, downstream_cache = _repository_index_with_cache(
             ascend_root,
             "vllm_ascend",
             ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+            source_version=source_versions.get("vllm_ascend"),
+            cache_dir=downstream_index_cache_dir,
         )
+        self.repository_index_timings["downstream"] = round(time.perf_counter() - index_started, 6)
+        self.repository_index_cache = {
+            "upstream_file_fragments": upstream_file_cache,
+            "downstream": downstream_cache,
+        }
+        index_started = time.perf_counter()
         self.externals = {
             package: RepositoryIndex(
                 root,
@@ -4076,6 +4631,7 @@ class InterfaceBoundaryGenerator:
             )
             for package, root in sorted((external_roots or {}).items())
         }
+        self.repository_index_timings["external"] = round(time.perf_counter() - index_started, 6)
         parse_errors = (
             [("vLLM", error) for error in self.upstream.parse_errors]
             + [("vllm-ascend", error) for error in self.downstream.parse_errors]

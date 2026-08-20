@@ -56,6 +56,9 @@ def _add_sources(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--expect-ascend-sha", required=True)
     parser.add_argument("--external-root", action="append", default=[], metavar="PACKAGE=PATH")
     parser.add_argument("--expect-external-sha", action="append", default=[], metavar="PACKAGE=SHA")
+    parser.add_argument("--downstream-index-cache-dir", type=Path)
+    parser.add_argument("--upstream-file-index-cache-dir", type=Path)
+    parser.add_argument("--index-workers", type=int, default=1)
 
 
 def _range_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -67,6 +70,7 @@ def _range_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--scenario", choices=SCENARIOS, default=MAIN2MAIN_SCENARIO)
     parser.add_argument("--profile", choices=("exact-contracts", "expanded"), default="exact-contracts")
     parser.add_argument("--fail-on", choices=("never", "introduced", "unresolved"), default="never")
+    parser.add_argument("--analysis-workers", type=int, default=3)
 
 
 def _validate_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -100,6 +104,9 @@ def _validate(args: argparse.Namespace) -> int:
         args.ascend_root,
         external_roots,
         source_versions={"vllm": vllm_sha, "vllm_ascend": ascend_sha, **external_shas},
+        downstream_index_cache_dir=args.downstream_index_cache_dir,
+        upstream_file_index_cache_dir=args.upstream_file_index_cache_dir,
+        index_workers=args.index_workers,
     )
     relations, findings = engine.generate(plan)
     visible_generator_findings = findings if plan.include_generator_findings else []
@@ -157,6 +164,10 @@ def _analyze(args: argparse.Namespace) -> int:
         external_shas=external_shas,
         profile=args.profile,
         scenario=args.scenario,
+        analysis_workers=args.analysis_workers,
+        downstream_index_cache_dir=args.downstream_index_cache_dir,
+        upstream_file_index_cache_dir=args.upstream_file_index_cache_dir,
+        index_workers=args.index_workers,
     )
     outputs = write_reports(report, args.output_dir)
     console_summary = report["summary"]

@@ -32,6 +32,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -75,8 +76,8 @@ from .models import (
     SourceEndpoint,
 )
 
-RANGE_SCHEMA_VERSION = 7
-RANGE_ANALYZER_VERSION = "1.7.0"
+RANGE_SCHEMA_VERSION = 9
+RANGE_ANALYZER_VERSION = "1.9.0"
 CLASSIFICATIONS = (
     "introduced_break",
     "compatibility_warning",
@@ -98,6 +99,17 @@ def _diagnostic_timing(
     if os.environ.get("VLLM_INTERFACE_TIMINGS") == "1":
         print(f"[vllm-interface] {label}: {elapsed:.3f}s", file=sys.stderr, flush=True)
     return now
+
+
+def _record_diagnostic_timing(
+    label: str,
+    elapsed: float,
+    timings: dict[str, float | None],
+) -> None:
+    rounded = round(elapsed, 6)
+    timings[label] = rounded
+    if os.environ.get("VLLM_INTERFACE_TIMINGS") == "1":
+        print(f"[vllm-interface] {label}: {rounded:.3f}s", file=sys.stderr, flush=True)
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> str:
@@ -2715,12 +2727,20 @@ def analyze_range(
     external_shas: dict[str, str] | None = None,
     profile: str = "exact-contracts",
     scenario: str = MAIN2MAIN_SCENARIO,
+    analysis_workers: int = 3,
+    downstream_index_cache_dir: Path | None = None,
+    upstream_file_index_cache_dir: Path | None = None,
+    index_workers: int = 1,
 ) -> dict[str, Any]:
     """Run the selected source-analysis plan for an exact vLLM range."""
     analysis_started = time.perf_counter()
     phase_started = time.perf_counter()
     timings: dict[str, float | None] = {}
     plan = resolve_analysis_plan(scenario)
+    if analysis_workers < 1:
+        raise ValueError("analysis_workers must be at least 1")
+    if index_workers < 1:
+        raise ValueError("index_workers must be at least 1")
     if profile not in {"exact-contracts", "expanded"}:
         raise ValueError(f"unsupported profile: {profile}")
     if scenario != MAIN2MAIN_SCENARIO and profile != "exact-contracts":
@@ -2741,8 +2761,14 @@ def analyze_range(
         ascend_root,
         external_roots,
         source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha, **external_shas},
+        downstream_index_cache_dir=downstream_index_cache_dir,
+        upstream_file_index_cache_dir=upstream_file_index_cache_dir,
+        index_workers=index_workers,
     )
     phase_started = _diagnostic_timing("repository_indexing", phase_started, timings)
+    timings.update(
+        {f"repository_indexing.{name}": duration for name, duration in generator.repository_index_timings.items()}
+    )
     relations, generator_findings = generator.generate(plan)
     timings.update({f"relation_generation.{name}": duration for name, duration in generator.phase_timings.items()})
     phase_started = time.perf_counter()
@@ -2761,56 +2787,99 @@ def analyze_range(
         )
     )
 
-    findings = [
-        finding
-        for relation in relations
-        if relation.upstream_package == "vllm" and relation.relation in plan.relation_types
-        for finding in _relation_findings(
-            relation,
-            generator,
-            old_snapshot,
-            new_snapshot,
-            new_to_old,
-            changed_upstream_files,
-            registered_overrides,
-        )
-    ]
-    phase_started = _diagnostic_timing("relation_comparison", phase_started, timings)
-    if plan.analyze_direct_imports:
-        import_started = time.perf_counter()
-        findings.extend(_import_findings(ascend_root, old_snapshot, new_snapshot, old_to_new))
-        _diagnostic_timing("direct_import_analysis", import_started, timings)
-    else:
-        timings["direct_import_analysis"] = None
+    def analyze_relations() -> tuple[list[RangeFinding], float]:
+        started = time.perf_counter()
+        branch_findings = [
+            finding
+            for relation in relations
+            if relation.upstream_package == "vllm" and relation.relation in plan.relation_types
+            for finding in _relation_findings(
+                relation,
+                generator,
+                old_snapshot,
+                new_snapshot,
+                new_to_old,
+                changed_upstream_files,
+                registered_overrides,
+            )
+        ]
+        return branch_findings, time.perf_counter() - started
 
-    direct_call_dependencies: list[DirectCallDependency] = []
-    if plan.analyze_direct_calls:
-        direct_started = time.perf_counter()
+    def analyze_imports() -> tuple[list[RangeFinding], float]:
+        started = time.perf_counter()
+        branch_findings = _import_findings(
+            ascend_root,
+            GitSnapshot(vllm_root, old_sha),
+            GitSnapshot(vllm_root, new_sha),
+            old_to_new,
+        )
+        return branch_findings, time.perf_counter() - started
+
+    def analyze_direct_calls() -> tuple[
+        list[RangeFinding],
+        list[DirectCallDependency],
+        float,
+        float,
+    ]:
+        branch_old_snapshot = GitSnapshot(vllm_root, old_sha)
+        branch_new_snapshot = GitSnapshot(vllm_root, new_sha)
+        discovery_started = time.perf_counter()
         direct_call_detector = DirectCallDetector(generator)
         discovered_direct_calls = direct_call_detector.discover()
         discovered_direct_calls.extend(
             _verified_historical_direct_calls(
                 direct_call_detector.historical_candidates,
-                old_snapshot,
-                new_snapshot,
+                branch_old_snapshot,
+                branch_new_snapshot,
             )
         )
-        comparison_started = _diagnostic_timing(
-            "direct_call_discovery",
-            direct_started,
-            timings,
-        )
-        direct_call_findings, direct_call_dependencies = _direct_call_findings(
+        discovery_elapsed = time.perf_counter() - discovery_started
+        comparison_started = time.perf_counter()
+        branch_findings, dependencies = _direct_call_findings(
             discovered_direct_calls,
-            old_snapshot,
-            new_snapshot,
+            branch_old_snapshot,
+            branch_new_snapshot,
         )
+        return (
+            branch_findings,
+            dependencies,
+            discovery_elapsed,
+            time.perf_counter() - comparison_started,
+        )
+
+    branch_count = 1 + int(plan.analyze_direct_imports) + int(plan.analyze_direct_calls)
+    effective_workers = min(analysis_workers, branch_count)
+    if effective_workers > 1:
+        with ThreadPoolExecutor(
+            max_workers=effective_workers,
+            thread_name_prefix="vllm-interface",
+        ) as executor:
+            relation_future = executor.submit(analyze_relations)
+            import_future = executor.submit(analyze_imports) if plan.analyze_direct_imports else None
+            direct_call_future = executor.submit(analyze_direct_calls) if plan.analyze_direct_calls else None
+            relation_result = relation_future.result()
+            import_result = import_future.result() if import_future is not None else None
+            direct_call_result = direct_call_future.result() if direct_call_future is not None else None
+    else:
+        relation_result = analyze_relations()
+        import_result = analyze_imports() if plan.analyze_direct_imports else None
+        direct_call_result = analyze_direct_calls() if plan.analyze_direct_calls else None
+
+    findings, relation_elapsed = relation_result
+    _record_diagnostic_timing("relation_comparison", relation_elapsed, timings)
+    if import_result is not None:
+        import_findings, import_elapsed = import_result
+        findings.extend(import_findings)
+        _record_diagnostic_timing("direct_import_analysis", import_elapsed, timings)
+    else:
+        timings["direct_import_analysis"] = None
+
+    direct_call_dependencies: list[DirectCallDependency] = []
+    if direct_call_result is not None:
+        direct_call_findings, direct_call_dependencies, discovery_elapsed, comparison_elapsed = direct_call_result
         findings.extend(direct_call_findings)
-        _diagnostic_timing(
-            "direct_call_comparison",
-            comparison_started,
-            timings,
-        )
+        _record_diagnostic_timing("direct_call_discovery", discovery_elapsed, timings)
+        _record_diagnostic_timing("direct_call_comparison", comparison_elapsed, timings)
     else:
         timings["direct_call_discovery"] = None
         timings["direct_call_comparison"] = None
@@ -2930,6 +2999,17 @@ def analyze_range(
             "vllm_new_sha": new_sha,
             "vllm_ascend_sha": ascend_sha,
             "external_sources": dict(sorted(external_shas.items())),
+            "execution": {
+                "analysis_workers_requested": analysis_workers,
+                "analysis_workers_used": effective_workers,
+                "parallel_branches": effective_workers > 1,
+                "branches": [
+                    "relation_comparison",
+                    *(["direct_import_analysis"] if plan.analyze_direct_imports else []),
+                    *(["direct_call_analysis"] if plan.analyze_direct_calls else []),
+                ],
+            },
+            "repository_index_cache": generator.repository_index_cache,
             "timings_seconds": timings,
         },
         "summary": {

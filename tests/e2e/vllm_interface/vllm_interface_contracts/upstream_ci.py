@@ -67,9 +67,13 @@ def build_analysis_command(
     new_sha: str,
     ascend_sha: str,
     output_dir: Path,
+    analysis_workers: int = 3,
+    downstream_index_cache_dir: Path | None = None,
+    upstream_file_index_cache_dir: Path | None = None,
+    index_workers: int = 1,
 ) -> list[str]:
     """Build the repository CLI command used by the upstream pytest entry."""
-    return [
+    command = [
         sys.executable,
         "-m",
         "tests.e2e.vllm_interface.vllm_interface_contracts",
@@ -90,7 +94,26 @@ def build_analysis_command(
         "introduced",
         "--output-dir",
         str(output_dir),
+        "--analysis-workers",
+        str(analysis_workers),
+        "--index-workers",
+        str(index_workers),
     ]
+    if downstream_index_cache_dir is not None:
+        command.extend(
+            [
+                "--downstream-index-cache-dir",
+                str(downstream_index_cache_dir),
+            ]
+        )
+    if upstream_file_index_cache_dir is not None:
+        command.extend(
+            [
+                "--upstream-file-index-cache-dir",
+                str(upstream_file_index_cache_dir),
+            ]
+        )
+    return command
 
 
 def run_analysis(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:

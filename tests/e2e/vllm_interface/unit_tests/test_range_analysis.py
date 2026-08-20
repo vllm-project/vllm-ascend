@@ -5,7 +5,11 @@ import subprocess
 from pathlib import Path
 
 from tests.e2e.vllm_interface.vllm_interface_contracts.cli import main as cli_main
-from tests.e2e.vllm_interface.vllm_interface_contracts.generator import InterfaceBoundaryGenerator
+from tests.e2e.vllm_interface.vllm_interface_contracts.generator import (
+    InterfaceBoundaryGenerator,
+    RepositoryIndex,
+    _repository_index_from_file_fragments,
+)
 from tests.e2e.vllm_interface.vllm_interface_contracts.range_analysis import (
     GitSnapshot,
     analyze_range,
@@ -468,7 +472,7 @@ def test_report_writer_separates_introduced_csv(tmp_path: Path) -> None:
     outputs = write_reports(report, tmp_path / "reports")
     payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
     introduced_csv = Path(outputs["introduced_csv"]).read_text(encoding="utf-8-sig")
-    assert payload["schema_version"] == 7
+    assert payload["schema_version"] == 9
     assert payload["metadata"]["vllm_old_sha"] == roots[2]
     assert "introduced_break" in introduced_csv
     assert "contract_kind" in introduced_csv.splitlines()[0]
@@ -1623,7 +1627,7 @@ def test_vllm_interface_expands_transitive_override_impacts_under_one_root_cause
 
     outputs = write_reports(report, tmp_path / "upstream-report")
     payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 7
+    assert payload["schema_version"] == 9
     assert payload["summary"]["introduced_breaks"] == 2
     assert payload["summary"]["root_causes"] == 1
     markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
@@ -1735,3 +1739,206 @@ def test_vllm_interface_cli_log_keeps_only_exact_masked_delta_review(
     assert '"preexisting":' not in console
     assert "new_delta_masked_by_preexisting_incompatibility" in console
     assert "analysis_unresolved" not in console
+
+
+def test_parallel_analysis_matches_serial_results(tmp_path: Path) -> None:
+    roots = _call_repositories(
+        tmp_path,
+        old_source=("class Base:\n    def run(self, value): return value\n\ndef helper(value): return value\n"),
+        new_source=("class Base:\n    def run(self, value, required): return value\n\nOTHER = 1\n"),
+        consumer_source=(
+            "from vllm.api import Base, helper\n\n"
+            "class Child(Base):\n"
+            "    def run(self, value): return value\n\n"
+            "def use():\n"
+            "    return helper(1)\n"
+        ),
+    )
+    serial = analyze_range(
+        vllm_root=roots[0],
+        ascend_root=roots[1],
+        old=roots[2],
+        new=roots[3],
+        expect_ascend_sha=roots[4],
+        scenario="vllm-interface",
+        analysis_workers=1,
+    )
+    parallel = analyze_range(
+        vllm_root=roots[0],
+        ascend_root=roots[1],
+        old=roots[2],
+        new=roots[3],
+        expect_ascend_sha=roots[4],
+        scenario="vllm-interface",
+        analysis_workers=3,
+    )
+
+    assert parallel["findings"] == serial["findings"]
+    assert parallel["summary"] == serial["summary"]
+    assert serial["metadata"]["execution"]["parallel_branches"] is False
+    assert parallel["metadata"]["execution"]["parallel_branches"] is True
+    assert parallel["metadata"]["execution"]["analysis_workers_used"] == 3
+
+
+def test_serial_file_fragments_match_repository_index(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    _write(root, "vllm/__init__.py", "")
+    _write(root, "vllm/accessors.py", "def read(self): return self._value\n")
+    _write(
+        root,
+        "vllm/model.py",
+        (
+            "from vllm.accessors import read\n\n"
+            "class Model:\n"
+            "    value = property(read)\n\n"
+            "    def run(self, item): return item\n"
+        ),
+    )
+
+    regular = RepositoryIndex(root, "vllm")
+    fragmented = RepositoryIndex._from_serial_file_fragments(root, "vllm")
+
+    def snapshot(index: RepositoryIndex) -> dict[str, object]:
+        return {
+            "modules": sorted(index.modules),
+            "classes": {
+                name: (item.bases, item.resolved_bases, sorted(item.methods))
+                for name, item in sorted(index.classes.items())
+            },
+            "callables": {
+                name: (
+                    item.signature,
+                    item.descriptor_kind,
+                    item.decorator_references,
+                    item.property_accessors,
+                )
+                for name, item in sorted(index.callables.items())
+            },
+            "aliases": dict(sorted(index.aliases.items())),
+            "exports": sorted(index.unconditional_exports),
+            "symbols": sorted(index.unconditional_symbols),
+        }
+
+    assert snapshot(fragmented) == snapshot(regular)
+
+
+def test_process_file_fragments_reuse_unchanged_git_blobs(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    _git(root, "init")
+    _write(root, "vllm/__init__.py", "")
+    _write(root, "vllm/accessors.py", "def read(self): return self._value\n")
+    _write(
+        root,
+        "vllm/model.py",
+        "class Model:\n    def run(self, item): return item\n",
+    )
+    first_sha = _commit(root, "first")
+    cache_dir = tmp_path / "file-cache"
+
+    cold, cold_status = _repository_index_from_file_fragments(
+        root,
+        "vllm",
+        ordinary_descriptor_decorators=frozenset(),
+        source_version=first_sha,
+        cache_dir=cache_dir,
+        index_workers=2,
+    )
+    hot, hot_status = _repository_index_from_file_fragments(
+        root,
+        "vllm",
+        ordinary_descriptor_decorators=frozenset(),
+        source_version=first_sha,
+        cache_dir=cache_dir,
+        index_workers=2,
+    )
+    assert cold_status["status"] == "miss"
+    assert cold_status["workers_used"] == 2
+    assert cold_status["hit_ratio"] == 0.0
+    assert cold_status["database_bytes"] > 0
+    assert hot_status["status"] == "hit"
+    assert hot_status["cache_hits"] == 3
+    assert hot_status["hit_ratio"] == 1.0
+    assert sorted(hot.callables) == sorted(cold.callables)
+
+    _write(
+        root,
+        "vllm/model.py",
+        "class Model:\n    def run(self, item, optional=None): return item\n",
+    )
+    second_sha = _commit(root, "second")
+    incremental, incremental_status = _repository_index_from_file_fragments(
+        root,
+        "vllm",
+        ordinary_descriptor_decorators=frozenset(),
+        source_version=second_sha,
+        cache_dir=cache_dir,
+        index_workers=2,
+    )
+    regular = RepositoryIndex(root, "vllm")
+
+    assert incremental_status["status"] == "partial_hit"
+    assert incremental_status["cache_hits"] == 2
+    assert incremental_status["cache_misses"] == 1
+    assert incremental_status["hit_ratio"] == 0.666667
+    assert (
+        incremental.callables["vllm.model.Model.run"].signature == regular.callables["vllm.model.Model.run"].signature
+    )
+
+
+def test_downstream_repository_index_cache_miss_then_hit(tmp_path: Path) -> None:
+    roots = _call_repositories(
+        tmp_path,
+        old_source=("class Base:\n    @classmethod\n    def run(cls, value): return value\n"),
+        new_source=("class Base:\n    @classmethod\n    def run(cls, value, required): return value\n"),
+        consumer_source=(
+            "from vllm.api import Base\n\nclass Child(Base):\n    @classmethod\n    def run(cls, value): return value\n"
+        ),
+    )
+    cache_dir = tmp_path / "repository-index-cache"
+    first = analyze_range(
+        vllm_root=roots[0],
+        ascend_root=roots[1],
+        old=roots[2],
+        new=roots[3],
+        expect_ascend_sha=roots[4],
+        scenario="vllm-interface",
+        analysis_workers=1,
+        downstream_index_cache_dir=cache_dir,
+    )
+    second = analyze_range(
+        vllm_root=roots[0],
+        ascend_root=roots[1],
+        old=roots[2],
+        new=roots[3],
+        expect_ascend_sha=roots[4],
+        scenario="vllm-interface",
+        analysis_workers=1,
+        downstream_index_cache_dir=cache_dir,
+    )
+
+    first_cache = first["metadata"]["repository_index_cache"]["downstream"]
+    second_cache = second["metadata"]["repository_index_cache"]["downstream"]
+    assert first_cache["status"] == "miss"
+    assert second_cache["status"] == "hit"
+    assert first_cache["key"] == second_cache["key"]
+    assert len(list(cache_dir.glob("vllm_ascend-*.pickle"))) == 1
+    assert second["findings"] == first["findings"]
+    assert second["summary"] == first["summary"]
+
+    Path(str(second_cache["path"])).write_bytes(b"invalid cache")
+    rebuilt = analyze_range(
+        vllm_root=roots[0],
+        ascend_root=roots[1],
+        old=roots[2],
+        new=roots[3],
+        expect_ascend_sha=roots[4],
+        scenario="vllm-interface",
+        analysis_workers=1,
+        downstream_index_cache_dir=cache_dir,
+    )
+    rebuilt_cache = rebuilt["metadata"]["repository_index_cache"]["downstream"]
+    assert rebuilt_cache["status"] == "invalid_rebuilt"
+    assert rebuilt_cache["reason"].startswith("UnpicklingError:")
+    assert rebuilt["findings"] == first["findings"]
+    assert rebuilt["summary"] == first["summary"]
