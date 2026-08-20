@@ -108,8 +108,9 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 SERVER_START_TIMEOUT = 600
 
 # Two self-cognition LoRA adapters to demonstrate the update workflow.
-# Local paths on this machine; in real RL training, replace these with your
-# own trained adapter paths.
+# HuggingFace repo IDs, resolved to local paths via resolve_lora_path()
+# in main(); in real RL training, replace these with your own trained
+# adapter repo IDs or local paths.
 LORA_ALICE = (
     "Alice",
     "charent/self_cognition_Alice",
@@ -125,6 +126,24 @@ POLICY_NAME = "policy"
 
 # One identity prompt is enough to observe the adapter switch.
 PROMPTS = ["Hi, tell me about you"]
+
+
+def resolve_lora_path(repo_id: str) -> str:
+    """Resolve a HuggingFace repo ID to a local adapter path.
+
+    Downloads the adapter into the HF cache on first use and returns the
+    cached directory; subsequent calls just resolve the cache entry, so
+    this is cheap to call on every run.  A local path passed in is
+    returned unchanged.
+
+    Set ``HF_ENDPOINT`` (e.g. ``https://hf-mirror.com``) in the
+    environment when huggingface.co is not reachable.
+    """
+    if os.path.isdir(repo_id):
+        return repo_id
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    return hf_api().snapshot_download(repo_id=repo_id)
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +379,8 @@ def main():
 
         _, alice_path = LORA_ALICE
         _, bob_path = LORA_BOB
+        alice_path = resolve_lora_path(alice_path)
+        bob_path = resolve_lora_path(bob_path)
 
         # Reset adapter state so the demo is re-runnable against a warm server.
         try:
