@@ -33,7 +33,12 @@ By default, sleep mode only releases memory managed by the sleep-mode allocator.
 llm = LLM(
     "Qwen/Qwen2.5-0.5B-Instruct",
     enable_sleep_mode=True,
-    additional_config={"enable_sleep_mode_extra_cleanup": True},
+    additional_config={
+        "rl_config": {
+            "enabled": True,
+            "sleep_mode_extra_cleanup": True,
+        }
+    },
 )
 ```
 
@@ -42,10 +47,10 @@ For online serving, pass the same option through `--additional-config`:
 ```bash
 vllm serve Qwen/Qwen2.5-0.5B-Instruct \
     --enable-sleep-mode \
-    --additional-config '{"enable_sleep_mode_extra_cleanup": true}'
+    --additional-config '{"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}}'
 ```
 
-When `enable_sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
+When `rl_config.sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
 
 - clears ACL graph attention workspaces and invalidates captured ACL graph caches when ACL graph is enabled;
 - resets the model runner graph manager so ACL graphs can be captured again after wakeup;
@@ -55,7 +60,7 @@ During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE 
 
 !!! note
 
-    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `enable_sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory.
+    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `rl_config.sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory. The former top-level `enable_sleep_mode_extra_cleanup` option has been removed.
 
 For level 2 sleep, wakeup can be split into two phases:
 

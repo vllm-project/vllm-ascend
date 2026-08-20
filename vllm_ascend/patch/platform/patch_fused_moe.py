@@ -15,17 +15,16 @@
 # limitations under the License.
 #
 
-# Patch vllm's FusedMoE factory to use AscendMoERunner by default.
+# Patch vllm's MoE factory to use AscendMoERunner by default.
 #
-# vllm's FusedMoE is a factory function (not a class). deepseek_v2 and other
-# models do `from vllm.model_executor.layers.fused_moe import FusedMoE` and
-# call it directly, so we must patch the binding in the package __init__ as
-# well as the layer module before any model is imported.
+# vLLM v0.26.0 exports the factory as FusedMoE, while vLLM main renamed it
+# to FusedMoEFactory. We patch the exact binding for the active version lane
+# in both the package __init__ and layer module before any model is imported.
 #
 # Import order in worker.__init__:
-#   1. adapt_patch()  ->  this file runs  ->  FusedMoE patched
+#   1. adapt_patch()  ->  this file runs  ->  MoE factory patched
 #   2. from vllm_ascend import ops
-#   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
+#   3. model loading  ->  deepseek_v2 imported  ->  gets patched factory  ✓
 
 from collections.abc import Callable
 from inspect import signature
@@ -36,33 +35,16 @@ import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
-from vllm_ascend.utils import is_310p
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
 # Capture the real original before fused_moe.py's module-level code runs.
-_original_FusedMoE = _fused_moe_layer.FusedMoE
-_DefaultAscendMoERunner: Any
-_DefaultAscendRoutedExperts: type[RoutedExperts]
-_IS_310P = is_310p()
-
-if _IS_310P:
-    from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
-
-    _DefaultAscendMoERunner = AscendMoERunner310
-    _DefaultAscendRoutedExperts = AscendRoutedExperts310
-else:
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-
-    _DefaultAscendMoERunner = AscendMoERunner
-    _DefaultAscendRoutedExperts = AscendRoutedExperts
+_original_FusedMoE = _fused_moe_layer.FusedMoEFactory
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
@@ -112,7 +94,6 @@ def _ascend_FusedMoE(
     num_redundant_experts: int = 0,
     n_shared_experts: int | None = None,
     apply_routed_scale_to_output: bool = False,
-    zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
     runner_cls: Any | None = None,
     runner_args: dict[str, Any] | None = None,
@@ -122,10 +103,6 @@ def _ascend_FusedMoE(
     tid2eid: torch.Tensor | None = None,
     **kwargs,
 ):
-    if runner_cls is None:
-        runner_cls = _DefaultAscendMoERunner
-    if routed_experts_cls is None:
-        routed_experts_cls = _DefaultAscendRoutedExperts
     # RoutedExperts allocates its parameters before AscendMoERunner is
     # constructed. Propagate Ascend EPLB capacity into the upstream factory so
     # redundant expert slots are present when weights are created and loaded.
@@ -156,14 +133,12 @@ def _ascend_FusedMoE(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor if not apply_routed_scale_to_output else 1.0,
             e_score_correction_bias=e_score_correction_bias,
-            zero_expert_type=zero_expert_type,
             num_logical_experts=num_experts,
             hash_indices_table=hash_indices_table,
             tid2eid=hash_indices_table_for_legacy_path,
             eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
         )
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
-    routed_experts_args["router"] = router
     routed_experts_args["n_shared_experts"] = n_shared_experts
     if hash_indices_table_for_legacy_path is not None:
         routed_experts_args["tid2eid"] = hash_indices_table_for_legacy_path
@@ -184,7 +159,6 @@ def _ascend_FusedMoE(
         num_redundant_experts=num_redundant_experts,
         n_shared_experts=n_shared_experts,
         apply_routed_scale_to_output=apply_routed_scale_to_output,
-        zero_expert_type=zero_expert_type,
         hash_indices_table=hash_indices_table,
         runner_cls=runner_cls,
         runner_args=runner_args,
@@ -196,5 +170,5 @@ def _ascend_FusedMoE(
     return runner
 
 
-_fused_moe_layer.FusedMoE = _ascend_FusedMoE
-_fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+_fused_moe_layer.FusedMoEFactory = _ascend_FusedMoE
+_fused_moe_pkg.FusedMoEFactory = _ascend_FusedMoE

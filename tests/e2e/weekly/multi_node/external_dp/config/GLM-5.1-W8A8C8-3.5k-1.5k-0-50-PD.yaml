@@ -230,10 +230,13 @@ templates:
       - --gpu-memory-utilization
       - "0.92"
       - --async-scheduling
-      - --quantization ascend
+      - --quantization
+      - "ascend"
       - --enable-auto-tool-choice
-      - --tool-call-parser glm47
-      - --reasoning-parser glm45
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -329,5 +332,5 @@ benchmarks:
         max_out_len: 1500
         batch_size: 480
         request_rate: 6.5
-        baseline: 8240.61
+        baseline: 8235.305
         threshold: 0.97

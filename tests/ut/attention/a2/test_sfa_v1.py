@@ -15,6 +15,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.sfa_kv_offload import (
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
@@ -34,7 +35,6 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
@@ -50,9 +50,17 @@ class TestAscendSFABackend(TestBase):
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
+        self.dsa_patcher = patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False)
+        self.dsa_patcher.start()
+
+        self.ascend_config_patcher = patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+        mock_ascend_config = self.ascend_config_patcher.start()
+        mock_ascend_config.return_value.sparse_kv_offload_config.enabled = False
 
     def tearDown(self):
+        self.ascend_config_patcher.stop()
         self.utils_patcher.stop()
+        self.dsa_patcher.stop()
         self.config_context.__exit__(None, None, None)
 
     def test_get_name(self):
@@ -73,7 +81,7 @@ class TestAscendSFABackend(TestBase):
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
@@ -81,7 +89,7 @@ class TestAscendSFABackend(TestBase):
         builder_cls = AscendSFABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
@@ -544,9 +552,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
         )
         self.parent_init_patcher.start()
 
-        if hasattr(enable_dsa_cp, "cache_clear"):
-            enable_dsa_cp.cache_clear()
-
     def tearDown(self):
         self.patcher.stop()
         self.ascend_config_patcher.stop()
@@ -578,16 +583,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
     @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build(
         self,
-        mock_enable_dsa_cp,
         mock_get_cos_and_sin_mla,
         mock_get_current_vllm_config,
     ):
-        mock_enable_dsa_cp.return_value = False
-
         cfg = MagicMock()
         cfg.model_config = MagicMock()
         cfg.model_config.hf_text_config = MagicMock()
@@ -615,10 +616,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
+        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
-        common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
+        common_attn_metadata.seq_lens = torch.full((10,), 10, dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        common_attn_metadata._seq_lens_cpu = None
         common_attn_metadata.positions = torch.randn(100)
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
@@ -637,14 +640,30 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert isinstance(metadata, AscendSFAMetadata)
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
+        # TODO: Revisit this logic after ModelRunner V1 is fully removed,
+        # and remove it if ModelRunner V2 no longer depends on these per-step buffers.
+        assert metadata.cum_query_lens.data_ptr() == builder.actual_seq_lengths_query.data_ptr()
+        assert metadata.seq_lens.data_ptr() == builder.actual_seq_lengths_key.data_ptr()
+
+        draft_metadata_0 = builder.build_for_drafting(common_attn_metadata, draft_index=0)
+        draft_0_cum_query_lens = draft_metadata_0.cum_query_lens.clone()
+        draft_0_seq_lens = draft_metadata_0.seq_lens.clone()
+
+        common_attn_metadata.query_start_loc = torch.arange(0, 111, 11, dtype=torch.int32)
+        common_attn_metadata.seq_lens = torch.full((10,), 11, dtype=torch.int32)
+        draft_metadata_1 = builder.build_for_drafting(common_attn_metadata, draft_index=1)
+
+        assert draft_metadata_0.cum_query_lens.data_ptr() != draft_metadata_1.cum_query_lens.data_ptr()
+        assert draft_metadata_0.seq_lens.data_ptr() != draft_metadata_1.seq_lens.data_ptr()
+        assert torch.equal(draft_metadata_0.cum_query_lens, draft_0_cum_query_lens)
+        assert torch.equal(draft_metadata_0.seq_lens, draft_0_seq_lens)
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("vllm.distributed.parallel_state.get_tp_group")
     @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(
-        self, mock_get_tp_group, mock_enable_dsa_cp, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
+        self, mock_get_tp_group, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
     ):
         cfg = MagicMock()
         cfg.model_config = MagicMock()
@@ -674,10 +693,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
+        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
-        common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
+        common_attn_metadata.seq_lens = torch.full((10,), 10, dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        common_attn_metadata._seq_lens_cpu = None
         common_attn_metadata.positions = torch.randn(100)
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
@@ -698,12 +719,10 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
     def test_ascend_sfa_metadata_builder_build_with_c8_reshape_optim(
         self,
         store_kv_block_metadata,
-        mock_enable_dsa_cp,
         mock_get_cos_and_sin_mla,
         mock_get_current_vllm_config,
     ):
@@ -734,10 +753,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
+        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
         common_attn_metadata.slot_mapping = torch.randint(0, 10000, (100, 4, 1024), dtype=torch.int64)
-        common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
+        common_attn_metadata.seq_lens = torch.full((10,), 10, dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        common_attn_metadata._seq_lens_cpu = None
         common_attn_metadata.positions = torch.randn(100)
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
@@ -776,26 +797,19 @@ class TestAscendSFAMetadataBuilder(TestBase):
 class TestAscendSFAImpl(TestBase):
     @patch("vllm.distributed.parallel_state._TP", new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp_with_o_proj_tp")
     @patch("vllm_ascend.attention.sfa_v1.enable_sp")
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def setUp(
         self,
         mock_get_ascend_config,
-        mock_enable_dsa_cp,
         mock_enable_sp,
-        mock_enable_dsa_cp_with_o_proj_tp,
         mock_get_current_vllm_config,
         mock_tp,
     ):
         mock_tp.world_size = 1
-        mock_tp.rank_in_group = 0
         mock_tp.device_group = MagicMock()
 
-        mock_enable_dsa_cp.return_value = False
         mock_enable_sp.return_value = False
-        mock_enable_dsa_cp_with_o_proj_tp.return_value = False
 
         # Default ascend config (non-MLAPO, non-C8)
         mock_ascend_config = MagicMock()
@@ -953,7 +967,6 @@ class TestAscendSFAImpl(TestBase):
         """exec_kv with enable_sparse_sfa_c8 delegates to custom_kv_rmsnorm_rope."""
         self.impl.enable_sparse_sfa_c8 = True
         self.impl.c8_k_cache_dtype = torch.int8
-        self.impl.enable_dsa_cp = False
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5
@@ -1073,9 +1086,9 @@ class TestAscendSFAImpl(TestBase):
 
     def test_reasons_dsa_cp_blocked(self):
         self._setup_prolog_v3_state()
-        self.impl.enable_dsa_cp = True
-
-        reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+        impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+        impl.__dict__.update(self.impl.__dict__)
+        reasons = impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
         self.assertTrue(any("DSA-CP" in r for r in reasons))
 
     def test_reasons_kv_producer_blocked(self):

@@ -192,6 +192,12 @@ def enable_dcp():
     return parallel_config.decode_context_parallel_size > 1
 
 
+@lru_cache(maxsize=1)
+def enable_pcp():
+    parallel_config = get_current_vllm_config().parallel_config
+    return parallel_config.prefill_context_parallel_size > 1
+
+
 @dataclass
 class AscendDCPMetadata:
     """Per-batch metadata required by decode context parallelism."""
@@ -466,9 +472,9 @@ def notify_kv_cache_written(layer_name: str = ""):
     The attention layer calls this unconditionally; each connector decides whether
     it needs to record a synchronization primitive (e.g. a compute-stream event
     later waited on by the resharding stream to overlap the outgoing KV copy).
-    Connectors that don't need it -- such as the AscendStore pool connector, which
-    records its own sync event at save time -- simply do not implement
-    ``on_kv_cache_written`` and this becomes a no-op.
+    The AscendStore pool and SFA-PD connectors implement
+    ``on_kv_cache_written`` to dispatch a layerwise save or PD-pull
+    notification at scatter time. Other connectors can omit the hook.
     """
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return

@@ -44,7 +44,13 @@ class TestBlockTableComputeSlotMapping(TestBase):
         self.kernel_sizes = [128]
         self._skip_triton_kernel = True
 
-    def create_block_table(self, dcp_world_size, dcp_rank, cp_kv_cache_interleave_size):
+    def create_block_table(
+        self,
+        dcp_world_size,
+        dcp_rank,
+        cp_kv_cache_interleave_size,
+        num_speculative_tokens=0,
+    ):
         """Helper method to create BlockTable with mocked distributed groups"""
 
         with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group:
@@ -65,10 +71,32 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 device=self.device,
                 kernel_sizes=self.kernel_sizes,
                 cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-                num_speculative_tokens=0,
+                num_speculative_tokens=num_speculative_tokens,
             )
 
             return block_table
+
+    def test_compute_slot_mapping_draft_reserves_mtp_slots(self):
+        """MTP5 draft slots can exceed the scheduler token capacity."""
+        self.max_num_reqs = 12
+        self.max_num_batched_tokens = 80
+        block_table = self.create_block_table(
+            dcp_world_size=4,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+            num_speculative_tokens=5,
+        )
+
+        num_active_reqs = 11
+        for req_idx in range(num_active_reqs):
+            block_table.add_row([req_idx], req_idx)
+
+        req_indices = np.repeat(np.arange(num_active_reqs, dtype=np.int32), 10)
+        positions = np.tile(np.arange(10, dtype=np.int64), num_active_reqs)
+        block_table.compute_slot_mapping_draft(req_indices, positions)
+
+        self.assertEqual(block_table.slot_mapping.cpu.numel(), 128)
+        self.assertEqual(block_table.slot_mapping.cpu[: req_indices.size].numel(), 110)
 
     def setup_block_table_data(self, block_table, num_reqs=2):
         """Helper method to populate block table with test data"""
@@ -76,6 +104,27 @@ class TestBlockTableComputeSlotMapping(TestBase):
         for i in range(num_reqs):
             block_ids = list(range(i * 4, (i + 1) * 4))  # [0,1,2,3], [4,5,6,7], etc.
             block_table.add_row(block_ids, i)
+
+    def test_dsv4_logical_block_ids_are_not_expanded(self):
+        self.block_size = 512
+        self.kernel_sizes = [512]
+        block_table = self.create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+
+        block_table.add_row([7, 11], 0)
+
+        self.assertFalse(block_table.use_hybrid_blocks)
+        self.assertEqual(block_table.blocks_per_phys_block, 1)
+        self.assertEqual(block_table.physical_block_size, 512)
+        self.assertEqual(block_table.logical_block_size, 512)
+        self.assertEqual(block_table.num_blocks_per_row[0], 2)
+        np.testing.assert_array_equal(
+            block_table.block_table.np[0, :2],
+            np.array([7, 11], dtype=np.int32),
+        )
 
     def _test_slot_mapping_for_ranks(self, dcp_world_size, cp_kv_cache_interleave_size, test_configs):
         """Helper method to test slot_mapping across multiple ranks

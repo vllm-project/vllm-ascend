@@ -115,8 +115,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "vllm_quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
-        "hc_pre_sinkhorn"
-        "hc_pre_inv_rms"
         "hc_pre"
         "hc_post"
         "inplace_partial_rotary_mul"
@@ -130,6 +128,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "store_kv_block"
         "store_kv_block_metadata"
         "sparse_attention_score"
+        "k2q_csr"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -163,8 +162,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "vllm_quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
-        "hc_pre_sinkhorn"
-        "hc_pre_inv_rms"
         "hc_pre"
         "hc_post"
         "inplace_partial_rotary_mul"
@@ -178,6 +175,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "store_kv_block"
         "store_kv_block_metadata"
         "sparse_attention_score"
+        "k2q_csr"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
@@ -189,7 +187,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "moe_gating_top_k_hash"
-        "indexer_compress_epilog"
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"
         "compressor"
@@ -198,12 +195,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "vllm_quant_lightning_indexer_metadata"
         "kv_quant_sparse_attn_sharedkv"
         "kv_quant_sparse_attn_sharedkv_metadata"
-        "hc_pre_sinkhorn"
-        "hc_pre_inv_rms"
         "hc_post"
         "hc_pre"
         "swiglu_group_quant"
-        "load_index_kv_cache"
         "indexer_compress_epilog_v2"
         "causal_conv1d"
         "recurrent_gated_delta_rule"
@@ -211,7 +205,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
         "store_kv_block_metadata"
-        "sparse_attention_score"
+        "k2q_csr"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

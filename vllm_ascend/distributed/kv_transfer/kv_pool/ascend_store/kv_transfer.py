@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -13,12 +14,11 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 # isort: off
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
-    infer_cache_family_ratio,
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
@@ -740,8 +740,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
             group_block_size = self._get_block_size(group_id)
-            cache_family = self.token_database.group_cache_families["kv"].get(group_id)
-            raw_group_block_size = group_block_size * infer_cache_family_ratio(cache_family)
 
             group_store_mask = (
                 list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
@@ -749,8 +747,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if group_store_mask is not None:
                 skipped_chunks = 0
                 for chunk_id, allowed in enumerate(group_store_mask):
-                    start = chunk_id * raw_group_block_size
-                    if allowed and should_skip(start, start + raw_group_block_size):
+                    start = chunk_id * group_block_size
+                    if allowed and should_skip(start, start + group_block_size):
                         group_store_mask[chunk_id] = False
                         skipped_chunks += 1
                 if skipped_chunks:
@@ -776,14 +774,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 start: int,
                 group_block_size=group_block_size,
                 group_store_mask=group_store_mask,
-                raw_group_block_size=raw_group_block_size,
             ) -> bool:
                 block_idx = start // group_block_size
                 mask_allows = group_store_mask is None or (
                     block_idx < len(group_store_mask) and group_store_mask[block_idx]
                 )
-                chunk_start = block_idx * raw_group_block_size
-                return mask_allows and not should_skip(chunk_start, chunk_start + raw_group_block_size)
+                chunk_start = block_idx * group_block_size
+                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
             pre_shard = self.dcp_size <= 1 and not align_state_group
             iterator = self.token_database.process_token_key_strings_with_block_ids(
@@ -1427,14 +1424,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             )
-            if physical_layer <= 2 or res != 0:
-                logger.info(
-                    "save_thread: layer=%d groups=%d blocks=%d res=%d",
-                    physical_layer,
-                    len(all_gvas),
-                    len(gvas_array),
-                    res,
-                )
             if res != 0:
                 raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
             if all_save_keys:
@@ -1485,11 +1474,14 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         get_event: threading.Event,
         layer_load_finished_events: list[threading.Event],
         layer_save_finished_events: list[threading.Event],
+        sync_save_events: list[torch.npu.Event],
         num_layers: int,
         h2d_stagger_us: int = 0,
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
+        external_slot_release_waiter: Callable[[int], None] | None = None,
+        save_failure_checker: Callable[[], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1504,10 +1496,13 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.get_event = get_event
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
+        self.sync_save_events = sync_save_events
         self.final_layer_id = num_layers - 1
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self.external_slot_release_waiter = external_slot_release_waiter
+        self.save_failure_checker = save_failure_checker
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1556,20 +1551,30 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
 
+        if wait_for_save is not None:
+            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
+                if self.save_failure_checker is not None:
+                    self.save_failure_checker()
+                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+            if self.save_failure_checker is not None:
+                self.save_failure_checker()
+            # Non-saving TP ranks have no D2H task to synchronize the event.
+            # Their CPU save-finished signal only means the event was recorded;
+            # wait for the NPU work before reusing the local HBM buffer.
+            self.sync_save_events[wait_for_save].synchronize()
+            logger.debug("Layer save event cleared: layer %d", wait_for_save)
+            self.layer_save_finished_events[wait_for_save].clear()
+
         if len(transfer_tasks) == 0:
-            if wait_for_save is not None:
-                while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                    logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-                logger.debug("Layer save event cleared: layer %d", wait_for_save)
-                self.layer_save_finished_events[wait_for_save].clear()
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
 
-        # Build req_meta for all tasks first; if all are None, early return
-        # before wait_for_save (matches original single-task behavior).
+        # Build req_meta for all tasks first; if all are None, early return.
         task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
         for task in transfer_tasks:
             shared = task.shared_block_data
@@ -1582,17 +1587,13 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 task_metas.append((task, req_meta))
 
         if not task_metas:
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
-
-        if wait_for_save is not None:
-            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
 
         if attention_start_gate is not None:
             while not attention_start_gate.wait(timeout=10):
@@ -1619,6 +1620,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
         addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+        if self.external_slot_release_waiter is not None:
+            self.external_slot_release_waiter(layer_id)
         res = self._batch_copy_with_limits(
             gvas_array,
             addr_array,
@@ -1641,7 +1644,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if layer_id == self.final_layer_id and all_load_keys:
             unique_load_keys = list(dict.fromkeys(all_load_keys))
             self.m_store.batch_remove_lease(unique_load_keys)
-            logger.info(
+            logger.debug(
                 "[KVPOOL] load_thread released %d leases after final layer %d",
                 len(unique_load_keys),
                 layer_id,
@@ -1653,7 +1656,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
         logger.debug("Layer load event set: layer %d", layer_id)
         self.layer_load_finished_events[layer_id].set()
-        transfer_tasks.clear()
+        # transfer_tasks aliases KVPoolWorker.layer_load_tasks[layer_id]. Do
+        # not mutate the worker-owned list from this asynchronous thread. The
+        # worker replaces all per-layer lists at the beginning of every step.
         self.request_queue.task_done()
         self.get_event.set()
 

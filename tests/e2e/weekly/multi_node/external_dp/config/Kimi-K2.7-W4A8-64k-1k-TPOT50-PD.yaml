@@ -39,7 +39,6 @@ env_common: &env_common
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  ASCEND_BUFFER_POOL: "4:8"
   VLLM_ASCEND_ENABLE_MLAPO: "1"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_SERVER_DEV_MODE: "1"
@@ -147,5 +146,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 15
     request_rate: 0.4
-    baseline: 347.4475
+    baseline: 242.7762
     threshold: 0.97

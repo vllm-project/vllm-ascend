@@ -25,9 +25,10 @@ import numpy as np
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
+    LayerLoadTask,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
     LayerBatchReqMeta,
@@ -293,14 +294,162 @@ class TestGVALayerTransferFailures(unittest.TestCase):
         store.batch_write_finish.assert_called_once_with(["k0"], [0])
 
 
+class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
+    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
+        store = MagicMock()
+        store.store.batch_copy.return_value = 0
+        load_finished = [threading.Event(), threading.Event()]
+        save_finished = [threading.Event(), threading.Event()]
+        sync_events = [MagicMock(), MagicMock()]
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerBatchReqMeta(
+            req_ids=["r1"],
+            layer_id=1,
+            is_last_chunks=[False],
+            addr_array=np.asarray([10]),
+            size_array=np.asarray([16]),
+            gvas_array=np.asarray([100]),
+        )
+        thread = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=16,
+            ready_event=threading.Event(),
+            get_event=threading.Event(),
+            layer_load_finished_events=load_finished,
+            layer_save_finished_events=save_finished,
+            sync_save_events=sync_events,
+            num_layers=2,
+            group_builders=[builder],
+            external_slot_release_waiter=external_slot_release_waiter,
+            save_failure_checker=save_failure_checker,
+        )
+        return thread, load_finished, save_finished, sync_events
+
+    def test_handle_request_does_not_clear_worker_owned_tasks(self):
+        thread, _, _, _ = self._make_thread()
+        task = LayerTransferTask(
+            layer_id=1,
+            block_ranges=[],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([0]),
+                block_gvas_arr=np.asarray([100]),
+                req_ids=["r1"],
+                is_last_chunks=[False],
+            ),
+        )
+        transfer_tasks = [task]
+        load_task = LayerLoadTask(
+            wait_for_save_layer=None,
+            transfer_tasks=transfer_tasks,
+            layer_id=1,
+        )
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        self.assertEqual(transfer_tasks, [task])
+
+    def test_empty_reuse_gate_waits_for_non_saving_rank_compute(self):
+        thread, load_finished, save_finished, sync_events = self._make_thread()
+        save_finished[0].set()
+        load_task = LayerLoadTask(
+            wait_for_save_layer=0,
+            transfer_tasks=[],
+            layer_id=1,
+        )
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        sync_events[0].synchronize.assert_called_once_with()
+        self.assertFalse(save_finished[0].is_set())
+        self.assertTrue(load_finished[1].is_set())
+
+    def test_source_save_failure_stops_receiver_wait(self):
+        save_failure_checker = MagicMock(side_effect=RuntimeError("save thread failed"))
+        thread, _, save_finished, _ = self._make_thread(save_failure_checker=save_failure_checker)
+        save_finished[0] = MagicMock()
+        save_finished[0].wait.return_value = False
+        load_task = LayerLoadTask(
+            wait_for_save_layer=0,
+            transfer_tasks=[],
+            layer_id=1,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "save thread failed"):
+            thread._handle_request(load_task)
+
+        save_failure_checker.assert_called_once_with()
+
+    def test_h2d_waits_for_source_save_then_target_layer_reuse(self):
+        call_order: list[tuple[str, int]] = []
+        thread, _, save_finished, sync_events = self._make_thread(
+            external_slot_release_waiter=lambda layer_id: call_order.append(("reuse", layer_id))
+        )
+        save_finished[0].set()
+        sync_events[0].synchronize.side_effect = lambda: call_order.append(("save", 0))
+
+        def record_h2d(*_args) -> int:
+            call_order.append(("h2d", 1))
+            return 0
+
+        thread._batch_copy_with_limits = MagicMock(side_effect=record_h2d)
+        task = LayerTransferTask(
+            layer_id=1,
+            block_ranges=[],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([0]),
+                block_gvas_arr=np.asarray([100]),
+                req_ids=["r1"],
+                is_last_chunks=[False],
+            ),
+        )
+        load_task = LayerLoadTask(wait_for_save_layer=0, transfer_tasks=[task], layer_id=1)
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        self.assertEqual(call_order, [("save", 0), ("reuse", 1), ("h2d", 1)])
+
+    def test_empty_load_waits_for_target_layer_reuse_before_finish(self):
+        load_finished_observed: list[bool] = []
+        thread = None
+
+        def wait_for_reuse(layer_id):
+            assert thread is not None
+            load_finished_observed.append(thread.layer_load_finished_events[layer_id].is_set())
+
+        thread, load_finished, _, _ = self._make_thread(external_slot_release_waiter=wait_for_reuse)
+        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[], layer_id=1)
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        self.assertEqual(load_finished_observed, [False])
+        self.assertTrue(load_finished[1].is_set())
+
+
 class TestKVCacheStoreSendingThread(unittest.TestCase):
-    def _make_thread(self, exists_result=None, kv_role="kv_producer", enable_kv_event=False):
+    def _make_thread(
+        self,
+        exists_result=None,
+        kv_role="kv_producer",
+        enable_kv_event=False,
+        block_size=16,
+    ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
-        db = FakeTokenDatabase()
+        db = FakeTokenDatabase(block_size=block_size)
         t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
-            block_size=16,
+            block_size=block_size,
             tp_rank=0,
             dcp_size=1,
             put_step=1,
@@ -473,7 +622,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(keys), 1)
 
     def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
-        t, store = self._make_thread([0, 0])
+        t, store = self._make_thread([0, 0], block_size=64)
         t.token_database.group_cache_families["kv"][0] = "c4"
         req = ReqMeta(
             req_id="r1",

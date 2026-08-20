@@ -126,7 +126,7 @@ def quantize_model(model, env_vars, dataset_dict=None):
 
 
 def save_quantized_model(model, tokenizer, save_path, save_compressed=False):
-    model.save_pretrained(save_path, save_compressed=save_compressed)
+    model.save_pretrained(save_path, save_compressed=save_compressed, max_shard_size="5GB")
     tokenizer.save_pretrained(save_path)
 
 

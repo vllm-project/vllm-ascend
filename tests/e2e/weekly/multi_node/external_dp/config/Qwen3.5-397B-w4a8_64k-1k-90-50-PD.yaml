@@ -55,7 +55,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      ASCEND_BUFFER_POOL: "4:8"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -71,6 +70,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "32"
       - --max-model-len
@@ -118,7 +123,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      ASCEND_BUFFER_POOL: "4:8"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -134,6 +138,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "32"
       - --max-model-len
@@ -198,6 +208,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "32"
       - --max-model-len
@@ -254,5 +270,5 @@ benchmarks:
         max_out_len: 1024
         batch_size: 250
         request_rate: 1
-        baseline: 1041.18
+        baseline: 1005.6834
         threshold: 0.97
