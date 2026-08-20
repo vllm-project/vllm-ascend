@@ -552,17 +552,16 @@ class TestAscendAttentionBackendImpl(TestBase):
     def test_forward_decode_only_uses_fia(
         self, mock_get_forward_context, mock_npu_reshape_and_cache, mock_fused_infer_attention_score
     ):
-        """Test forward pass in DecodeOnly state"""
-        query = torch.randn(4, 8, 64)
-        key = torch.randn(4, 8, 64)
-        value = torch.randn(4, 8, 64)
+        """Test forward pass in DecodeOnly state using FIA"""
+        query = torch.randn(4, 8 * 64)
+        key = torch.randn(4, 8 * 64)
+        value = torch.randn(4, 8 * 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
 
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.seq_lens = torch.tensor([4])
-        metadata.actual_seq_lengths_q = [4]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 4
         metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
@@ -571,12 +570,43 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        mock_fused_infer_attention_score.return_value = (torch.ones(4, 8, 64), None)
 
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
         mock_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (4, 8, 64)
+        assert output.shape == (4, 8 * 64)
+
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
+    @patch("torch_npu._npu_paged_attention")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_paged_attention(
+        self, mock_get_forward_context, mock_npu_scatter_pa_kv_cache, mock_paged_attention, mock_using_paged_attention
+    ):
+        """Test forward pass in DecodeOnly state using paged attention"""
+        query = torch.randn(4, 8 * 64)
+        key = torch.randn(4, 8 * 64)
+        value = torch.randn(4, 8 * 64)
+        kv_cache = torch.empty(2, 5, 128, 8, 64)
+        output = torch.empty_like(query)
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.seq_lens = torch.tensor([4])
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 4
+        metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
+        metadata.num_decodes = 4
+        metadata.num_prefills = 0
+        layer = self.layer_no_quant
+        mock_using_paged_attention.return_value = True
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+        output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
+
+        mock_paged_attention.assert_called_once()
+        assert output.shape == (4, 8 * 64)
 
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
     @patch("torch_npu._npu_paged_attention")
