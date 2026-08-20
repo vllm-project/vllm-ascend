@@ -41,6 +41,8 @@ vllm serve <glm-5.2-model> \
   --cp-kv-cache-interleave-size <B> \
 ```
 
+DCP reuses the TP devices and does not increase the world size.
+
 ### DSA-CP
 
 ```bash
