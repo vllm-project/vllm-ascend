@@ -186,7 +186,8 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --additional-config '{"enable_cpu_binding":true,
                           "enable_fused_mc2":true,
                           "enable_flashcomm1":true,
-                          "weight_nz_mode":true}' \
+                          "weight_nz_mode":true,
+                          "VLLM_ASCEND_BALANCE_SCHEDULING":0}' \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
@@ -306,7 +307,9 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --enforce-eager \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                        "VLLM_ASCEND_ENABLE_FLASHCOMM1":1,
+                        "VLLM_ASCEND_ENABLE_FUSED_MC2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -364,7 +367,9 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                        "VLLM_ASCEND_ENABLE_FLASHCOMM1":0,
+                        "VLLM_ASCEND_ENABLE_FUSED_MC2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -588,7 +593,7 @@ The following optimizations are enabled by default and require no additional con
 | ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
 | FlashComm v1 | High-concurrency, TP scenarios | `--additional-config '{"enable_flashcomm1": true}'` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather | Threshold protection: only takes effect when the actual number of tokens exceeds the threshold |
 | Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": true}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
-| Balanced Scheduling | High DP scenarios | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
+| Balanced Scheduling | High DP scenarios | `--additional-config '{"VLLM_ASCEND_BALANCE_SCHEDULING": 1}'` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
 | EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{"method": "eagle3", "model": "/path/to/Eagle3/", "num_speculative_tokens": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |
 | jemalloc Preload | All scenarios | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default memory allocator to reduce fragmentation | Ensure jemalloc is installed in the container |
 
