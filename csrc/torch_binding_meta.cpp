@@ -1446,15 +1446,6 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
-void npu_scatter_nd_update_v2_meta(
-    at::Tensor& var,
-    const at::Tensor& indices,
-    const at::Tensor& update)
-{
-    return;
-}
-
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3_meta(
     const at::Tensor &token_x,
     const at::Tensor &weight_dq,
@@ -2020,7 +2011,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_load_index_kv_cache", &vllm_ascend::meta::npu_load_index_kv_cache_meta);
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
-    ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
     // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu

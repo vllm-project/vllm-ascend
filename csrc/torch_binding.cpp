@@ -1936,17 +1936,6 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
     return std::make_tuple(y, scale);
 }
 
-void npu_scatter_nd_update_v2(
-    at::Tensor& var,
-    const at::Tensor& indices,
-    const at::Tensor& update)
-{
-    // construct the output tensor
-    at::IntArrayRef var_stride = var.strides();
-    EXEC_NPU_CMD(aclnnScatterNdUpdateV2, var, indices, update, var_stride);
-    return;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
     const at::Tensor & k,
     const at::Tensor & w,
@@ -3069,13 +3058,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y, Tensor scale)"
     );
     ops.impl("npu_dequant_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::npu_dequant_swiglu_quant);
-
-    ops.def(
-        "npu_scatter_nd_update_v2("
-                "Tensor(a!) var, Tensor indices, Tensor update"
-            ") -> ()"
-    );
-    ops.impl("npu_scatter_nd_update_v2", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_v2);
 
     // This operator is planned to be integrated into PTA in the near future.
     // Once that happens, the implementation in csrc will be removed.
