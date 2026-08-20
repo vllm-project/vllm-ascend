@@ -56,6 +56,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -197,8 +198,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
-from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
-from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3IndexerCache
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -4046,6 +4045,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
+        compilation_config = getattr(self, "compilation_config", None)
+        if compilation_config is None:
+            compilation_config = getattr(self.vllm_config, "compilation_config", None)
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
             group_spec = group_kv_cache_spec.kv_cache_spec
             for layer_name in group_kv_cache_spec.layer_names:
@@ -4053,16 +4056,12 @@ class NPUModelRunner(GPUModelRunner):
                     layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
                 else:
                     layer_kv_cache_spec[layer_name] = group_spec
-                # Prefer runner.compilation_config (set in GPUModelRunner.__init__);
-                # fall back for partial constructions used by unit tests.
-                compilation_config = getattr(self, "compilation_config", None)
-                if compilation_config is None:
-                    compilation_config = getattr(self.vllm_config, "compilation_config", None)
-                static_forward_context = getattr(compilation_config, "static_forward_context", None)
                 if static_forward_context is not None:
                     attn_layer = static_forward_context.get(layer_name)
-                    if isinstance(attn_layer, AscendMiniMaxM3IndexerCache):
-                        layer_kv_cache_spec[layer_name] = attn_layer.get_kv_cache_spec(self.vllm_config)
+                    if isinstance(attn_layer, AttentionLayerBase):
+                        spec = attn_layer.get_kv_cache_spec(self.vllm_config)
+                        if isinstance(spec, AscendSFAIndexerCacheSpec):
+                            layer_kv_cache_spec[layer_name] = spec
         return layer_kv_cache_spec
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
@@ -4811,6 +4810,22 @@ class NPUModelRunner(GPUModelRunner):
             layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase, kv_cache_group_spec.layer_names)
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
+
+            def backend_supports_kernel_block_size(
+                attn_backend: type[AttentionBackend],
+                block_size: int,
+            ) -> bool:
+                for supported_size in attn_backend.get_supported_kernel_block_sizes():
+                    if isinstance(supported_size, int):
+                        if block_size == supported_size:
+                            return True
+                    elif isinstance(supported_size, MultipleOf):
+                        if block_size % supported_size.base == 0:
+                            return True
+                    else:
+                        raise ValueError(f"Unknown supported size: {supported_size}")
+                return False
+
             # Dedupe based on full class name; this is a bit safer than
             # using the class itself as the key because when we create dynamic
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
@@ -4820,14 +4835,19 @@ class NPUModelRunner(GPUModelRunner):
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-                if isinstance(layers[layer_name], AscendMiniMaxM3IndexerCache):
-                    attn_backend = layers[layer_name].get_attn_backend()
-                elif isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec):
+                # Prefer the backend declared by the layer itself. Some
+                # indexer-cache layers require their own metadata builder.
+                attn_backend = layers[layer_name].get_attn_backend()
+                if (
+                    isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec)
+                    and not backend_supports_kernel_block_size(
+                        attn_backend,
+                        layer_kv_cache_spec.block_size,
+                    )
+                ):
                     from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 
                     attn_backend = AscendSFAIndexerBackend
-                else:
-                    attn_backend = layers[layer_name].get_attn_backend()
                 full_cls_name = attn_backend.full_cls_name()
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
@@ -4934,10 +4954,7 @@ class NPUModelRunner(GPUModelRunner):
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
-            elif isinstance(
-                attn_module,
-                (Attention, MiniMaxM3SparseAttention, AscendMiniMaxM3IndexerCache),
-            ):
+            elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
@@ -5021,6 +5038,11 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=spec.dtype,
                         cache_dtype_str=spec.cache_dtype_str,
                     )
+                    attn_layer_names.add(layer_name)
+
+            elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
+                if isinstance(spec, AttentionSpec):
                     attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
