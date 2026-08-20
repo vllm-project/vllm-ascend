@@ -857,7 +857,15 @@ private:
                     MatrixCoord offsetA{rowStart, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
                     int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + UB_ALIGN);
-                    int32_t ubMoveNum = 2;
+                    // Fill each 96 KiB ping-pong buffer with as many complete
+                    // token rows as possible to reduce copy and event overhead.
+                    constexpr uint32_t HALF_UB_SIZE = 96 * 1024;
+                    const uint32_t rowSizeBytes =
+                        (params.problemShape.k() + UB_ALIGN) * sizeof(ElementA);
+                    int32_t ubMoveNum = static_cast<int32_t>(HALF_UB_SIZE / rowSizeBytes);
+                    if (ubMoveNum < 1) {
+                        ubMoveNum = 1;
+                    }
                     CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], gmRemoteA[gmOffsetPeer],  rows, params.problemShape.k(), ubMoveNum, pingpongIdx);
                 }
 
