@@ -136,6 +136,15 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             layer_name=f"{prefix}.attn",
         )
 
+        # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
+        # layers, so quant methods must skip their own NZ conversion.
+        # Mark before VLLM calls process_weights_after_loading on submodules.
+        impl = self.mla_attn.impl
+        if getattr(impl, "_fused_preprocess_type", None) and impl._fused_preprocess_type() is not None:
+            for _layer in (impl.fused_qkv_a_proj, impl.q_proj):
+                if _layer is not None:
+                    _layer._fused_preprocess_managed = True
+
         original_process_weights = self.mla_attn.process_weights_after_loading
 
         def wrapped_process_weights(act_dtype: torch.dtype):
