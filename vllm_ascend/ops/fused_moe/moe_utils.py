@@ -31,6 +31,14 @@ _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
 _CANN_MEGA_MOE_QUANT_MODE_None = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
+_CANN_MEGA_MOE_QUANT_MODE_MXFP = 4
+# FP8/FP4 dispatch-quant-out dtype and weight-type enums (ACL/CANN). The FP8
+# values match mega_moe.py's _dtype_to_int and the Ascend 950 MegaMoe
+# dispatchQuantOutDtype values documented in cann_ops_transformer
+# (23 = FLOAT8_E5M2, 24 = FLOAT8_E4M3FN, 296 = FLOAT4_E2M1).
+_CANN_ACL_FLOAT8_E5M2 = 23
+_CANN_ACL_FLOAT8_E4M3FN = 24
+_CANN_ACL_FLOAT4_E2M1 = 296
 
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
@@ -139,6 +147,18 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
     if quant_type == QuantType.NONE:
         return (_CANN_MEGA_MOE_QUANT_MODE_None, None, None)
+    # Ascend 950 MegaMoe is MXFP-only (dispatch_quant_mode == 4). The
+    # dispatch_quant_out_dtype must bind to the activation dtype and the
+    # weight_type to the weight dtype, per the A5 scenario table:
+    #   W8A8MXFP -> A8W8-FP (act FP8, weight FP8)
+    #   W4A8MXFP -> A8W4-FP (act FP8, weight FP4)
+    #   W4A4MXFP -> A4W4-FP (act FP4, weight FP4)
+    if quant_type == QuantType.W8A8MXFP:
+        return (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT8_E4M3FN, _CANN_ACL_FLOAT8_E4M3FN)
+    if quant_type == QuantType.W4A8MXFP:
+        return (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT8_E4M3FN, _CANN_ACL_FLOAT4_E2M1)
+    if quant_type == QuantType.W4A4MXFP:
+        return (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT4_E2M1, _CANN_ACL_FLOAT4_E2M1)
 
     raise RuntimeError(
         "MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
