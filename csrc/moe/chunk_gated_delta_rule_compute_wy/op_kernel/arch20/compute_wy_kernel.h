@@ -431,16 +431,20 @@ class KernelComputeWy {
     LocalTensor<float> attnLocal = attnBuf_.Get<float>();
     LocalTensor<float> attnSnap = attnSnapBuf_.Get<float>();
     LocalTensor<float> scratch = tmpBuf_.Get<float>();
+    if (debugStage_ == 14) { PipeBarrier<PIPE_ALL>(); return; }
 
     // ---- Stage 1: K → tmp(fp32), Kβ → rhs, gram, Λ. V is not touched yet. ----
     LoadKChunk(b, kHeadIdx, tokenStart, halfLocal);
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     Cast(scratch, halfLocal, RoundMode::CAST_NONE, chunkKElems_);  // scratch = K fp32
+    if (debugStage_ == 11) { PipeBarrier<PIPE_ALL>(); return; }
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
     SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     LoadBetaChunk(betaLocal, halfLocal, chunkKElems_, b, tokenStart, vHeadIdx);
+    if (debugStage_ == 12) { PipeBarrier<PIPE_ALL>(); return; }
     // attnLocal doubles as the Brcb workspace (needs 64*8 floats) while free.
     BroadcastMulRowsFloat(rhs, scratch, betaLocal, attnLocal, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
+    if (debugStage_ == 13) { PipeBarrier<PIPE_ALL>(); return; }
     // attnSnap's first 64 floats hold gRaw; attnLocal is the g-load scratch
     // (Hv<=64 ⇒ FIXED_CHUNK*Hv <= ATTEN_ELEMS). Both are free until the gram.
     BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, attnSnap, attnLocal, ATTEN_ELEMS);
