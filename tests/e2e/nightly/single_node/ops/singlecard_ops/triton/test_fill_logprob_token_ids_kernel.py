@@ -33,7 +33,6 @@ import torch
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
 
-
 MAX_LOGPROB_TOKEN_IDS = 128
 
 
@@ -74,7 +73,6 @@ def _fill_logprob_token_ids_ref(
 
 
 class TestFillLogprobTokenIdsKernel:
-
     @pytest.mark.parametrize("batch_size", [1, 4, 8])
     @pytest.mark.parametrize("topk", [0, 3, 5])
     def test_custom_token_ids(self, batch_size, topk):
@@ -97,10 +95,7 @@ class TestFillLogprobTokenIdsKernel:
             device=device,
         )
         # Deterministically include request 0, which owns the custom token IDs.
-        expanded_idx_mapping = (
-            torch.arange(batch_size, dtype=torch.int32, device=device)
-            % num_reqs
-        )
+        expanded_idx_mapping = torch.arange(batch_size, dtype=torch.int32, device=device) % num_reqs
 
         # Some requests get custom token IDs, others don't
         num_per_req_token_ids = torch.zeros(num_reqs, dtype=torch.int32, device=device)
@@ -159,9 +154,7 @@ class TestFillLogprobTokenIdsKernel:
         NUM_TOPK = 0
         PADDED_COLS = 8
         sampled_token_ids = torch.tensor([42, 77], dtype=torch.int64, device=device)
-        topk_indices = torch.zeros(
-            batch_size, 1, dtype=torch.int32, device=device
-        )
+        topk_indices = torch.zeros(batch_size, 1, dtype=torch.int32, device=device)
         expanded_idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=device)
         num_per_req_token_ids = torch.zeros(2, dtype=torch.int32, device=device)
         per_req_token_ids = torch.zeros(2, MAX_LOGPROB_TOKEN_IDS, dtype=torch.int32, device=device)
