@@ -228,6 +228,7 @@ jobs:
             -o coverage.tar
           echo "Downloaded coverage.tar"
           echo "test2222"
+          echo "test2221111"
           du -h coverage.tar
           tar xf coverage.tar vllm-ascend/covstub
           test -d vllm-ascend/covstub
