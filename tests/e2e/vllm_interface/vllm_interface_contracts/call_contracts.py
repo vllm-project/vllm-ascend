@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from tools.vllm_interface_contracts.generator import (
+from .generator import (
     _TRITON_JIT_DECORATOR,
     _TRITON_KERNEL_PROTOCOL,
     InterfaceBoundaryGenerator,
@@ -1335,6 +1335,7 @@ class DirectCallDetector:
         return callable_info is not None and callable_info.decorator_references == (_TRITON_JIT_DECORATOR,)
 
     def discover(self) -> list[DirectCallDependency]:
+        """Discover exact downstream calls and constrained return uses."""
         dependencies: list[DirectCallDependency] = []
         self.historical_candidates = []
         for module_info in self.engine.downstream.modules.values():

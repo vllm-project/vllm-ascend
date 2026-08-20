@@ -36,12 +36,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from tools.vllm_interface_contracts.analysis_plans import (
+from .analysis_plans import (
     MAIN2MAIN_SCENARIO,
     AnalysisPlan,
     resolve_analysis_plan,
 )
-from tools.vllm_interface_contracts.call_contracts import (
+from .call_contracts import (
     DirectCallDependency,
     DirectCallDetector,
     ReturnContract,
@@ -52,7 +52,7 @@ from tools.vllm_interface_contracts.call_contracts import (
     return_contract_from_dict,
     return_use_compatible,
 )
-from tools.vllm_interface_contracts.generator import (
+from .generator import (
     _TRITON_JIT_DECORATOR,
     _TRITON_KERNEL_PROTOCOL,
     GENERATOR_VERSION,
@@ -69,7 +69,7 @@ from tools.vllm_interface_contracts.generator import (
     _scope_final_bindings,
     _tag_guard_names,
 )
-from tools.vllm_interface_contracts.models import (
+from .models import (
     CompatibilityState,
     RangeFinding,
     SourceEndpoint,
@@ -1859,6 +1859,7 @@ def _relation_findings(
     changed_upstream_files: tuple[str, ...],
     registered_overrides: dict[tuple[str, str], list[dict[str, object]]],
 ) -> list[RangeFinding]:
+    """Compare one verified replacement relation across the selected range."""
     old_endpoint, new_endpoint = _relation_endpoints(
         relation,
         old_snapshot,
@@ -2310,6 +2311,7 @@ def _direct_call_findings(
     old_snapshot: GitSnapshot,
     new_snapshot: GitSnapshot,
 ) -> tuple[list[RangeFinding], list[DirectCallDependency]]:
+    """Compare exact downstream call and return-use contracts at both SHAs."""
     findings: list[RangeFinding] = []
     exact_dependencies: list[DirectCallDependency] = []
     for dependency in dependencies:
@@ -2714,6 +2716,7 @@ def analyze_range(
     profile: str = "exact-contracts",
     scenario: str = MAIN2MAIN_SCENARIO,
 ) -> dict[str, Any]:
+    """Run the selected source-analysis plan for an exact vLLM range."""
     analysis_started = time.perf_counter()
     phase_started = time.perf_counter()
     timings: dict[str, float | None] = {}

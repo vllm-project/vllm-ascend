@@ -4,9 +4,9 @@ import json
 import subprocess
 from pathlib import Path
 
-from tools.vllm_interface_contracts.cli import main as cli_main
-from tools.vllm_interface_contracts.generator import InterfaceBoundaryGenerator
-from tools.vllm_interface_contracts.range_analysis import (
+from tests.e2e.vllm_interface.vllm_interface_contracts.cli import main as cli_main
+from tests.e2e.vllm_interface.vllm_interface_contracts.generator import InterfaceBoundaryGenerator
+from tests.e2e.vllm_interface.vllm_interface_contracts.range_analysis import (
     GitSnapshot,
     analyze_range,
     discover_imports,

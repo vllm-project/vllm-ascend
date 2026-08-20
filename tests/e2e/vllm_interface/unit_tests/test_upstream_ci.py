@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from tools.vllm_interface_contracts.upstream_ci import build_analysis_command, resolve_vllm_range
+from tests.e2e.vllm_interface.vllm_interface_contracts.upstream_ci import (
+    build_analysis_command,
+    resolve_vllm_range,
+)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -65,6 +68,10 @@ def test_build_analysis_command_uses_upstream_pr_scenario(tmp_path: Path) -> Non
         output_dir=tmp_path / "reports",
     )
 
-    assert command[1:4] == ["-m", "tools.vllm_interface_contracts", "analyze-range"]
+    assert command[1:4] == [
+        "-m",
+        "tests.e2e.vllm_interface.vllm_interface_contracts",
+        "analyze-range",
+    ]
     assert command[command.index("--scenario") + 1] == "vllm-interface"
     assert command[command.index("--fail-on") + 1] == "introduced"

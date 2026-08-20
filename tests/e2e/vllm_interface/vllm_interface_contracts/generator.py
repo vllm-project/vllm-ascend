@@ -48,8 +48,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from tools.vllm_interface_contracts import schema as _boundary_schema
-from tools.vllm_interface_contracts.analysis_plans import MAIN2MAIN_PLAN, AnalysisPlan
+from . import schema as _boundary_schema
+from .analysis_plans import MAIN2MAIN_PLAN, AnalysisPlan
 
 SCHEMA_VERSION = 6
 GENERATOR_VERSION = "0.38.0"
@@ -2646,6 +2646,7 @@ class RepositoryIndex:
         self._parse()
 
     def _parse(self) -> None:
+        """Parse repository modules and build the static symbol indexes."""
         for path in sorted(self.package_root.rglob("*.py")):
             relative_file = path.relative_to(self.repo_root).as_posix()
             try:
@@ -4413,6 +4414,7 @@ class InterfaceBoundaryGenerator:
         descriptor_kind: str | None = None,
         binds_receiver: bool | None = None,
     ) -> SignatureContract:
+        """Derive the callable contract after statically known wrappers."""
         definition_signature = callable_info.signature
         runtime_entry_signature = definition_signature
         reported_signature = definition_signature
@@ -5260,6 +5262,7 @@ class InterfaceBoundaryGenerator:
                 )
 
     def _collect_verified_overrides(self) -> None:
+        """Collect downstream overrides with a statically proven upstream owner."""
         for class_info in self.downstream.classes.values():
             if self._conditional_class_dependency(class_info.qualified_name) is not None:
                 continue
@@ -5533,6 +5536,7 @@ class InterfaceBoundaryGenerator:
         *,
         override_path: tuple[str, ...],
     ) -> None:
+        """Record one override after validating its owner and installed contract."""
         is_external = self._is_external_owner(effective_owner)
         if not effective_owner.startswith("vllm.") and not is_external:
             return
@@ -6024,6 +6028,7 @@ class InterfaceBoundaryGenerator:
             list[tuple[dict[str, set[str] | None], tuple[GuardFact, ...]]],
         ],
     ) -> PatchFlowResult:
+        """Propagate bindings and guards through private patch helper calls."""
         exits: list[PatchFlowExit] = []
         for node in statements:
             if isinstance(node, ast.Assert):
@@ -7068,6 +7073,7 @@ class InterfaceBoundaryGenerator:
         context: PatchScanContext,
         tag_guard_names: set[str],
     ) -> tuple[StaticValueAlternative, ...] | None:
+        """Resolve statically provable values together with their guards."""
         if node is None:
             return None
 
@@ -7627,6 +7633,7 @@ class InterfaceBoundaryGenerator:
         context: PatchScanContext,
         tag_guard_names: set[str],
     ) -> PatchFlowResult:
+        """Interpret patch statements while preserving control-flow evidence."""
         exits: list[PatchFlowExit] = []
         for node in statements:
             if isinstance(node, ast.Assert):
@@ -8690,6 +8697,7 @@ class InterfaceBoundaryGenerator:
         *,
         evidence_target: str | None = None,
     ) -> None:
+        """Validate and record one resolved patch installation relation."""
         replacement = self._resolve_patch_replacement(
             module_info,
             replacement_node,
@@ -8957,6 +8965,7 @@ class InterfaceBoundaryGenerator:
         evidence_target: str | None,
         replacement: PatchReplacement,
     ) -> CandidateFinding | None:
+        """Build a review finding for a patch targeting a non-callable field."""
         if self._find_upstream_patch_target(target) is not None:
             return None
         upstream_value = self.upstream.find_value(target)
@@ -9073,6 +9082,7 @@ class InterfaceBoundaryGenerator:
         target: str,
         line: int,
     ) -> PatchReplacement:
+        """Resolve the callable or value installed by a patch statement."""
         kind = "replacement"
         installed_descriptor_kind: str | None = None
         if isinstance(node, ast.Call):
@@ -9346,6 +9356,7 @@ class InterfaceBoundaryGenerator:
         target: str | None = None,
         line: int,
     ) -> PatchReplacement | None:
+        """Resolve a statically inspectable wrapper-factory result."""
         expression = _expression_name(node.func)
         if expression is None:
             return None
@@ -9935,6 +9946,7 @@ def _verified_external_sources(
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the legacy-compatible relation-generator command line."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vllm-root", type=Path, required=True)
     parser.add_argument("--ascend-root", type=Path, required=True)

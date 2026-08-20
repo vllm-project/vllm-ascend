@@ -23,13 +23,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from tools.vllm_interface_contracts import generator
-from tools.vllm_interface_contracts.analysis_plans import (
+from . import generator
+from .analysis_plans import (
     MAIN2MAIN_SCENARIO,
     SCENARIOS,
     resolve_analysis_plan,
 )
-from tools.vllm_interface_contracts.range_analysis import (
+from .range_analysis import (
     GitSnapshot,
     analyze_range,
     git_head,
