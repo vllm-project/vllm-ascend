@@ -532,7 +532,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_compress = True
         layer_name = "model.layers.1.self_attn.indexer.k_cache"
         indexer_spec = AscendMLAAttentionSpec(
-            block_size=16,
+            block_size=16 * 4,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.int8,

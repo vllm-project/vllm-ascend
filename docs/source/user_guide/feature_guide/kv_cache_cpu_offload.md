@@ -24,10 +24,10 @@ kv_transfer_config = KVTransferConfig(
     kv_connector="OffloadingConnector",
     kv_role="kv_both",
     kv_connector_extra_config={
-        "num_cpu_blocks": 1000,
-        "block_size": 128,
+        "cpu_bytes_to_use": 4 * 1024**3,
+        "blocks_per_chunk": 8,
         "spec_name": "NPUOffloadingSpec",
-        "spec_module_path": "vllm_ascend.kv_offload.npu",
+        "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
     },
 )
 
@@ -53,10 +53,10 @@ vllm serve Qwen/Qwen3-0.6B \
         "kv_connector": "OffloadingConnector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {
-            "num_cpu_blocks": 1000,
-            "block_size": 128,
+            "cpu_bytes_to_use": 4294967296,
+            "blocks_per_chunk": 8,
             "spec_name": "NPUOffloadingSpec",
-            "spec_module_path": "vllm_ascend.kv_offload.npu"
+            "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu"
         }
     }'
 ```
@@ -65,10 +65,12 @@ vllm serve Qwen/Qwen3-0.6B \
 
 - `kv_connector`: Must be set to `"OffloadingConnector"`.
 - `kv_role`: Set to `"kv_both"` to enable both storing and loading of KV cache.
-- `num_cpu_blocks`: Number of blocks to allocate in CPU memory. Increase this value for longer context scenarios. Each block consumes memory proportional to `block_size × num_layers × (key_size + value_size)`.
-- `block_size`: The CPU-side block size. Should be a multiple of the NPU-side block size. Typical value: `128`.
+- `cpu_bytes_to_use`: Server-wide CPU memory capacity in bytes. It is divided across workers by the upstream vLLM offloading framework.
+- `blocks_per_chunk`: Number of NPU KV-cache blocks stored in one CPU offload block. It must be greater than zero.
 - `spec_name`: Must be `"NPUOffloadingSpec"` for Ascend NPU.
-- `spec_module_path`: Must be `"vllm_ascend.kv_offload.npu"`.
+- `spec_module_path`: Must be `"vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu"`.
+
+The legacy Ascend-only `num_cpu_blocks` option remains supported for compatibility, but new configurations should use vLLM's native `cpu_bytes_to_use` option.
 
 ## How It Works
 
@@ -102,7 +104,7 @@ llm = LLM(
 ## Notes
 
 - This feature requires vLLM v1 engine.
-- Adjust `num_cpu_blocks` based on available CPU memory. Using too many blocks may cause out-of-memory errors on the host.
+- Adjust `cpu_bytes_to_use` based on available CPU memory. Reserving too much may cause host out-of-memory errors.
 - Pinned (page-locked) memory is used when available for optimal transfer performance.
 - The `gpu_memory_utilization` parameter controls how much NPU memory is reserved for KV cache. Lower values leave less NPU memory for KV cache, making offloading more active.
-- For production workloads, benchmark with realistic request patterns to find the optimal `num_cpu_blocks` and `block_size` settings.
+- For production workloads, benchmark with realistic request patterns to find the optimal `cpu_bytes_to_use` and `blocks_per_chunk` settings.
