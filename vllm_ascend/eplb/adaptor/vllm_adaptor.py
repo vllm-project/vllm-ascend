@@ -166,7 +166,11 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[local_idx] = list()
             for name in expert_weight_names:
                 param_key = f"{local_idx}.{name}"
-                self.param_dict[param_key] = getattr(layer, name)
+                if hasattr(layer, name):
+                    self.param_dict[param_key] = getattr(layer, name)
+                else:
+                    fallback_name = name.replace("_list", "")
+                    self.param_dict[param_key] = getattr(layer, fallback_name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in expert_weight_names:

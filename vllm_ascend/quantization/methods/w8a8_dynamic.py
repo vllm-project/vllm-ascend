@@ -179,7 +179,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
-        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = ascend_config.eplb_config.convert_weight_to_list
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 

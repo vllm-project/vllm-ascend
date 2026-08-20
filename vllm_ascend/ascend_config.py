@@ -803,6 +803,9 @@ class EplbConfig:
         "num_redundant_experts": 0,
         "eplb_policy_type": 2,
         "eplb_heat_collection_stage": "all",
+        "enable_omni_eplb": False,
+        "omni_config_file": None,
+        "convert_weight_to_list": False
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -824,7 +827,7 @@ class EplbConfig:
         raise AttributeError(f"Config has no attribute '{key}'")
 
     def _validate_config(self):
-        if self.expert_map_path is not None:
+        if self.expert_map_path is not None and not self.enable_omni_eplb:
             logger.info("The expert_map is %s", self.expert_map_path)
             if self.expert_map_path[-5:] != ".json":
                 raise TypeError("The expert_map is not json.")
@@ -832,10 +835,13 @@ class EplbConfig:
                 raise ValueError("The expert_map is not exist.")
         if self.expert_map_record_path is not None:
             self.config["dynamic_eplb"] = True
-            if self.expert_map_record_path[-5:] != ".json":
-                raise TypeError("The expert_map_record_path is not json.")
-            dirname = os.path.dirname(self.expert_map_record_path)
-            os.makedirs(dirname, exist_ok=True)
+            if self.enable_omni_eplb:
+                os.makedirs(self.expert_map_record_path, exist_ok=True)
+            else:
+                if self.expert_map_record_path[-5:] != ".json":
+                    raise TypeError("The expert_map_record_path is not json.")
+                dirname = os.path.dirname(self.expert_map_record_path)
+                os.makedirs(dirname, exist_ok=True)
         for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
             if not isinstance(self.config[key], int):
                 raise TypeError(f"{key} must be an integer")
@@ -850,9 +856,16 @@ class EplbConfig:
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
+        if self.enable_omni_eplb:
+            if self.omni_config_file is not None and not os.path.exists(self.omni_config_file):
+                raise ValueError(f"omni_config_file does not exist: {self.omni_config_file}")
 
-        logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
+        if self.config["dynamic_eplb"] and not self.enable_omni_eplb:
+            self.config["convert_weight_to_list"] = True
+        
+        logger.info("Dynamic EPLB is %s and convert moe's weights to list is %s", self.config["dynamic_eplb"], self.config["convert_weight_to_list"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+        logger.info("Omni EPLB is %s, config_file=%s", self.config["enable_omni_eplb"], self.config["omni_config_file"])
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

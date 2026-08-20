@@ -17,7 +17,7 @@
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
 import json
 from collections import defaultdict
-
+import os
 import numpy as np
 import torch
 from vllm.logger import logger
@@ -62,6 +62,24 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
 
 
 def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1, tp_size=None):
+    if eplb_config.enable_omni_eplb:
+        try:
+            from omni_placement.omni_planner import OmniPlanner
+            planner = OmniPlanner(
+                config_file=eplb_config.omni_config_file,
+                device="npu",
+                rank=moe_config.ep_rank,
+                world_size=moe_config.ep_size,
+                num_experts=moe_config.num_experts,
+                max_redundant_per_rank=eplb_config.num_redundant_experts//moe_config.ep_size  if eplb_config.expert_map_path is None else None,
+                max_redundant_per_expert=100  if eplb_config.expert_map_path is None else None,
+            )
+            planner.config.dump_dir = eplb_config.expert_map_record_path
+            planner.config.enable_dump = os.getenv("EXPERT_MAP_RECORD", "false") == "true"
+            planner.enable_dynamic = os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
+        except Exception as e:
+            logger.error("[eplb/omni] Failed to initialize OmniPlanner: %s", e)
+            raise
     expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size
@@ -74,7 +92,14 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         assert not eplb_enable, "EPLB must used in expert parallelism."
         return None, None, None, n_redundant
 
-    if expert_map_path:
+    if expert_map_path and eplb_config.enable_omni_eplb:
+        planner.config.pattern_path = expert_map_path
+        planner.init_expert_mapping()
+        log2phy = planner.get_log2phy(layer_id)
+        local_expert_map = planner.get_local_expert_map(layer_id)
+        n_redundant = planner.get_global_n_redundant(layer_id)
+        return None, local_expert_map, log2phy, n_redundant # _, _, _, global_n_redundant
+    elif expert_map_path:
         eplb_enable = True
         global_placement, physical_count = expert_file_to_tensor(expert_map_path, layer_id)
         n_redundant = physical_count - n_experts
@@ -103,7 +128,7 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         if eplb_enable
         else None
     )
-
+        
     return torch.stack(global_expert_map), local_expert_map, log2phy, n_redundant
 
 
