@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num
@@ -41,7 +42,7 @@ def bonus_renew_1(
     tl.store(output_token_ids_ptr + position * 2 + 1, bonus_token_id)
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["max_spec_len", "vec_len"])
 def rejection_greedy_sample_spec_len_1_triton(
     output_token_ids_ptr,  # [batch_size, 2]
     draft_token_ids_ptr,  # [num_tokens]
@@ -139,7 +140,7 @@ def rejection_greedy_sample_triton(
             )
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["max_spec_len", "vocab_size", "global_vocab_size", "vec_len", "BLOCK_SIZE"])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -155,14 +156,17 @@ def rejection_random_sample_kernel(
     vocab_size,  # vocab_size or selected_vocab_size if ENABLE_REDUCE_SAMPLING
     global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
     vec_len,
+    BLOCK_SIZE,
     NO_DRAFT_PROBS: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce sampling
-    BLOCK_SIZE: tl.constexpr,
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
+    MAX_BLOCK_SIZE: tl.constexpr = 16,
 ):
     block_idx = tl.program_id(0)
-    offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < vec_len
+    offsets = block_idx * BLOCK_SIZE + tl.arange(0, MAX_BLOCK_SIZE)
+    mask = tl.arange(0, MAX_BLOCK_SIZE) < BLOCK_SIZE
+    mask = mask & (offsets < vec_len)
+
     is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
     not_greedy_mask = is_greedy == 0
     start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
@@ -264,7 +268,7 @@ def rejection_random_sample_kernel(
                 )
 
 
-@triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len"])
+@triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len", "output_ptr", "input_ptr", "BLOCK_SIZE"])
 def expand_kernel(
     output_ptr,  # [num_tokens]
     input_ptr,  # [batch_size]
@@ -272,12 +276,14 @@ def expand_kernel(
     replace_from,
     replace_to,
     vec_len,
+    BLOCK_SIZE,
     MAX_NUM_TOKENS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    MAX_BLOCK_SIZE: tl.constexpr = 16,
 ):
     req_idx = tl.program_id(0)
-    offset = req_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    len_mask = offset < vec_len
+    offset = req_idx * BLOCK_SIZE + tl.arange(0, MAX_BLOCK_SIZE)
+    mask = tl.arange(0, MAX_BLOCK_SIZE) < BLOCK_SIZE
+    len_mask = mask & (offset < vec_len)
 
     start_idx = tl.where(offset == 0, 0, tl.load(cu_num_tokens_ptr + offset - 1, len_mask))
     end_idx = tl.load(cu_num_tokens_ptr + offset, len_mask)
@@ -294,7 +300,7 @@ def expand_kernel(
         tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["output_token_ids_ptr", "cu_num_draft_tokens_ptr", "draft_token_ids_ptr", "vocab_size", "global_vocab_size"])
 def sample_recovered_tokens_kernel(
     output_token_ids_ptr,
     cu_num_draft_tokens_ptr,
@@ -449,6 +455,7 @@ def rejection_greedy_sample_with_triton(
             BLOCK_SIZE=block_size,
         )
     else:
+        cu_num_draft_tokens = cu_num_draft_tokens.to(torch.int32) if cu_num_draft_tokens.dtype != torch.int32 else cu_num_draft_tokens
         rejection_greedy_sample_triton[(grid,)](
             output_token_ids,
             cu_num_draft_tokens,

@@ -443,9 +443,9 @@ def rejection_sample(
                     selected_vocab_size,
                     global_vocab_size,
                     batch_size,
+                    block_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=True,
-                    BLOCK_SIZE=block_size,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -553,9 +553,9 @@ def rejection_sample(
                     vocab_size,
                     global_vocab_size,  # global_vocab_size
                     batch_size,
+                    block_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
-                    BLOCK_SIZE=block_size,
                 )
             else:
                 rejection_random_sample_pytorch(

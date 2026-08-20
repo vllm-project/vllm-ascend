@@ -27,7 +27,20 @@ from vllm_ascend.ops.triton.bincount import get_token_bin_counts_and_mask_triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "num_seqs",
+        "vocab_size",
+        "stride_logits_seq",
+        "stride_logits_vocab",
+        "stride_prompt_mask_seq",
+        "stride_prompt_mask_vocab",
+        "stride_output_mask_seq",
+        "stride_output_mask_vocab",
+        "stride_bin_counts_seq",
+        "stride_bin_counts_vocab",
+    ],
+)
 def apply_all_penalties_kernel(
     logits_ptr,
     prompt_mask_ptr,
@@ -154,5 +167,6 @@ def _apply_all_penalties_triton(
         stride_output_mask_vocab=output_mask.stride(1),
         stride_bin_counts_seq=output_bin_counts.stride(0),
         stride_bin_counts_vocab=output_bin_counts.stride(1),
-        BLOCK_SIZE=2048,
+        BLOCK_SIZE=512,
+        multibuffer=False,
     )
