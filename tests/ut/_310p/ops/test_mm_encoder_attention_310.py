@@ -17,7 +17,6 @@ from unittest import mock
 
 import torch
 
-from vllm_ascend import utils
 from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
 
 
@@ -28,7 +27,7 @@ def test_register_customop_overrides_mm_encoder_attention_for_310p():
         mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot"),
         mock.patch("vllm_ascend.ops.registry.is_310p", return_value=True),
     ):
-        utils.register_ascend_customop()
+        ops_registry.register_all_custom_ops()
         assert ops_registry.ascend_custom_ops()["MMEncoderAttention"] is AscendMMEncoderAttention310
 
 

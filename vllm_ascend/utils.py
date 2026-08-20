@@ -654,29 +654,6 @@ def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 
 
-def register_ascend_customop(vllm_config: VllmConfig | None = None):
-    """Register Ascend CustomOP
-
-    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
-    and ensure this will execute after model config is initilazed.
-    """
-    from vllm_ascend.ops.registry import register_custom_ops
-
-    if vllm_config is None:
-        try:
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-
-    exclude = set()
-    if vllm_config is None or vllm_config.model_config is None or not vllm_config.model_config.is_deepseek_mla:
-        # GateLinear is needed by DeepSeek MLA models.
-        exclude.add("GateLinear")
-    register_custom_ops(exclude=exclude)
-
-
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 

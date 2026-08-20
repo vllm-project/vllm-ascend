@@ -62,6 +62,27 @@ class TestOpsRegistry(TestBase):
             )
             self.assertNotIn("GateLinear", custom_op_module.op_registry_oot)
 
+    @mock.patch("vllm_ascend.ops.registry.CustomOp")
+    def test_register_all_custom_ops(self, mock_customop):
+        import vllm.model_executor.custom_op as custom_op_module
+
+        mock_customop.register_oot.side_effect = lambda _decorated_op_cls=None, name=None: (
+            custom_op_module.op_registry_oot.__setitem__(name, _decorated_op_cls)
+        )
+        from vllm_ascend.ops import registry as ops_registry
+
+        with (
+            mock.patch("vllm_ascend.ops.registry.is_310p", return_value=False),
+            mock.patch.dict(custom_op_module.op_registry_oot, clear=True),
+        ):
+            expected_ops = len(ops_registry._get_ops_base()) - 1
+            ops_registry.register_all_custom_ops()
+            self.assertEqual(mock_customop.register_oot.call_count, expected_ops)
+
+            # ascend custom op is already registered
+            ops_registry.register_all_custom_ops()
+            self.assertEqual(mock_customop.register_oot.call_count, expected_ops)
+
     def test_ascend_custom_ops_310p_overrides_base(self):
         """On 310P the merged catalog lets 310P variants win over base ops."""
         from vllm_ascend.ops import registry as ops_registry

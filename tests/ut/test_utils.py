@@ -274,27 +274,6 @@ class TestUtils(TestBase):
         with mock.patch("vllm_ascend.utils._IS_DRAFTER_MOE_MODEL", None):
             self.assertTrue(utils.is_drafter_moe_model(vllm_config))
 
-    @mock.patch("vllm_ascend.ops.registry.CustomOp")
-    def test_register_ascend_customop(self, mock_customop):
-        import vllm.model_executor.custom_op as custom_op_module
-
-        mock_customop.register_oot.side_effect = lambda _decorated_op_cls=None, name=None: (
-            custom_op_module.op_registry_oot.__setitem__(name, _decorated_op_cls)
-        )
-        from vllm_ascend.ops import registry as ops_registry
-
-        with (
-            mock.patch("vllm_ascend.ops.registry.is_310p", return_value=False),
-            mock.patch.dict(custom_op_module.op_registry_oot, clear=True),
-        ):
-            expected_ops = len(ops_registry._get_ops_base()) - 1
-            utils.register_ascend_customop()
-            self.assertEqual(mock_customop.register_oot.call_count, expected_ops)
-
-            # ascend custom op is already registered
-            utils.register_ascend_customop()
-            self.assertEqual(mock_customop.register_oot.call_count, expected_ops)
-
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
         from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ

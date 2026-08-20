@@ -18,20 +18,26 @@
 """Ascend OOT CustomOp registry.
 
 This module is the single source of truth for the Ascend out-of-tree
-CustomOp catalog. It replaces the registration table that used to live
-inline in ``vllm_ascend.utils.register_ascend_customop``.
+CustomOp catalog and its registration entry points, including
+``register_all_custom_ops`` which moved here from ``vllm_ascend.utils``.
 
 Custom ops are imported lazily inside cached helpers so that merely
 importing this module does not trigger CANN/torch-npu initialization.
 """
 
+from __future__ import annotations
+
 from collections.abc import Collection, Mapping
 from functools import cache
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from vllm.model_executor.custom_op import CustomOp, op_registry_oot
 
 from vllm_ascend.device.device_config import is_310p
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @cache
@@ -165,3 +171,24 @@ def register_custom_ops(
     for name in names:
         if name not in exclude:
             register_custom_op(name)
+
+
+def register_all_custom_ops(vllm_config: VllmConfig | None = None):
+    """Register Ascend CustomOP
+
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
+    and ensure this will execute after model config is initilazed.
+    """
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    exclude = set()
+    if vllm_config is None or vllm_config.model_config is None or not vllm_config.model_config.is_deepseek_mla:
+        # GateLinear is needed by DeepSeek MLA models.
+        exclude.add("GateLinear")
+    register_custom_ops(exclude=exclude)
