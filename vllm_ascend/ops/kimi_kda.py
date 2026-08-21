@@ -290,20 +290,12 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         if self.use_full_rank_gate:
             del self.g_a_proj
             del self.g_b_proj
-            del self.b_proj
-            del self.f_a_proj
-            self.fused_bfg_proj = _KDAFusedBFGLinear(
-                hidden_size=self.hidden_size,
-                num_heads=self.num_heads,
-                head_dim=self.head_dim,
-                tp_size=self.tp_size,
+            self.g_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.head_dim * self.num_heads,
+                bias=False,
                 quant_config=self.quant_config,
-                prefix=f"{prefix}.{_FUSED_BFG_NAME}",
-            )
-            self._fused_bfg_output_sizes = (
-                self.local_num_heads,
-                self.head_dim,
-                self.local_num_heads * self.head_dim,
+                prefix=f"{prefix}.g_proj",
             )
 
         # The upstream class used FusedRMSNormGated's default epsilon.  K3's
@@ -410,18 +402,13 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.use_full_rank_gate:
-            fused_bfg = self.fused_bfg_proj(hidden_states)[0]
-            beta, f_a, output_gate = fused_bfg.split(
-                self._fused_bfg_output_sizes,
-                dim=-1,
-            )
-        else:
-            beta = self.b_proj(hidden_states)[0]
-            f_a = self.f_a_proj(hidden_states)[0]
-            output_gate = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
-
+        beta = self.b_proj(hidden_states)[0]
+        f_a = self.f_a_proj(hidden_states)[0]
         raw_gate = self.f_b_proj(f_a)[0]
+        if self.use_full_rank_gate:
+            output_gate = self.g_proj(hidden_states)[0]
+        else:
+            output_gate = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         return beta, raw_gate, output_gate
 
     def _postprocess_bfg(

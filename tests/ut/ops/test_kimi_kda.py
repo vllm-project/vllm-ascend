@@ -31,7 +31,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiGatedDeltaNetAttention,
-    _KDAFusedBFGLinear,
     _load_a_log,
     _zero_padded_spec_output,
 )
@@ -189,68 +188,40 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.device == output.device
 
 
-def test_fused_bfg_linear_loads_sharded_and_replicated_weights():
-    with (
-        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=4),
-        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
-    ):
-        linear = _KDAFusedBFGLinear(
-            hidden_size=6,
-            num_heads=8,
-            head_dim=3,
-            tp_size=4,
-            quant_config=None,
-            prefix="model.layers.0.self_attn.fused_bfg_proj",
-        )
-
-    linear.weight.data.zero_()
-    b_weight = torch.arange(8 * 6, dtype=linear.weight.dtype).reshape(8, 6)
-    f_a_weight = torch.arange(3 * 6, dtype=linear.weight.dtype).reshape(3, 6) + 100
-    g_weight = torch.arange(24 * 6, dtype=linear.weight.dtype).reshape(24, 6) + 200
-
-    linear.weight.weight_loader(linear.weight, b_weight, 0)
-    linear.weight.weight_loader(linear.weight, f_a_weight, 1)
-    linear.weight.weight_loader(linear.weight, g_weight, 2)
-
-    assert tuple(linear.weight.shape) == (11, 6)
-    torch.testing.assert_close(linear.weight[:2], b_weight[4:6])
-    torch.testing.assert_close(linear.weight[2:5], f_a_weight)
-    torch.testing.assert_close(linear.weight[5:], g_weight[12:18])
-
-
-def test_fused_bfg_projection_splits_original_outputs():
+def test_staged_bfg_projection_preserves_original_outputs():
     attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
     nn.Module.__init__(attention)
     attention.use_full_rank_gate = True
     attention.head_dim = 3
-    attention._fused_bfg_output_sizes = (2, 3, 6)
 
     hidden_states = torch.randn(4, 5)
-    fused_output = torch.arange(44, dtype=torch.float32).reshape(4, 11)
+    beta_output = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    f_a_output = torch.arange(12, dtype=torch.float32).reshape(4, 3)
     f_b_output = torch.arange(24, dtype=torch.float32).reshape(4, 6)
-    attention.fused_bfg_proj = _RecordingLinear(fused_output)
+    g_output = torch.arange(24, dtype=torch.float32).reshape(4, 6) + 100
+    attention.b_proj = _RecordingLinear(beta_output)
+    attention.f_a_proj = _RecordingLinear(f_a_output)
     attention.f_b_proj = _RecordingLinear(f_b_output)
+    attention.g_proj = _RecordingLinear(g_output)
 
     beta, raw_gate, output_gate = attention._project_bfg(hidden_states)
 
-    torch.testing.assert_close(beta, fused_output[:, :2])
-    torch.testing.assert_close(attention.f_b_proj.input, fused_output[:, 2:5])
+    torch.testing.assert_close(beta, beta_output)
+    torch.testing.assert_close(attention.f_b_proj.input, f_a_output)
     torch.testing.assert_close(raw_gate, f_b_output)
-    torch.testing.assert_close(output_gate, fused_output[:, 5:])
+    torch.testing.assert_close(output_gate, g_output)
 
     beta, raw_gate, output_gate = attention._postprocess_bfg(
         beta,
         raw_gate,
         output_gate,
     )
-    torch.testing.assert_close(beta, fused_output[:, :2].sigmoid().unsqueeze(0))
+    torch.testing.assert_close(beta, beta_output.sigmoid().unsqueeze(0))
     torch.testing.assert_close(
         raw_gate,
         f_b_output.reshape(4, 2, 3).unsqueeze(0),
     )
-    torch.testing.assert_close(output_gate, fused_output[:, 5:].reshape(4, 2, 3))
+    torch.testing.assert_close(output_gate, g_output.reshape(4, 2, 3))
 
 
 @pytest.mark.parametrize(
