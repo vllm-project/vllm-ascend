@@ -88,8 +88,6 @@ def _filter_reduced_layer_weights(
         yield name, loaded_weight
 
 
-MiniMaxM2Model._filter_reduced_layer_weights = _filter_reduced_layer_weights
-
 _original_load_weights = MiniMaxM2Model.load_weights
 
 
@@ -97,7 +95,7 @@ def _patched_load_weights(
     self: "MiniMaxM2Model",
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
-    weights = self._filter_reduced_layer_weights(weights)
+    weights = _filter_reduced_layer_weights(self, weights)
     return _original_load_weights(self, weights)
 
 

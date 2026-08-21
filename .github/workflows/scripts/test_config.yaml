@@ -332,8 +332,10 @@
   # Run only on PRs tagged with both the job-level ready gate
   # (`ready-precise`/`ready-all`, formerly `ready`) and `mrv2`.
   # Callers that do not pass --pr-labels (e.g. nightly/schedule) are not gated.
-  # optional: false = a PR carrying the mrv2 label always runs this module;
-  # source_file_dependencies only narrows bisect/test-only edge paths, not PR selection.
+  # optional: false = the mrv2 label keeps this module in the matched set on
+  # the diff/ready-all path (precise-testing recommended mode selects from the
+  # coverage recommendation instead); source_file_dependencies only narrows
+  # bisect/test-only edge paths, not PR selection.
   required_pr_labels: [mrv2]
   source_file_dependencies:
     - vllm_ascend/patch/worker/patch_minimax_m2.py
