@@ -708,6 +708,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         **kwargs,
     ):
         self.vllm_config = get_current_vllm_config()
+        self.dcp_world_size = self.vllm_config.parallel_config.decode_context_parallel_size
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

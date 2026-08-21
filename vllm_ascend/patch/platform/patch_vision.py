@@ -27,6 +27,8 @@ import contextlib
 
 import torch
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
     if self.is_identity:
@@ -56,4 +58,8 @@ def install_patch():
 
 
 with contextlib.suppress(ImportError):
-    install_patch()
+    # Upstream (main) replaced FusedInputNorm's F.batch_norm (eps=0.0) with a
+    # direct affine transform, so the eps>0 workaround is only needed on the
+    # 0.27.1 release lane where the patch still references running_mean/var.
+    if vllm_version_is("0.27.1"):
+        install_patch()

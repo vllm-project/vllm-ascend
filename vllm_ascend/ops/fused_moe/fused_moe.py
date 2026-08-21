@@ -206,6 +206,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
             if self.ascend_shared_experts is None:
+                if self.gate is not None and not self.is_internal_router:
+                    router_logits, _ = self.gate(hidden_states)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -221,6 +223,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 hidden_states_fp32 = hidden_states.float()
                 before_routed_experts = torch.npu.current_stream().record_event()
                 router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                after_routed_experts = torch.npu.current_stream().record_event()
+            elif self.gate is not None:
+                # Upstream contract: the runner owns the gate. Models now always
+                # forward hidden_states as router_logits, so apply the gate here
+                # (is_internal_router handles the DeepSeek V4 fp32 path above).
+                before_routed_experts = torch.npu.current_stream().record_event()
+                router_logits, _ = self.gate(hidden_states)
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()

@@ -18,6 +18,7 @@
 #
 
 from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import torch
@@ -206,12 +207,16 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
-        batch_desc: BatchExecutionDescriptor,
+        batch_req_state: Any,
+        batch_desc: BatchExecutionDescriptor | None = None,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
+        if batch_desc is None:
+            # v0.27.1 base calls prepare_inputs(scheduler_output, batch_desc).
+            batch_desc = batch_req_state
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
@@ -388,6 +393,7 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             is_prefilling_np=is_prefilling_np,
+            has_prefill=batch_has_prefill,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
