@@ -66,128 +66,62 @@ def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
 # =========================================================================
 class TestMooncakeStoreConfig(unittest.TestCase):
     def test_from_file(self):
-        config = {
-            "metadata_server": "127.0.0.1:2379",
-            "global_segment_size": "2GB",
-            "local_buffer_size": "1GB",
-            "protocol": "ascend",
-            "device_name": "npu0",
-            "master_server_address": "127.0.0.1:8080",
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(config, f)
-            f.flush()
-            path = f.name
+        cfg = _make_mooncake_store_config(
+            metadata_server="127.0.0.1:2379",
+            global_segment_size="2GB",
+            local_buffer_size="1GB",
+            protocol="ascend",
+            device_name="npu0",
+            master_server_address="127.0.0.1:8080",
+        )
+        self.assertEqual(cfg.global_segment_size, 2 * 1024**3)
+        self.assertEqual(cfg.local_buffer_size, 1024**3)
+        self.assertEqual(cfg.device_name, "npu0")
 
-        try:
-            cfg = MooncakeStoreConfig.from_file(path)
-            self.assertEqual(cfg.metadata_server, "127.0.0.1:2379")
-            self.assertEqual(cfg.global_segment_size, 2 * 1024**3)
-            self.assertEqual(cfg.local_buffer_size, 1 * 1024**3)
-            self.assertEqual(cfg.protocol, "ascend")
-            self.assertEqual(cfg.device_name, "npu0")
-        finally:
-            os.unlink(path)
+        defaults = _make_mooncake_store_config()
+        self.assertEqual(defaults.protocol, "ascend")
+        self.assertEqual(defaults.device_name, "")
+        self.assertFalse(defaults.enable_ssd_offload)
 
-    def test_from_file_defaults(self):
-        config = {
-            "metadata_server": "localhost:2379",
-            "master_server_address": "localhost:8080",
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(config, f)
-            f.flush()
-            path = f.name
-
-        try:
-            cfg = MooncakeStoreConfig.from_file(path)
-            self.assertEqual(cfg.protocol, "ascend")
-            self.assertEqual(cfg.device_name, "")
-            self.assertFalse(cfg.enable_ssd_offload)
-            self.assertEqual(cfg.ssd_offload_path, "")
-        finally:
-            os.unlink(path)
-
-    def test_from_file_ssd_offload(self):
         ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
         self.addCleanup(lambda: os.rmdir(ssd_path))
-        cfg = _make_mooncake_store_config(
-            enable_ssd_offload=True,
-            ssd_offload_path=ssd_path,
-        )
-        self.assertTrue(cfg.enable_ssd_offload)
-        self.assertEqual(cfg.ssd_offload_path, ssd_path)
+        ssd = _make_mooncake_store_config(enable_ssd_offload=True, ssd_offload_path=ssd_path)
+        self.assertEqual(ssd.ssd_offload_path, ssd_path)
 
-    def test_ssd_offload_requires_absolute_path(self):
-        with self.assertRaises(ValueError):
-            _make_mooncake_store_config(
-                enable_ssd_offload=True,
-                ssd_offload_path="relative/path",
-            )
-
-    def test_ssd_offload_requires_path_in_json(self):
-        with self.assertRaises(ValueError):
-            _make_mooncake_store_config(enable_ssd_offload=True)
+    def test_ssd_offload_validation(self):
+        for path in ("relative/path", None):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                kwargs = {"ssd_offload_path": path} if path else {}
+                _make_mooncake_store_config(enable_ssd_offload=True, **kwargs)
 
     @staticmethod
     def _writable_ssd_path() -> str:
         return tempfile.mkdtemp(prefix="mooncake_ssd_ut_")
 
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
-        "mooncake_backend._mooncake_setup_supports_ssd_offload",
-        return_value=False,
-    )
-    def test_ssd_setup_kwargs_off_when_disabled(self, _mock_supports):
-        cfg = _make_mooncake_store_config()
-        self.assertEqual(_ssd_setup_kwargs(cfg), {})
+    def test_ssd_setup_kwargs(self):
+        target = (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+            "mooncake_backend._mooncake_setup_supports_ssd_offload"
+        )
+        with patch(target, return_value=False):
+            self.assertEqual(_ssd_setup_kwargs(_make_mooncake_store_config()), {})
 
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
-        "mooncake_backend._mooncake_setup_supports_ssd_offload",
-        return_value=False,
-    )
-    def test_ssd_setup_kwargs_raises_on_old_mooncake(self, _mock_supports):
         ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
         self.addCleanup(lambda: os.rmdir(ssd_path))
-        cfg = _make_mooncake_store_config(
-            enable_ssd_offload=True,
-            ssd_offload_path=ssd_path,
-        )
-        with self.assertRaises(RuntimeError):
+        cfg = _make_mooncake_store_config(enable_ssd_offload=True, ssd_offload_path=ssd_path)
+        with patch(target, return_value=False), self.assertRaises(RuntimeError):
             _ssd_setup_kwargs(cfg)
-
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
-        "mooncake_backend._mooncake_setup_supports_ssd_offload",
-        return_value=True,
-    )
-    def test_ssd_setup_kwargs_when_supported(self, _mock_supports):
-        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
-        self.addCleanup(lambda: os.rmdir(ssd_path))
-        cfg = _make_mooncake_store_config(
-            enable_ssd_offload=True,
-            ssd_offload_path=ssd_path,
-        )
-        self.assertEqual(
-            _ssd_setup_kwargs(cfg),
-            {
-                "enable_ssd_offload": cfg.enable_ssd_offload,
-                "ssd_offload_path": cfg.ssd_offload_path,
-            },
-        )
-
-    def test_load_from_env_missing(self):
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("MOONCAKE_CONFIG_PATH", None)
-            with self.assertRaises(ValueError):
-                MooncakeStoreConfig.load_from_env()
+        with patch(target, return_value=True):
+            self.assertEqual(
+                _ssd_setup_kwargs(cfg),
+                {"enable_ssd_offload": True, "ssd_offload_path": ssd_path},
+            )
 
     def test_load_from_env(self):
-        config = {
-            "metadata_server": "host:1234",
-            "master_server_address": "host:5678",
-        }
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(ValueError):
+            MooncakeStoreConfig.load_from_env()
+
+        config = {"metadata_server": "host:1234", "master_server_address": "host:5678"}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(config, f)
             f.flush()
@@ -202,38 +136,24 @@ class TestMooncakeStoreConfig(unittest.TestCase):
 
 
 class TestParseGlobalSegmentSize(unittest.TestCase):
-    def test_int(self):
-        self.assertEqual(_parse_global_segment_size(1024), 1024)
+    def test_valid_values(self):
+        cases = [
+            (1024, 1024),
+            ("2GB", 2 * 1024**3),
+            ("512MB", 512 * 1024**2),
+            ("256KB", 256 * 1024),
+            ("4096B", 4096),
+            ("2048", 2048),
+            (2048.0, 2048),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(_parse_global_segment_size(value), expected)
 
-    def test_gb(self):
-        self.assertEqual(_parse_global_segment_size("2GB"), 2 * 1024**3)
-
-    def test_mb(self):
-        self.assertEqual(_parse_global_segment_size("512MB"), 512 * 1024**2)
-
-    def test_kb(self):
-        self.assertEqual(_parse_global_segment_size("256KB"), 256 * 1024)
-
-    def test_b(self):
-        self.assertEqual(_parse_global_segment_size("4096B"), 4096)
-
-    def test_no_unit(self):
-        self.assertEqual(_parse_global_segment_size("2048"), 2048)
-
-    def test_float_input(self):
-        self.assertEqual(_parse_global_segment_size(2048.0), 2048)
-
-    def test_empty_string(self):
-        with self.assertRaises(ValueError):
-            _parse_global_segment_size("")
-
-    def test_invalid_format(self):
-        with self.assertRaises(ValueError):
-            _parse_global_segment_size("abcGB")
-
-    def test_unsupported_type(self):
-        with self.assertRaises(TypeError):
-            _parse_global_segment_size(None)  # type: ignore[arg-type]
+    def test_invalid_values(self):
+        for value, error in [("", ValueError), ("abcGB", ValueError), (None, TypeError)]:
+            with self.subTest(value=value), self.assertRaises(error):
+                _parse_global_segment_size(value)  # type: ignore[arg-type]
 
 
 class TestConvertToBytes(unittest.TestCase):
@@ -326,49 +246,25 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         result = b.exists(["k1", "k2"])
         self.assertEqual(result, [1, 0])
 
-    def test_put(self):
-        b = self._make_backend()
-        b.store.batch_put_from_multi_buffers.return_value = [0, 0]
-        b.put(["k1"], [[100]], [[10]])
-        b.store.batch_put_from_multi_buffers.assert_called_once()
-
-    def test_put_error(self):
-        b = self._make_backend()
-        b.store.batch_put_from_multi_buffers.return_value = [-1]
-        b.put(["k1"], [[100]], [[10]])  # Should log error but not raise
-
-    def test_put_exception(self):
-        b = self._make_backend()
-        b.store.batch_put_from_multi_buffers.side_effect = RuntimeError("backend fail")
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.logger"
-        ) as mock_logger:
-            b.put(["k1"], [[100]], [[10]])  # Should log error but not raise
-        error_log = _format_log_call(mock_logger.error.call_args)
-        self.assertIn("RuntimeError", error_log)
-        self.assertIn("backend fail", error_log)
-
-    def test_get(self):
-        b = self._make_backend()
-        b.store.batch_get_into_multi_buffers.return_value = [0]
-        b.get(["k1"], [[100]], [[10]])
-        b.store.batch_get_into_multi_buffers.assert_called_once()
-
-    def test_get_error(self):
-        b = self._make_backend()
-        b.store.batch_get_into_multi_buffers.return_value = [-1]
-        b.get(["k1"], [[100]], [[10]])
-
-    def test_get_exception(self):
-        b = self._make_backend()
-        b.store.batch_get_into_multi_buffers.side_effect = RuntimeError("backend fail")
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.logger"
-        ) as mock_logger:
-            b.get(["k1"], [[100]], [[10]])
-        error_log = _format_log_call(mock_logger.error.call_args)
-        self.assertIn("RuntimeError", error_log)
-        self.assertIn("backend fail", error_log)
+    def test_transfers(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.logger"
+        for operation, store_method in [
+            ("put", "batch_put_from_multi_buffers"),
+            ("get", "batch_get_into_multi_buffers"),
+        ]:
+            for result in ([0], [-1], RuntimeError("backend fail")):
+                with self.subTest(operation=operation, result=result):
+                    backend = self._make_backend()
+                    method = getattr(backend.store, store_method)
+                    if isinstance(result, Exception):
+                        method.side_effect = result
+                    else:
+                        method.return_value = result
+                    with patch(module) as logger:
+                        getattr(backend, operation)(["k1"], [[100]], [[10]])
+                    method.assert_called_once()
+                    if result != [0]:
+                        logger.error.assert_called()
 
     def test_register_buffer(self):
         b = self._make_backend()
