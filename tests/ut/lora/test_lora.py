@@ -243,19 +243,19 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
 
 
 @pytest.mark.parametrize(
-    ("is_prefill", "index_mapping", "expected_homogeneous"),
+    ("is_prefill", "index_mapping", "expected_count"),
     [
-        (True, (42, 42, 42), True),
-        (True, (42, 7, 42), False),
-        (True, (42, 0, 42), False),
-        (False, (42, 42, 42), False),
+        (True, (42, 42, 42), 1),
+        (True, (42, 7, 42), 2),
+        (True, (42, 0, 42), 1),
+        (False, (42, 42, 42), 1),
     ],
 )
-def test_metadata_tracks_host_known_homogeneous_lora(is_prefill, index_mapping, expected_homogeneous) -> None:
+def test_metadata_tracks_host_known_active_moe_lora_count(is_prefill, index_mapping, expected_count) -> None:
     wrapper = object.__new__(PunicaWrapperNPU)
     mapping = SimpleNamespace(is_prefill=is_prefill, index_mapping=index_mapping)
 
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [7, 42, None], 3, 100)
 
-    assert wrapper.has_homogeneous_lora is expected_homogeneous
+    assert wrapper.num_active_moe_loras == expected_count

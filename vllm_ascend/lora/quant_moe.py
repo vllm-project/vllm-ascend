@@ -51,12 +51,25 @@ class QuantMoELoRAImpl:
     validate_activation_input: QuantMoELoRAActivationValidator | None
 
 
+@dataclass(frozen=True)
+class _CompositeLoraGMMRouting:
+    permutation: torch.Tensor
+    group_list: torch.Tensor
+    enabled: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _SingleLoraGMMRouting:
+    slot: torch.Tensor
+    enabled: torch.Tensor
+
+
 _QUANT_MOE_LORA_IMPLS: dict[QuantType, QuantMoELoRAImpl] = {}
 
 MOE_LORA_GMM_MAX_LORAS = 3
 MOE_LORA_GMM_RANK = 16
 MOE_LORA_GMM_TOP_K = 6
-MOE_LORA_GMM_MIN_ROWS_PER_EXPERT = 8
+MOE_LORA_GMM_MIN_ROWS_PER_GROUP = 8
 
 
 def register_quant_moe_lora_impl(
@@ -150,19 +163,19 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
-def _can_use_homogeneous_lora_gmm(
+def _can_use_single_lora_gmm(
     lora_context,
     *,
     hidden_states: torch.Tensor,
     group_list: torch.Tensor,
     group_list_type: int,
 ) -> bool:
-    """Return whether the fixed homogeneous-LoRA GMM path is safe."""
+    """Return whether one active adapter can use expert-grouped GMM."""
     punica_wrapper = getattr(lora_context, "punica_wrapper", None)
     if punica_wrapper is None:
         return False
     if (
-        not getattr(punica_wrapper, "has_homogeneous_lora", False)
+        getattr(punica_wrapper, "num_active_moe_loras", 0) != 1
         or not getattr(punica_wrapper, "is_prefill", False)
         or lora_context.fully_sharded
         or group_list_type != 1
@@ -184,7 +197,118 @@ def _can_use_homogeneous_lora_gmm(
         or any(weight.dtype != hidden_states.dtype for weight in weights)
         or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in (*w13_a, *w2_a))
         or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
-        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_EXPERT * num_experts
+        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_experts
+    )
+
+
+def _can_use_composite_lora_gmm(
+    lora_context,
+    *,
+    hidden_states: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int,
+) -> bool:
+    """Return whether mixed requests can use ``(slot, expert)`` GMM."""
+    punica_wrapper = getattr(lora_context, "punica_wrapper", None)
+    if (
+        punica_wrapper is None
+        or getattr(punica_wrapper, "no_lora", True)
+        or getattr(punica_wrapper, "num_active_moe_loras", 0) < 2
+        or not getattr(punica_wrapper, "is_prefill", False)
+        or lora_context.fully_sharded
+        or group_list_type != 1
+        or lora_context.top_k != MOE_LORA_GMM_TOP_K
+        or hidden_states.dtype != torch.bfloat16
+    ):
+        return False
+
+    w13_a = lora_context.w13_lora_a_stacked
+    w13_b = lora_context.w13_lora_b_stacked
+    w2_a = lora_context.w2_lora_a_stacked
+    w2_b = lora_context.w2_lora_b_stacked
+    weights = (*w13_a, *w13_b, *w2_a, *w2_b)
+    num_experts = group_list.numel()
+    num_composite_groups = MOE_LORA_GMM_MAX_LORAS * num_experts
+    return not (
+        not weights
+        or any(weight.shape[0] != MOE_LORA_GMM_MAX_LORAS for weight in weights)
+        or any(weight.shape[1] != num_experts for weight in weights)
+        or any(weight.dtype != hidden_states.dtype for weight in weights)
+        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in (*w13_a, *w2_a))
+        or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
+        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_composite_groups
+    )
+
+
+def _build_single_lora_gmm_routing(
+    lora_context,
+    *,
+    expanded_row_idx: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> _SingleLoraGMMRouting:
+    """Select one adapter and align its active/base mask to dispatched rows."""
+    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    token_lora_indices = token_lora_indices[: topk_ids.shape[0]]
+    pair_lora_slots = token_lora_indices.repeat_interleave(topk_ids.shape[1])
+    max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
+    safe_lora_slots = pair_lora_slots.clamp(min=0, max=max_loras - 1)
+    pair_enabled = (pair_lora_slots >= 0) & lora_context.adapter_enabled[safe_lora_slots].bool()
+
+    dispatched_rows = expanded_row_idx.abs().reshape(-1).to(torch.long)
+    dispatched_enabled = torch.empty_like(pair_enabled)
+    dispatched_enabled.index_copy_(0, dispatched_rows, pair_enabled)
+    return _SingleLoraGMMRouting(
+        slot=safe_lora_slots.max().reshape(1),
+        enabled=dispatched_enabled,
+    )
+
+
+def _build_composite_lora_gmm_routing(
+    lora_context,
+    *,
+    expanded_row_idx: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_experts: int,
+) -> _CompositeLoraGMMRouting:
+    """Group dispatched rows by ``(LoRA slot, expert)`` without host sync."""
+    flat_expert_ids = topk_ids.reshape(-1).to(torch.long)
+    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    pair_lora_slots = token_lora_indices[: topk_ids.shape[0]].repeat_interleave(topk_ids.shape[1])
+
+    max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
+    safe_lora_slots = pair_lora_slots.clamp(min=0, max=max_loras - 1)
+    adapter_enabled = lora_context.adapter_enabled
+    pair_enabled = (pair_lora_slots >= 0) & adapter_enabled[safe_lora_slots].bool()
+
+    # Inactive/base rows still need a static GMM group. Route them through an
+    # enabled slot with zeroed inputs so unloaded weight buffers are not read.
+    fallback_slot = torch.argmax(adapter_enabled[:max_loras])
+    pair_group_slots = torch.where(pair_enabled, safe_lora_slots, fallback_slot)
+    pair_group_ids = pair_group_slots * num_experts + flat_expert_ids
+
+    dispatched_rows = expanded_row_idx.abs().reshape(-1).to(torch.long)
+    dispatched_group_ids = torch.empty_like(pair_group_ids)
+    dispatched_group_ids.index_copy_(0, dispatched_rows, pair_group_ids)
+    dispatched_enabled = torch.empty_like(pair_enabled)
+    dispatched_enabled.index_copy_(0, dispatched_rows, pair_enabled)
+
+    _, permutation = torch.sort(dispatched_group_ids)
+    grouped_enabled = dispatched_enabled.index_select(0, permutation)
+    num_groups = max_loras * num_experts
+    composite_group_list = torch.zeros(
+        num_groups,
+        dtype=torch.int64,
+        device=dispatched_group_ids.device,
+    )
+    composite_group_list.scatter_add_(
+        0,
+        dispatched_group_ids,
+        torch.ones_like(dispatched_group_ids, dtype=torch.int64),
+    )
+    return _CompositeLoraGMMRouting(
+        permutation=permutation,
+        group_list=composite_group_list,
+        enabled=grouped_enabled,
     )
 
 
@@ -209,28 +333,57 @@ def _grouped_lora_matmul(
     )[0]
 
 
-def _add_homogeneous_lora_gmm(
+def _add_single_lora_gmm(
     output: torch.Tensor,
     inputs: torch.Tensor,
     lora_a_stacked: tuple[torch.Tensor, ...],
     lora_b_stacked: tuple[torch.Tensor, ...],
     *,
-    lora_slot: torch.Tensor,
+    routing: _SingleLoraGMMRouting,
     group_list: torch.Tensor,
 ) -> None:
-    """Add one homogeneous adapter with two grouped matmuls per slice.
+    """Add one adapter with two grouped matmuls per output slice.
 
-    ``lora_slot`` stays on device so ACLGraph replay selects the adapter used
-    by the current batch instead of retaining the slot captured initially.
+    Slot selection and the optional base-token mask remain graph tensors.
     """
+    masked_inputs = inputs * routing.enabled.unsqueeze(-1).to(inputs.dtype)
     output_offset = 0
     for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
-        selected_lora_a = torch.index_select(lora_a, 0, lora_slot).squeeze(0)
-        selected_lora_b = torch.index_select(lora_b, 0, lora_slot).squeeze(0)
-        shrink = _grouped_lora_matmul(inputs, selected_lora_a, group_list)
+        selected_lora_a = torch.index_select(lora_a, 0, routing.slot).squeeze(0)
+        selected_lora_b = torch.index_select(lora_b, 0, routing.slot).squeeze(0)
+        shrink = _grouped_lora_matmul(masked_inputs, selected_lora_a, group_list)
         delta = _grouped_lora_matmul(shrink, selected_lora_b, group_list)
+        delta *= routing.enabled.unsqueeze(-1).to(delta.dtype)
         output_size = delta.shape[-1]
         output.narrow(-1, output_offset, output_size).add_(delta)
+        output_offset += output_size
+
+
+def _add_composite_lora_gmm(
+    output: torch.Tensor,
+    inputs: torch.Tensor,
+    lora_a_stacked: tuple[torch.Tensor, ...],
+    lora_b_stacked: tuple[torch.Tensor, ...],
+    *,
+    routing: _CompositeLoraGMMRouting,
+) -> None:
+    """Add LoRA deltas after grouping rows by dynamic slot and expert."""
+    grouped_inputs = inputs.index_select(0, routing.permutation)
+    grouped_inputs = grouped_inputs * routing.enabled.unsqueeze(-1).to(inputs.dtype)
+
+    output_offset = 0
+    for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
+        lora_a_flat = lora_a.flatten(0, 1)
+        lora_b_flat = lora_b.flatten(0, 1)
+        shrink = _grouped_lora_matmul(grouped_inputs, lora_a_flat, routing.group_list)
+        delta = _grouped_lora_matmul(shrink, lora_b_flat, routing.group_list)
+        delta *= routing.enabled.unsqueeze(-1).to(delta.dtype)
+        output_size = delta.shape[-1]
+        output.narrow(-1, output_offset, output_size).index_add_(
+            0,
+            routing.permutation,
+            delta,
+        )
         output_offset += output_size
 
 
@@ -301,33 +454,53 @@ def _apply_dynamic_int8_moe_lora(
         output_dtype=input_dtype,
     )[0]
 
-    use_homogeneous_lora_gmm = False
+    use_single_lora_gmm = False
+    use_composite_lora_gmm = False
     if comm_type == MoECommType.ALLGATHER:
-        use_homogeneous_lora_gmm = _can_use_homogeneous_lora_gmm(
+        use_single_lora_gmm = _can_use_single_lora_gmm(
             lora_context,
             hidden_states=hidden_states,
             group_list=mlp_compute_input.group_list,
             group_list_type=mlp_compute_input.group_list_type,
         )
+        if not use_single_lora_gmm:
+            use_composite_lora_gmm = _can_use_composite_lora_gmm(
+                lora_context,
+                hidden_states=hidden_states,
+                group_list=mlp_compute_input.group_list,
+                group_list_type=mlp_compute_input.group_list_type,
+            )
 
     lora_routing = None
-    if use_homogeneous_lora_gmm:
-        # The host only decides whether this graph-safe fast path is eligible.
-        # Select the concrete adapter from the device mapping so a graph
-        # captured with slot N can be replayed with slot M.
-        graph_lora_slot = torch.narrow(
-            lora_context.punica_wrapper.token_lora_indices,
-            0,
-            0,
-            1,
+    single_lora_routing = None
+    composite_lora_routing = None
+    if use_single_lora_gmm:
+        single_lora_routing = _build_single_lora_gmm_routing(
+            lora_context,
+            expanded_row_idx=mlp_compute_input.expanded_row_idx,
+            topk_ids=mlp_compute_input.topk_ids,
         )
-        _add_homogeneous_lora_gmm(
+        _add_single_lora_gmm(
             gate_up_out,
             hidden_states,
             lora_context.w13_lora_a_stacked,
             lora_context.w13_lora_b_stacked,
-            lora_slot=graph_lora_slot,
+            routing=single_lora_routing,
             group_list=mlp_compute_input.group_list,
+        )
+    elif use_composite_lora_gmm:
+        composite_lora_routing = _build_composite_lora_gmm_routing(
+            lora_context,
+            expanded_row_idx=mlp_compute_input.expanded_row_idx,
+            topk_ids=mlp_compute_input.topk_ids,
+            num_experts=mlp_compute_input.group_list.numel(),
+        )
+        _add_composite_lora_gmm(
+            gate_up_out,
+            hidden_states,
+            lora_context.w13_lora_a_stacked,
+            lora_context.w13_lora_b_stacked,
+            routing=composite_lora_routing,
         )
     elif comm_type == MoECommType.ALLGATHER:
         lora_routing = _recover_moe_lora_routing_allgather(
@@ -382,16 +555,25 @@ def _apply_dynamic_int8_moe_lora(
         fallback_output_dtype=w2_scale[0].dtype,
         mxfp_quant_dtype=None,
     )
-    if use_homogeneous_lora_gmm:
+    if use_single_lora_gmm:
         # activated already includes topk_scales, so the W2 LoRA delta must
         # not multiply routed weights a second time.
-        _add_homogeneous_lora_gmm(
+        _add_single_lora_gmm(
             down_out,
             activated,
             lora_context.w2_lora_a_stacked,
             lora_context.w2_lora_b_stacked,
-            lora_slot=graph_lora_slot,
+            routing=single_lora_routing,
             group_list=mlp_compute_input.group_list,
+        )
+        reset_lora_indices(lora_context)
+    elif use_composite_lora_gmm:
+        _add_composite_lora_gmm(
+            down_out,
+            activated,
+            lora_context.w2_lora_a_stacked,
+            lora_context.w2_lora_b_stacked,
+            routing=composite_lora_routing,
         )
         reset_lora_indices(lora_context)
     else:

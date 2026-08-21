@@ -68,19 +68,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             vocab_size,
             **kwargs,
         )
-        # Keep the homogeneous-LoRA decision on the host.  Reading
-        # token_lora_indices back from the NPU in the MoE hot path would
-        # introduce a device synchronization.  A strict all-token match is
-        # intentional: mixed base/LoRA batches must keep using the per-row
-        # BGMV routing path.
+        # Keep only the active-LoRA count on the host. The concrete slot and
+        # base-token mask stay in device tensors so ACLGraph replay can switch
+        # requests without fixing batch-local routing values.
         index_mapping = mapping.index_mapping
-        homogeneous_lora_id = (
-            index_mapping[0] if getattr(mapping, "is_prefill", False) and len(index_mapping) > 0 else 0
-        )
-        self.has_homogeneous_lora = (
-            homogeneous_lora_id > 0
-            and all(lora_id == homogeneous_lora_id for lora_id in index_mapping)
-            and homogeneous_lora_id in lora_index_to_id
+        loaded_lora_ids = set(lora_id for lora_id in lora_index_to_id if lora_id is not None)
+        self.num_active_moe_loras = len(
+            set(lora_id for lora_id in index_mapping if lora_id > 0 and lora_id in loaded_lora_ids)
         )
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
