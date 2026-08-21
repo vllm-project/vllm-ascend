@@ -59,7 +59,6 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V1: "1"
@@ -114,7 +113,7 @@ templates:
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true}'
+      - '{"recompute_scheduler_enable":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -155,7 +154,7 @@ templates:
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true}'
+      - '{"recompute_scheduler_enable":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -198,7 +197,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,4,8,16,24,32,48,56]}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -241,7 +240,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,4,8,16,24,32,48,56]}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 

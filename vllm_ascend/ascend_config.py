@@ -22,7 +22,6 @@ import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
-from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -214,9 +213,8 @@ class AscendConfig:
     Migrated to ``@config`` (pydantic dataclass). User-input switches are now
     typed fields with lax bool/int coercion (``"false"``→False, ``"2"``→2),
     fixing the ``bool("false")``/``"2"==2`` pitfalls. Unknown keys are
-    forbidden (``extra="forbid"``). A-family env-var fallbacks (additional_config
-    → envs → default) run in a ``before`` model_validator. Cross-config
-    derivations, downgrades and mutex checks that need ``vllm_config`` run in
+    forbidden (``extra="forbid"``). Cross-config derivations, downgrades and
+    mutex checks that need ``vllm_config`` run in
     ``derive_and_validate()``, a plain method invoked explicitly by
     ``init_ascend_config`` (not a pydantic validator) — preserving original
     ordering and error messages.
@@ -294,31 +292,6 @@ class AscendConfig:
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
-
-    # ---- A-family envs fallback (before, handles ArgsKwargs) ----
-    @model_validator(mode="before")
-    @classmethod
-    def _env_fallback(cls, data: Any) -> Any:
-        if not isinstance(data, ArgsKwargs):
-            return data
-        kw = dict(data.kwargs)
-        from vllm_ascend import envs as ascend_envs
-
-        _A_FAMILY = {
-            "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
-        }
-        for key, env_name in _A_FAMILY.items():
-            if key in kw:
-                logger.info_once(f"AscendConfig.{key} is set from additional_config with value {kw[key]}.")
-            elif env_name in os.environ:
-                env_value = getattr(ascend_envs, env_name)
-                logger.info_once(
-                    f"AscendConfig.{key} falls back to environment variable {env_name} with value {env_value}. "
-                    f"Please use additional_config.{key} instead, because {env_name} will be removed in the "
-                    "next release."
-                )
-                kw[key] = env_value
-        return ArgsKwargs(data.args, kw)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):

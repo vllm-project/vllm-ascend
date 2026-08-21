@@ -18,7 +18,6 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
-from unittest import skip
 from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
@@ -423,74 +422,6 @@ class TestAscendConfig(TestBase):
         )
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.AscendConfig._is_megamoe_supported_by_config")
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once, mock_is_megamoe):
-        mock_is_megamoe.return_value = True
-        test_vllm_config = VllmConfig()
-        test_vllm_config.parallel_config.tensor_parallel_size = 4
-        with patch.dict(
-            os.environ,
-            {
-                "VLLM_ASCEND_ENABLE_MLAPO": "0",
-            },
-        ):
-            ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertEqual(ascend_config.enable_fused_mc2, 0)
-        self.assertFalse(ascend_config.enable_mlapo)
-        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
-        self.assertEqual(ascend_config.weight_nz_mode, 1)
-        mock_info_once.assert_any_call(
-            "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
-            "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be "
-            "removed in the next release."
-        )
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_skips_default_env_fallback_logs(self, mock_fix_incompatible_config, mock_info_once):
-        test_vllm_config = VllmConfig()
-        with patch.dict(os.environ, {}, clear=True):
-            init_ascend_config(test_vllm_config)
-
-        fallback_logs = [
-            call.args[0]
-            for call in mock_info_once.call_args_list
-            if "falls back to environment variable" in call.args[0]
-        ]
-        self.assertEqual(fallback_logs, [])
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {
-            "enable_fused_mc2": 0,
-            "enable_mlapo": True,
-            "msmonitor_use_daemon": False,
-            "enable_transpose_kv_cache_by_block": True,
-            "weight_nz_mode": 1,
-        }
-        with patch.dict(
-            os.environ,
-            {
-                "VLLM_ASCEND_ENABLE_MLAPO": "0",
-            },
-        ):
-            ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertEqual(ascend_config.enable_fused_mc2, 0)
-        self.assertTrue(ascend_config.enable_mlapo)
-        self.assertFalse(ascend_config.msmonitor_use_daemon)
-        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
-        self.assertEqual(ascend_config.weight_nz_mode, 1)
-        mock_info_once.assert_any_call("AscendConfig.enable_mlapo is set from additional_config with value True.")
-
-    @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_msmonitor_daemon_uses_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
@@ -499,6 +430,16 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
 
         self.assertTrue(ascend_config.msmonitor_use_daemon)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mlapo_config_ignores_removed_env(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_mlapo": False}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "1"}):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertFalse(ascend_config.enable_mlapo)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
@@ -1006,16 +947,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "weight_nz_mode must be one of 0, 1, or 2"):
             init_ascend_config(vc)
 
-    @skip("Deprecated env compatibility will be removed; additional_config is the supported path.")
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_mlapo_env_false_no_longer_crashes(self, mock_fix):
-        # Regression: `export VLLM_ASCEND_ENABLE_MLAPO=false` used to crash
-        # startup with ValueError (int("false")). The before-validator reads
-        # os.getenv directly and resolves "false" to False.
+    def test_enable_mlapo_removed_env_is_ignored(self, mock_fix):
         vc = VllmConfig()
         with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "false"}):
-            self.assertFalse(init_ascend_config(vc).enable_mlapo)
+            self.assertTrue(init_ascend_config(vc).enable_mlapo)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

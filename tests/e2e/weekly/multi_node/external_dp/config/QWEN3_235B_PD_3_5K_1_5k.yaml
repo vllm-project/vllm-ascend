@@ -50,7 +50,6 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V1: "1"
@@ -108,6 +107,8 @@ templates:
       - --no-enable-prefix-caching
       # #4623 removed Ascend Scheduler; use the vLLM scheduler CLI instead.
       - --enable-chunked-prefill
+      - --additional-config
+      - '{"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -148,7 +149,7 @@ templates:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15]}'
       - --additional-config
       # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0}}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -189,7 +190,7 @@ templates:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15]}'
       - --additional-config
       # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0}}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
