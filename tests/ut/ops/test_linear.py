@@ -249,6 +249,73 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self.assertIsNone(self._op("model.patch_merge_mlp.out_proj"))
 
 
+class TestSequenceRowParallelOp(unittest.TestCase):
+    def setUp(self):
+        self.mock_group = MagicMock(world_size=4, rank_in_group=0)
+        self.group_patch = patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group)
+        self.group_patch.start()
+
+    def tearDown(self):
+        self.group_patch.stop()
+
+    def _make_op(self, input_is_parallel=True):
+        from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+
+        layer = MagicMock()
+        op = SequenceRowParallelOp(layer)
+        op.input_is_parallel = input_is_parallel
+        op.reduce_results = True
+        op.skip_bias_add = False
+        op.bias = None
+        op.quant_method = MagicMock()
+        op.unique_prefix = "model.layers.0.mlp.down_proj"
+        return op
+
+    def test_mxfp8_tuple_uses_dedicated_custom_op(self):
+        op = self._make_op()
+        quantized_input = torch.empty(8, 16, dtype=torch.float8_e4m3fn)
+        input_scale = torch.empty(8, 1, 2, dtype=torch.uint8)
+        expected = torch.empty(2, 8, dtype=torch.bfloat16)
+
+        with patch.object(torch.ops.vllm, "matmul_and_reduce_mxfp8", return_value=expected, create=True) as mock_mxfp8:
+            output, output_bias = op.apply_impl((quantized_input, input_scale))
+
+        self.assertIs(output, expected)
+        self.assertIsNone(output_bias)
+        mock_mxfp8.assert_called_once_with(quantized_input, input_scale, op.unique_prefix)
+
+    def test_mxfp8_tuple_must_be_prepartitioned(self):
+        op = self._make_op(input_is_parallel=False)
+        quantized_input = torch.empty(8, 16, dtype=torch.float8_e4m3fn)
+        input_scale = torch.empty(8, 1, 2, dtype=torch.uint8)
+
+        with self.assertRaisesRegex(ValueError, "must already be partitioned"):
+            op.apply_impl((quantized_input, input_scale))
+
+    def test_mxfp8_custom_op_reconstructs_quantized_input_tuple(self):
+        from vllm_ascend.ops.register_custom_ops import _matmul_and_reduce_mxfp8_impl
+
+        quantized_input = torch.empty(8, 16, dtype=torch.float8_e4m3fn)
+        input_scale = torch.empty(8, 1, 2, dtype=torch.uint8)
+        expected = torch.empty(2, 8, dtype=torch.bfloat16)
+        layer = MagicMock()
+        layer.tp_rank = 0
+        layer.skip_bias_add = False
+        layer.bias = None
+        layer.custom_op.matmul_and_reduce.return_value = expected
+        forward_context = MagicMock()
+        forward_context.no_compile_layers = {"model.layers.0.mlp.down_proj": layer}
+
+        with patch(
+            "vllm_ascend.ops.register_custom_ops.get_forward_context",
+            return_value=forward_context,
+        ):
+            output = _matmul_and_reduce_mxfp8_impl(quantized_input, input_scale, "model.layers.0.mlp.down_proj")
+
+        self.assertIs(output, expected)
+        layer.custom_op.matmul_and_reduce.assert_called_once_with((quantized_input, input_scale), None)
+
+
 class TestGetParallelOpShareExpert(unittest.TestCase):
     """Tests for get_parallel_op — share_expert/shared_expert disables TP."""
 
