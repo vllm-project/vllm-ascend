@@ -728,6 +728,18 @@ class NPUModelRunner(GPUModelRunner):
         # count and make every rank select a different MoE communication path.
         num_tokens_across_dp[~active_dp_mask] = max_tokens_across_dp
 
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DP model execution metadata synchronized: rank=%d, role=%s, "
+                "local_tokens=%d, active_mask=%s, synced_tokens=%s, aclgraph_mode=%s",
+                self.dp_rank,
+                "dummy" if is_dummy_run else "active",
+                num_tokens,
+                active_dp_mask.tolist(),
+                num_tokens_across_dp.tolist(),
+                synced_cudagraph_mode.name,
+            )
+
         # Create a tensor for num_tokens_after_padding
         if allow_dp_padding or is_draft_model:
             num_tokens_after_padding = torch.tensor(
