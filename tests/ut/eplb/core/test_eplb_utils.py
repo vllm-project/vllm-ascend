@@ -43,7 +43,7 @@ class TestAscendConfig(unittest.TestCase):
         moe_config.supports_eplb = True
         self.vllm_config = vllm_config
         self.moe_config = moe_config
-        self.mock_npu_patcher = patch("torch.Tensor.npu", new=lambda self: self)
+        self.mock_npu_patcher = patch("torch.Tensor.npu", new=lambda self: self, create=True)
         self.mock_npu_patcher.start()
         os.environ["DYNAMIC_EPLB"] = "true"
 
