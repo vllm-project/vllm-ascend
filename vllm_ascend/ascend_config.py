@@ -410,9 +410,6 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
-        if self.enable_shared_expert_dp:
-            sp_enabled = enable_sp(vllm_config=vc, enable_shared_expert_dp=True, ascend_config=self)
-            assert sp_enabled
 
         # FLASHCOMM1 max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc, ascend_config=self):
@@ -455,6 +452,11 @@ class AscendConfig:
             logger.warning_once(
                 "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+            )
+        if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
+            self.enable_fused_mc2 = 0
+            logger.warning_once(
+                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
             )
 
         # PD tp_ratio / head_ratio / num_head_replica derivation
@@ -513,6 +515,8 @@ class AscendConfig:
             and vc.compilation_config.pass_config.enable_sp
         )
 
+        self._validate_mc2_hierarchy_comm(vc)
+
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
@@ -541,6 +545,28 @@ class AscendConfig:
         # sparse KV offload vs sparse SFA C8 main cache mutex
         self._validate_sparse_c8_kv_offload_compatibility()
         return self
+
+    def _validate_mc2_hierarchy_comm(self, vllm_config: VllmConfig) -> None:
+        if not self.enable_mc2_hierarchy_comm:
+            return
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        device_type = get_ascend_device_type()
+        if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+            raise NotImplementedError(
+                f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
+            )
+
+        num_logical_experts = vllm_config.model_config.get_num_experts()
+        num_redundant_experts = self.eplb_config.num_redundant_experts if self.eplb_config.dynamic_eplb else 0
+        num_experts = num_logical_experts + num_redundant_experts
+        if num_experts > 512:
+            raise ValueError(
+                "enable_mc2_hierarchy_comm supports at most 512 experts, "
+                f"but got {num_experts} experts "
+                f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
+            )
 
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
         if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
@@ -580,6 +606,38 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
+    @staticmethod
+    def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+        hf_text_config = vllm_config.model_config.hf_text_config
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+            hidden_size = vllm_config.model_config.get_hidden_size()
+        if hidden_size is None:
+            return False
+        hidden_size = int(hidden_size)
+        if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+            return False
+
+        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None:
+            return False
+        if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+            return False
+
+        quant_type = getattr(hf_text_config, "moe_quantize", getattr(hf_text_config, "quantize", None))
+        if quant_type is None:
+            return True
+        quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+        supported_quant_names = {
+            "w8a8",
+            "w4a8",
+            "w8a8_dynamic",
+            "w4a8_dynamic",
+            "quanttype.w8a8",
+            "quanttype.w4a8",
+        }
+        return quant_name in supported_quant_names
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
@@ -682,7 +740,7 @@ class DynamicSpecConfig:
 
     # Dynamic speculative-length methods. "dspark" relies on the DSpark
     # confidence head; models without such a head need another method.
-    SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark",)
+    SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
 
     # None disables the dynamic speculative-length path.
     method: str | None = None
@@ -855,6 +913,12 @@ class ProfilingChunkConfig:
         # sentinel distinguishes "not provided" from "explicitly False".
         if self.need_timing is None:
             self.need_timing = self.enabled
+        if not self.enabled and self.need_timing:
+            logger.warning(
+                "profiling_chunk_config.need_timing=True is ignored because "
+                "profiling_chunk_config.enabled=False. Setting need_timing to False."
+            )
+            self.need_timing = False
         if not (0 < self.smooth_factor <= 1.0):
             raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:

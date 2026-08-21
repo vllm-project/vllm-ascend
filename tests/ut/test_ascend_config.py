@@ -28,6 +28,7 @@ from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
     FinegrainedTPConfig,
@@ -41,7 +42,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.utils import clear_enable_sp, enable_sp
+from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
 def test_ascend_config_import_does_not_load_vllm_config():
@@ -533,6 +534,35 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_and_shared_expert_dp_are_independent(self, mock_check_and_update_config):
+        for enable_flashcomm1, enable_shared_expert_dp in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                enable_flashcomm1=enable_flashcomm1,
+                enable_shared_expert_dp=enable_shared_expert_dp,
+            ):
+                clear_ascend_config()
+                clear_enable_sp()
+                test_vllm_config = VllmConfig()
+                test_vllm_config.parallel_config.tensor_parallel_size = 2
+                test_vllm_config.parallel_config.enable_expert_parallel = True
+                test_vllm_config.additional_config = {
+                    "enable_flashcomm1": enable_flashcomm1,
+                    "enable_shared_expert_dp": enable_shared_expert_dp,
+                }
+
+                ascend_config = init_ascend_config(test_vllm_config)
+
+                self.assertEqual(enable_sp(test_vllm_config), enable_flashcomm1)
+                self.assertEqual(ascend_config.enable_shared_expert_dp, enable_shared_expert_dp)
+                self.assertEqual(shared_expert_dp_enabled(), enable_shared_expert_dp)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
@@ -833,6 +863,9 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             ProfilingChunkConfig(smooth_factor=1.5)
 
+    def test_dynamic_spec_config_accepts_dflash(self):
+        self.assertEqual(DynamicSpecConfig(method="dflash").method, "dflash")
+
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):
@@ -863,6 +896,52 @@ class TestSubconfigPydanticTypeValidation(TestBase):
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
+
+
+class TestUpstreamConfigCompatibility(TestBase):
+    def test_megamoe_model_config_constraints(self):
+        supported = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    hidden_size=4096,
+                    moe_intermediate_size=1536,
+                    moe_quantize="w8a8",
+                )
+            )
+        )
+        unsupported = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    hidden_size=896,
+                    moe_intermediate_size=1536,
+                )
+            )
+        )
+
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(supported))
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(unsupported))
+
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, mock_device_type):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_mc2_hierarchy_comm=True,
+        )
+        vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 513))
+
+        with self.assertRaisesRegex(ValueError, "supports at most 512 experts"):
+            config._validate_mc2_hierarchy_comm(vllm_config)
+
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    def test_mc2_hierarchy_comm_rejects_unsupported_device(self, mock_device_type):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_mc2_hierarchy_comm=True,
+        )
+        vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 1))
+
+        with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
+            config._validate_mc2_hierarchy_comm(vllm_config)
 
 
 class TestTopLevelSwitchTypeValidation(TestBase):
@@ -963,6 +1042,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc = VllmConfig()
         vc.additional_config = {"mega_moe_max_tokens": "131072"}
         self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
+
+    @_clean_up
+    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
+    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_fused_mc2": 1}
+
+        self.assertEqual(init_ascend_config(vc).enable_fused_mc2, 0)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

@@ -82,7 +82,7 @@ class TestProfilingChunkConfig(TestBase):
 
     @patch("vllm_ascend.ascend_config.logger.warning")
     def test_need_timing_is_disabled_when_profiling_chunk_is_disabled(self, mock_warning):
-        cfg = ProfilingChunkConfig({"enabled": False, "need_timing": True})
+        cfg = ProfilingChunkConfig(enabled=False, need_timing=True)
 
         self.assertFalse(cfg.need_timing)
         mock_warning.assert_called_once()
