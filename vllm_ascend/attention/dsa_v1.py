@@ -704,7 +704,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.block_table[: self.num_decodes],
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
-                self.block_size,
+                self.storage_block_size,
                 query_start_loc[: self.num_decodes + 1],
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
