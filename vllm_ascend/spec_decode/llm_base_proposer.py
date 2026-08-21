@@ -118,6 +118,13 @@ def _is_glm_model(model_config) -> bool:
     return "glm" in str(model_type).lower()
 
 
+def _maybe_remove_d2t(draft_model, vllm_config):
+    target_vocab_size = vllm_config.model_config.get_vocab_size()
+    draft_vocab_size = draft_model.config.draft_vocab_size
+    if draft_vocab_size == target_vocab_size:
+        draft_model.draft_id_to_target_id = None
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -300,6 +307,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 model_config=self.speculative_config.draft_model_config,
                 load_config=self.speculative_config.draft_load_config,
             )
+            # A full-vocab draft (draft_vocab_size == target vocab_size) uses an
+            # identity d2t mapping; drop it so the draft's compute_logits skips
+            # the full-vocab -inf buffer + scatter, which is pure overhead.
+            _maybe_remove_d2t(model, draft_vllm_config)
+
         return model
 
     def load_model(self, model: nn.Module) -> None:
