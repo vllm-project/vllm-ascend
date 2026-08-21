@@ -17,7 +17,8 @@
 
 # This image is intentionally free of CANN and NPU device support.  It is a
 # reproducible package build/verification environment, not an inference image.
-FROM openeuler/openeuler:24.03-lts
+ARG CPU_BASE_IMAGE="openeuler/openeuler:24.03-lts"
+FROM ${CPU_BASE_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -25,6 +26,7 @@ ARG PIP_INDEX_URL="https://pypi.org/simple"
 ARG PIP_TRUSTED_HOST=""
 ARG PYTORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 ARG ASCEND_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG DNF_MIRROR=""
 
 ENV COMPILE_CUSTOM_KERNELS=0 \
     SOC_VERSION=ascend910b1 \
@@ -39,7 +41,11 @@ WORKDIR /opt/vllm-ascend
 
 # Keep this layer independent of source changes.  A normal Python source edit
 # therefore reuses the expensive PyTorch and Ascend wheel installation.
-RUN dnf -y --setopt=install_weak_deps=False --setopt=timeout=30 --setopt=retries=1 install \
+RUN if [ -n "${DNF_MIRROR}" ]; then \
+        sed -Ei "s@https?://repo\.openeuler\.org@${DNF_MIRROR%/}@g; /^metalink=/d" \
+            /etc/yum.repos.d/*.repo; \
+    fi \
+    && dnf -y --setopt=install_weak_deps=False --setopt=timeout=30 --setopt=retries=1 install \
         ca-certificates gcc gcc-c++ make cmake git ninja-build \
         numactl-devel wget curl jq python3 python3-pip \
     && dnf clean all \

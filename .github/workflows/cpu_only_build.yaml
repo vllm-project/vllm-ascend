@@ -57,6 +57,8 @@ jobs:
           file: Dockerfile.cpu
           outputs: type=cacheonly
           build-args: |
+            CPU_BASE_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/openeuler/openeuler:24.03-lts
+            DNF_MIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/openeuler
             PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
             PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
             PYTORCH_CPU_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu

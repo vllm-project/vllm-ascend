@@ -113,7 +113,11 @@ class DependencyDocumentationTest(unittest.TestCase):
         self.assertIn('grep -Fvx "${ARCTIC_INFERENCE_REQUIREMENT}"', cpu_only_script)
         self.assertIn("trap restore_requirements EXIT", cpu_only_script)
         self.assertIn("RUN bash tools/cpu_only_build.sh verify", cpu_only_dockerfile)
+        self.assertIn('ARG CPU_BASE_IMAGE="openeuler/openeuler:24.03-lts"', cpu_only_dockerfile)
+        self.assertIn("FROM ${CPU_BASE_IMAGE}", cpu_only_dockerfile)
         self.assertIn("uses: docker/build-push-action@v7", cpu_only_workflow)
+        self.assertIn("swr.cn-north-4.myhuaweicloud.com/ddn-k8s/", cpu_only_workflow)
+        self.assertIn("DNF_MIRROR=http://cache-service.nginx-pypi-cache", cpu_only_workflow)
         self.assertNotIn("docker run", cpu_only_workflow)
 
     def test_arctic_inference_contract_is_documented_for_suffix_decoding(self):
