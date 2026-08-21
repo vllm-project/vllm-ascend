@@ -109,6 +109,15 @@ if not _npu_available:
     torch.npu = MagicMock()
     torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = MagicMock
+    torch.npu.current_stream = MagicMock()
+    torch.npu.set_device = MagicMock()
+    torch.npu.device_count = MagicMock(return_value=0)
+    torch.npu.empty_cache = MagicMock()
+    torch.npu.mem_get_info = MagicMock(return_value=(0, 0))
+    torch.npu.memory_stats = MagicMock(return_value={})
+    torch.npu.reset_peak_memory_stats = MagicMock()
+    # Some code paths do `import torch.npu`; attribute assignment alone is not enough.
+    sys.modules["torch.npu"] = torch.npu
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
 
