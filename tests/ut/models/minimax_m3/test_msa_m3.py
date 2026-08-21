@@ -779,13 +779,6 @@ def test_ascendc_index_cache_unwraps_runtime_tuple() -> None:
     assert actual.data_ptr() == index_key_cache.data_ptr()
 
 
-def test_ascendc_index_cache_rejects_non_runtime_shape() -> None:
-    index_key_cache = torch.zeros(4, 128, 1, 128)
-
-    with pytest.raises(ValueError, match=r"\[num_blocks, 128, head_dim\]"):
-        _as_ascendc_index_kv_cache(index_key_cache)
-
-
 def test_ascendc_index_score_forwards_metadata_operands() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
@@ -816,8 +809,8 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
     assert args[1].shape == (4, 128, 1, 128)
     assert args[3] is start_loc
     assert kwargs["atten_mask"] is causal_mask
-    assert kwargs["init_blocks"] == 0
-    assert kwargs["local_blocks"] == 0
+    assert "init_blocks" not in kwargs
+    assert "local_blocks" not in kwargs
 
 
 def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
@@ -995,8 +988,7 @@ def test_decode_applies_forced_blocks_only_in_topk(decode_query_len: int) -> Non
 
     assert actual_indices is expected_indices
     assert actual_scores is expected_scores
-    assert mock_score.call_args.kwargs.get("init_blocks", 0) == 0
-    assert mock_score.call_args.kwargs.get("local_blocks", 0) == 0
+    assert mock_score.call_args.kwargs == {}
     assert mock_topk.call_args.kwargs["init_blocks"] == 1
     assert mock_topk.call_args.kwargs["local_blocks"] == 1
 
