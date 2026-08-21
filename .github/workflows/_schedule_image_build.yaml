@@ -170,6 +170,8 @@ jobs:
       contents: read
 
     strategy:
+      max-parallel: 2
+      fail-fast: false
       matrix:
         runner_info:
           - {runner: linux-aarch64-cpu-4, tag: arm64}
