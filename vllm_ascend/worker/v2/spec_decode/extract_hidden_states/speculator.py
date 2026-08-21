@@ -21,7 +21,8 @@ Requires upstream vLLM PR #49811 (``vllm.v1.worker.gpu.spec_decode.extract_hidde
 
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
+# Upstream module lands with vLLM PR #49811; ignore until that lands in CI pin.
+from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (  # type: ignore[import-not-found]
     ExtractHiddenStatesSpeculator,
 )
 
