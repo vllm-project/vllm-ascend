@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -13,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
 from .helpers import make_full_spec, make_sliding_spec
 
@@ -108,3 +111,145 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
         assert "absent from kv_cache_tensors" in str(error)
     else:
         raise AssertionError("unexpected layer must fail")
+
+
+def make_worker_config(
+    *,
+    is_consumer: bool = True,
+    is_producer: bool = False,
+    local_dp_rank: int | None = 1,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            is_kv_consumer=is_consumer,
+            is_kv_producer=is_producer,
+            kv_role="kv_consumer" if is_consumer else "kv_producer",
+            kv_port=6000,
+        ),
+        cache_config=SimpleNamespace(block_size=16),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=4,
+            pipeline_parallel_size=2,
+            data_parallel_rank_local=local_dp_rank,
+            data_parallel_size_local=3,
+            data_parallel_rank=2,
+        ),
+    )
+
+
+def patch_worker_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pcp_size: int = 1,
+) -> tuple[MagicMock, object]:
+    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", "original")
+    tp_group = object()
+    transfer_engine = MagicMock()
+    transfer_engine.get_rpc_port.return_value = 9000
+    global_te = MagicMock()
+    global_te.get_transfer_engine.return_value = transfer_engine
+    patches = {
+        "init_ascend_config": MagicMock(),
+        "get_ascend_config": MagicMock(return_value=object()),
+        "get_transfer_timeout_value": MagicMock(return_value=30),
+        "get_tensor_model_parallel_rank": MagicMock(return_value=2),
+        "get_tp_group": MagicMock(return_value=tp_group),
+        "get_pp_group": MagicMock(return_value=SimpleNamespace(rank_in_group=1)),
+        "get_pcp_group": MagicMock(return_value=SimpleNamespace(rank_in_group=0, world_size=pcp_size)),
+        "get_decode_context_model_parallel_world_size": MagicMock(return_value=2),
+        "get_decode_context_model_parallel_rank": MagicMock(return_value=1),
+        "get_ip": MagicMock(return_value="10.0.0.2"),
+        "global_te": global_te,
+    }
+    for name, value in patches.items():
+        monkeypatch.setattr(
+            f"vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.{name}",
+            value,
+        )
+    monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=7))
+    return global_te, tp_group
+
+
+def test_base_worker_initializes_parallel_ranks_and_handshake_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_worker_config()
+    kv_cache_config = SimpleNamespace(num_blocks=32)
+    global_te, tp_group = patch_worker_runtime(monkeypatch)
+
+    worker = MooncakeBaseConnectorWorker(config, "engine-d", kv_cache_config)  # type: ignore[arg-type]
+
+    assert worker.engine_id == "engine-d"
+    assert worker.block_size == 16
+    assert worker.num_blocks == 32
+    assert worker.tp_rank == 2
+    assert worker.tp_size == 4
+    assert worker.tp_group is tp_group
+    assert worker.pp_rank == 1
+    assert worker.pp_size == 2
+    assert worker.dp_rank == 1
+    assert worker.dp_size == 3
+    assert worker.pcp_rank == 0
+    assert worker.pcp_size == 1
+    assert worker.dcp_rank == 1
+    assert worker.dcp_size == 2
+    assert worker.max_device_id == 24
+    assert worker.side_channel_host == "10.0.0.2"
+    assert worker.side_channel_port == 6016
+    assert worker.handshake_port == 6022
+    assert worker.te_rpc_port == 9000
+    assert worker.xfer_handshake_metadata is None
+    assert worker.xfer_stats.is_empty()
+    global_te.get_transfer_engine.assert_called_once_with("10.0.0.2", device_name="7")
+
+
+@pytest.mark.parametrize(("is_consumer", "is_producer"), [(False, False), (True, True)])
+def test_base_worker_rejects_invalid_transfer_roles(
+    is_consumer: bool,
+    is_producer: bool,
+) -> None:
+    config = make_worker_config(is_consumer=is_consumer, is_producer=is_producer)
+
+    with pytest.raises(ValueError, match="exactly one KV transfer role"):
+        MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+
+
+def test_base_worker_requires_local_dp_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = make_worker_config(local_dp_rank=None)
+    patch_worker_runtime(monkeypatch)
+
+    with pytest.raises(ValueError, match="requires a local DP rank"):
+        MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+
+
+def test_base_worker_rejects_unsupported_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = make_worker_config()
+    patch_worker_runtime(monkeypatch, pcp_size=2)
+
+    with pytest.raises(AssertionError, match="prefill context parallel size 1"):
+        MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+
+
+def test_base_worker_stats_are_returned_and_reset() -> None:
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.xfer_stats = MooncakeKVConnectorStats(data={})
+
+    assert worker.get_kv_connector_stats() is None
+
+    worker.xfer_stats.record_transfer(0.1, 1024)
+    result = worker.get_kv_connector_stats()
+
+    assert result is not None
+    assert result.data["transfer_duration"] == [0.1]
+    assert worker.xfer_stats.is_empty()
+
+
+def test_base_worker_abstract_contract() -> None:
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+
+    with pytest.raises(NotImplementedError):
+        worker.get_finished()
+    with pytest.raises(NotImplementedError):
+        worker.get_block_ids_with_load_errors()
+    with pytest.raises(NotImplementedError):
+        worker.start_load_kv(MagicMock())
