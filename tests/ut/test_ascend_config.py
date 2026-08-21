@@ -196,6 +196,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -417,7 +418,6 @@ class TestAscendConfig(TestBase):
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "MSMONITOR_USE_DAEMON": "1",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
-                "VLLM_ASCEND_ENABLE_NZ": "2",
             },
         ):
             ascend_config = init_ascend_config(test_vllm_config)
@@ -427,16 +427,11 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertTrue(ascend_config.msmonitor_use_daemon)
         self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
-        self.assertEqual(ascend_config.weight_nz_mode, 2)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
         mock_info_once.assert_any_call(
             "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
             "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be "
             "removed in the next release."
-        )
-        mock_info_once.assert_any_call(
-            "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2. "
-            "Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed "
-            "in the next release."
         )
 
     @_clean_up_ascend_config
@@ -475,7 +470,6 @@ class TestAscendConfig(TestBase):
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "MSMONITOR_USE_DAEMON": "1",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
-                "VLLM_ASCEND_ENABLE_NZ": "2",
             },
         ):
             ascend_config = init_ascend_config(test_vllm_config)
@@ -499,6 +493,16 @@ class TestAscendConfig(TestBase):
             ascend_config = init_ascend_config(test_vllm_config)
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertTrue(enable_sp(test_vllm_config))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_weight_nz_mode_ignores_removed_env(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"weight_nz_mode": 2}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.weight_nz_mode, 2)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -637,7 +641,6 @@ class TestAscendConfig(TestBase):
             ascend_config = init_ascend_config(test_vllm_config)
 
             self.assertEqual(ascend_config.weight_nz_mode, 0)
-            self.assertEqual(os.environ.get("VLLM_ASCEND_ENABLE_NZ"), "0")
             self.assertEqual(os.environ.get("VLLM_SERVER_DEV_MODE"), "1")
             self.assertNotIn("VLLM_BATCH_INVARIANT", os.environ)
             self.assertFalse(ascend_config.rl_config.sleep_mode_extra_cleanup)
@@ -681,23 +684,19 @@ class TestAscendConfig(TestBase):
                 "enabled": False,
                 "sleep_mode_extra_cleanup": True,
                 "enable_batch_invariant": True,
-            }
+            },
+            "weight_nz_mode": 2,
         }
         allocator_config = "page_size:1g,expandable_segments:True"
         with patch.dict(
             os.environ,
-            {
-                "VLLM_ASCEND_ENABLE_NZ": "2",
-                "PYTORCH_NPU_ALLOC_CONF": allocator_config,
-            },
+            {"PYTORCH_NPU_ALLOC_CONF": allocator_config},
             clear=True,
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
-            # rl_config is a no-op when the master switch is off: the env var is
-            # neither overridden by the sub-field nor rewritten by rl_config.
+            # rl_config is a no-op when the master switch is off.
             self.assertEqual(ascend_config.weight_nz_mode, 2)
-            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "2")
             self.assertNotIn("VLLM_SERVER_DEV_MODE", os.environ)
             self.assertNotIn("VLLM_BATCH_INVARIANT", os.environ)
             self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], allocator_config)
@@ -713,8 +712,6 @@ class TestAscendConfig(TestBase):
         }
         with patch.dict(os.environ, {}, clear=True):
             ascend_config = init_ascend_config(test_vllm_config)
-            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
-
         self.assertEqual(ascend_config.weight_nz_mode, 0)
         mock_warning.assert_called_once_with(
             "RL config requires weight_nz_mode=0; overriding AscendConfig.weight_nz_mode from %s to 0.",

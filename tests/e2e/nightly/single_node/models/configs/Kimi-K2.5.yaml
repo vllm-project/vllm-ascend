@@ -12,7 +12,6 @@ _envs: &envs
   TASK_QUEUE_ENABLE: "1"
   VLLM_ASCEND_ENABLE_MLAPO: "1"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ASCEND_ENABLE_NZ: "1"
 
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
@@ -44,7 +43,7 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
   - "--additional-config"
-  - '{"enable_shared_expert_dp":true}'
+  - '{"enable_shared_expert_dp":true,"weight_nz_mode":1}'
   - "--mm-processor-cache-gb"
   - "0"
   - "--mm-encoder-tp-mode"
