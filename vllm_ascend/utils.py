@@ -535,12 +535,6 @@ def adapt_patch(is_global_patch: bool = False):
     else:
         from vllm_ascend.patch import worker  # noqa: F401
 
-    from vllm.v1.sample.ops import topk_topp_sampler
-    from vllm_ascend.sample.sampler import _apply_top_k_top_p_torch_npu
-
-    topk_topp_sampler.apply_top_k_top_p = _apply_top_k_top_p_torch_npu
-
-
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
     """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
     if kv_transfer_config is None:
