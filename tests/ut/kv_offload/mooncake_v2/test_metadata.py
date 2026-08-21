@@ -36,6 +36,7 @@ def test_transfer_metadata_rejects_misaligned_layer_count() -> None:
 def test_transfer_metadata_rejects_misaligned_tensor_count() -> None:
     with pytest.raises(ValueError, match="layer 'layer.0'.*block_strides"):
         make_transfer_metadata(
+            layer_names=["layer.0"],
             base_addrs=[[1000, 2000]],
             block_strides=[[128]],
         )

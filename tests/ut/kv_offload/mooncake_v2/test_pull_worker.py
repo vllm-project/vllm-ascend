@@ -43,6 +43,7 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.block_strides = [[128]]
     thread.block_lens = [[128]]
     thread.block_shapes = [[(1, 16, 4)]]
+    thread.block_size_scales = [[1]]
     thread.can_report_invalid_block_ids = True
     thread.invalid_block_ids = set()
     thread.invalid_block_ids_lock = threading.Lock()
@@ -303,6 +304,7 @@ def test_transfer_bucket_reuses_block_mapping_for_layers_of_same_spec() -> None:
         block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
         block_strides=[[128], [128]],
         block_lens=[[128], [128]],
+        block_size_scales=[[1], [1]],
         kv_caches_base_addr=[[1000], [2000]],
     )
     thread.local_metadata = make_transfer_metadata(
