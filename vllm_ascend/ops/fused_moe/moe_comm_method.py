@@ -334,9 +334,36 @@ class FusedMC2CommImpl(MoECommMethod):
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
-        max_recv_token_num = max(
+        absolute_safe_max_recv_token_num = max(
             1,
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
+        )
+
+        # mega_moe_max_tokens is passed as max_recv_token_num for the CANN
+        # MegaMoe symmetric buffer. The absolute safe upper bound is
+        # num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) *
+        # min(num_topk, expert_per_rank), but this is typically far too large
+        # and causes excessive device memory usage. If the actual per-rank token
+        # count after dispatch exceeds this value, tokens may be truncated,
+        # leading to precision degradation.
+        ascend_config = get_ascend_config()
+        max_recv_token_num = ascend_config.mega_moe_max_tokens
+        logger.warning_once(
+            "MegaMoe symm buffer: max_recv_token_num is set from mega_moe_max_tokens=%d "
+            "(reference value). "
+            "If the actual per-rank received token count after dispatch exceeds this value, "
+            "precision degradation will occur. The absolute safe upper bound is %d "
+            "(num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) "
+            "* min(num_topk, expert_per_rank); num_max_tokens_per_rank=%d, "
+            "ep_world_size=%d, num_topk=%d, expert_per_rank=%d), "
+            "but using it would cause very large device memory usage. Please tune "
+            "mega_moe_max_tokens in additional_config based on actual expert load distribution.",
+            max_recv_token_num,
+            absolute_safe_max_recv_token_num,
+            num_max_tokens_per_rank,
+            int(self.token_dispatcher.ep_world_size),
+            num_topk,
+            expert_per_rank,
         )
 
         logger.info(

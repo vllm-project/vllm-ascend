@@ -263,12 +263,13 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
-        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
-        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
-        # are dropped and skipped from computation, degrading accuracy.
-        # Do not set this too large: workspace memory scales linearly with this value, which matters
-        # especially under long-context scenarios where the operator should not hold too much memory.
-        # Default 131072.
+        # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
+        # The same value is passed as dispatch_ffn_combine's max_output_size
+        # and CANN MegaMoe buffer's max_recv_token_num.
+        # This is a reference value: if the actual per-rank received token
+        # count exceeds it, tokens may be truncated, causing precision
+        # degradation. Do not set it too large because workspace memory scales
+        # linearly with this value. Default 131072.
         self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
