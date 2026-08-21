@@ -42,7 +42,7 @@ permissions:
 jobs:
   build:
     name: Build and smoke-test CPU image
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4
     timeout-minutes: 90
     steps:
       - name: Checkout vllm-ascend
