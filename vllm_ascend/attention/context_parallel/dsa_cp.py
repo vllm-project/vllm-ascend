@@ -12,6 +12,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
@@ -27,6 +28,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
@@ -1333,6 +1335,41 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         scale = scale.reshape(scale.shape[0], num_groups, -1, *scale.shape[2:])
         return scale.permute(1, 0, 2, *range(3, scale.ndim))
 
+    def _start_hidden_states_all_gather(
+        self,
+        hidden_states_local: torch.Tensor,
+        need_gather_q_kv: bool,
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None, int]:
+        try:
+            flash_comm_v1_enabled = bool(_EXTRA_CTX.flash_comm_v1_enabled)
+        except AssertionError:
+            return hidden_states_local, None, 0
+
+        if self.tp_size == 1 or not flash_comm_v1_enabled or not need_gather_q_kv:
+            return hidden_states_local, None, 0
+
+        gather_input = hidden_states_local
+        if not gather_input.is_contiguous():
+            gather_input = gather_input.contiguous()
+
+        gathered_hidden_states, handle = all_gather_async(gather_input, self.tp_group, async_op=True)
+
+        pad_size = int(_EXTRA_CTX.pad_size or 0)
+
+        return (gathered_hidden_states, handle, pad_size)
+
+    @staticmethod
+    def _finish_hidden_states_all_gather(
+        gathered_hidden_states: torch.Tensor, handle: torch.distributed.Work | None, pad_size: int
+    ) -> torch.Tensor:
+        if handle is not None:
+            handle.wait()
+
+        if pad_size > 0:
+            gathered_hidden_states = gathered_hidden_states[:-pad_size]
+
+        return gathered_hidden_states
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
@@ -1447,7 +1484,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if common_attn_metadata is None:
             common_attn_metadata = swa_metadata
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
+        (
+            gathered_hidden_states,
+            hidden_states_ag_handle,
+            hidden_states_pad_size,
+        ) = self._start_hidden_states_all_gather(hidden_states_local, need_gather_q_kv)
 
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
@@ -1462,7 +1503,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = common_attn_metadata.num_prefills > 0
         swa_req_metadata = swa_metadata.req_metadata
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
@@ -1521,6 +1561,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+
+        hidden_states = self._finish_hidden_states_all_gather(
+            gathered_hidden_states, hidden_states_ag_handle, hidden_states_pad_size
+        )
+
+        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
 
         self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
