@@ -875,8 +875,8 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     # Fused MC2 and hierarchy communication are mutually exclusive.
     if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
         raise ValueError(
-            "fused mc2 op cannot be used with hierarchy communication."
-            "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
+            "fused mc2 op cannot be used with hierarchy communication. "
+            "Please set additional_config.enable_fused_mc2 to 0."
         )
 
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
