@@ -49,5 +49,6 @@ RUN bash tools/cpu_only_build.sh install-deps
 # caching for ordinary source changes.
 COPY . .
 RUN bash tools/cpu_only_build.sh build
+RUN bash tools/cpu_only_build.sh verify
 
 CMD ["/opt/vllm-ascend/tools/cpu_only_build.sh", "verify"]

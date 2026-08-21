@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   build:
-    name: Build and smoke-test CPU image
+    name: Build and verify CPU image
     runs-on: linux-amd64-cpu-4
     container:
       image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
@@ -50,13 +50,10 @@ jobs:
       - name: Checkout vllm-ascend
         uses: actions/checkout@v7
 
-      - name: Build CPU-only image
-        run: |
-          docker build --progress=plain \
-            --file Dockerfile.cpu \
-            --tag vllm-ascend-cpu-ci:${{ github.sha }} \
-            .
-
-      - name: Run CPU-only smoke verification
-        run: |
-          docker run --rm vllm-ascend-cpu-ci:${{ github.sha }}
+      - name: Build and verify CPU-only image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.cpu
+          outputs: type=cacheonly
+          provenance: false

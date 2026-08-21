@@ -75,6 +75,8 @@ class DependencyDocumentationTest(unittest.TestCase):
     def test_cpu_only_build_contract_is_documented(self):
         installation = _read("docs/source/installation.md")
         cpu_only_script = _read("tools/cpu_only_build.sh")
+        cpu_only_dockerfile = _read("Dockerfile.cpu")
+        cpu_only_workflow = _read(".github/workflows/cpu_only_build.yaml")
         section_start = installation.index("### CPU-only build verification")
         section_end = installation.index("\n!!! note", section_start)
         cpu_section = installation[section_start:section_end]
@@ -110,6 +112,9 @@ class DependencyDocumentationTest(unittest.TestCase):
         self.assertIn("write_cpu_only_requirements", cpu_only_script)
         self.assertIn('grep -Fvx "${ARCTIC_INFERENCE_REQUIREMENT}"', cpu_only_script)
         self.assertIn("trap restore_requirements EXIT", cpu_only_script)
+        self.assertIn("RUN bash tools/cpu_only_build.sh verify", cpu_only_dockerfile)
+        self.assertIn("uses: docker/build-push-action@v7", cpu_only_workflow)
+        self.assertNotIn("docker run", cpu_only_workflow)
 
     def test_arctic_inference_contract_is_documented_for_suffix_decoding(self):
         for path in (
