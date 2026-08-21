@@ -138,8 +138,14 @@ class SingleNodeMooncakeManager(SingleNodeKVPoolManager):
         self.config_path = self.runtime_dir / "mooncake.json"
 
     @property
+    def mooncake_config(self) -> MooncakeKVPoolConfig:
+        if not isinstance(self.config, MooncakeKVPoolConfig):
+            raise TypeError("Mooncake manager requires MooncakeKVPoolConfig")
+        return self.config
+
+    @property
     def master_address(self) -> str:
-        return f"{SINGLE_NODE_POOL_HOST}:{self.config.master_port}"
+        return f"{SINGLE_NODE_POOL_HOST}:{self.mooncake_config.master_port}"
 
     def _write_config(self) -> None:
         store_config = _replace_localhost(self.config.config)
@@ -157,9 +163,9 @@ class SingleNodeMooncakeManager(SingleNodeKVPoolManager):
         cmd = [
             "mooncake_master",
             "--port",
-            str(self.config.master_port),
+            str(self.mooncake_config.master_port),
             "--metrics_port",
-            str(self.config.metrics_port),
+            str(self.mooncake_config.metrics_port),
             "--eviction_high_watermark_ratio",
             str(MOONCAKE_EVICTION_HIGH_WATERMARK_RATIO),
             "--eviction_ratio",
@@ -177,7 +183,7 @@ class SingleNodeMooncakeManager(SingleNodeKVPoolManager):
         )
 
     def _ready_ports(self) -> tuple[int, ...]:
-        return (self.config.master_port,)
+        return (self.mooncake_config.master_port,)
 
 
 class SingleNodeMemcacheManager(SingleNodeKVPoolManager):
@@ -186,6 +192,12 @@ class SingleNodeMemcacheManager(SingleNodeKVPoolManager):
         self.config = config
         self.meta_config_path = self.runtime_dir / "mmc-meta.conf"
         self.local_config_path = self.runtime_dir / "mmc-local.conf"
+
+    @property
+    def memcache_config(self) -> MemcacheKVPoolConfig:
+        if not isinstance(self.config, MemcacheKVPoolConfig):
+            raise TypeError("Memcache manager requires MemcacheKVPoolConfig")
+        return self.config
 
     @staticmethod
     def _format_config(config: dict[str, Any]) -> str:
@@ -198,8 +210,8 @@ class SingleNodeMemcacheManager(SingleNodeKVPoolManager):
         rendered_config = _replace_localhost(self.config.config)
         meta_config = dict(rendered_config["meta"])
         local_config = dict(rendered_config["local"])
-        meta_service_url = f"tcp://{SINGLE_NODE_POOL_HOST}:{self.config.meta_service_port}"
-        config_store_url = f"tcp://{SINGLE_NODE_POOL_HOST}:{self.config.config_store_port}"
+        meta_service_url = f"tcp://{SINGLE_NODE_POOL_HOST}:{self.memcache_config.meta_service_port}"
+        config_store_url = f"tcp://{SINGLE_NODE_POOL_HOST}:{self.memcache_config.config_store_port}"
         meta_config["ock.mmc.meta_service_url"] = meta_service_url
         meta_config["ock.mmc.meta_service.config_store_url"] = config_store_url
         local_config["ock.mmc.meta_service_url"] = meta_service_url
@@ -220,8 +232,8 @@ class SingleNodeMemcacheManager(SingleNodeKVPoolManager):
 
     def _ready_ports(self) -> tuple[int, ...]:
         return (
-            self.config.meta_service_port,
-            self.config.config_store_port,
+            self.memcache_config.meta_service_port,
+            self.memcache_config.config_store_port,
         )
 
 

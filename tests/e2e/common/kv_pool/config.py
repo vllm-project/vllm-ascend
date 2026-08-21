@@ -52,6 +52,7 @@ def parse_kv_pool_config(raw_kv_pool: Any) -> KVPoolConfig | None:
     pool_config = raw_kv_pool.get("config")
     if not isinstance(pool_config, dict):
         raise TypeError("kv_pool.config must be a mapping")
+    kv_pool: KVPoolConfig
     if pool_type == "mooncake":
         kv_pool = MooncakeKVPoolConfig(
             config=dict(pool_config),

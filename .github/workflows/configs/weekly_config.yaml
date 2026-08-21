@@ -149,18 +149,18 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-64k-1k-90-50-PD.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
-      #      - name: GLM-5.2-W8A8C8-3.5k-1.5k-0-20-PD
-      #        config_file_path: GLM-5.2-W8A8C8-3.5k-1.5k-0-20-PD.yaml
-      #        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
-      #        size: 4
-      #      - name: GLM-5.2-W8A8C8-3.5k-1.5k-0-50-PD
-      #        config_file_path: GLM-5.2-W8A8C8-3.5k-1.5k-0-50-PD.yaml
-      #        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
-      #        size: 4
-      #      - name: GLM-5.2-W8A8C8-64k-1k-90-50-PD
-      #        config_file_path: GLM-5.2-W8A8C8-64k-1k-90-50-PD.yaml
-      #        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
-      #        size: 4
+#      - name: GLM-5.2-W8A8C8-3.5k-1.5k-0-20-PD
+#        config_file_path: GLM-5.2-W8A8C8-3.5k-1.5k-0-20-PD.yaml
+#        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+#        size: 4
+#      - name: GLM-5.2-W8A8C8-3.5k-1.5k-0-50-PD
+#        config_file_path: GLM-5.2-W8A8C8-3.5k-1.5k-0-50-PD.yaml
+#        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+#        size: 4
+#      - name: GLM-5.2-W8A8C8-64k-1k-90-50-PD
+#        config_file_path: GLM-5.2-W8A8C8-64k-1k-90-50-PD.yaml
+#        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+#        size: 4
       - name: Minimax_m2.7_in3_5_tpot50
         config_file_path: Minimax_m2.7_in3_5_tpot50.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
@@ -215,17 +215,17 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_3.5k_1.5k_0_20.yaml
         config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
-      #      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_64k
-      #        config_file_path: GLM-5.2-W8A8C8-A3_64k_90_50.yaml
-      #        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
-      #        size: 2
-      #      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_3.5k_1.5k_0_50
-      #        config_file_path: GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_50.yaml
-      #        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
-      #        size: 2
-      #      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_3.5k_1.5k_0_20
-      #        config_file_path: GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_20.yaml
-      #        size: 2
+#      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_64k
+#        config_file_path: GLM-5.2-W8A8C8-A3_64k_90_50.yaml
+#        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
+#        size: 2
+#      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_3.5k_1.5k_0_50
+#        config_file_path: GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_50.yaml
+#        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
+#        size: 2
+#      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_3.5k_1.5k_0_20
+#        config_file_path: GLM-5.2-W8A8C8-A3_3.5k_1.5k_0_20.yaml
+#        size: 2
       - name: Minimax_m2.7_in64k_1k_prefix90_tpot50
         config_file_path: Minimax_m2.7_in64k_1k_prefix90_tpot50.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
