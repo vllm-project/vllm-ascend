@@ -85,14 +85,19 @@ class MiniMaxM3TPDecodeScoreMetadata:
 
 
 def _as_ascendc_index_kv_cache(
-    index_kv_cache: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
 ) -> torch.Tensor:
     """Convert the runtime index K cache to the AscendC BBND layout.
 
-    The model runner binds this K-only cache as a tensor shaped
-    ``[num_blocks, 128, head_dim]``. MsaIndexScore expects the BBND shape
+    The model runner binds this K-only cache as a one-element tuple whose
+    tensor is shaped ``[num_blocks, 128, head_dim]``. Direct calls may pass
+    that tensor without the tuple. MsaIndexScore expects the BBND shape
     ``[num_blocks, 128, 1, head_dim]`` instead.
     """
+    if isinstance(index_kv_cache, tuple):
+        if len(index_kv_cache) != 1:
+            raise ValueError("M3 index cache tuple must contain only the K tensor")
+        (index_kv_cache,) = index_kv_cache
     if index_kv_cache.ndim != 3 or index_kv_cache.shape[1] != _MSA_INDEX_BLOCK_SIZE:
         raise ValueError(
             "M3 index K cache must have shape "
@@ -149,7 +154,7 @@ def _build_cu_block_lens(
 @torch.no_grad()
 def _minimax_m3_index_score(
     idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -187,7 +192,7 @@ def _minimax_m3_index_score(
 @torch.no_grad()
 def minimax_m3_index_prefill(
     idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -310,7 +315,7 @@ def _index_score_topk_candidates(
 @torch.no_grad()
 def _minimax_m3_index_decode(
     idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -352,7 +357,7 @@ def _minimax_m3_index_decode(
 @torch.no_grad()
 def minimax_m3_index_decode(
     idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -386,7 +391,7 @@ def minimax_m3_index_decode(
 @torch.no_grad()
 def minimax_m3_index_tp_block_parallel_decode(
     idx_q: torch.Tensor,
-    index_kv_cache: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     metadata: MiniMaxM3TPDecodeScoreMetadata,
     causal_mask: torch.Tensor,
     *,
