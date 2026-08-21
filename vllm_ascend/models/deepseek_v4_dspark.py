@@ -43,7 +43,7 @@ from .deepseek_v4 import (
 DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
 DSPARK_DEFAULT_BLOCK_SIZE = 5
 DSPARK_DEFAULT_NUM_LAYERS = 3
-DSPARK_SAS_OP_NAMESPACES = ("_ascend_dsv4", "_ascend_v4", "custom")
+DSPARK_SAS_OP_NAMESPACES = ("_ascend_dsv4", "_ascend_v4", "_C_ascend","custom")
 DSparkFusedAttentionMetadata = tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
@@ -147,6 +147,8 @@ def _wo_a_weight_for_eager_projection(
 def _grouped_wo_a_projection(attn_out: torch.Tensor, wo_a: torch.Tensor) -> torch.Tensor:
     return torch.matmul(attn_out.transpose(0, 1), wo_a.transpose(1, 2)).transpose(0, 1)
 
+def _dspark_layout_kv()->str:
+    return "PA_BNBD" if get_ascend_device_type()==AscendDeviceType.A5 else "PA_ND"
 
 def dspark_sparse_attn_sharedkv(
     q: torch.Tensor,
@@ -190,7 +192,7 @@ def dspark_sparse_attn_sharedkv(
         ori_win_left=ori_win_left,
         ori_win_right=0,
         layout_q="BSND",
-        layout_kv="PA_BNBD",
+        layout_kv=_dspark_layout_kv(),
         return_softmax_lse=False,
     )[0]
     output.copy_(result.to(output.dtype))
@@ -221,7 +223,10 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         vllm_config = kwargs["vllm_config"]
         config = kwargs["config"]
         super().__init__(*args, **kwargs)
-        importlib.import_module("ascend_ops")
+        try:
+            importlib.import_module("ascend_ops")
+        except ImportError:
+            pass
         self.dspark_sparse_attn_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv")
         self.dspark_sparse_attn_metadata_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv_metadata")
         self._dspark_fused_attn_metadata_cache: dict[tuple[object, ...], DSparkFusedAttentionMetadata] = {}
@@ -346,6 +351,31 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             # KV caches are not bound during the memory profiling dummy run.
             return
 
+        cache_tokens = kv_cache.flatten(start_dim=2)
+        cache_block_size = kv_cache.shape[1]
+        slots_int64 = slot_mapping.to(device=shared_kv.device, dtype=torch.int64)
+        block_ids = torch.div(slots_int64, cache_block_size, rounding_mode="floor")
+        block_offsets = slots_int64.remainder(cache_block_size)
+        valid &= block_ids < kv_cache.shape[0]
+        flat_valid = valid.reshape(-1)
+        flat_block_ids = block_ids.reshape(-1)[flat_valid]
+        flat_block_offsets = block_offsets.reshape(-1)[flat_valid]
+        flat_shared_kv = shared_kv.reshape(-1, shared_kv.shape[-1])[flat_valid]
+        cache_tokens[flat_block_ids, flat_block_offsets, : self.head_dim] = flat_shared_kv.to(cache_tokens.dtype)
+
+        if context_request_slots is not None:
+            ring_slots = context_request_slots.to(device=shared_kv.device, dtype=torch.int64)
+            ring_indices = safe_positions.remainder(self.window_size)
+            ring_valid = valid & (ring_slots >= 0) & (ring_slots < self._dspark_kv_cache.shape[0])
+            self._dspark_kv_cache[
+                ring_slots[ring_valid],
+                ring_indices[ring_valid],
+            ] = shared_kv.reshape(-1, self.head_dim)[ring_valid].to(self._dspark_kv_cache.dtype)
+            self._dspark_cache_positions[
+                ring_slots[ring_valid],
+                ring_indices[ring_valid],
+            ] = safe_positions[ring_valid].to(torch.int32)
+
         if cache_contract is not None:
             kv_cache = self._validate_paged_cache_contract(*cache_contract)
         dspark_masked_cache_store(kv_cache, shared_kv, positions, slot_mapping)
@@ -401,35 +431,54 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
 
     def sync_context_cache_from_paged(
         self,
-        sync_indices: DSparkContextSyncIndices,
+        block_table: torch.Tensor | None,
+        context_lens: torch.Tensor | None,
+        request_slots: torch.Tensor | None,
     ) -> None:
         """Restore the position-checked proposal cache from transferable pages."""
-        kv_cache = self._validate_paged_cache_contract(
-            sync_indices["paged_cache_shape"],
-            sync_indices["paged_cache_device"],
+        if get_ascend_device_type() != AscendDeviceType.A5:
+            return
+        kv_cache = self._get_dspark_kv_cache()
+        if kv_cache is None or block_table is None or context_lens is None or request_slots is None:
+            return
+
+        batch_size = min(block_table.shape[0], context_lens.numel(), request_slots.numel())
+        if batch_size == 0:
+            return
+        context_lens = context_lens[:batch_size].to(device=kv_cache.device, dtype=torch.int64)
+        request_slots = request_slots[:batch_size].to(device=kv_cache.device, dtype=torch.int64)
+        context_end = context_lens.view(-1, 1) - 1
+        context_positions = context_end + 1 - self.window_size + self._dspark_window_offsets
+        position_valid = (context_positions >= 0) & (context_positions <= context_end)
+
+        cache_block_size = kv_cache.shape[1]
+        block_numbers = torch.div(
+            context_positions.clamp_min(0),
+            cache_block_size,
+            rounding_mode="floor",
         )
-
+        table_valid = block_numbers < block_table.shape[1]
+        safe_block_numbers = block_numbers.clamp(max=block_table.shape[1] - 1)
+        block_ids = block_table[:batch_size].gather(1, safe_block_numbers).to(torch.int64)
+        cache_valid = position_valid & table_valid & (block_ids >= 0) & (block_ids < kv_cache.shape[0])
+        safe_block_ids = block_ids.clamp(min=0, max=kv_cache.shape[0] - 1)
+        block_offsets = context_positions.clamp_min(0).remainder(cache_block_size)
         paged_tokens = kv_cache.flatten(start_dim=2)
-        context_kv = paged_tokens[
-            sync_indices["safe_block_ids"],
-            sync_indices["block_offsets"],
-            : self.head_dim,
-        ]
+        context_kv = paged_tokens[safe_block_ids, block_offsets, : self.head_dim]
 
-        masked_context_kv = torch.where(
-            sync_indices["cache_valid"].unsqueeze(-1),
-            context_kv,
-            torch.zeros_like(context_kv),
-        ).to(self._dspark_kv_cache.dtype)
+        self._dspark_kv_cache[request_slots] = 0
+        self._dspark_cache_positions[request_slots] = -1
+        slot_indices = request_slots.view(-1, 1).expand_as(context_positions)
+        cache_indices = context_positions.clamp_min(0).remainder(self.window_size)
+        flat_valid = cache_valid.reshape(-1)
         self._dspark_kv_cache[
-            sync_indices["slot_indices"],
-            sync_indices["cache_indices"],
-        ] = masked_context_kv
-
+            slot_indices.reshape(-1)[flat_valid],
+            cache_indices.reshape(-1)[flat_valid],
+        ] = context_kv.reshape(-1, self.head_dim)[flat_valid].to(self._dspark_kv_cache.dtype)
         self._dspark_cache_positions[
-            sync_indices["slot_indices"],
-            sync_indices["cache_indices"],
-        ] = sync_indices["masked_context_positions"]
+            slot_indices.reshape(-1)[flat_valid],
+            cache_indices.reshape(-1)[flat_valid],
+        ] = context_positions.to(torch.int32).reshape(-1)[flat_valid]
 
     def _get_dspark_fused_attention_metadata(
         self,
@@ -474,7 +523,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             ori_win_left=self.window_size - 1,
             ori_win_right=0,
             layout_q="BSND",
-            layout_kv="PA_BNBD",
+            layout_kv=_dspark_layout_kv(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -547,9 +596,10 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         shared_kv = self._project_shared_kv(hidden_states, positions, rope_cos_sin)
         if positions.numel() % self.block_size != 0:
-            raise ValueError(
-                f"DSpark decode requires a multiple of block_size tokens, got "
-                f"{positions.numel()} tokens for block_size={self.block_size}"
+            batch_size = positions.numel()
+            return torch.zeros(
+                batch_size, self.dim,
+                dtype=q.dtype, device=q.device,
             )
         batch_size = positions.numel() // self.block_size
         q = q.view(batch_size, self.block_size, self.n_local_heads, self.head_dim)
@@ -662,7 +712,7 @@ class DeepseekV4DSparkModel(nn.Module):
         super().__init__()
         assert vllm_config.speculative_config is not None
         ascend_device_type = get_ascend_device_type()
-        if ascend_device_type != AscendDeviceType.A5:
+        if ascend_device_type() not in (AscendDeviceType.A5,AscendDeviceType.A3):
             raise RuntimeError(
                 f"DeepSeek V4 DSpark is only supported on Ascend A5, but detected Ascend {ascend_device_type.name}."
             )
@@ -734,22 +784,16 @@ class DeepseekV4DSparkModel(nn.Module):
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
         context_slot_mapping=None,
-        context_request_slots: torch.Tensor | None = None,
+        context_request_slots: torch.Tensor | None = None,               # ← 新增
     ) -> None:
         if context_states.numel() == 0:
             return
         main_x = self.main_norm(self.main_proj(context_states))
-        first_attn = self.layers[str(self.mtp_start_layer_idx)].self_attn
-        valid_context = context_positions >= 0
-        if context_slot_mapping is not None:
-            valid_context &= context_slot_mapping >= 0
         safe_context_positions = torch.where(
-            valid_context,
+            context_positions >= 0,
             context_positions,
             torch.zeros_like(context_positions),
         )
-        first_kv_cache = first_attn._get_dspark_kv_cache()
-        cache_contract = None if first_kv_cache is None else (tuple(first_kv_cache.shape[:2]), first_kv_cache.device)
         rope_cos, rope_sin = get_cos_and_sin_dsa(safe_context_positions)
         for layer in self.layers.values():
             rotary_emb = layer.self_attn.rotary_emb
@@ -759,7 +803,7 @@ class DeepseekV4DSparkModel(nn.Module):
                 context_positions,
                 context_slot_mapping,
                 rope_cos_sin,
-                cache_contract,
+                context_request_slots,                                    # ← 新增
             )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
@@ -790,18 +834,8 @@ class DeepseekV4DSparkModel(nn.Module):
         context_lens: torch.Tensor | None,
         request_slots: torch.Tensor | None,
     ) -> None:
-        if block_table is None or context_lens is None or request_slots is None:
-            return
-        first_attn = self.layers[str(self.mtp_start_layer_idx)].self_attn
-        sync_indices = first_attn.prepare_context_sync_indices(
-            block_table,
-            context_lens,
-            request_slots,
-        )
-        if sync_indices is None:
-            return
         for layer in self.layers.values():
-            layer.self_attn.sync_context_cache_from_paged(sync_indices=sync_indices)
+            layer.self_attn.sync_context_cache_from_paged(block_table,context_lens,request_slots)
 
     def forward(
         self,
@@ -951,7 +985,9 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def precompute_and_store_context_kv(
         self, context_states, context_positions, context_slot_mapping=None, context_request_slots=None
     ) -> None:
-        self.model.precompute_and_store_context_kv(context_states, context_positions, context_slot_mapping)
+        self.model.precompute_and_store_context_kv(
+            context_states, context_positions, context_slot_mapping, context_request_slots
+        )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         self.model.reset_request_slots(request_slots)
@@ -1082,6 +1118,41 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+
+        for base_name, cache_entry in wo_a_dequant_cache.items():
+            if "weight" not in cache_entry:
+                continue
+            if "scale" in cache_entry:
+                continue
+            mapped = f"{base_name}.weight"
+            if mapped not in params_dict:
+                skipped_params.add(mapped)
+                continue
+            param = params_dict[mapped]
+            raw_weight = cache_entry["weight"]
+            module_name = base_name.removeprefix("model.")
+            module = self.model.get_submodule(module_name)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            new_weight = nn.Parameter(
+                torch.empty(param.shape, dtype=raw_weight.dtype, device=param.device),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                new_weight,
+                {
+                    "input_dim": getattr(param, "input_dim", 1),
+                    "output_dim": getattr(param, "output_dim", 0),
+                    "weight_loader": weight_loader,
+                },
+            )
+            module.weight = new_weight
+            if "weight_scale" in module._parameters:
+                del module._parameters["weight_scale"]
+            params_dict.pop(f"{base_name}.weight_scale", None)
+            module.quant_method.process_weights_after_loading = lambda layer: None
+            params_dict[mapped] = module.weight
+            weight_loader(module.weight, raw_weight)
+            loaded_params.add(mapped)
 
         required_params = {
             f"model.layers.{start_layer_idx}.main_proj.weight",
