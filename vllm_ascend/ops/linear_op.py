@@ -407,6 +407,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             isinstance(self.layer.quant_method, AscendLinearMethod)
             and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)
         ):
+            assert isinstance(x, torch.Tensor)
             if x.dtype != torch.int8:
                 x_quant = torch.ops.vllm.quantize(
                     x,
