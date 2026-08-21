@@ -287,7 +287,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if self.quant_config is not None and self.quant_config.get_name() == "fp8":
+            if self.quant_config is not None and self.quant_config.get_name() == "deepseek_v4_fp8":
                 if name == "embed.weight":
                     name = "mtp.0.emb.tok_emb.weight"
 

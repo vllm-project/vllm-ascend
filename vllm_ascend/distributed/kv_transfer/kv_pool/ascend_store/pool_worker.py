@@ -20,7 +20,6 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -69,8 +68,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
+    get_group_block_size,
+    get_group_cache_family,
+    infer_cache_transfer_granularity,
+    infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -151,12 +155,13 @@ class KVPoolWorker:
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
-        self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
+        kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
+        self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
-        self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
+        self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -170,9 +175,11 @@ class KVPoolWorker:
         self.block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
         self.num_kv_cache_groups = len(self.grouped_block_size)
-        self.kv_cache_group_families = self._infer_group_families()
+        self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
-        self.cache_transfer_granularity = self._infer_cache_transfer_granularity()
+        self.cache_transfer_granularity = infer_cache_transfer_granularity(
+            self.grouped_block_size, self.lcm_block_size, range(self.num_kv_cache_groups)
+        )
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
         self.layerwise_max_transfer_bytes = int(extra_config.get("layerwise_max_transfer_bytes", 0))
@@ -296,7 +303,7 @@ class KVPoolWorker:
             )
 
         self.token_database = ChunkedTokenDatabase(
-            self.metadata, self.grouped_block_size, partitions, self.use_hybrid, self.hash_block_size
+            self.metadata, self.grouped_block_size, partitions, hash_block_size=self.hash_block_size
         )
         self.cache_coordinator = self._build_cache_coordinator(vllm_config)
         self.token_database.cache_coordinator = self.cache_coordinator
@@ -443,8 +450,6 @@ class KVPoolWorker:
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
-                    self.my_key_index,
-                    self.num_ranks_per_layer,
                     group_page_size,
                     group_num_layers,
                     group_id=group_id,
@@ -474,9 +479,6 @@ class KVPoolWorker:
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
-                    self.put_step,
-                    self.my_key_index,
-                    self.num_ranks_per_layer,
                     self.page_size_bytes,
                     ready_event_sending,
                     self.num_layers,
@@ -514,8 +516,6 @@ class KVPoolWorker:
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
-                    self.my_key_index,
-                    self.num_ranks_per_layer,
                     self.page_size_bytes,
                     ready_event,
                     self.get_event,
@@ -602,26 +602,6 @@ class KVPoolWorker:
             retention_interval=retention_interval,
         )
 
-    def _infer_group_families(self) -> list[str]:
-        kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
-        return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
-
-    def _infer_group_block_sizes(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig | None,
-    ) -> list[int]:
-        if kv_cache_config is None:
-            return [vllm_config.cache_config.block_size]
-
-        block_sizes: list[int] = []
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            block_sizes.append(kv_cache_spec.block_size)
-        return block_sizes
-
     def _infer_group_uses_align_state(self) -> list[bool]:
         if self.kv_cache_config is None:
             return [False]
@@ -639,36 +619,6 @@ class KVPoolWorker:
                 )
             )
         return group_uses_align_state
-
-    def _get_group_block_size(self, group_id: int) -> int:
-        if group_id >= len(self.grouped_block_size):
-            return self.grouped_block_size[0]
-        return self.grouped_block_size[group_id]
-
-    def _get_effective_group_block_size(self, group_id: int) -> int:
-        return self._get_group_block_size(group_id)
-
-    @staticmethod
-    def _get_group_family(families: list[str], group_id: int) -> str:
-        if group_id >= len(families):
-            return "default"
-        return families[group_id]
-
-    def _infer_cache_transfer_granularity(self) -> int:
-        granularities = [self.lcm_block_size]
-        for group_id in range(self.num_kv_cache_groups):
-            granularities.append(self._get_group_block_size(group_id))
-        return math.lcm(*granularities)
-
-    @staticmethod
-    def _uses_hybrid_kv_cache(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None) -> bool:
-        if kv_cache_config is None:
-            return False
-        if getattr(vllm_config.scheduler_config, "disable_hybrid_kv_cache_manager", False):
-            return False
-        return len(kv_cache_config.kv_cache_groups) > 1 and any(
-            not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_config.kv_cache_groups
-        )
 
     @staticmethod
     def _uses_mamba_kv_cache(use_hybrid: bool, kv_cache_config: KVCacheConfig | None):
@@ -778,7 +728,7 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
-            group_id: self._get_group_family(self.kv_cache_group_families, group_id)
+            group_id: get_group_cache_family(self.kv_cache_group_families, group_id)
             for group_id in range(self.num_kv_cache_groups)
         }
         self.group_num_layers: dict[int, int] = {}
@@ -1029,7 +979,7 @@ class KVPoolWorker:
         # TODO(lf): Distribute KV block writes across ranks in the put_step group.
         if self.tp_rank % self.put_step != 0:
             return
-        block_size = self._get_effective_group_block_size(group_id)
+        block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
         for request in requests:
             if request.can_save is None or not request.can_save:
@@ -1087,7 +1037,7 @@ class KVPoolWorker:
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        block_size = self._get_effective_group_block_size(group_id)
+        block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
