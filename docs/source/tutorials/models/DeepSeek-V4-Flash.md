@@ -93,6 +93,9 @@ Select an image based on your machine type and start the docker image on your no
     
     # deepseek-v4-flash-dspark uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+
+    # deepseek-v4-flash-0731 uses the following image
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     
     docker run --rm \
         --name vllm-ascend \
@@ -221,6 +224,41 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
     tps more than 50+ ,its reach  2X speed of dsv4f with mtp
+
+=== "A2 series with 0731&dspark"
+
+    Run the following script to execute online inference.
+
+    ```shell
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE=AIV
+
+    vllm serve /root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8 \
+        --max-model-len 500000 \
+        --max-num-batched-tokens 8192 \
+        --served-model-name dsv4-dspark \
+        --gpu-memory-utilization 0.9 \
+        --max-num-seqs 32 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --no-disable-hybrid-kv-cache-manager \
+        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+        --quantization ascend \
+        --port 8000 \
+        --block-size 128 \
+        --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+    tps more than 100+ ,its reach  4X speed of dsv4f with mtp, 2X speed of dsv4f-dpsark
 
 === "A3 series"
 
