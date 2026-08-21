@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -10,6 +12,9 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     enable_custom_op,
     get_ascend_device_type,
+)
+from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+    minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
 )
 
 _SPARSE_ATTN_INNER_PRECISE = 4
@@ -129,46 +134,28 @@ def _build_cu_block_lens(
 
 
 @torch.no_grad()
-def minimax_m3_index_score(
+def _minimax_m3_index_score(
     idx_q: torch.Tensor,
     index_kv_cache: tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
-    prefix_lens: torch.Tensor,
-    max_query_len: int,
-    max_seq_len: int,
-    num_kv_heads: int,
-    sm_scale: float | None = None,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor | None,
     *,
-    start_loc: torch.Tensor | None = None,
     init_blocks: int = 0,
     local_blocks: int = 0,
 ) -> torch.Tensor:
-    """Compute causal MSA index scores with the bundled AscendC operator.
+    """Compute MSA index scores with the bundled AscendC operator.
 
     ``start_loc`` is the current query block in the *passed block table*.  For
     a TP-sharded table this is a per-request local block index, not the scalar
     global ``block_offset`` used by the Triton decode kernel.
-    """
-    del max_query_len, max_seq_len, sm_scale
-    if idx_q.ndim != 3:
-        raise ValueError(f"Unexpected index query shape: {tuple(idx_q.shape)}")
-    index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
-    if idx_q.shape[1] != num_kv_heads:
-        raise ValueError("M3 requires num_idx_heads == num_kv_heads")
 
-    if start_loc is None:
-        start_loc = torch.div(
-            prefix_lens,
-            _MSA_INDEX_BLOCK_SIZE,
-            rounding_mode="floor",
-        ).to(dtype=torch.int32)
-    elif start_loc.ndim != 1 or start_loc.shape != prefix_lens.shape:
-        raise ValueError("start_loc must be a 1D tensor matching prefix_lens")
-    else:
-        start_loc = start_loc.to(dtype=torch.int32)
-    causal_mask = AttentionMaskBuilder(idx_q.device).get_splitfuse_attn_mask()
+    A causal mask selects sparse mode 3. Passing no mask selects dense mode 0
+    for a TP chunk that is entirely before the current query positions.
+    """
+    index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     return torch.ops._C_ascend.npu_msa_index_score(
         idx_q,
         index_kv_cache,
@@ -178,9 +165,46 @@ def minimax_m3_index_score(
         actual_seq_qlen=cu_seqlens_q,
         actual_seq_klen=seq_lens,
         layout_key="BBND",
-        sparse_mode=3,
+        sparse_mode=3 if causal_mask is not None else 0,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
+    )
+
+
+@torch.no_grad()
+def minimax_m3_index_prefill(
+    idx_q: torch.Tensor,
+    index_kv_cache: tuple[torch.Tensor],
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    context_lens: torch.Tensor,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor,
+    *,
+    max_query_len: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+) -> torch.Tensor:
+    """Compute AscendC prefill scores and finalize their block TopK."""
+    score = _minimax_m3_index_score(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        start_loc,
+        causal_mask,
+    )
+    return _minimax_m3_index_prefill_topk(
+        score,
+        cu_seqlens_q,
+        context_lens,
+        max_query_len,
+        topk,
+        init_blocks,
+        local_blocks,
     )
 
 
@@ -270,42 +294,35 @@ def _index_score_topk_candidates(
 
 
 @torch.no_grad()
-def minimax_m3_index_decode(
+def _minimax_m3_index_decode(
     idx_q: torch.Tensor,
     index_kv_cache: tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
     context_lens: torch.Tensor,
-    max_seq_len: int,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor | None,
+    *,
     topk: int,
     init_blocks: int,
     local_blocks: int,
-    num_kv_heads: int,
     decode_query_len: int,
-    sm_scale: float | None = None,
-    *,
-    start_loc: torch.Tensor | None = None,
     block_offset: int = 0,
-    return_scores: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Run AscendC decode score followed by one non-fused local TopK."""
     # AscendC start_loc is per request.  For q>1, disable its fixed local mask
     # and apply the equivalent moving mask per speculative token below.
     ascendc_init_blocks = init_blocks if decode_query_len == 1 else 0
     ascendc_local_blocks = local_blocks if decode_query_len == 1 else 0
-    score = minimax_m3_index_score(
+    score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
         block_table,
         cu_seqlens_q,
         seq_lens,
-        context_lens,
-        decode_query_len,
-        max_seq_len,
-        num_kv_heads,
-        sm_scale,
-        start_loc=start_loc,
+        start_loc,
+        causal_mask,
         init_blocks=ascendc_init_blocks,
         local_blocks=ascendc_local_blocks,
     )
@@ -318,9 +335,135 @@ def minimax_m3_index_decode(
         init_blocks=init_blocks if decode_query_len > 1 else 0,
         local_blocks=local_blocks if decode_query_len > 1 else 0,
     )
-    if return_scores:
-        return topk_indices, topk_scores
+    return topk_indices, topk_scores
+
+
+@torch.no_grad()
+def minimax_m3_index_decode(
+    idx_q: torch.Tensor,
+    index_kv_cache: tuple[torch.Tensor],
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    context_lens: torch.Tensor,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor,
+    *,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    decode_query_len: int,
+) -> torch.Tensor:
+    """Compute AscendC decode scores and return their block TopK."""
+    topk_indices, _ = _minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        context_lens,
+        start_loc,
+        causal_mask,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        decode_query_len=decode_query_len,
+    )
     return topk_indices
+
+
+@torch.no_grad()
+def minimax_m3_index_tp_block_parallel_decode(
+    idx_q: torch.Tensor,
+    index_kv_cache: tuple[torch.Tensor],
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    context_lens: torch.Tensor,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor,
+    *,
+    max_seq_len: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    decode_query_len: int,
+    tp_group: Any,
+) -> torch.Tensor:
+    """Run decode with KV blocks sharded across tensor-parallel ranks."""
+    full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1)
+    tp_size = tp_group.world_size
+    tp_rank = tp_group.rank_in_group
+
+    max_block_count = (max_seq_len + _MSA_INDEX_BLOCK_SIZE - 1) // _MSA_INDEX_BLOCK_SIZE
+    blocks_per_tp = (max_block_count + tp_size - 1) // tp_size
+    block_offset = tp_rank * blocks_per_tp
+    block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
+    if block_count == 0:
+        # MsaIndexScore requires a non-empty block-table width. Ranks without
+        # logical blocks contribute neutral candidates to the collectives.
+        candidate_shape = (
+            full_idx_q.shape[1],
+            full_idx_q.shape[0],
+            topk,
+        )
+        local_topk = torch.full(
+            candidate_shape,
+            -1,
+            dtype=torch.int32,
+            device=full_idx_q.device,
+        )
+        local_scores = torch.full(
+            candidate_shape,
+            float("-inf"),
+            dtype=torch.float32,
+            device=full_idx_q.device,
+        )
+    else:
+        local_block_table = block_table[:, block_offset : block_offset + block_count].contiguous()
+        local_seq_lens = torch.clamp(
+            seq_lens - block_offset * _MSA_INDEX_BLOCK_SIZE,
+            min=0,
+            max=block_count * _MSA_INDEX_BLOCK_SIZE,
+        )
+        local_context_lens = context_lens - block_offset * _MSA_INDEX_BLOCK_SIZE
+        local_start_loc = start_loc - block_offset
+        local_init_blocks = max(
+            0,
+            min(init_blocks - block_offset, block_count),
+        )
+        local_local_blocks = min(local_blocks, block_count)
+        is_last_chunk = block_offset + block_count == max_block_count
+        local_causal_mask = causal_mask if is_last_chunk else None
+        local_topk, local_scores = _minimax_m3_index_decode(
+            full_idx_q,
+            index_kv_cache,
+            local_block_table,
+            cu_seqlens_q,
+            local_seq_lens,
+            local_context_lens,
+            local_start_loc,
+            local_causal_mask,
+            topk=topk,
+            init_blocks=local_init_blocks,
+            local_blocks=local_local_blocks,
+            decode_query_len=decode_query_len,
+            block_offset=block_offset,
+        )
+
+    gathered_scores = tp_group.all_gather(local_scores.contiguous(), dim=-1)
+    gathered_topk = tp_group.all_gather(local_topk.contiguous(), dim=-1)
+
+    local_head_count = idx_q.shape[1]
+    local_head_start = tp_rank * local_head_count
+    local_gathered_scores = gathered_scores.narrow(0, local_head_start, local_head_count)
+    _, merged_pos = torch.topk(
+        local_gathered_scores,
+        k=topk,
+        dim=-1,
+    )
+    local_gathered_topk = gathered_topk.narrow(0, local_head_start, local_head_count)
+    return torch.gather(local_gathered_topk, dim=-1, index=merged_pos)
 
 
 @torch.no_grad()

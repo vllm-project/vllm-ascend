@@ -41,6 +41,10 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _as_ascendc_index_kv_cache,
     _index_score_topk_candidates,
+    _minimax_m3_index_score,
+    minimax_m3_index_decode,
+    minimax_m3_index_prefill,
+    minimax_m3_index_tp_block_parallel_decode,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
@@ -280,14 +284,23 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
 
     assert metadata.num_actual_tokens == sum(batch_spec.query_lens)
     assert metadata.num_decodes + metadata.num_prefills == batch_spec.batch_size
+    assert metadata.causal_mask.shape == (2048, 2048)
     if batch_spec.name == "decode_only":
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
+        assert torch.equal(
+            metadata.decode.start_loc,
+            metadata.decode.context_lens // 128,
+        )
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
         assert metadata.prefill is not None
+        assert torch.equal(
+            metadata.prefill.start_loc,
+            metadata.prefill.context_lens // 128,
+        )
 
 
 def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
@@ -590,9 +603,230 @@ def test_ascendc_index_cache_rejects_non_runtime_shape() -> None:
         _as_ascendc_index_kv_cache((index_key_cache,))
 
 
+def test_ascendc_index_score_forwards_metadata_operands() -> None:
+    idx_q = torch.zeros(1, 2, 128)
+    index_key_cache = torch.zeros(4, 128, 128)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([129], dtype=torch.int32)
+    start_loc = torch.tensor([1], dtype=torch.int32)
+    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
+    expected = torch.zeros(2, 1, 4)
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
+        return_value=expected,
+        create=True,
+    ) as mock_index_score:
+        actual = _minimax_m3_index_score(
+            idx_q,
+            (index_key_cache,),
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            start_loc,
+            causal_mask,
+        )
+
+    assert actual is expected
+    args, kwargs = mock_index_score.call_args
+    assert args[1].shape == (4, 128, 1, 128)
+    assert args[3] is start_loc
+    assert kwargs["atten_mask"] is causal_mask
+
+
+def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
+    idx_q = torch.zeros(1, 2, 128)
+    index_key_cache = torch.zeros(4, 128, 128)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([128], dtype=torch.int32)
+    start_loc = torch.tensor([1], dtype=torch.int32)
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
+        return_value=torch.zeros(2, 1, 4),
+        create=True,
+    ) as mock_index_score:
+        _minimax_m3_index_score(
+            idx_q,
+            (index_key_cache,),
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            start_loc,
+            None,
+        )
+
+    kwargs = mock_index_score.call_args.kwargs
+    assert kwargs["atten_mask"] is None
+    assert kwargs["sparse_mode"] == 0
+
+
+def test_ascendc_index_prefill_wraps_score_and_topk() -> None:
+    idx_q = torch.zeros(1, 2, 128)
+    index_key_cache = torch.zeros(4, 128, 128)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([129], dtype=torch.int32)
+    context_lens = torch.tensor([128], dtype=torch.int32)
+    start_loc = torch.tensor([1], dtype=torch.int32)
+    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
+    score = torch.zeros(2, 1, 4)
+    expected = torch.zeros(2, 1, 2, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_prefill_topk",
+            return_value=expected,
+        ) as mock_topk,
+    ):
+        actual = minimax_m3_index_prefill(
+            idx_q,
+            (index_key_cache,),
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            context_lens,
+            start_loc,
+            causal_mask,
+            max_query_len=1,
+            topk=2,
+            init_blocks=1,
+            local_blocks=1,
+        )
+
+    assert actual is expected
+    mock_score.assert_called_once_with(
+        idx_q,
+        (index_key_cache,),
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        start_loc,
+        causal_mask,
+    )
+    mock_topk.assert_called_once_with(
+        score,
+        cu_seqlens_q,
+        context_lens,
+        1,
+        2,
+        1,
+        1,
+    )
+
+
+def test_ascendc_index_decode_wraps_score_candidates() -> None:
+    idx_q = torch.zeros(1, 2, 128)
+    index_key_cache = torch.zeros(4, 128, 128)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([129], dtype=torch.int32)
+    context_lens = torch.tensor([128], dtype=torch.int32)
+    start_loc = torch.tensor([1], dtype=torch.int32)
+    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
+    expected = torch.zeros(2, 1, 2, dtype=torch.int32)
+    scores = torch.zeros(2, 1, 2)
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_decode",
+        return_value=(expected, scores),
+    ) as mock_decode:
+        actual = minimax_m3_index_decode(
+            idx_q,
+            (index_key_cache,),
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            context_lens,
+            start_loc,
+            causal_mask,
+            topk=2,
+            init_blocks=1,
+            local_blocks=1,
+            decode_query_len=1,
+        )
+
+    assert actual is expected
+    mock_decode.assert_called_once_with(
+        idx_q,
+        (index_key_cache,),
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        context_lens,
+        start_loc,
+        causal_mask,
+        topk=2,
+        init_blocks=1,
+        local_blocks=1,
+        decode_query_len=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tp_rank", "expects_causal_mask"),
+    [(0, False), (1, True)],
+)
+def test_tp_block_parallel_decode_only_masks_last_chunk(
+    tp_rank: int,
+    expects_causal_mask: bool,
+) -> None:
+    class FakeTPGroup:
+        world_size = 2
+        rank_in_group = tp_rank
+
+        @staticmethod
+        def all_gather(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+            return torch.cat((tensor, tensor), dim=dim)
+
+    idx_q = torch.zeros(1, 1, 128)
+    index_key_cache = torch.zeros(4, 128, 128)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([512], dtype=torch.int32)
+    context_lens = torch.tensor([511], dtype=torch.int32)
+    start_loc = torch.tensor([3], dtype=torch.int32)
+    causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
+    local_topk = torch.zeros(2, 1, 1, dtype=torch.int32)
+    local_scores = torch.ones(2, 1, 1)
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_decode",
+        return_value=(local_topk, local_scores),
+    ) as mock_decode:
+        minimax_m3_index_tp_block_parallel_decode(
+            idx_q,
+            (index_key_cache,),
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            context_lens,
+            start_loc,
+            causal_mask,
+            max_seq_len=512,
+            topk=1,
+            init_blocks=0,
+            local_blocks=0,
+            decode_query_len=1,
+            tp_group=FakeTPGroup(),
+        )
+
+    passed_mask = mock_decode.call_args.args[7]
+    if expects_causal_mask:
+        assert passed_mask is causal_mask
+    else:
+        assert passed_mask is None
+
+
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
-def test_indexer_speculative_decode_uses_ascendc_tp_sharded_path(
+def test_indexer_speculative_decode_uses_tp_block_parallel_path(
     mock_get_forward_context: MagicMock,
     mock_get_tp_group: MagicMock,
 ) -> None:
@@ -600,6 +834,9 @@ def test_indexer_speculative_decode_uses_ascendc_tp_sharded_path(
     torch.nn.Module.__init__(impl)
     impl.num_index_heads = 1
     impl.index_head_dim = 4
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
     impl.index_cache = SimpleNamespace(
         prefix="layer.attn.index_cache",
         kv_cache=torch.zeros(4, 128, 4),
@@ -610,6 +847,7 @@ def test_indexer_speculative_decode_uses_ascendc_tp_sharded_path(
         seq_lens=torch.tensor([258], dtype=torch.int32),
         context_lens=torch.tensor([256], dtype=torch.int32),
         block_table=torch.tensor([[0, 1, 2]], dtype=torch.int32),
+        start_loc=torch.tensor([2], dtype=torch.int32),
         max_seq_len=258,
         decode_query_len=2,
     )
@@ -617,6 +855,7 @@ def test_indexer_speculative_decode_uses_ascendc_tp_sharded_path(
         seq_lens=decode.seq_lens,
         max_seq_len=decode.max_seq_len,
         slot_mapping=torch.arange(2, dtype=torch.int64),
+        causal_mask=torch.zeros(2048, 2048, dtype=torch.int8),
         num_actual_tokens=2,
         num_decodes=1,
         num_decode_tokens=2,
@@ -633,17 +872,21 @@ def test_indexer_speculative_decode_uses_ascendc_tp_sharded_path(
     )
     expected = torch.zeros((1, 2, 2), dtype=torch.int32)
 
-    with patch.object(
-        impl,
-        "_decode_topk_tp_sharded",
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_index_tp_block_parallel_decode",
         return_value=expected,
-    ) as mock_tp_sharded:
+    ) as mock_tp_block_parallel:
         actual, prefill = impl.forward(torch.zeros(2, 4))
 
     assert actual is expected
     assert prefill is None
-    mock_tp_sharded.assert_called_once()
-    assert mock_tp_sharded.call_args.args[7] == 2
+    mock_tp_block_parallel.assert_called_once()
+    call_args = mock_tp_block_parallel.call_args.args
+    call_kwargs = mock_tp_block_parallel.call_args.kwargs
+    assert call_args[6] is decode.start_loc
+    assert call_args[7] is metadata.causal_mask
+    assert call_kwargs["decode_query_len"] == 2
+    assert call_kwargs["tp_group"] is mock_get_tp_group.return_value
 
 
 def test_speculative_decode_candidates_use_per_token_visibility() -> None:
