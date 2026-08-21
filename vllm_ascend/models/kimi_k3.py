@@ -1179,7 +1179,7 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
         weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
     ) -> set[str]:
         params_dict = dict(self.named_parameters())
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int | None]] = [
             (".fused_qkv", ".q_proj", "q"),
             (".fused_qkv", ".k_proj", "k"),
             (".fused_qkv", ".v_proj", "v"),
