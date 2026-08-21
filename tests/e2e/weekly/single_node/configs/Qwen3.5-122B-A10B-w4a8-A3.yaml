@@ -7,7 +7,6 @@ test_cases:
     envs:
       HCCL_BUFFSIZE: "2048"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -37,7 +36,7 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":0}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"
@@ -61,7 +60,6 @@ test_cases:
     envs:
       HCCL_BUFFSIZE: "2048"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -91,7 +89,7 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":0}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"
@@ -116,7 +114,6 @@ test_cases:
       HCCL_BUFFSIZE: "2048"
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -146,7 +143,7 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"

@@ -257,7 +257,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with GLM-5's DeepSeek-style MTP draft model. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5 does not support graph-mode speculative decoding.
 - `--enable-chunked-prefill` / `--enable-prefix-caching`: Recommended for long-context and multi-user scenarios — chunked prefill splits long prompts to improve TTFT, prefix caching reuses KV cache for shared prefixes (e.g., system prompts).
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
-- `--additional-config '{"multistream_overlap_shared_expert": true}'`: Overlaps shared-expert computation on an additional stream. Note: automatically disabled when `VLLM_ASCEND_ENABLE_FUSED_MC2=1`, as the two optimizations conflict.
+- `--additional-config '{"multistream_overlap_shared_expert": true}'`: Overlaps shared-expert computation on an additional stream. Note: automatically disabled when `additional_config.enable_fused_mc2=1`, as the two optimizations conflict.
 
 **Key environment variables:**
 
@@ -784,7 +784,6 @@ Before you start, please
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
@@ -800,7 +799,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true,"enable_fused_mc2":1}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -854,7 +853,6 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
@@ -870,7 +868,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true,"enable_fused_mc2":1}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -923,7 +921,6 @@ Before you start, please
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -942,7 +939,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"recompute_scheduler_enable": true}' \
+            --additional-config '{"recompute_scheduler_enable": true,"enable_fused_mc2":1}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -992,7 +989,6 @@ Before you start, please
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
          export TASK_QUEUE_ENABLE=1
          export ASCEND_RT_VISIBLE_DEVICES=$1
-         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -1011,7 +1007,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true,"enable_fused_mc2":1}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1061,7 +1057,6 @@ Before you start, please
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
          export TASK_QUEUE_ENABLE=1
          export ASCEND_RT_VISIBLE_DEVICES=$1
-         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -1080,7 +1075,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true,"enable_fused_mc2":1}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1130,7 +1125,6 @@ Before you start, please
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
          export TASK_QUEUE_ENABLE=1
          export ASCEND_RT_VISIBLE_DEVICES=$1
-         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -1149,7 +1143,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true,"enable_fused_mc2":1}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1274,7 +1268,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 
 **Prefill node-specific configurations:**
 
-- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
+- `additional_config.enable_fused_mc2=1`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
 - `--additional-config '{"enable_dsa_cp": true}'`: Enables DSA context parallelism on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128K tokens.
 
 **Decode node-specific configurations:**
