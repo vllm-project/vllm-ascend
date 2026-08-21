@@ -26,6 +26,18 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
+# Note: Install CANN 950 Ops Transformer Package (ARM only)
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    if [ "$ARCH" != "linux/arm64" ] && [ "$ARCH" != "aarch64" ]; then \
+        echo "Skipping ARM-only package" && exit 0; \
+    fi && \
+    CANN_OPS_TRANSFORMER_URL="https://ascend-ci.obs.cn-north-4.myhuaweicloud.com/package/open/20260820193947/cann-950-ops-transformer_9.2.0_linux-aarch64.run" && \
+    wget --quiet ${CANN_OPS_TRANSFORMER_URL} -O /tmp/cann-950-ops-transformer.run && \
+    chmod +x /tmp/cann-950-ops-transformer.run && \
+    /tmp/cann-950-ops-transformer.run --full --quiet --install-for-all && \
+    rm -f /tmp/cann-950-ops-transformer.run
+
 # Install clang-15 (for triton-ascend) and Mooncake
 ARG MOONCAKE_TAG=0.3.11.post1
 RUN apt-get update -y && \
