@@ -657,23 +657,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return self.kv_sharing_target_layer_name or layer_name
 
     @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config=None,
-        num_dcp_pcp_tokens=None,
-        draft_attn_metadatas=None,
-    ):
-        use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
+    def refresh_fa3_graph_params(update_stream, forward_context, num_tokens):
+        """Refresh FA3 graph buffers BEFORE the aclgraph replay (decode-only).
 
-        # FA3 graph replay: refresh the captured NPU seq-length tensors with
-        # the current batch's data.  FA3 is invisible to the CANN task-group
-        # update mechanism, so we copy fresh seq_lens/query_start_loc into the
-        # tensors whose addresses were captured during torch.npu.graph().
-        # Only refresh for DECODE graphs — prefill uses CANN V1 and must not
-        # touch the FA3 buffers (its num_tokens can collide with a decode size).
+        FA3 is a plain torch op captured inside the aclgraph: it reads its
+        ``cache_seqlens``/``cu_seqlens_q``/``block_table`` buffers directly at
+        replay time and, unlike the CANN V1 path (task group + event), has no
+        replay-side sync.  The buffers therefore must be refreshed on the update
+        stream and the replay stream made to wait BEFORE the replay — otherwise
+        the first decode step reads the capture-time (block_table=zeros) buffers
+        and produces wrong output.
+
+        Returns True if an FA3 refresh was performed.
+        """
         global _FA3_GRAPH_TENSORS
         first_meta = next(iter(forward_context.attn_metadata.values()), None)
         is_decode_replay = first_meta is not None and (
@@ -696,61 +692,76 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     "will NOT be refreshed -> stale graph replay.",
                     num_tokens, sorted(_FA3_GRAPH_TENSORS),
                 )
-        if fa3_tensors is not None:
-            cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
-            for meta in forward_context.attn_metadata.values():
-                if meta.seq_lens is not None:
-                    with torch.npu.stream(update_stream):
-                        n_batch = cache_seqlens.numel()
-                        n_actual = meta.seq_lens.numel()
-                        n_pad = n_batch - n_actual
+        if fa3_tensors is None:
+            return False
+        cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
+        for meta in forward_context.attn_metadata.values():
+            if meta.seq_lens is not None:
+                with torch.npu.stream(update_stream):
+                    n_batch = cache_seqlens.numel()
+                    n_actual = meta.seq_lens.numel()
+                    n_pad = n_batch - n_actual
 
-                        # cache_seqlens: real lengths first, padding requests
-                        # get KV length 1 (dummy, reads block 0 via zero rows).
-                        cache_seqlens[:n_actual].copy_(
-                            meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
+                    # cache_seqlens: real lengths first, padding requests
+                    # get KV length 1 (dummy, reads block 0 via zero rows).
+                    cache_seqlens[:n_actual].copy_(
+                        meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
+                    )
+                    if n_pad > 0:
+                        cache_seqlens[n_actual:].fill_(1)
+
+                    # cu_seqlens_q: real cumulative first, then one query
+                    # token per padding request.
+                    n_cu = cu_seqlens_q.numel()
+                    n_cu_actual = min(meta.query_start_loc.numel(), n_cu)
+                    cu_seqlens_q[:n_cu_actual].copy_(meta.query_start_loc[:n_cu_actual])
+                    if n_cu_actual < n_cu:
+                        last = int(cu_seqlens_q[n_cu_actual - 1].item())
+                        for i in range(n_cu_actual, n_cu):
+                            last += 1
+                            cu_seqlens_q[i] = last
+
+                    # block_table: real rows first, padding rows zeroed so
+                    # padding requests point to block 0 (valid memory).
+                    if meta.block_tables is not None:
+                        n_bt_r = min(meta.block_tables.shape[0], block_table_buf.shape[0])
+                        n_bt_c = min(meta.block_tables.shape[1], block_table_buf.shape[1])
+                        block_table_buf[:n_bt_r, :n_bt_c].copy_(
+                            meta.block_tables[:n_bt_r, :n_bt_c]
                         )
-                        if n_pad > 0:
-                            cache_seqlens[n_actual:].fill_(1)
-
-                        # cu_seqlens_q: real cumulative first, then one query
-                        # token per padding request.
-                        n_cu = cu_seqlens_q.numel()
-                        n_cu_actual = min(meta.query_start_loc.numel(), n_cu)
-                        cu_seqlens_q[:n_cu_actual].copy_(meta.query_start_loc[:n_cu_actual])
-                        if n_cu_actual < n_cu:
-                            last = int(cu_seqlens_q[n_cu_actual - 1].item())
-                            for i in range(n_cu_actual, n_cu):
-                                last += 1
-                                cu_seqlens_q[i] = last
-
-                        # block_table: real rows first, padding rows zeroed so
-                        # padding requests point to block 0 (valid memory).
-                        if meta.block_tables is not None:
-                            n_bt_r = min(meta.block_tables.shape[0], block_table_buf.shape[0])
-                            n_bt_c = min(meta.block_tables.shape[1], block_table_buf.shape[1])
-                            block_table_buf[:n_bt_r, :n_bt_c].copy_(
-                                meta.block_tables[:n_bt_r, :n_bt_c]
-                            )
-                            if n_bt_r < block_table_buf.shape[0]:
-                                block_table_buf[n_bt_r:].zero_()
+                        if n_bt_r < block_table_buf.shape[0]:
+                            block_table_buf[n_bt_r:].zero_()
                 break
+        # Make the replay stream wait for the copies so the next replay reads
+        # fresh buffers.
+        torch.npu.current_stream().wait_stream(update_stream)
+        return True
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
 
         # FA3 decode graph: it is invisible to the CANN task-group mechanism, so
         # it has NO entries in graph_params.  graph_params[num_tokens] may hold
         # entries from a prefill CANN V1 graph captured with the SAME num_tokens;
-        # running the CANN task-group update below would use DECODE data to update
-        # those PREFILL handles, corrupting the prefill graph.  Skip it.
-        if fa3_tensors is not None:
-            # FA3 is a plain torch op captured inside the aclgraph — it has no
-            # CANN task group, so unlike the CANN V1 path above (which records an
-            # event on update_stream that the graph waits on via
-            # graph_task_update_begin/end), the aclgraph replay does NOT wait for
-            # the copies we just issued on update_stream.  Without this wait the
-            # replay can read stale/partial cache_seqlens/block_table buffers,
-            # producing wrong decode output.  Make the current (replay) stream
-            # wait for the update stream so the next replay sees fresh buffers.
-            torch.npu.current_stream().wait_stream(update_stream)
+        # running the CANN task-group update below would use DECODE data to
+        # update those PREFILL handles, corrupting the prefill graph.  The FA3
+        # buffers themselves are refreshed by refresh_fa3_graph_params BEFORE the
+        # replay.  Skip the CANN V1 update here.
+        global _FA3_GRAPH_TENSORS
+        first_meta = next(iter(forward_context.attn_metadata.values()), None)
+        is_decode_replay = first_meta is not None and (
+            first_meta.attn_state == AscendAttentionState.DecodeOnly
+        )
+        if is_decode_replay and num_tokens in _FA3_GRAPH_TENSORS:
             return
 
         if using_paged_attention(num_tokens, vllm_config):

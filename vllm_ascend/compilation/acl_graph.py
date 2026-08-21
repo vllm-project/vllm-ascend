@@ -299,6 +299,23 @@ def update_full_graph_params(
     )
 
 
+def refresh_fa3_graph_params(
+    attn_backend,
+    update_stream,
+    forward_context,
+    num_tokens,
+):
+    """Refresh FA3 graph buffers before the aclgraph replay (decode-only).
+
+    Only the FA3 backend (``AscendAttentionBackendImpl``) implements this hook;
+    other v1 backends (MLA / DSA / SFA / CP) are a no-op.
+    """
+    impl_cls = attn_backend.get_impl_cls()
+    refresh = getattr(impl_cls, "refresh_fa3_graph_params", None)
+    if refresh is not None:
+        refresh(update_stream, forward_context, num_tokens)
+
+
 @dataclass
 class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]

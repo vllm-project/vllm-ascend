@@ -121,6 +121,7 @@ from vllm_ascend.attention.utils import (
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
+    refresh_fa3_graph_params,
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
@@ -2868,6 +2869,23 @@ class NPUModelRunner(GPUModelRunner):
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 
+    def _refresh_fa3_graph_params_if_needed(
+        self,
+        forward_context: ForwardContext,
+        num_tokens_padded: int,
+    ) -> None:
+        if (
+            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and not forward_context.capturing
+            and not self.use_sparse and not self.use_compress
+        ):
+            refresh_fa3_graph_params(
+                self.attn_backend,
+                self.update_stream,
+                forward_context,
+                num_tokens_padded,
+            )
+
     def _update_full_graph_params_if_needed(
         self,
         forward_context: ForwardContext,
@@ -2914,6 +2932,11 @@ class NPUModelRunner(GPUModelRunner):
             **model_kwargs,
         }
         run_model = partial(self.model, **model_inputs)
+
+        # FA3 decode replay reads its graph buffers directly (no CANN task
+        # group), so they must be refreshed BEFORE the replay.  This is a no-op
+        # for prefill (CANN V1) and for non-FA3 backends.
+        self._refresh_fa3_graph_params_if_needed(forward_context, num_tokens_padded)
 
         if self.enable_enpu:
             # The soft segmentation scenario requires event.record first, then event.wait
