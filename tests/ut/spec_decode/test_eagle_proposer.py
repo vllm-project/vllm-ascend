@@ -12,7 +12,6 @@ import torch
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.platforms import current_platform
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
