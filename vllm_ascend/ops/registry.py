@@ -32,7 +32,7 @@ from functools import cache
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from vllm.model_executor.custom_op import CustomOp, op_registry_oot
+from vllm.model_executor.custom_op import CustomOp
 
 from vllm_ascend.device.device_config import is_310p
 
@@ -154,8 +154,6 @@ def ascend_custom_ops() -> Mapping[str, type]:
 
 def register_custom_op(name: str, op_cls: type | None = None) -> None:
     """Registers a single Ascend OOT CustomOp."""
-    if name in op_registry_oot:
-        return
     if op_cls is None:
         op_cls = ascend_custom_ops()[name]
     CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -173,12 +171,21 @@ def register_custom_ops(
             register_custom_op(name)
 
 
+# register_all_custom_ops runs at most once per process.
+_registered_all_custom_ops = False
+
+
 def register_all_custom_ops(vllm_config: VllmConfig | None = None):
     """Register Ascend CustomOP
 
     NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
+    global _registered_all_custom_ops
+    if _registered_all_custom_ops:
+        return
+    _registered_all_custom_ops = True
+
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config

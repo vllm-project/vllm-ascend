@@ -25,9 +25,11 @@ class TestOpsRegistry(TestBase):
     def test_register_custom_op(self, mock_customop):
         import vllm.model_executor.custom_op as custom_op_module
 
-        mock_customop.register_oot.side_effect = lambda _decorated_op_cls=None, name=None: (
-            custom_op_module.op_registry_oot.__setitem__(name, _decorated_op_cls)
-        )
+        def fake_register_oot(_decorated_op_cls=None, name=None):
+            assert name not in custom_op_module.op_registry_oot, f"Duplicate op name: {name}"
+            custom_op_module.op_registry_oot[name] = _decorated_op_cls
+
+        mock_customop.register_oot.side_effect = fake_register_oot
         from vllm_ascend.ops.registry import register_custom_op
 
         with mock.patch.dict(custom_op_module.op_registry_oot, clear=True):
@@ -36,9 +38,10 @@ class TestOpsRegistry(TestBase):
             self.assertEqual(mock_customop.register_oot.call_count, 1)
             self.assertIs(custom_op_module.op_registry_oot["OmniCustomOp"], int)
 
-            # a name already in the OOT registry is skipped
-            register_custom_op("OmniCustomOp", str)
-            self.assertEqual(mock_customop.register_oot.call_count, 1)
+            # registering an already-registered op fails
+            with self.assertRaises(AssertionError):
+                register_custom_op("OmniCustomOp", str)
+            self.assertEqual(mock_customop.register_oot.call_count, 2)
             self.assertIs(custom_op_module.op_registry_oot["OmniCustomOp"], int)
 
     @mock.patch("vllm_ascend.ops.registry.CustomOp")
@@ -73,6 +76,7 @@ class TestOpsRegistry(TestBase):
 
         with (
             mock.patch("vllm_ascend.ops.registry.is_310p", return_value=False),
+            mock.patch("vllm_ascend.ops.registry._registered_all_custom_ops", False),
             mock.patch.dict(custom_op_module.op_registry_oot, clear=True),
         ):
             expected_ops = len(ops_registry._get_ops_base()) - 1

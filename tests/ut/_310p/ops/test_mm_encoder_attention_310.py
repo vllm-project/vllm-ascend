@@ -28,6 +28,7 @@ def test_register_customop_overrides_mm_encoder_attention_for_310p():
     with (
         mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot") as mock_register_oot,
         mock.patch("vllm_ascend.ops.registry.is_310p", return_value=True),
+        mock.patch("vllm_ascend.ops.registry._registered_all_custom_ops", False),
         mock.patch.dict(custom_op_module.op_registry_oot, clear=True),
     ):
         mock_register_oot.side_effect = lambda _decorated_op_cls=None, name=None: (
