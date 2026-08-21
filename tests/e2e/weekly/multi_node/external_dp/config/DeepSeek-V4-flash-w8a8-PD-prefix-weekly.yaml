@@ -45,7 +45,6 @@ env_prefill: &env_prefill
   HCCL_BUFFSIZE: "1024"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
@@ -102,7 +101,7 @@ templates:
       - "ascend"
       - --enforce-eager
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_dsa_cp": true}'
+      - '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}'
 

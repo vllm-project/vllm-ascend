@@ -296,7 +296,6 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 
 export TASK_QUEUE_ENABLE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -319,7 +318,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --enforce-eager \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -358,7 +357,6 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 
 export TASK_QUEUE_ENABLE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -382,7 +380,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",

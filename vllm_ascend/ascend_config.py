@@ -156,31 +156,23 @@ class AscendConfig:
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
-        self.enable_fused_mc2 = self._get_config_value(
-            additional_config,
-            "enable_fused_mc2",
-            "VLLM_ASCEND_ENABLE_FUSED_MC2",
-            ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
-        )
+        self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", 0)
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
         assert not (
             self.enable_fused_mc2 == 1
             and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        ), (
-            "MiniMax M3 does not support enable_fused_mc2=1. Please set "
-            "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
-        )
+        ), "MiniMax M3 does not support enable_fused_mc2=1. Please set additional_config.enable_fused_mc2 to 0."
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
-                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
         if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vllm_config):
             self.enable_fused_mc2 = 0
             logger.warning_once(
-                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+                "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
         self.enable_mlapo = self._get_config_value(
             additional_config,
