@@ -198,6 +198,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_ascend_forward_context,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    set_moe_quant_mismatch,
 )
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
@@ -3613,6 +3614,11 @@ class NPUModelRunner(GPUModelRunner):
                     patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
+
+            set_moe_quant_mismatch(
+                self.model,
+                getattr(self.drafter, "model", None) if self.drafter else None,
+            )
 
             pp_group = get_pp_group()
             should_configure_aux_hidden_states = (

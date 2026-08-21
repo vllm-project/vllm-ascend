@@ -1211,9 +1211,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config)
+    decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config, is_draft_model=is_draft_model)
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
-    prefill_comm_method = select_moe_comm_method(scheduler_config.max_num_batched_tokens, vllm_config)
+    prefill_comm_method = select_moe_comm_method(
+        scheduler_config.max_num_batched_tokens, vllm_config, is_draft_model=is_draft_model
+    )
 
     if use_cann_megamoe(vllm_config):
         return False

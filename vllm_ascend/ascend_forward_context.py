@@ -161,6 +161,7 @@ def set_ascend_forward_context(
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            is_draft_model=is_draft_model,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -262,6 +263,10 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
+# TODO: Remove the following variables and related methods once the megamoe operator supports mixed weight formats
+#  (e.g., main model quantized, draft model in floating point)
+_moe_quant_mismatch: bool | None = None
+_dispatch_v2_tokens_capacity: int | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
@@ -288,6 +293,8 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
+        global _dispatch_v2_tokens_capacity
+        _dispatch_v2_tokens_capacity = min(num_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT) * tp_size
 
     # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
     else:
@@ -297,6 +304,10 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
 def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
+
+
+def get_dispatch_v2_tokens_capacity():
+    return _dispatch_v2_tokens_capacity
 
 
 def set_mc2_mask(vllm_config, device):
@@ -332,16 +343,88 @@ def _select_a2_moe_comm_method(
     return MoECommType.ALLGATHER
 
 
+def _is_moe_quantized(model_instance: torch.nn.Module) -> bool | None:
+    """Check if the model's MoE layers use a quantized method.
+
+    Scans the model for the first ``routed_experts.quant_method`` and checks
+    whether it is an unquantized (float) or quantized MoE method instance.
+    modelslim quantization cannot be reliably detected from config, so the
+    actual runtime instance type is used instead.
+
+    Returns ``True`` if quantized, ``False`` if unquantized, ``None`` if no MoE
+    layers are found (e.g. dense model or ``model_instance`` is ``None``).
+    """
+    if model_instance is None:
+        return None
+    for module in model_instance.modules():
+        routed_experts = getattr(module, "routed_experts", None)
+        if routed_experts is None:
+            continue
+        quant_method = getattr(routed_experts, "quant_method", None)
+        if quant_method is None:
+            continue
+        from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+            UnquantizedFusedMoEMethod,
+        )
+
+        return not isinstance(quant_method, UnquantizedFusedMoEMethod)
+    return None
+
+
+def set_moe_quant_mismatch(
+    main_model: torch.nn.Module | None,
+    draft_model: torch.nn.Module | None,
+) -> None:
+    """Cache whether the main and draft models have inconsistent MoE quantization.
+
+    MegaMoe is configured from the MoE-part weight format. When the main model
+    and the draft model use different MoE quantization (e.g. main is quantized
+    while the draft is floating-point), the MegaMoe kernel cannot handle the
+    mixed weight formats and hangs.
+
+    Should be called once after both models are loaded. The weight format is
+    fixed for the lifetime of the process, so the result is cached. Only the MoE
+    part is compared; a model without MoE layers (or a ``None`` draft model)
+    never exercises the MegaMoe path, so its quantization is irrelevant.
+    """
+    global _moe_quant_mismatch
+    if _moe_quant_mismatch is not None:
+        return
+
+    _moe_quant_mismatch = False
+    main_quantized = _is_moe_quantized(main_model)
+    if main_quantized is None:
+        return
+
+    draft_quantized = _is_moe_quantized(draft_model)
+    if draft_quantized is None:
+        return
+
+    if main_quantized != draft_quantized:
+        _moe_quant_mismatch = True
+        logger.warning_once(
+            "FUSED_MC2 disabled on draft model path due to inconsistent MoE "
+            "quantization between main model (quantized=%s) and draft model "
+            "(quantized=%s). Main model still uses FUSED_MC2; draft model falls "
+            "back to MC2/ALLTOALL.",
+            main_quantized,
+            draft_quantized,
+        )
+
+
 def _select_a3_moe_comm_method(
     num_tokens: int,
     mc2_tokens_capacity: int,
     vllm_config: VllmConfig,
+    is_draft_model: bool = False,
 ) -> MoECommType:
-    if use_cann_megamoe(vllm_config):
+    skip_fused_mc2 = is_draft_model and _moe_quant_mismatch
+    if not skip_fused_mc2 and use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
-    if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+    if not skip_fused_mc2 and get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
         return MoECommType.FUSED_MC2
 
+    mc2_tokens_capacity = get_dispatch_v2_tokens_capacity() or mc2_tokens_capacity
     if num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
 
@@ -366,7 +449,11 @@ def _select_a5_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model: bool = False,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
 
@@ -414,6 +501,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             num_tokens,
             mc2_tokens_capacity,
             vllm_config,
+            is_draft_model=is_draft_model,
         )
     elif soc_version == AscendDeviceType.A5:
         moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
