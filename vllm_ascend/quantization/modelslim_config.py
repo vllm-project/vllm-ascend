@@ -344,6 +344,50 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
     """
     return packed_modules_model_mapping.get(model_type, {})
 
+def _lookup_mtp_quant_type(
+    quant_description: dict[str, Any], prefix: str
+) -> str:
+    """Fallback lookup that reverses the DSpark MTP layer-name mapping.
+
+    vLLM DSpark draft layers are addressed as ``model.layers.{N}.self_attn.*``
+    (where ``N = num_hidden_layers + stage_idx``), but the on-disk
+    ``quant_model_description.json`` uses the original HF naming
+    ``mtp.{stage_idx}.attn.*``.  This helper converts the vLLM prefix
+    back to the HF/MTP form and looks up the quant type.
+
+    Raises ``KeyError`` (the original problem) when the prefix does not
+    match the MTP pattern or the key is genuinely absent.
+    """
+    import re
+
+    m = re.match(r"^model\.layers\.(\d+)\.(.+)$", prefix)
+    if not m:
+        raise KeyError(prefix + ".weight")
+
+    layer_idx = int(m.group(1))
+    suffix = m.group(2)
+
+    # Reverse the substring mappings applied by QUANT_MODEL_SUBSTR_MAPPINGS
+    reverse_subst = {
+        "self_attn": "attn",
+        "gate_proj": "w1",
+        "down_proj": "w2",
+        "up_proj": "w3",
+        "mlp": "ffn",
+        "post_attention_layernorm": "ffn_norm",
+        "input_layernorm": "attn_norm",
+    }
+    parts = suffix.split(".")
+    parts = [reverse_subst.get(p, p) for p in parts]
+    suffix = ".".join(parts)
+
+    # Try every possible MTP stage index (0, 1, 2, ...) until we find a match.
+    for stage_idx in range(layer_idx, -1, -1):
+        hf_key = f"mtp.{stage_idx}.{suffix}.weight"
+        if hf_key in quant_description:
+            return quant_description[hf_key]
+
+    raise KeyError(prefix + ".weight")
 
 def get_linear_quant_type(
     quant_description: dict[str, Any], prefix: str, packed_modules_mapping: dict[str, Any]
@@ -358,6 +402,11 @@ def get_linear_quant_type(
     Returns:
         The quantization type string (e.g., "W8A8_DYNAMIC").
     """
+    def _lookup_quant_type(key_prefix: str) -> str:
+        if key_prefix + ".weight" in quant_description:
+            return quant_description[key_prefix + ".weight"]
+        raise KeyError(key_prefix + ".weight")
+    
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
         quant_type = None
@@ -365,7 +414,10 @@ def get_linear_quant_type(
             prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
-            shard_quant_type = quant_description[shard_prefix + ".weight"]
+            try:
+                shard_quant_type = _lookup_quant_type(shard_prefix)
+            except KeyError:
+                shard_quant_type = _lookup_mtp_quant_type(quant_description, shard_prefix)  # ← 修改
 
             if quant_type is None:
                 quant_type = shard_quant_type
@@ -378,7 +430,10 @@ def get_linear_quant_type(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
-        quant_type = quant_description[prefix + ".weight"]
+        try:
+            quant_type = _lookup_quant_type(prefix)
+        except KeyError:
+            quant_type = _lookup_mtp_quant_type(quant_description, prefix)  # ← 修改
     return quant_type
 
 
@@ -671,8 +726,15 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
-                is_shard_skipped = self.quant_description[shard_prefix + ".weight"] == "FLOAT"
-
+                key = shard_prefix + ".weight"
+if key in self.quant_description:
+    is_shard_skipped = self.quant_description[key] == "FLOAT"
+else:
+    try:
+        quant_type = _lookup_mtp_quant_type(self.quant_description, shard_prefix)
+        is_shard_skipped = quant_type == "FLOAT"
+    except KeyError:
+        is_shard_skipped = False
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
                 elif is_shard_skipped != is_skipped:
@@ -686,6 +748,12 @@ class AscendModelSlimConfig(QuantizationConfig):
                 key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
                 for key, value in self.quant_description.items()
             )
+            if not is_skipped:                                                          # ← 新增
+                try:
+                    quant_type = _lookup_mtp_quant_type(self.quant_description, prefix)
+                    is_skipped = quant_type == "FLOAT"
+                except KeyError:
+                    pass
 
         assert is_skipped is not None
         return is_skipped
