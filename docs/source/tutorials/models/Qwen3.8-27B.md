@@ -242,7 +242,7 @@ Before starting the service:
         --host 0.0.0.0 \
         --port 8000 \
         --data-parallel-size 1 \
-        --tensor-parallel-size 2 \
+        --tensor-parallel-size 1 \
         --quantization ascend \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
@@ -258,7 +258,7 @@ Before starting the service:
 
     Key Parameter Descriptions:
 
-    - `--data-parallel-size 1` and `--tensor-parallel-size 2` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
+    - `--data-parallel-size 1` and `--tensor-parallel-size 1` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
     - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
     - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
     - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
