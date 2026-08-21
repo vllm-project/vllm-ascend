@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -126,16 +125,20 @@ class TestQuaRotDraftBoundaries:
         )
         return proposer
 
-    def test_loads_rotation_for_k3_shared_boundaries(self, monkeypatch):
-        class FakeK3DSpark:
+    @pytest.mark.parametrize(
+        "draft_class_name",
+        ["K3DSparkForCausalLM", "Qwen3DSparkForCausalLM"],
+    )
+    def test_loads_rotation_for_shared_dspark_boundaries(self, monkeypatch, draft_class_name):
+        class FakeDSpark:
             pass
 
         proposer = self._make_proposer()
         rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
-        proposer.model = FakeK3DSpark()
+        proposer.model = FakeDSpark()
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.llm_base_proposer.K3DSparkForCausalLM",
-            FakeK3DSpark,
+            f"vllm_ascend.spec_decode.llm_base_proposer.{draft_class_name}",
+            FakeDSpark,
         )
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.llm_base_proposer.get_rotation_path",
@@ -150,7 +153,7 @@ class TestQuaRotDraftBoundaries:
 
         torch.testing.assert_close(proposer._quarot_rotation, rotation)
 
-    def test_does_not_apply_k3_boundary_rotation_to_other_drafts(self, monkeypatch):
+    def test_does_not_apply_dspark_boundary_rotation_to_other_drafts(self, monkeypatch):
         proposer = self._make_proposer()
         proposer.model = SimpleNamespace()
         calls = []
@@ -289,6 +292,8 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         )
 
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+
 class TestParallelDraftSeqLens:
     @staticmethod
     def _metadata():

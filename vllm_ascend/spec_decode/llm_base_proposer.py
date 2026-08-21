@@ -276,8 +276,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
     def _maybe_load_quarot_rotation(self) -> None:
-        """Load the target rotation needed by K3's shared draft boundaries."""
-        if not isinstance(self.model, K3DSparkForCausalLM):
+        """Load the target rotation needed by shared DSpark boundaries."""
+        if not isinstance(self.model, (K3DSparkForCausalLM, Qwen3DSparkForCausalLM)):
             return
         rotation_path = get_rotation_path(self.vllm_config)
         if rotation_path is None:

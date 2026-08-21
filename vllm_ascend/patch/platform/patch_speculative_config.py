@@ -1,5 +1,5 @@
-from vllm.config.speculative import SpeculativeConfig
 from transformers import PretrainedConfig
+from vllm.config.speculative import SpeculativeConfig
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
