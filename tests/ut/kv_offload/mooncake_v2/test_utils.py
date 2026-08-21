@@ -112,7 +112,7 @@ def test_zmq_ctx_destroys_context(monkeypatch: pytest.MonkeyPatch) -> None:
         MagicMock(return_value=socket),
     )
 
-    with zmq_ctx(zmq.REQ, "tcp://127.0.0.1:1") as result:
+    with zmq_ctx(zmq.REQ, "tcp://127.0.0.1:1") as result:  # type: ignore[attr-defined]
         assert result is socket
 
     context.destroy.assert_called_once_with(linger=0)
@@ -121,8 +121,8 @@ def test_zmq_ctx_destroys_context(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_zmq_retry_helpers_succeed_after_transient_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils.time.sleep", MagicMock())
     socket = MagicMock()
-    socket.send.side_effect = [zmq.ZMQError("transient"), None]
-    socket.recv.side_effect = [zmq.ZMQError("transient"), b"response"]
+    socket.send.side_effect = [zmq.ZMQError("transient"), None]  # type: ignore[attr-defined]
+    socket.recv.side_effect = [zmq.ZMQError("transient"), b"response"]  # type: ignore[attr-defined]
 
     ensure_zmq_send(socket, b"request", "tcp://peer", max_retries=2)
     assert ensure_zmq_recv(socket, "tcp://peer", max_retries=2) == b"response"
@@ -133,8 +133,8 @@ def test_zmq_retry_helpers_succeed_after_transient_error(monkeypatch: pytest.Mon
 def test_zmq_retry_helpers_raise_after_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils.time.sleep", MagicMock())
     socket = MagicMock()
-    socket.send.side_effect = zmq.ZMQError("failed")
-    socket.recv.side_effect = zmq.ZMQError("failed")
+    socket.send.side_effect = zmq.ZMQError("failed")  # type: ignore[attr-defined]
+    socket.recv.side_effect = zmq.ZMQError("failed")  # type: ignore[attr-defined]
 
     with pytest.raises(RuntimeError, match="Failed to send"):
         ensure_zmq_send(socket, b"request", "tcp://peer", max_retries=2)
