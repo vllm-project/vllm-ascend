@@ -21,12 +21,16 @@ FROM openeuler/openeuler:24.03-lts
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+ARG PIP_INDEX_URL="https://pypi.org/simple"
+ARG PIP_TRUSTED_HOST=""
 ARG PYTORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 ARG ASCEND_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
 ENV COMPILE_CUSTOM_KERNELS=0 \
     SOC_VERSION=ascend910b1 \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
     PYTORCH_CPU_INDEX_URL=${PYTORCH_CPU_INDEX_URL} \
     ASCEND_EXTRA_INDEX_URL=${ASCEND_EXTRA_INDEX_URL} \
     PIP_DISABLE_PIP_VERSION_CHECK=1

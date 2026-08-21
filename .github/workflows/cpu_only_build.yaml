@@ -56,4 +56,9 @@ jobs:
           context: .
           file: Dockerfile.cpu
           outputs: type=cacheonly
+          build-args: |
+            PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
+            PYTORCH_CPU_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
+            ASCEND_EXTRA_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
           provenance: false
