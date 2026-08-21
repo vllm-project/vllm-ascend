@@ -194,12 +194,7 @@ class AscendConfig:
             "MSMONITOR_USE_DAEMON",
             ascend_envs.MSMONITOR_USE_DAEMON,
         )
-        self.enable_transpose_kv_cache_by_block = self._get_config_value(
-            additional_config,
-            "enable_transpose_kv_cache_by_block",
-            "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
-            ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
-        )
+        self.enable_transpose_kv_cache_by_block = additional_config.get("enable_transpose_kv_cache_by_block", True)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
