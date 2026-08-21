@@ -236,12 +236,7 @@ class AscendConfig:
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
-        self.weight_nz_mode = self._get_config_value(
-            additional_config,
-            "weight_nz_mode",
-            "VLLM_ASCEND_ENABLE_NZ",
-            ascend_envs.VLLM_ASCEND_ENABLE_NZ,
-        )
+        self.weight_nz_mode = additional_config.get("weight_nz_mode", 1)
 
         from vllm_ascend.utils import model_uses_sfa_sparse
 
@@ -590,8 +585,6 @@ class RlConfig:
                 ascend_config.weight_nz_mode,
             )
         ascend_config.weight_nz_mode = 0
-        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
-
         from vllm_ascend.platform import _disable_expandable_segments
 
         _disable_expandable_segments()

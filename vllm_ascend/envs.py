@@ -77,11 +77,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
     # for your DeepSeek W8A8 scene, then disable it.
     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
-    # Whether to enable weight cast format to FRACTAL_NZ.
-    # 0: close nz;
-    # 1: only quant case enable nz;
-    # 2: enable nz as long as possible.
-    "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Whether to enable fused MC2 (`dispatch_ffn_combine/mega_moe`).
