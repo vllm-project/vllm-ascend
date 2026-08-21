@@ -20,6 +20,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
 from ..utils import weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -248,11 +250,15 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
-        # The ordering between graph replay and graph-parameter updates is
-        # established by update_full_graph_params with stream dependencies.
-        # Do not use a device/host synchronize here: on newer CANN/PTA
-        # combinations it can race with the allocator's stream bookkeeping,
-        # and it also serializes unrelated work on the device.
+        # Keep the V1 FULL-graph barrier for the main model.  In async
+        # scheduling, the CPU-side update event for the next iteration can be
+        # observed before the previous replay has completed on the NPU.  The
+        # draft Eagle graph is merged with the main graph and must not take
+        # this barrier, matching the existing V1 Eagle ordering contract.
+        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+        if not self.enable_enpu and need_sync:
+            torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
 
