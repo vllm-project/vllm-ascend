@@ -306,7 +306,8 @@
       "Eco-Tech/DeepSeek-R1-0528-w8a8-mtp-QuaRot",
       "Eco-Tech/Qwen3.6-27B-w8a8",
       "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot",
-      "Eco-Tech/MiniMax-M2.7-eagle-model-short"
+      "Eco-Tech/MiniMax-M2.7-eagle-model-short",
+      "Eco-Tech/Qwen3.8-27B-w8a8"
     ],
     "datasets": [
       "vllm-ascend/mm_request",
