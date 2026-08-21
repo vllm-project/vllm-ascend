@@ -1508,20 +1508,29 @@ def _change_text(
 
 def _suggestion(relation: str, classification: str, old: SourceEndpoint, new: SourceEndpoint) -> str:
     if classification == "preexisting":
-        return "作为历史问题单独处理，不归因于本次上游升级。"
+        return "Track this as a pre-existing compatibility issue; do not attribute it to this upstream range."
     if classification == "fixed":
-        return "上游已经恢复兼容，确认下游兼容代码是否仍需保留。"
+        return (
+            "Upstream compatibility has been restored. "
+            "Confirm whether the downstream compatibility code is still needed."
+        )
     if new.file is None:
-        return "更新下游 override 目标；若上游已删除该能力，需要移除重写并补充替代实现。"
+        return (
+            "Update the downstream override target. If upstream removed this capability, "
+            "remove the override and provide an alternative implementation if needed."
+        )
     if old.name != new.name:
-        return f"把下游依赖从 {old.name} 更新到 {new.name}，并重新核对参数转发。"
+        return f"Update the downstream dependency from {old.name} to {new.name}, and verify all forwarded arguments."
     if relation == "override":
-        return "同步 override 参数并检查 super() 调用和关键字转发。"
+        return "Update the downstream override signature, then verify super() calls and keyword forwarding."
     if relation == "direct_import":
-        return "更新 import 模块或符号路径，并补充导入边界测试。"
+        return "Update the imported module or symbol path and add an import-boundary regression test."
     if relation == "direct_call":
-        return "同步下游调用参数或返回值消费方式，并为该调用点补充接口级回归测试。"
-    return "根据上下游精确契约差异调整依赖，并补充接口级回归测试。"
+        return (
+            "Update the downstream call arguments or return-value handling "
+            "and add a regression test for this call site."
+        )
+    return "Update the downstream dependency to match the exact upstream contract and add an interface regression test."
 
 
 def _finding_id(*parts: object) -> str:
@@ -1951,12 +1960,14 @@ def _relation_findings(
         )
         if optional_contract_review:
             suggestion = (
-                "暂不判定为运行时不兼容。请确认实际调用路径；如果运行时会使用该下游实现，请同步方法签名并处理新增参数。"
+                "Review whether the new optional parameter can reach this downstream override at runtime. "
+                "If it can, update the override signature and handle the new argument."
             )
         elif masked_preexisting_delta:
             suggestion = (
-                "本次上游又引入了新的精确参数差异，但下游在 old 已存在其他不兼容；"
-                "作为独立 review 核对本次增量，不直接归入升级修复清单。"
+                "This upstream range introduces another exact parameter difference, but the downstream override "
+                "was already incompatible at the old revision. Review the new difference separately; do not add "
+                "it to this range's repair list."
             )
         else:
             suggestion = _suggestion(
@@ -2066,7 +2077,10 @@ def _relation_findings(
                 change=_change_text(old_endpoint, new_endpoint, "replacement_return"),
                 evidence=evidence,
                 gates=gates,
-                suggestion="同步 override 的返回协议，使其满足上游新接口约定，并补充返回值回归测试。",
+                suggestion=(
+                    "Update the downstream override's return contract to satisfy the new upstream contract, and "
+                    "add a return-value regression test."
+                ),
                 contract_kind="replacement_return",
                 direction="upstream_contract_to_downstream_implementation",
                 details={
@@ -2449,7 +2463,10 @@ def _direct_call_findings(
                 change=_change_text(old_endpoint, new_endpoint, "return_usage"),
                 evidence=[dependency.as_dict()],
                 gates=gates,
-                suggestion="同步下游对上游返回值的解包、下标或协议使用，并补充该调用点回归测试。",
+                suggestion=(
+                    "Update how this downstream call unpacks, indexes, or otherwise consumes the upstream return "
+                    "value, and add a regression test for the call site."
+                ),
                 source="direct_call_detector",
                 contract_kind="return_usage",
                 direction="downstream_call_to_upstream",
@@ -3062,14 +3079,17 @@ def _upstream_pr_finding_lines(
     if review:
         if details.get("optional_contract_only"):
             optional_parameters = details.get("new_optional_parameters") or []
-            parameter_names = "、".join(f"`{name}`" for name in optional_parameters)
-            parameter_reference = "该参数" if len(optional_parameters) == 1 else "这些参数"
+            parameter_names = ", ".join(f"`{name}`" for name in optional_parameters)
+            parameter_reference = "it" if len(optional_parameters) == 1 else "them"
             reason = (
-                f"下游重写的方法未接收上游新增的可选参数 {parameter_names}，"
-                f"但目前没有证据表明运行时会把{parameter_reference}传给该下游实现。"
+                f"The downstream override does not accept the new optional parameter {parameter_names}, and the "
+                f"analyzer found no upstream call in this range that passes {parameter_reference} to that override."
             )
         else:
-            reason = "new exact delta masked by a preexisting incompatibility"
+            reason = (
+                "This range adds another contract difference, but the downstream code was already incompatible "
+                "at the old revision."
+            )
         reason_lines.append(f"- Review reason: {reason}")
     return [
         f"### {index}. {item['priority']} {item['relation']} / {item.get('contract_kind', '')}",
@@ -3098,10 +3118,11 @@ def _upstream_pr_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- vLLM range: `{meta['vllm_old_sha']}` -> `{meta['vllm_new_sha']}`",
         f"- vllm-ascend baseline: `{meta['vllm_ascend_sha']}`",
-        "- Scope: downstream imports, overrides, and direct upstream-call contracts",
+        "- Scope: downstream imports, overrides, and direct calls to vLLM",
         "- Monkey patches, inheritance-only findings, generator reviews, "
         "and historical incompatibilities are intentionally excluded.",
-        "- Exact new deltas masked by historical incompatibilities are retained as review input.",
+        "- If this range adds a new contract difference on top of an older incompatibility, "
+        "the report keeps it for manual review.",
         f"- Introduced breaks: {summary['introduced_breaks']}",
         f"- Root causes: {summary['root_causes']}",
         f"- Review findings: {summary['review_findings']}",
@@ -3111,12 +3132,12 @@ def _upstream_pr_markdown(payload: dict[str, Any]) -> str:
         "",
     ]
     if not findings:
-        lines.append("No new downstream interface break was introduced by this range.")
+        lines.extend(["No new downstream interface break was introduced by this range.", ""])
     for index, item in enumerate(findings, start=1):
         lines.extend(_upstream_pr_finding_lines(item, index, review=False))
     lines.extend(["## Review findings", ""])
     if not review_findings:
-        lines.append("No exact optional-contract or masked-delta review was found.")
+        lines.append("No additional interface change requires manual review.")
     for index, item in enumerate(review_findings, start=1):
         lines.extend(_upstream_pr_finding_lines(item, index, review=True))
     return "\n".join(lines)

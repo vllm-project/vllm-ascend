@@ -41,9 +41,9 @@ failure rather than a compatibility result.
 ### Dependency discovery
 
 The analyzer reads vllm-ascend first and discovers direct imports, verified overrides, and exact downstream
-calls to vLLM. Inheritance and C3 MRO are used only to prove override ownership. Monkey patches, inheritance-only
-findings, and broad generator reviews are intentionally outside this upstream PR check; their collector and report
-implementations are not included in this directory.
+calls to vLLM. Inheritance and C3 MRO are resolved lazily only to prove override ownership. Monkey patches,
+inheritance-only findings, and broad generator reviews are intentionally outside this upstream PR check; their
+collector and report implementations are not included in this directory.
 
 ### Old/new contract comparison
 
