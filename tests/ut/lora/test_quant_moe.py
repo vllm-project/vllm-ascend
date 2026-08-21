@@ -327,6 +327,10 @@ def _make_gmm_lora_context(num_experts: int = 2):
 
 def test_single_lora_gmm_checks_fixed_fast_path_shape() -> None:
     context = _make_gmm_lora_context()
+    # V1 sets LoRAMapping.is_prefill=True to select SGMV on non-CUDA
+    # platforms, so it is not a real scheduler-phase signal. GMM eligibility
+    # must remain valid when a caller supplies the actual decode value.
+    context.punica_wrapper.is_prefill = False
     group_list = torch.tensor([8, 8], dtype=torch.int64)
     hidden_states = torch.zeros(16, 4, dtype=torch.bfloat16)
 
@@ -360,9 +364,10 @@ def test_single_lora_gmm_checks_fixed_fast_path_shape() -> None:
     )
 
 
-def test_composite_lora_gmm_checks_mixed_prefill_and_minimum_rows() -> None:
+def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
     context = _make_gmm_lora_context()
     context.punica_wrapper.num_active_moe_loras = 2
+    context.punica_wrapper.is_prefill = False
     group_list = torch.tensor([24, 24], dtype=torch.int64)
     hidden_states = torch.zeros(48, 4, dtype=torch.bfloat16)
 

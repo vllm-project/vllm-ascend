@@ -176,7 +176,6 @@ def _can_use_single_lora_gmm(
         return False
     if (
         getattr(punica_wrapper, "num_active_moe_loras", 0) != 1
-        or not getattr(punica_wrapper, "is_prefill", False)
         or lora_context.fully_sharded
         or group_list_type != 1
         or lora_context.top_k != MOE_LORA_GMM_TOP_K
@@ -214,7 +213,6 @@ def _can_use_composite_lora_gmm(
         punica_wrapper is None
         or getattr(punica_wrapper, "no_lora", True)
         or getattr(punica_wrapper, "num_active_moe_loras", 0) < 2
-        or not getattr(punica_wrapper, "is_prefill", False)
         or lora_context.fully_sharded
         or group_list_type != 1
         or lora_context.top_k != MOE_LORA_GMM_TOP_K
@@ -248,17 +246,17 @@ def _build_single_lora_gmm_routing(
 ) -> _SingleLoraGMMRouting:
     """Select one adapter and align its active/base mask to dispatched rows."""
     token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-    token_lora_indices = token_lora_indices[: topk_ids.shape[0]]
-    pair_lora_slots = token_lora_indices.repeat_interleave(topk_ids.shape[1])
+    token_lora_slots = token_lora_indices[: topk_ids.shape[0]]
     max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
-    safe_lora_slots = pair_lora_slots.clamp(min=0, max=max_loras - 1)
-    pair_enabled = (pair_lora_slots >= 0) & lora_context.adapter_enabled[safe_lora_slots].bool()
+    safe_token_lora_slots = token_lora_slots.clamp(min=0, max=max_loras - 1)
+    token_enabled = (token_lora_slots >= 0) & lora_context.adapter_enabled[safe_token_lora_slots].bool()
+    pair_enabled = token_enabled.unsqueeze(-1).expand_as(topk_ids).reshape(-1)
 
     dispatched_rows = expanded_row_idx.abs().reshape(-1).to(torch.long)
     dispatched_enabled = torch.empty_like(pair_enabled)
     dispatched_enabled.index_copy_(0, dispatched_rows, pair_enabled)
     return _SingleLoraGMMRouting(
-        slot=safe_lora_slots.max().reshape(1),
+        slot=safe_token_lora_slots.max().reshape(1),
         enabled=dispatched_enabled,
     )
 
@@ -271,20 +269,20 @@ def _build_composite_lora_gmm_routing(
     num_experts: int,
 ) -> _CompositeLoraGMMRouting:
     """Group dispatched rows by ``(LoRA slot, expert)`` without host sync."""
-    flat_expert_ids = topk_ids.reshape(-1).to(torch.long)
     token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-    pair_lora_slots = token_lora_indices[: topk_ids.shape[0]].repeat_interleave(topk_ids.shape[1])
+    token_lora_slots = token_lora_indices[: topk_ids.shape[0]]
 
     max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
-    safe_lora_slots = pair_lora_slots.clamp(min=0, max=max_loras - 1)
+    safe_token_lora_slots = token_lora_slots.clamp(min=0, max=max_loras - 1)
     adapter_enabled = lora_context.adapter_enabled
-    pair_enabled = (pair_lora_slots >= 0) & adapter_enabled[safe_lora_slots].bool()
+    token_enabled = (token_lora_slots >= 0) & adapter_enabled[safe_token_lora_slots].bool()
+    pair_enabled = token_enabled.unsqueeze(-1).expand_as(topk_ids).reshape(-1)
 
     # Inactive/base rows still need a static GMM group. Route them through an
     # enabled slot with zeroed inputs so unloaded weight buffers are not read.
     fallback_slot = torch.argmax(adapter_enabled[:max_loras])
-    pair_group_slots = torch.where(pair_enabled, safe_lora_slots, fallback_slot)
-    pair_group_ids = pair_group_slots * num_experts + flat_expert_ids
+    token_group_slots = torch.where(token_enabled, safe_token_lora_slots, fallback_slot)
+    pair_group_ids = (token_group_slots.unsqueeze(-1) * num_experts + topk_ids.to(torch.long)).reshape(-1)
 
     dispatched_rows = expanded_row_idx.abs().reshape(-1).to(torch.long)
     dispatched_group_ids = torch.empty_like(pair_group_ids)
