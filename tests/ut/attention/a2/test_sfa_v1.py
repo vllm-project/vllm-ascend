@@ -355,6 +355,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
     def test_execute_kv_quant_sparse_flash_attention(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.enable_sparse_sfa_c8 = True
+        impl.enable_sparse_sfa_turboquant = False
         impl.scale = 0.125
         impl.sfa_qsfa_tile_size = 128
         impl.qk_rope_head_dim = 16
@@ -816,6 +817,7 @@ class TestAscendSFAImpl(TestBase):
         mock_ascend_config.enable_mlapo = False
         mock_ascend_config.enable_sparse_sfa_c8 = False
         mock_ascend_config.enable_sparse_li_c8 = False
+        mock_ascend_config.enable_sparse_sfa_turboquant = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.is_sparse_li_c8_layer.return_value = False
         mock_get_ascend_config.return_value = mock_ascend_config
@@ -993,6 +995,35 @@ class TestAscendSFAImpl(TestBase):
         result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, MagicMock())
         self.assertIs(result, fake_result)
         mock_npu_kv_rmsnorm_rope_cache.assert_not_called()
+
+    @patch("vllm_ascend.attention.sfa_v1.turboquant_kv_rmsnorm_rope")
+    @patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope")
+    def test_exec_kv_turboquant_uses_tq_packer(
+        self,
+        mock_custom_kv_rmsnorm_rope,
+        mock_turboquant_kv_rmsnorm_rope,
+    ):
+        """TQ4 turns C8 on, so exec_kv must pick the TQ packer, not the C8 one."""
+        self.impl.enable_sparse_sfa_turboquant = True
+        self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_dsa_cp = False
+        self.impl.kv_a_layernorm = MagicMock()
+        self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
+        self.impl.kv_a_layernorm.variance_epsilon = 1e-5
+
+        num_tokens = 2
+        head_dim = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        kv_no_split = torch.randn(num_tokens, self.impl.num_kv_heads * head_dim)
+        cos = torch.randn(num_tokens, self.impl.qk_rope_head_dim)
+        sin = torch.randn(num_tokens, self.impl.qk_rope_head_dim)
+
+        fake_result = (torch.randn(2, 4), torch.randn(2, 8), torch.randn(2, 1))
+        mock_turboquant_kv_rmsnorm_rope.return_value = fake_result
+
+        result = self.impl.exec_kv(kv_no_split, cos, sin, (torch.zeros(128, 386),), torch.arange(2), MagicMock())
+
+        self.assertIs(result, fake_result)
+        mock_custom_kv_rmsnorm_rope.assert_not_called()
 
     # ============ _resolve_preprocess_type: routing logic ============
 

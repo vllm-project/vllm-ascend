@@ -106,6 +106,7 @@
     - vllm_ascend/attention/indexer.py
     - vllm_ascend/attention/sfa_v1.py
     - vllm_ascend/attention/sfa_kv_offload.py
+    - vllm_ascend/attention/tq_latent_store.py
   tests:
     - tests/ut/attention/test_indexer.py
     - tests/ut/attention/test_sfa_kv_offload.py
@@ -698,6 +699,7 @@
     - setup.py
   tests:
     - tests/ut/test_ascend_config.py
+    - tests/ut/test_turboquant_config.py
     - tests/ut/test_ascend_forward_context.py
     - tests/ut/test_cpu_binding.py
     - tests/ut/test_envs.py

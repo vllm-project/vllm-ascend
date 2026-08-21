@@ -27,6 +27,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_sparse = False
         runner.enable_sparse_sfa_c8 = False
         runner.enable_sparse_li_c8 = False
+        runner.enable_sparse_sfa_turboquant = False
         runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False

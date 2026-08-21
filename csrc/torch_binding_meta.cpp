@@ -38,6 +38,9 @@ namespace meta {
 const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
+// TurboQuant compress slot: 256 packed nibble bytes + 2 bytes of fp16 norm, padded
+// to 64 B. Keep in sync with SLOT_PAD in turbo_quant_compress_latent.h.
+constexpr int64_t TQ_COMPRESS_SLOT_BYTES = 320;
 
 c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 {
@@ -1469,6 +1472,58 @@ void store_kv_block(
 
 }
 
+// TurboQuant SFA is TND-query only; the packed rope bytes are dropped from the
+// output, so the last dim shrinks by rope_head_dim. The softmax_lse shape mirrors
+// the kv_quant sibling so the DCP decode merge can consume it.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> turboquant_sparse_flash_attention_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &sparse_indices,
+    const c10::optional<at::Tensor> &key_dequant_scale,
+    const c10::optional<at::Tensor> &value_dequant_scale,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    double scale_value, int64_t key_quant_mode, int64_t value_quant_mode,
+    int64_t sparse_block_size, c10::string_view layout_query, c10::string_view layout_kv,
+    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens, int64_t attention_mode,
+    int64_t quant_scale_repo_mode, int64_t tile_size, int64_t rope_head_dim,
+    bool return_softmax_lse)
+{
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t DIM_3 = 3;
+
+    TORCH_CHECK(std::string(layout_query) == "TND",
+                "TurboQuant sparse flash attention only supports the TND query layout, but got ",
+                std::string(layout_query));
+    TORCH_CHECK(query.dim() == DIM_3, "The query dimension must be 3, but got ", query.dim());
+
+    c10::SymDimVector output_size = {
+        query.sym_size(DIM_0), query.sym_size(DIM_1), query.sym_size(DIM_2) - rope_head_dim};
+    at::Tensor output = at::empty_symint(output_size, query.options());
+
+    c10::SymDimVector softmax_size;
+    if (return_softmax_lse) {
+        const c10::SymInt kv_head_num =
+            std::string(layout_kv) == "PA_BSND" ? key.sym_size(DIM_2) : key.sym_size(DIM_1);
+        softmax_size = {kv_head_num, query.sym_size(DIM_0), query.sym_size(DIM_1) / kv_head_num};
+    } else {
+        softmax_size = {0};
+    }
+    at::Tensor softmax_max = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_sum = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
+}
+
+at::Tensor turbo_quant_compress_latent_meta(const at::Tensor &latent, const at::Tensor &centroids)
+{
+    constexpr int64_t DIM_0 = 0;
+    // symbolic-meta-ok: the kernel only implements kv_lora_rank=512, so the slot
+    // width is the fixed TQ_COMPRESS_SLOT_BYTES; the adapter rejects other widths.
+    c10::SymDimVector slot_size = {latent.sym_size(DIM_0), TQ_COMPRESS_SLOT_BYTES};
+    return at::empty_symint(slot_size, latent.options().dtype(at::kByte));
+}
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1527,6 +1582,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
+    // TurboQuant 4-bit MLA latent
+    ops.impl("turboquant_sparse_flash_attention", &vllm_ascend::meta::turboquant_sparse_flash_attention_meta);
+    ops.impl("turbo_quant_compress_latent", &vllm_ascend::meta::turbo_quant_compress_latent_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine

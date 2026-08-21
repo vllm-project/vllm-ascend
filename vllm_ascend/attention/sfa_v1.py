@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention import tq_latent_store
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
@@ -29,6 +30,8 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
+    get_tq_fused_slot_bytes,
+    get_tq_packed_bytes,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     trans_rope_weight,
@@ -68,6 +71,9 @@ if TYPE_CHECKING:
 
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
+
+# int64 max: TQ4 has no pre/next-token window, the top-k indices select the KV.
+TQ_UNBOUNDED_TOKENS = 9223372036854775807
 
 
 class PreprocessType(enum.Enum):
@@ -483,6 +489,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
+        _additional_config = self.vllm_config.additional_config or {}
+        # AscendConfig also gates the flag on the model being sparse.
+        self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
+        self.tq_key_quant_mode = int(_additional_config.get("tq_key_quant_mode", 3))
+        self.tq_value_quant_mode = int(_additional_config.get("tq_value_quant_mode", self.tq_key_quant_mode))
+        self.tq_tile_size = int(_additional_config.get("tq_tile_size", 128))
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
         self.is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
@@ -554,6 +566,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.qk_rope_head_dim,
                 self.sfa_qsfa_tile_size,
             )
+        if self.enable_sparse_sfa_turboquant:
+            # TQ4 replaces the 8-bit qsfa slot with the TurboQuant fused slot
+            # (int4 nope + bf16 rope + fp16 scale).
+            self.sfa_qsfa_packed_kv_head_dim = get_tq_fused_slot_bytes(self.kv_lora_rank, self.qk_rope_head_dim)
         self.preprocess_type = PreprocessType.NATIVE
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
@@ -700,6 +716,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         if pp_type is PreprocessType.PROLOG_V3:
             if self.is_kv_producer:
                 reasons.append("PROLOG_V3 is disabled on KV producer workers.")
+            if self.enable_sparse_sfa_turboquant:
+                # PROLOG_V3 writes the 8-bit qsfa slot; TQ4 owns its own packed layout.
+                reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
             if self._quant_type is None and self.enable_sparse_sfa_c8:
                 reasons.append("PROLOG_V3: C8 sparse requires quantized MLAPO.")
             if getattr(self.q_proj, "_chunk_size", 0):
@@ -883,6 +902,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
+        # TQ4 must be checked before C8: it packs the same three components into a
+        # narrower slot, and it turns enable_sparse_sfa_c8 on to reuse that layout.
+        if self.enable_sparse_sfa_turboquant:
+            assert self.kv_a_layernorm is not None
+            return turboquant_kv_rmsnorm_rope(
+                kv_no_split,
+                self.kv_a_layernorm.weight,
+                cos,
+                sin,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+            )
 
         # npu_kv_rmsnorm_rope_cache doesn't support C8 fp8 block quant;
         # all sparse-C8-SFA layers use custom_kv_rmsnorm_rope instead.
@@ -1292,6 +1324,51 @@ class AscendSFAImpl(MLAAttentionImpl):
         """Whether this layer can use the LI C8 cache-write operator."""
         return self.enable_sparse_li_c8 and get_ascend_config().c8_enable_reshape_optim
 
+    def _tq_rotate_query(self, ql_nope: torch.Tensor, q_pe: torch.Tensor) -> torch.Tensor:
+        """Rotate the nope half into Hadamard space and append the untouched rope half."""
+        rotated = tq_latent_store.had_fwd(ql_nope, head_dim=self.kv_lora_rank)
+        return torch.cat([rotated, q_pe], dim=-1).contiguous()
+
+    def _turboquant_sfa(
+        self,
+        query: torch.Tensor,
+        kv: torch.Tensor,
+        topk_indices: torch.Tensor,
+        block_table: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_kv: torch.Tensor,
+        sparse_mode: int,
+        return_softmax_lse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the fused TurboQuant SFA op over the packed 4-bit latent cache."""
+        # One cache serves as both K and V, and each slot carries its own dequant
+        # scale, so no separate scale tensors are passed.
+        return torch.ops._C_ascend.turboquant_sparse_flash_attention(
+            query,
+            kv,
+            kv,
+            topk_indices,
+            key_dequant_scale=None,
+            value_dequant_scale=None,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            scale_value=float(self.scale),
+            key_quant_mode=self.tq_key_quant_mode,
+            value_quant_mode=self.tq_value_quant_mode,
+            sparse_block_size=1,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            pre_tokens=TQ_UNBOUNDED_TOKENS,
+            next_tokens=TQ_UNBOUNDED_TOKENS,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=self.tq_tile_size,
+            rope_head_dim=self.qk_rope_head_dim,
+            return_softmax_lse=return_softmax_lse,
+        )
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -1303,6 +1380,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
+        if self.enable_sparse_sfa_turboquant:
+            # The turbo op reads the packed slot directly. DeviceOperator would
+            # dispatch on the bf16 base dtype and pick the 8-bit qsfa op instead.
+            attn_out, _, _ = self._turboquant_sfa(
+                self._tq_rotate_query(ql_nope, q_pe),
+                kv_cache[0],
+                topk_indices,
+                attn_metadata.block_table if block_table is None else block_table,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=3,
+            )
+            return tq_latent_store.had_inv(attn_out, head_dim=self.kv_lora_rank)
         return DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
@@ -1710,6 +1800,50 @@ class AscendSFAImpl(MLAAttentionImpl):
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output
+
+
+def turboquant_kv_rmsnorm_rope(
+    kv: torch.Tensor,
+    gamma: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    *,
+    epsilon: float = 1e-5,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """TurboQuant counterpart of custom_kv_rmsnorm_rope.
+
+    Returns the same (k_rope, k_nope, scale) byte views, so the caller packs and
+    stores a TQ4 slot exactly the way it packs and stores a C8 one.
+    """
+    rms_in, rope_in = kv.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
+    k_nope, _ = torch_npu.npu_rms_norm(rms_in.reshape(-1, kv_lora_rank), gamma, epsilon=epsilon)
+    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin).reshape(-1, qk_rope_head_dim)
+
+    # compress_kernel also returns the Hadamard buffer, alive until the op runs.
+    slot, _hadamard_keepalive = tq_latent_store.compress_kernel(k_nope, head_dim=kv_lora_rank)
+    slot = slot.view(torch.int8)
+    packed_bytes = get_tq_packed_bytes(kv_lora_rank)
+    nibbles = slot[:, :packed_bytes]
+    vec_norm = slot[:, packed_bytes : packed_bytes + 2]
+
+    # s_t = ||latent|| / ||dequantized unit vector||. The LUT maps a packed byte
+    # to the squared centroids of its two nibbles, so the reconstructed norm is a
+    # gather + sum with no bit twiddling, which keeps graph capture happy.
+    lut_sq = tq_latent_store.lutsq(nibbles.device, head_dim=kv_lora_rank)
+    inv_recon_norm = torch.rsqrt(lut_sq[nibbles.long()].sum(-1, keepdim=True) + 1e-16)
+    latent_norm = vec_norm.contiguous().view(torch.float16).float().view(-1, 1)
+    scale = latent_norm * inv_recon_norm
+
+    # Pre-divide the rope half by s_t so attention rescales the whole slot with one
+    # per-column multiply instead of a separate rope pass.
+    k_rope = (k_rope.float() / (scale + 1e-20)).to(torch.bfloat16).contiguous()
+    return (
+        k_rope.view(torch.int8),
+        nibbles,
+        scale.to(torch.float16).contiguous().view(torch.int8),
+    )
 
 
 def custom_kv_rmsnorm_rope(
