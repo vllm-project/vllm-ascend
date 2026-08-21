@@ -3834,6 +3834,10 @@ class NPUModelRunner(GPUModelRunner):
             time.time() - start,
         )
 
+        # [snapshot] Re-apply NZ format after copy_. Values match cold start
+        # but FRACTAL_NZ layout tags are lost; MoE NZ kernels otherwise drift.
+        self._recast_quant_nz_weights_after_restore(model=model, label=label)
+
         # [snapshot] Restore/re-derive decode-path state produced by
         # ``process_weights_after_loading``. MLA can rebuild absorbed weights
         # from persistent parameters; SFA rebinds absorbed/MLAPO buffers because
@@ -4236,6 +4240,86 @@ class NPUModelRunner(GPUModelRunner):
         logger.info(
             "[restore model] rebuilt global non-persistent state: %s",
             rebuilt if rebuilt else "none",
+        )
+
+    def _recast_quant_nz_weights_after_restore(self, model=None, label: str = "model") -> None:
+        """[snapshot] Rebuild Ascend NZ format tags after weight ``copy_``.
+
+        ``torch.save`` + CPU ``copy_`` restores numerical values but does not
+        preserve ``ACL_FORMAT_FRACTAL_NZ``. Quantized MoE / Linear paths that
+        feed ``grouped_matmul_swiglu_quant_weight_nz`` then silently misread
+        storage. Snapshot ckpt already holds the *runtime* (post-transpose)
+        layout from ``process_weights_after_loading`` — only format-cast.
+        """
+        if model is None:
+            model = self.get_model()
+        try:
+            import torch_npu
+            from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[restore model] [%s] NZ recast skipped (import): %s", label, exc
+            )
+            return
+
+        casted = 0
+        failed: list[str] = []
+
+        def _nd_then_nz(t: torch.Tensor) -> torch.Tensor:
+            # Normalize to ND first so a broken NZ tag + ND payload is repaired,
+            # then pack to NZ for the runtime kernels.
+            nd = torch_npu.npu_format_cast(t, 2).contiguous()
+            return torch_npu.npu_format_cast(nd, ACL_FORMAT_FRACTAL_NZ)
+
+        for name, module in model.named_modules():
+            for attr in ("w13_weight", "w2_weight"):
+                w = getattr(module, attr, None)
+                if w is None or not hasattr(w, "data"):
+                    continue
+                data = w.data
+                if not getattr(data, "is_npu", False):
+                    continue
+                try:
+                    w.data = _nd_then_nz(data)
+                    casted += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(f"{name}.{attr}:{type(exc).__name__}:{exc}")
+
+            for list_attr in ("w13_weight_list", "w2_weight_list"):
+                wl = getattr(module, list_attr, None)
+                if not isinstance(wl, list):
+                    continue
+                for i, w in enumerate(wl):
+                    if w is None or not getattr(w, "is_npu", False):
+                        continue
+                    try:
+                        wl[i] = _nd_then_nz(w)
+                        casted += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(f"{name}.{list_attr}[{i}]:{type(exc).__name__}:{exc}")
+
+            # Shared-expert / dense W8A8 Linear: maybe_trans_nz at load time.
+            weight = getattr(module, "weight", None)
+            if (
+                weight is not None
+                and hasattr(weight, "data")
+                and getattr(weight.data, "is_npu", False)
+                and weight.data.dtype == torch.int8
+                and hasattr(module, "weight_scale")
+            ):
+                try:
+                    weight.data = maybe_trans_nz(
+                        torch_npu.npu_format_cast(weight.data, 2).contiguous()
+                    )
+                    casted += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(f"{name}.weight:{type(exc).__name__}:{exc}")
+
+        logger.info(
+            "[restore model] [%s] recast quant NZ weights: casted=%d%s",
+            label,
+            casted,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
         )
 
     def _reload_non_persistent_derived_weights(self, model=None, label: str = "model") -> None:
