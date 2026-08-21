@@ -17,16 +17,22 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import time
 from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
@@ -38,7 +44,6 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
-    sort_batch_req_ids,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -50,6 +55,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.dfx.processor import DfxProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import enable_sp, set_potential_max_tokens
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -110,6 +116,61 @@ def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
         yield
     finally:
         vllm_model_runner.dispatch_cg_and_sync_dp = original_dispatch
+
+
+@contextmanager
+def _dfx_wrap_compute_logits_for_pre_sample(runner: "NPUModelRunner", input_batch: Any):
+    """Temporarily wrap ``model.compute_logits`` so DFX runs before grammar.
+
+    Parent ``GPUModelRunner.sample`` does ``compute_logits`` then grammar then
+    sampler with no mid-hook. Wrapping the bound method inserts
+    ``check_before_sample`` on the return path (still before grammar) without
+    copying the upstream ``sample()`` body. Restored in ``finally`` so
+    prompt-logprobs / draft paths are unaffected outside this call.
+    """
+    model = runner.model
+    # Prefer deleting the instance override so the class method is restored
+    # (assigning a bound method back leaves a stale instance attribute).
+    had_instance_attr = "compute_logits" in getattr(model, "__dict__", {})
+    orig = model.compute_logits
+
+    def wrapped(hidden_states, *args, **kwargs):
+        logits = orig(hidden_states, *args, **kwargs)
+        runner._dfx_check_before_sample(logits, input_batch)
+        return logits
+
+    model.compute_logits = wrapped
+    try:
+        yield
+    finally:
+        if had_instance_attr:
+            model.compute_logits = orig
+        elif "compute_logits" in getattr(model, "__dict__", {}):
+            del model.compute_logits
+        else:
+            model.compute_logits = orig
+
+
+class AscendAsyncOutput(AsyncModelRunnerOutput):
+    """Run token/logprob anomaly checks after AsyncOutput D2H completes.
+
+    Mirrors v1 ``AscendAsyncGPUModelRunnerOutput``: under async scheduling the
+    upstream ``sample_tokens`` returns ``AsyncOutput`` before CPU materialization;
+    detection must wait until ``get_output()``.
+    """
+
+    def __init__(self, inner: AsyncOutput, runner: "NPUModelRunner"):
+        self._inner = inner
+        self._runner = runner
+
+    def get_output(self) -> ModelRunnerOutput:
+        output = self._inner.get_output()
+        self._runner.dfx.check_after_sample(
+            sampled_token_ids=output.sampled_token_ids,
+            logprobs_lists=output.logprobs,
+            req_ids=output.req_ids,
+        )
+        return output
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -207,6 +268,33 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
+        # we need to update full graph params in run_fullgraph,
+        # so create a stream to update full graph params.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+
+        # we need to use return value of `get_cudagraph_and_dp_padding`
+        # to set forward_context in `run_fullgraph`.
+        # so we can inherit `execute_model` method.
+        self.cudagraph_and_dp_padding: tuple[int, torch.Tensor | None, int] | None = None
+
+        # we need to use input_batch to set forward_context in run_fullgraph.
+        # so we can inherit `execute_model` method.
+        self.input_batch: AscendInputBatch | None = None
+
+        # Dumper expects these attributes (aligned with v1 NPUModelRunner).
+        try:
+            self.tp_rank = get_tp_group().rank_in_group
+        except Exception:
+            self.tp_rank = 0
+        # Finalized in initialize_kv_cache (same stage as v1).
+        self.need_accepted_tokens = False
+
+        self.dfx = DfxProcessor(self)
+        # Stashed for V2 ``sample()`` DFX pre-sample hooks (ExecuteModelState
+        # does not carry scheduler_output / logits / positions).
+        self._dfx_scheduler_output: SchedulerOutput | None = None
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
@@ -216,6 +304,8 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+        # Hybrid + speculative decoding needs accepted-token tracking for MTP dumps.
+        self.need_accepted_tokens = bool(self.model_config.is_hybrid and self.speculative_config is not None)
 
     @torch.inference_mode()
     def execute_model(
@@ -226,14 +316,57 @@ class NPUModelRunner(GPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ):
-        with flashcomm_dispatch_wrapper(self.vllm_config):
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-            )
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
+            if getattr(scheduler_output, "disable_profiling_timing", False):
+                self.ascend_config.scheduler_config.profiling_chunk_config.need_timing = False
+            else:
+                torch.npu.synchronize()
+                self._execution_start_time = time.perf_counter()
+
+        # Split intentionally: sync_dfx_config on ALL ranks of this EngineCore
+        # (per-DP broadcast or file poll); sync_dump_pending_or only on last-PP
+        # TP. Idle DP must mirror via execute_dummy_batch → sync_for_step.
+        logger.debug(
+            "DFX sync: tp_group.world_size=%s tp_rank=%s pp_last=%s",
+            get_tp_group().world_size,
+            get_tp_group().rank_in_group,
+            get_pp_group().is_last_rank,
+        )
+        self.dfx.sync_for_step(
+            allow_arm=not dummy_run,
+            scheduler_output=scheduler_output,
+        )
+        # Visible to ``sample()`` DFX hooks after execute_model returns.
+        self._dfx_scheduler_output = None if dummy_run else scheduler_output
+        # start/finalize wrap the forward path; sample_tokens runs afterwards.
+        self.dfx.start_dump_data()
+        try:
+            with flashcomm_dispatch_wrapper(self.vllm_config):
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                )
+        except Exception:
+            # Do not record KV writes for a failed forward (avoids stale
+            # execute_model_state + new scheduler_output false positives).
+            self._dfx_scheduler_output = None
+            raise
+        else:
+            # Only after a successful forward: KV slots for this step exist.
+            if not dummy_run:
+                state = self.execute_model_state
+                self.dfx.note_kv_block_writes(
+                    scheduler_output,
+                    input_batch=getattr(state, "input_batch", None),
+                )
+        finally:
+            # dummy/capture must not consume the pending dump-forward window.
+            self.dfx.finalize_dump_data(dump=not dummy_run)
+            if dummy_run:
+                self._dfx_scheduler_output = None
 
         state = self.execute_model_state
         if (
@@ -260,6 +393,108 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         return output
+
+    def sample(self, hidden_states, input_batch, grammar_output):
+        """Delegate to upstream ``sample``; optionally wrap ``compute_logits`` for DFX.
+
+        When ``logits_finite`` / ``position_alignment`` are enabled **and**
+        anomaly detection is not gated off this step, temporarily wrap
+        ``model.compute_logits`` so ``check_before_sample`` runs on the
+        returned logits (still before grammar ``-inf``). Avoids copying the
+        upstream ``sample()`` body. No-op when detectors are off or the
+        detection gate skips (wrong rank / dump busy / no detector).
+        """
+        if self._dfx_need_pre_sample_hook():
+            with _dfx_wrap_compute_logits_for_pre_sample(self, input_batch):
+                return super().sample(hidden_states, input_batch, grammar_output)
+        return super().sample(hidden_states, input_batch, grammar_output)
+
+    def _dfx_need_pre_sample_hook(self) -> bool:
+        """True when pre-sample wrap is useful this call (detector on + gate open)."""
+        cfg = getattr(self.dfx, "dfx_config", None)
+        if cfg is None:
+            return False
+        if not (
+            bool(cfg.detector_get("logits_finite", "enabled", False))
+            or bool(cfg.detector_get("position_alignment", "enabled", False))
+        ):
+            return False
+        dumper = getattr(self.dfx, "dumper", None)
+        can = getattr(dumper, "can_run_anomaly_detection", None)
+        return not (callable(can) and not bool(can()))
+
+    def _dfx_check_before_sample(self, logits: torch.Tensor, input_batch: Any) -> None:
+        so = self._dfx_scheduler_output
+        positions = getattr(input_batch, "positions", None)
+        total = 0
+        if so is not None:
+            total = int(getattr(so, "total_num_scheduled_tokens", 0) or 0)
+        if total <= 0:
+            total = int(getattr(input_batch, "num_tokens", 0) or 0)
+        self.dfx.check_before_sample(
+            scheduler_output=so,
+            logits=logits,
+            positions=positions,
+            total_scheduled_tokens=total,
+            logits_indices=getattr(input_batch, "logits_indices", None),
+            input_batch=input_batch,
+        )
+
+    def sample_tokens(self, grammar_output=None):
+        finished_req_ids = None
+        state = self.execute_model_state
+        if state is not None:
+            finished_req_ids = getattr(state, "finished_req_ids", None)
+
+        # TokenLogprobDetector needs top-k logprobs even when the client
+        # did not set sampling_params.logprobs.
+        self.dfx.ensure_logprobs_for_detection()
+        try:
+            output = super().sample_tokens(grammar_output)
+        finally:
+            self._dfx_scheduler_output = None
+        self.dfx.mark_finished(finished_req_ids)
+
+        if isinstance(output, AsyncOutput):
+            # Async: defer token/logprob check until D2H in get_output().
+            # Stamp wave on the main thread before the output-copy thread runs.
+            mro = getattr(output, "model_runner_output", None)
+            req_ids = getattr(mro, "req_ids", None) if mro is not None else None
+            self.dfx.record_sample_waves(req_ids)
+            wrapped = AscendAsyncOutput(output, self)
+            self._attach_observability_fields(wrapped)
+            return wrapped
+
+        if isinstance(output, ModelRunnerOutput):
+            # Sync: super() already called get_output(); check immediately.
+            self.dfx.record_sample_waves(output.req_ids)
+            self.dfx.check_after_sample(
+                sampled_token_ids=output.sampled_token_ids,
+                logprobs_lists=output.logprobs,
+                req_ids=output.req_ids,
+            )
+            self._attach_observability_fields(output)
+        return output
+
+    def _attach_observability_fields(self, output: Any) -> None:
+        model_runner_output: ModelRunnerOutput | None = None
+        if isinstance(output, ModelRunnerOutput):
+            model_runner_output = output
+        elif isinstance(output, AscendAsyncOutput):
+            model_runner_output = output._inner.model_runner_output
+        elif hasattr(output, "model_runner_output"):
+            candidate = getattr(output, "model_runner_output", None)
+            if isinstance(candidate, ModelRunnerOutput):
+                model_runner_output = candidate
+
+        if model_runner_output is None:
+            return
+
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing and hasattr(
+            self, "_execution_start_time"
+        ):
+            torch.npu.synchronize()
+            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -294,7 +529,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
 
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
@@ -508,6 +743,11 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
             query_start_loc,
         )
+        if self.dfx.should_check_after_spec():
+            self.dfx.check_after_spec(
+                sampled_tokens=sampled_tokens,
+                accepted_token_nums=num_sampled,
+            )
 
         # Skip D2H copy without MTP: num_computed_tokens_cpu is synced
         # from num_computed_tokens_np in _update_seq_lens_cpu instead.

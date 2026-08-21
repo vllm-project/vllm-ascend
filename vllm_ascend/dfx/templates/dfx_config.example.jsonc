@@ -1,0 +1,224 @@
+{
+  // =============================================================================
+  // DFX runtime config EXAMPLE (JSONC). Not loaded by runtime.
+  // Runtime defaults: vllm_ascend/dfx/runtime_config.py (_DEFAULTS) → strict JSON.
+  // Hot-reload: additional_config.dfx_config_reload_interval > 0 at start.
+  // Startup without a file: additional_config.dfx_config = { same schema as this file }.
+  // Ops: docs/zh/design/dfx_ops.md | Design: docs/zh/design/dfx_design.md
+  // =============================================================================
+  //
+  // Detect vs dump (orthogonal):
+  //   - Detect-only: detector.<name>.enabled=true, dump.enabled=false → report on anomaly.
+  //   - Detect + auto dump: detectors on, dump.enabled=true, max_times>0.
+  //   - Manual-only: dump.enabled=true, detectors off → manual_trigger only.
+  //   - dump.enabled=true → report written regardless of arm success.
+  // =============================================================================
+
+  // sync_mode: "broadcast" (per-DP leader + in-DP broadcast / file poll) | "file"
+  "sync_mode": "broadcast",
+
+  // Visibility only; effective interval from additional_config at process start.
+  "reload_interval_seconds": 0,
+
+  "dump": {
+    // Dump arming sink (default false). Independent of detectors.
+    "enabled": false,
+    // Max auto dumps per worker lifecycle; 0 = no auto dump arm (detect / manual_trigger OK).
+    "max_times": 0,
+    // Cooldown seconds between auto dumps.
+    "cooldown_seconds": 300,
+    // Manual dump arm. false/0 = off; true = dump every wave with
+    // scheduled_tokens>0 until set false; positive int N = next N such waves
+    // then off. Idle / dummy / 0-token cleanup does not consume (even if
+    // residual req_ids remain). Needs dump.enabled=true + reload_interval > 0;
+    // skips quota / cooldown / input filters. Each arm writes one report.
+    "manual_trigger": false,
+    // Effective msprobe JSON path. Bootstrap seeds from additional_config
+    // dump_config_path / dump_config when null. Change path (or set
+    // reload_msprobe) to recreate the debugger on the next hot-reload wave.
+    "msprobe_config_path": null,
+    // One-shot: recreate debugger from current msprobe_config_path, then false.
+    "reload_msprobe": false
+  },
+
+  "ascend_log": {
+    "level": "INFO",
+    // e.g. ["dfx"] → force DEBUG on vllm_ascend.dfx
+    "debug": []
+  },
+
+  "log": {
+    // Log [SamplingMeta] when writing an anomaly report (TP0 + last PP only).
+    "print_sampling_meta": false,
+    // When any request finishes: log output_token_ids + decoded text (TP0 only).
+    // Default false (noisy / may contain sensitive text). Independent of
+    // report.save_sensitive_info. dump_finish files are separate (dump-armed
+    // reqs under report/; pending-not-yet-activate → activate_wave=null).
+    // Accumulation starts only while this is true (no backfill of earlier
+    // tokens). Hot-enable on in-flight reqs may print a partial output or
+    // empty (count=0) if the req finishes with no further appends — enable
+    // before sending traffic for a full finish log.
+    "print_output_on_finish": false
+  },
+
+  "report": {
+    // false (default): only *_token_count (and non-token metrics); no ids / no text.
+    // true: persist token ids (+ optional decode). JSON keeps int arrays on one line.
+    // Applies to anomaly_*.log and dump_finish_*.log.
+    "save_sensitive_info": false,
+    // When save_sensitive_info: decode *_token_ids → *_text / per-step *_texts
+    // (prompt, output, window_token_ids, window_sampled/accepted, current_*).
+    "decode_token_ids": true,
+    // Cap persisted prompt_token_ids length (0 = unlimited). Full count always kept.
+    // Truncation is from the head; see prompt_token_ids_truncated / _max in the report.
+    "max_prompt_token_ids": 1000,
+    // Cap output / window / current *_token_ids (0 = unlimited). Default 1000.
+    // Detection matches the full cumulative output; the report may only store a prefix.
+    // If a hit is beyond this cap, ids won't appear in the JSON — set 0 to dump all.
+    "max_output_token_ids": 1000,
+    // Include each request's current GPU block_ids in report detail.
+    "include_block_ids": true,
+    // D2H this wave's real paged-attention slot_mapping for the request
+    // (packed-batch slice). Default off: extra device sync; prefill can be long.
+    // Writes detail.slot_mapping + slot_mapping_span [start, end].
+    "include_slot_mapping": false,
+    // Per physical block: last KV-write wave (DFX real-step index). Off by default.
+    "block_last_write_wave": false,
+    // Per physical block: last writer request_id. Off by default.
+    // When either block_last_* is true, detail also has blocks[{block_id, ...}].
+    // block_kv alerts only: always add violated_blocks (writer/wave) even if both are false.
+    // Other anomaly types still respect these flags for report.blocks[].
+    "block_last_writer": false
+  },
+
+  "detector": {
+    // Shared detect behavior (not a detector section): keep detecting a request
+    // on every step, but once an anomaly is found for it, stop detecting that
+    // request — prevents the same anomaly writing endless reports. Default true.
+    // Set false to keep checking (and re-alerting) a request every step.
+    "stop_after_alert": true,
+    // Each detector is its own nested object. All ``enabled`` default false.
+    // Independent of dump.enabled.
+    "spec_acceptance": {
+      "enabled": false,
+      "window": 10,
+      "low_threshold": 0.3,
+      "len_low_threshold": 1.4,
+      "high_threshold": 0.96,
+      "len_high_threshold": 2.8
+    },
+
+    "token_logprob": {
+      "enabled": false,
+      "window": 64,
+      "stride": 32,
+      "topk": 20,
+      "ill_nan_window_thresh": 1,
+      "ill_rare_window_thresh": 1,
+      "ill_garbled_window_thresh": 1,
+      "ill_repet_window_thresh": 2
+    },
+
+    // Match cumulative output token ids against patterns (text and/or token id lists).
+    // On config refresh: text→encode and token_ids→decode; both views are logged.
+    // Each req alerts at most once. Report detail includes matched_text / matched_token_ids,
+    // match_mode ("prefix" / "subsequence"), and matched_pattern_index.
+    "output_substring": {
+      "enabled": false,
+      "patterns": [],
+      // e.g. ["INTERNAL_ERROR", [151643, 198]]
+      "add_special_tokens": false,
+      // false (default): match anywhere as a contiguous token-id subsequence.
+      // true: match only at the start (prefix) of the cumulative output.
+      "match_prefix": false
+    },
+
+    // Sliding-window re-read: score = count of new token in prior ``window``
+    // content tokens; alert when sum of last ``window`` scores exceeds threshold.
+    // No logprobs / msprobe. ignore_token_ids skips fillers from the content window.
+    "token_repeat": {
+      "enabled": false,
+      "window": 32,
+      "repeat_sum_threshold": 64,
+      "min_tokens": 32,
+      "consecutive_hits": 1,
+      "ignore_token_ids": []
+    },
+
+    // KV block write integrity (wave regression / same-wave writer clash).
+    // Uses KvBlockMetaTracker; independent of report.block_last_* flags.
+    // Only kv_cache_group=0 (first block table); hybrid multi-group not covered.
+    // msprobe: alert only — same dump arm path as other detectors when dump.enabled.
+    "block_kv": {
+      "enabled": false,
+      "check_wave_regression": true,
+      "check_same_wave_writer": true
+    },
+
+    // 1-D position_ids alignment for tokens scheduled this step.
+    // Text RoPE only (ndim==1). M-RoPE / multimodal positions are skipped.
+    // msprobe: detect-only native check; dump is optional via dump.enabled.
+    "position_alignment": {
+      "enabled": false
+    },
+
+    // Pre-sample logits NaN/Inf on sampling rows (GPU isfinite reduce).
+    // ill_type=4 (nan) for both NaN and ±Inf (msprobe ILL table has no Inf code);
+    // detail.finite_kind distinguishes nan / pos_inf / neg_inf.
+    // msprobe: no ILLDetector; optional msprobe tensor dump after alert arms dump.
+    "logits_finite": {
+      "enabled": false
+    }
+  },
+
+  "input_filter": {
+    // Detect-time InputFilterManager. [] = no filter.
+    // Semantics: ALL include must match AND NO exclude matches.
+    // Eval order within include/exclude: prompt_length → prefix → contains.
+    // Allow result cached per req_id until request finishes / filters change
+    // (unchanged filters on refresh do not clear the cache).
+    // manual_trigger bypasses. Missing prompt → deny when filters active (not cached).
+    // Prefix matching: use type "input_token_id_prefix" (no separate prefixes field).
+    "filters": [],
+
+    // One-shot: next real execute_model with requests logs length + prompt_token_ids
+    // (and a prefix filter hint), then auto-clears to false. Needs reload > 0.
+    // Logged by TP0 only (tp_rank==0); all ranks consume the same one-shot flag together.
+    "print_input_token_ids_once": false
+
+    // ---- copy into "filters" to enable ----
+    // "filters": [
+    //   {
+    //     "type": "input_token_id_prefix",
+    //     "mode": "include",
+    //     "prefixes": [[151644, 872], [151644, 77091]]
+    //   },
+    //   {
+    //     "type": "prompt_length",
+    //     "mode": "include",
+    //     "op": "gte",
+    //     "value": 64
+    //   },
+    //   {
+    //     "type": "prompt_length",
+    //     "mode": "include",
+    //     "op": "between",
+    //     "min": 16,
+    //     "max": 4096
+    //   },
+    //   {
+    //     "type": "prompt_contains_token_ids",
+    //     "mode": "exclude",
+    //     "token_ids": [0, 1],
+    //     "match": "any"
+    //   },
+    //   {
+    //     "type": "prompt_contains_token_ids",
+    //     "mode": "exclude",
+    //     "token_ids": [100, 200, 300],
+    //     "match": "subsequence"
+    //   }
+    // ]
+    // prompt_length op: gt|gte|lt|lte|eq|between
+  }
+}
