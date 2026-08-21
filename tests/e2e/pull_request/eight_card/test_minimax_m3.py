@@ -110,7 +110,6 @@ def test_minimax_m3_gsm8k_one_case() -> None:
         },
         additional_config={
             "enable_cpu_binding": True,
-            "enable_reduce_sample": True,
             "ascend_compilation_config": {
                 "enable_static_kernel": True,
                 "fuse_norm_quant": False,
