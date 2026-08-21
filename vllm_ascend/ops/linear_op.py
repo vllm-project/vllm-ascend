@@ -71,6 +71,11 @@ from vllm_ascend.utils import (
 )
 
 
+def _pad_sequence_tensor(tensor: torch.Tensor, pad_size: int) -> torch.Tensor:
+    padding = (0, 0) * (tensor.dim() - 1) + (0, pad_size)
+    return F.pad(tensor, padding)
+
+
 class CustomLinearOp:
     def __init__(self, layer):
         self.layer = layer
@@ -316,26 +321,42 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         super().__init__(layer)
         self.unique_prefix = None
 
-    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+    def apply_impl(
+        self, input_: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
 
         Implemented multiple optimization projects for dense models, such as FlashComm and
         communication-computation fusion.
         """
-        input_parallel = self.get_input_parallel(input_)
+        if isinstance(input_, tuple):
+            if not self.input_is_parallel:
+                raise ValueError("Pre-quantized row-parallel input must already be partitioned.")
+            input_parallel = input_
+        else:
+            input_parallel = self.get_input_parallel(input_)
 
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
 
         if self.tp_size == 1 or not self.reduce_results:
             output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        elif isinstance(input_parallel, tuple):
+            # Custom-op schemas cannot express a Tensor-or-tuple union, so pass
+            # the pre-quantized activation and its scale as separate tensors.
+            quantized_input, input_scale = input_parallel
+            output = torch.ops.vllm.matmul_and_reduce_with_scale(quantized_input, input_scale, self.unique_prefix)
         else:
             output = torch.ops.vllm.matmul_and_reduce(input_parallel, self.unique_prefix)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
-    def matmul_and_reduce(self, input_parallel: torch.Tensor, bias_: Parameter | None) -> torch.Tensor:
+    def matmul_and_reduce(
+        self,
+        input_parallel: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        bias_: Parameter | None,
+    ) -> torch.Tensor:
         assert self.quant_method is not None
         try:
             flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
@@ -357,7 +378,10 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         pad_size = _EXTRA_CTX.pad_size
         dsa_cp_attn_out = enable_dsa_cp() and ("o_proj" in self.layer.prefix or "wo_b" in self.layer.prefix)
         if pad_size > 0 and not dsa_cp_attn_out:
-            x = F.pad(x, (0, 0, 0, pad_size))
+            if isinstance(x, tuple):
+                x = tuple(_pad_sequence_tensor(tensor, pad_size) for tensor in x)
+            else:
+                x = _pad_sequence_tensor(x, pad_size)
 
         world_size = self.layer.tp_size
         hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
@@ -385,6 +409,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             isinstance(self.layer.quant_method, AscendLinearMethod)
             and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)
         ):
+            assert isinstance(x, torch.Tensor)
             if x.dtype != torch.int8:
                 x_quant = torch.ops.vllm.quantize(
                     x,

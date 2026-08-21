@@ -131,7 +131,7 @@ def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tens
         return tensor_model_parallel_all_reduce(final_hidden_states)
 
 
-def _matmul_and_reduce_impl(input_parallel: torch.Tensor, layer_name: str) -> torch.Tensor:
+def _run_matmul_and_reduce(input_parallel, layer_name: str) -> torch.Tensor:
     forward_context = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.custom_op is not None
@@ -139,6 +139,10 @@ def _matmul_and_reduce_impl(input_parallel: torch.Tensor, layer_name: str) -> to
     output = self.custom_op.matmul_and_reduce(input_parallel, bias_)
 
     return output
+
+
+def _matmul_and_reduce_impl(input_parallel: torch.Tensor, layer_name: str) -> torch.Tensor:
+    return _run_matmul_and_reduce(input_parallel, layer_name)
 
 
 def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor, layer_name: str) -> torch.Tensor:
@@ -152,6 +156,29 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor, layer_name: str) 
     )
 
     return output
+
+
+def _matmul_and_reduce_with_scale_impl(
+    quantized_input: torch.Tensor, input_scale: torch.Tensor, layer_name: str
+) -> torch.Tensor:
+    # Reconstruct the pre-quantized input tuple only after crossing the
+    # Tensor-only custom-op schema boundary.
+    return _run_matmul_and_reduce((quantized_input, input_scale), layer_name)
+
+
+def _matmul_and_reduce_with_scale_impl_fake(
+    quantized_input: torch.Tensor, input_scale: torch.Tensor, layer_name: str
+) -> torch.Tensor:
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    num_tokens = quantized_input.size(0)
+    if _EXTRA_CTX.flash_comm_v1_enabled:
+        num_tokens = num_tokens // self.tp_size
+    return torch.empty(
+        size=(num_tokens, self.output_size_per_partition),
+        device=quantized_input.device,
+        dtype=self.params_dtype,
+    )
 
 
 # TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
@@ -228,6 +255,14 @@ direct_register_custom_op(
     op_name="matmul_and_reduce",
     op_func=_matmul_and_reduce_impl,
     fake_impl=_matmul_and_reduce_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="matmul_and_reduce_with_scale",
+    op_func=_matmul_and_reduce_with_scale_impl,
+    fake_impl=_matmul_and_reduce_with_scale_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
