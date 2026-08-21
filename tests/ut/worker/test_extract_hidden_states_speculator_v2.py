@@ -2,7 +2,8 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for Ascend ExtractHiddenStatesSpeculator (Model Runner V2).
 
-Mirrors upstream vLLM PR #49811 coverage for init dispatch and propose().
+Covers Ascend init_speculator dispatch and upstream propose() behavior
+(vLLM PR #49811).
 """
 
 from __future__ import annotations
@@ -10,10 +11,11 @@ from __future__ import annotations
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
+
 import pytest
 import torch
+import vllm.v1.worker.gpu.spec_decode.extract_hidden_states as upstream_spec_module
 
-from vllm_ascend.worker.v2.spec_decode import extract_hidden_states as spec_module
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.extract_hidden_states.speculator import (
     AscendExtractHiddenStatesSpeculator,
@@ -60,7 +62,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
         contexts.append((args, kwargs))
         return nullcontext()
 
-    monkeypatch.setattr(spec_module.speculator, "set_forward_context", fake_set_forward_context)
+    monkeypatch.setattr(upstream_spec_module, "set_forward_context", fake_set_forward_context)
 
     layer_name = "cache_only_layers.2"
     speculator = object.__new__(AscendExtractHiddenStatesSpeculator)
@@ -140,7 +142,6 @@ def test_propose_requires_aux_hidden_states():
 def test_npu_model_runner_enables_aux_hidden_for_extract_hidden_states():
     """Document the MRV2 contract: extract_hidden_states needs aux outputs."""
     speculative_config = SimpleNamespace(method="extract_hidden_states")
-    # Mirrors NPUModelRunner.__init__ after parent construction.
     use_aux_hidden_state_outputs = False
     if speculative_config.method == "extract_hidden_states":
         use_aux_hidden_state_outputs = True

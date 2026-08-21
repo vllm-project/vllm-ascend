@@ -41,6 +41,8 @@ to get specific plans.
 - [x] `extract_hidden_states` (MRV2)
 
     Why: Upstream vLLM PR #49811 added Model Runner V2 support for
-    `extract_hidden_states`. Ascend wires `AscendExtractHiddenStatesSpeculator`
-    through `init_speculator`, forces `use_aux_hidden_state_outputs`, and keeps
-    HiddenStateCacheSpec on a single-tensor allocate/reshape path.
+    `extract_hidden_states`. Ascend thin-wraps upstream
+    `ExtractHiddenStatesSpeculator`, dispatches it via `init_speculator`,
+    forces `use_aux_hidden_state_outputs` when the pinned vLLM omit the
+    method from the GPU allow-list, and keeps HiddenStateCacheSpec on a
+    single-tensor allocate/reshape path.
