@@ -87,12 +87,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
-    # Fault-tolerance timeout (in milliseconds) after which a hung NPU operator
-    # (e.g. a communication op) is aborted with a timeout exception, so fault
-    # tolerance can detect it and trigger recovery. 0 (default) disables the
-    # timeout. Applied via torch_npu.npu.set_op_timeout_ms when fault tolerance
-    # is enabled.
-    "FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS": lambda: int(os.getenv("FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS", "0")),
 }
 
 # end-env-vars-definition
