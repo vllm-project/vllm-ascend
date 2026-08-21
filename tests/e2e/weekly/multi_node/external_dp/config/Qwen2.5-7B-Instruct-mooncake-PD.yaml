@@ -1,0 +1,176 @@
+test_name: "Qwen2.5-7B-Instruct Mooncake KV pool PD"
+model: "Qwen/Qwen2.5-7B-Instruct"
+num_nodes: 2
+npu_per_node: 2
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+kv_pool:
+  type: mooncake
+  master_port: 50088
+  metrics_port: 50089
+  config:
+    metadata_server: "P2PHANDSHAKE"
+    protocol: "ascend"
+    device_name: ""
+    global_segment_size: "1GB"
+    preferred_segment: false
+    prefer_alloc_in_same_node: true
+
+config:
+  - node_index: 0
+    port_start: 8100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 8200
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH"
+  PYTHONHASHSEED: "0"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  ACL_OP_INIT_MODE: "1"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  HCCL_RDMA_TIMEOUT: "17"
+  ASCEND_CONNECT_TIMEOUT: "10000"
+  ASCEND_TRANSFER_TIMEOUT: "10000"
+  SERVER_PORT: "${PORT}"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --trust-remote-code
+      - --enforce-eager
+      - --no-enable-prefix-caching
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --max-model-len
+      - "32768"
+      - --block-size
+      - "128"
+      - --max-num-batched-tokens
+      - "16384"
+      - --kv-transfer-config
+      - >-
+        {
+          "kv_connector": "MultiConnector",
+          "kv_role": "kv_producer",
+          "kv_load_failure_policy": "fail",
+          "kv_connector_extra_config": {
+            "connectors": [
+              {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "20001",
+                "kv_connector_extra_config": {
+                  "prefill": {"dp_size": 2, "tp_size": 1},
+                  "decode": {"dp_size": 2, "tp_size": 1}
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                  "lookup_rpc_port": "0",
+                  "backend": "mooncake"
+                }
+              }
+            ]
+          }
+        }
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --trust-remote-code
+      - --enforce-eager
+      - --no-enable-prefix-caching
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --max-model-len
+      - "32768"
+      - --block-size
+      - "128"
+      - --max-num-batched-tokens
+      - "16384"
+      - --kv-transfer-config
+      - >-
+        {
+          "kv_connector": "MultiConnector",
+          "kv_role": "kv_consumer",
+          "kv_load_failure_policy": "fail",
+          "kv_connector_extra_config": {
+            "connectors": [
+              {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "20002",
+                "kv_connector_extra_config": {
+                  "prefill": {"dp_size": 2, "tp_size": 1},
+                  "decode": {"dp_size": 2, "tp_size": 1}
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {
+                  "lookup_rpc_port": "0",
+                  "backend": "mooncake"
+                }
+              }
+            ]
+          }
+        }
+
+benchmarks:
+  smoke:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 48
+    batch_size: 4
+    baseline: 0
+    threshold: 100
