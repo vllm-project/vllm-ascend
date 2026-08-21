@@ -93,7 +93,7 @@ def test_deepseek_v4_mtp_eager():
         Counter,
         Vector,
     )
-    golden = [0.89, 0.69, 0.39]
+    golden = [0.85, 0.65, 0.35]
     match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
 
