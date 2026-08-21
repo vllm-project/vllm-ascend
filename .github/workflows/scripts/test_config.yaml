@@ -331,6 +331,7 @@
     - vllm_ascend/ops/rotary_embedding.py
     - vllm_ascend/ops/vocab_parallel_embedding.py
     - vllm_ascend/ops/register_custom_ops.py
+    - vllm_ascend/ops/kimi_kda.py
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py

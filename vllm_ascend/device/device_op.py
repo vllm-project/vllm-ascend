@@ -303,7 +303,15 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+    def mla_preprocess_only_decode(
+        atten_obj,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        use_mla_rope: bool = True,
+    ):
+        # Keep the shared adaptor signature. A2 only reaches this prolog when
+        # RoPE is enabled; no-RoPE MLA uses the generic preprocessing path.
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
 
@@ -1397,20 +1405,50 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+    def mla_preprocess_only_decode(
+        atten_obj,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        use_mla_rope: bool = True,
+    ):
         bsz = attn_metadata.num_decode_tokens
-        hidden_states = hidden_states[:bsz].unsqueeze(1)
-        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
-        dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+        hidden_states = hidden_states[:bsz]
+        weight_quant_mode = atten_obj.mlapo_weight_quant_mode
+        if weight_quant_mode == 0:
+            token_x = hidden_states
+            dynamic_scale = None
+        else:
+            token_x = hidden_states.unsqueeze(1)
+            token_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+                token_x,
+                dst_type=torch.float8_e4m3fn,
+            )
+            dynamic_scale = dynamic_scale.reshape(
+                token_x.shape[0] * token_x.shape[1],
+                -1,
+            )
+
+        if use_mla_rope:
+            cos_shape = attn_metadata.decode.cos.shape
+            rope_shape = (cos_shape[0], 1, cos_shape[-1]) if token_x.dim() == 3 else (cos_shape[0], cos_shape[-1])
+            cos = attn_metadata.decode.cos.view(rope_shape)
+            sin = attn_metadata.decode.sin.view(rope_shape)
+        else:
+            cos = token_x.new_empty((0,), dtype=torch.bfloat16)
+            sin = token_x.new_empty((0,), dtype=torch.bfloat16)
+
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+        cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
+        if token_x.dim() == 3:
+            cache_index = cache_index.view(bsz, -1)
+        else:
+            cache_index = cache_index.view(-1)
         decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
-            token_x=hidden_states,
+            token_x=token_x,
             weight_dq=atten_obj.weight_dq,
             weight_uq_qr=atten_obj.weight_uq_qr,
-            weight_uk=atten_obj.W_UK_T,
+            weight_uk=atten_obj.mlapo_W_UK_T,
             weight_dkv_kr=atten_obj.weight_dkv_kr,
             rmsnorm_gamma_cq=atten_obj.q_a_layernorm.weight.data,
             rmsnorm_gamma_ckv=atten_obj.kv_a_layernorm.weight.data,
@@ -1418,19 +1456,30 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             rope_cos=cos,
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
-            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
+            cache_index=cache_index,
+            dequant_scale_x=(None if dynamic_scale is None else dynamic_scale.view(torch.float8_e8m0fnu)),
+            dequant_scale_w_dq=(
+                None if weight_quant_mode == 0 else atten_obj.weight_dq_scale.view(torch.float8_e8m0fnu)
+            ),
+            dequant_scale_w_uq_qr=(
+                None if weight_quant_mode == 0 else atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu)
+            ),
+            dequant_scale_w_dkv_kr=(
+                None if weight_quant_mode == 0 else atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu)
+            ),
             cache_mode="PA_BSND",
             query_quant_mode=1 if atten_obj.fa_quant_layer else 0,
-            weight_quant_mode=3,
+            weight_quant_mode=weight_quant_mode,
             kv_cache_quant_mode=1 if atten_obj.fa_quant_layer else 0,
-            quant_scale_ckv=atten_obj.fak_descale_reciprocal if atten_obj.fa_quant_layer else None,
+            quant_scale_ckv=(atten_obj.fak_descale_reciprocal if atten_obj.fa_quant_layer else None),
         )
-        decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
-        decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
+        prolog_num_heads = atten_obj.mlapo_num_heads
+        decode_q_nope = decode_q_nope.view(
+            bsz,
+            prolog_num_heads,
+            atten_obj.kv_lora_rank,
+        )
+        decode_q_pe = decode_q_pe.view(bsz, prolog_num_heads, -1)
 
         decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
         from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult

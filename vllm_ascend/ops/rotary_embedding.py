@@ -98,8 +98,17 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     global _cos_mla
     global _sin_mla
     num_tokens = positions.size(0)
-    _cos_mla[:num_tokens, ...] = cos
-    _sin_mla[:num_tokens, ...] = sin
+    _cos_mla[:num_tokens, ...].copy_(cos)
+    _sin_mla[:num_tokens, ...].copy_(sin)
+    return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
+
+
+def get_identity_cos_and_sin_mla(positions, use_cache=False):
+    """Return the existing stable-shape identity rotation for no-RoPE MLA."""
+    del use_cache
+    global _cos_mla
+    global _sin_mla
+    num_tokens = positions.size(0)
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
 
 
