@@ -34,6 +34,28 @@ def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
 
 
+def _stage_mamba_copy_metadata(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
+    """Stage pointer metadata while input-preparation buffers are protected."""
+    n = copy_bufs.offset
+    if n == 0:
+        return
+    copy_bufs.src_ptrs.copy_to_gpu(n)
+    copy_bufs.dst_ptrs.copy_to_gpu(n)
+    copy_bufs.sizes.copy_to_gpu(n)
+
+
+def _do_mamba_copy_block_npu(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
+    """Copy state after KV load using metadata staged during preprocessing."""
+    n = copy_bufs.offset
+    if n == 0:
+        return
+    _batch_memcpy_triton(
+        copy_bufs.src_ptrs.gpu[:n],
+        copy_bufs.dst_ptrs.gpu[:n],
+        copy_bufs.sizes.gpu[:n],
+    )
+
+
 def _tensor_view_from_data_ptr(state: torch.Tensor, start_addr: int, num_elements: int) -> torch.Tensor:
     byte_offset = start_addr - state.data_ptr()
     element_size = state.element_size()
@@ -195,8 +217,7 @@ def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
 if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
-    # Keep the existing Ascend postprocess precision fix. The shared copy
-    # helper and align pre-copy continue to use the upstream implementation.
+    mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_npu
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
 else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
@@ -253,13 +274,22 @@ def preprocess_mamba(
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        if num_scheduled_tokens == 0:
+            # Async KV connectors can surface a request in a load-only step
+            # before any model tokens are scheduled.  Persisting the derived
+            # ``-1`` state index here makes the next real forward skip the
+            # copy from the remotely loaded h(N-1) state into its running
+            # block.  Re-resolve the index from the updated computed-token
+            # count when the request is actually scheduled instead.
+            mamba_state_idx.pop(req_id, None)
+            continue
         prev_state_idx = mamba_state_idx.get(req_id)
         if prev_state_idx is None:
             # new / resumed request, no previous state
             # if num_computed_tokens is 0, prev_state_idx will be -1
             prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
         num_blocks: int = (
             cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size) + num_speculative_blocks
         )
@@ -289,8 +319,12 @@ def preprocess_mamba(
                 forward_context,
             )
             input_batch.num_accepted_tokens_cpu[i] = 1
-    # do not copy here, since kv_transfer still not load
-    # do_mamba_copy_block(copy_bufs)
+    if _can_launch_triton_batch_memcpy():
+        # Only stage the pointer table here. This runs inside the existing
+        # input-preparation event scope, so its pinned CPU buffers cannot be
+        # reused until the asynchronous H2D copies finish. The state copy must
+        # remain after KV transfer and is executed by do_mamba_copy_block().
+        _stage_mamba_copy_metadata(copy_bufs)
 
 
 mamba_utils.preprocess_mamba = preprocess_mamba

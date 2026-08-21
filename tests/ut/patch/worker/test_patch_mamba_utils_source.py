@@ -26,9 +26,10 @@ def test_postprocess_keeps_only_existing_ascend_precision_kernel() -> None:
     assert "tl.store(num_accepted_tokens_ptr + req_idx, 1)" in postprocess_source
 
 
-def test_patch_only_installs_existing_ascend_postprocess_kernel() -> None:
+def test_patch_installs_ascend_copy_and_postprocess_kernels() -> None:
     patch_source = PATCH_MAMBA_UTILS.read_text()
 
+    assert "mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_npu" in patch_source
     assert "mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel" in patch_source
     assert "MambaBase.bind_kv_cache" not in patch_source
     assert "mamba_utils._copy_mamba_state_block" not in patch_source
