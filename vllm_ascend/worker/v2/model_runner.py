@@ -112,6 +112,30 @@ def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
         vllm_model_runner.dispatch_cg_and_sync_dp = original_dispatch
 
 
+def _is_eagle3_pp(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    return (
+        speculative_config is not None
+        and speculative_config.method == "eagle3"
+        and vllm_config.model_config.architecture == "Qwen3ForCausalLM"
+        and vllm_config.parallel_config.pipeline_parallel_size > 1
+    )
+
+
+def _is_dsv4_mtp_pp(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    return (
+        speculative_config is not None
+        and speculative_config.method == "mtp"
+        and vllm_config.model_config.architecture == "DeepseekV4ForCausalLM"
+        and vllm_config.parallel_config.pipeline_parallel_size > 1
+    )
+
+
+def _is_spec_decode_pp(vllm_config: VllmConfig) -> bool:
+    return _is_eagle3_pp(vllm_config) or _is_dsv4_mtp_pp(vllm_config)
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -131,8 +155,29 @@ class NPUModelRunner(GPUModelRunner):
         if parallel_config.decode_context_parallel_size > 1:
             raise NotImplementedError("Decode Context parallelism is not supported by Ascend NPU model runner v2.")
 
-        with torch_cuda_wrapper():
-            super().__init__(vllm_config, device)
+        is_spec_decode_pp = _is_spec_decode_pp(vllm_config)
+        is_eagle3_pp = _is_eagle3_pp(vllm_config)
+        speculative_config = vllm_config.speculative_config
+        if is_eagle3_pp:
+            assert speculative_config is not None
+            object.__setattr__(speculative_config, "method", "eagle")
+        try:
+            with torch_cuda_wrapper():
+                super().__init__(vllm_config, device)
+        finally:
+            if is_eagle3_pp:
+                object.__setattr__(speculative_config, "method", "eagle3")
+
+        if is_spec_decode_pp:
+            from vllm_ascend.patch.worker.patch_v2.patch_spec_decode_pp import (
+                install_spec_decode_pp_token_broadcast,
+            )
+
+            assert self.pp_handler is not None
+            install_spec_decode_pp_token_broadcast(self.pp_handler)
+
+        if is_eagle3_pp:
+            self.use_aux_hidden_state_outputs = True
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -156,11 +201,11 @@ class NPUModelRunner(GPUModelRunner):
         del self.input_buffers
         del self.speculator
 
-        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
-        # init_speculator will return AscendEagleSpeculator when eagle is used.
-        # so here we just call init_speculator to reinitialize speculator.
+        # Reinitialize the Ascend speculator only where proposals are generated.
         self.speculator: AscendEagleSpeculator | None = None
-        if self.speculative_config is not None:
+        if self.speculative_config is not None and (
+            not is_spec_decode_pp or self.is_last_pp_rank
+        ):
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
@@ -206,6 +251,65 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        is_eagle3_pp = _is_eagle3_pp(self.vllm_config)
+        if is_eagle3_pp:
+            from vllm_ascend.patch.worker.patch_v2.patch_spec_decode_pp import (
+                install_qwen3_eagle3_pp_aux,
+                prepare_qwen3_eagle3_pp_forward,
+            )
+
+            prepare_qwen3_eagle3_pp_forward()
+
+        super().load_model(load_dummy_weights, *args, **kwargs)
+
+        if is_eagle3_pp:
+            inner_model = install_qwen3_eagle3_pp_aux(self.model)
+            self.model.make_empty_intermediate_tensors = inner_model.make_empty_intermediate_tensors
+            if not self.is_first_pp_rank:
+                self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                    batch_size=self.max_num_tokens,
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                )
+
+    def sample_tokens(self, grammar_output):
+        input_batch = None
+        if _is_spec_decode_pp(self.vllm_config) and self.is_last_pp_rank and self.execute_model_state is not None:
+            input_batch = self.execute_model_state.input_batch
+
+        output = super().sample_tokens(grammar_output)
+        if input_batch is not None:
+            assert self.pp_handler is not None
+            # The base PP broadcast is deferred until propose() has populated
+            # the next-step draft tokens for this same in-flight slot.
+            draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
+            self.pp_handler.broadcast_draft_tokens(draft_tokens)
+        return output
+
+    def update_pp_decode_requests(self):
+        if not _is_spec_decode_pp(self.vllm_config):
+            return super().update_pp_decode_requests()
+
+        if self.pp_handler is None:
+            return
+        outputs = self.pp_handler.get_prev_sampled_outputs()
+        if outputs is None:
+            return
+
+        draft_tokens = outputs.pop("draft_tokens")
+        draft_update_indices = outputs.pop("draft_update_indices")
+        idx_mapping = outputs["idx_mapping"]
+        self.postprocess_sampled(**outputs)
+        # AsyncScheduler carries placeholders; every PP rank needs the actual
+        # draft tokens in its local RequestState before preparing the next step.
+        if draft_update_indices is None:
+            self.req_states.draft_tokens.index_copy_(0, idx_mapping, draft_tokens)
+        else:
+            draft_rows, draft_req_indices = draft_update_indices.unbind(dim=0)
+            valid_draft_tokens = draft_tokens.index_select(0, draft_rows)
+            self.req_states.draft_tokens.index_copy_(0, draft_req_indices, valid_draft_tokens)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -509,9 +613,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        # Skip D2H copy without MTP: num_computed_tokens_cpu is synced
-        # from num_computed_tokens_np in _update_seq_lens_cpu instead.
-        if self.speculator is not None:
+        if self.speculator is not None or _is_spec_decode_pp(self.vllm_config):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
@@ -534,20 +636,40 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-
-        # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
-        # Without MTP, num_computed_tokens_np is already correct from update_requests.
-        if self.speculator is not None:
-            self.num_computed_tokens_event.synchronize()
+        if not _is_spec_decode_pp(self.vllm_config):
+            use_device_counts = self.speculator is not None
+            if use_device_counts:
+                self.num_computed_tokens_event.synchronize()
+            source = (
+                self.num_computed_tokens_cpu
+                if use_device_counts
+                else self.req_states.num_computed_tokens_np
+            )
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+                self.req_states.num_computed_tokens_cpu[req_index] = source[req_index]
         else:
-            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.req_states.num_computed_tokens_np[req_index]
+            cached_req_indices = [
+                self.req_states.req_id_to_index[req_id]
+                for req_id in scheduler_output.scheduled_cached_reqs.req_ids
+            ]
+            is_prefilling = (
+                self.req_states.num_computed_tokens_np[cached_req_indices]
+                < self.req_states.prefill_len.np[cached_req_indices]
+            )
+            if not is_prefilling.all():
+                self.num_computed_tokens_event.synchronize()
 
-        # update seq_lens_cpu
+            for req_index, req_is_prefilling in zip(cached_req_indices, is_prefilling):
+                # Non-final PP chunks have no sampled-token postprocess/D2H
+                # copy, so the scheduler count is authoritative in prefill.
+                source = (
+                    self.req_states.num_computed_tokens_np
+                    if req_is_prefilling
+                    else self.num_computed_tokens_cpu
+                )
+                self.req_states.num_computed_tokens_cpu[req_index] = source[req_index]
+
         for i, req_id in enumerate(req_ids):  # type: ignore
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
