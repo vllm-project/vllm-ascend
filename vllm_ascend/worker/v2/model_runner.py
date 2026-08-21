@@ -50,6 +50,10 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _finish_profiling_chunk_timing,
+    _start_profiling_chunk_timing,
+)
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import enable_sp, set_potential_max_tokens
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -226,6 +230,12 @@ class NPUModelRunner(GPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ):
+        self._cpp_execution_time_ms = None
+        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
+        execution_start_time = _start_profiling_chunk_timing(
+            profiling_config,
+            scheduler_output,
+        )
         with flashcomm_dispatch_wrapper(self.vllm_config):
             output = super().execute_model(
                 scheduler_output,
@@ -259,6 +269,10 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states=aux_hidden_states,
             )
 
+        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
+            profiling_config,
+            execution_start_time,
+        )
         return output
 
     @torch.inference_mode()
