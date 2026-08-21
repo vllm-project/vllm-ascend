@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.models.utils import StageMissingLayer
 
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
@@ -148,6 +149,41 @@ def test_kimi_k3_enables_projector_rotation_only_when_weight_is_loaded(
     assert actual == loaded_weights
     assert hasattr(wrapper.mm_projector, "rot_proj") is has_rot_proj
     assert ("mm_projector.rot_proj.weight" in dict(wrapper.named_parameters())) is has_rot_proj
+
+
+def test_kimi_k3_deletes_unused_rot_proj_when_projector_is_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Text-only serving (--language-model-only, or --limit-mm-per-prompt at 0
+    # for all tower modalities) wraps tower components in StageMissingLayer.
+    # Its __getattr__ delegates to the wrapped projector, but del acts on the
+    # placeholder's own registries (empty by design), so deleting
+    # mm_projector.rot_proj directly raises AttributeError. The deletion must
+    # target the wrapped module instead.
+    class StubLoader:
+        def __init__(self, model, *, skip_prefixes):
+            assert model is wrapper
+            assert skip_prefixes == []
+
+        def load_weights(self, weights, *, mapper):
+            assert list(weights) == []
+            assert mapper is wrapper.hf_to_vllm_mapper
+            return {"mm_projector.linear_1.weight"}
+
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
+    wrapper = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
+    nn.Module.__init__(wrapper)
+    projector = nn.Module()
+    projector.rot_proj = nn.Linear(1, 1, bias=False)
+    wrapper.mm_projector = StageMissingLayer("vision_tower", projector)
+
+    actual = wrapper.load_weights(iter(()))
+
+    assert actual == {"mm_projector.linear_1.weight"}
+    # The unused rotation was released from the wrapped projector...
+    assert hasattr(projector, "rot_proj") is False
+    # ...and lookups through the placeholder no longer find it either.
+    assert hasattr(wrapper.mm_projector, "rot_proj") is False
 
 
 def test_kimi_k3_projector_applies_rotation_only_after_weight_load():
