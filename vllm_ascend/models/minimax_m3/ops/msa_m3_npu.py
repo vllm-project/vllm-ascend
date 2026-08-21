@@ -3,23 +3,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_custom_op,
     get_ascend_device_type,
 )
-from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
-    minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
-)
 
 _SPARSE_ATTN_INNER_PRECISE = 4
 _MSA_INDEX_BLOCK_SIZE = 128
 _ASCEND_DEVICE_TYPE = get_ascend_device_type()
+
+if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+        minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
+    )
 
 
 def _k2q_csr_block_stats(cu_block_lens: torch.Tensor) -> tuple[int, int]:
@@ -68,24 +70,35 @@ def _npu_k2q_csr(
     )
 
 
+@dataclass
+class MiniMaxM3TPDecodeScoreMetadata:
+    """Per-forward metadata for packed TP decode scoring."""
+
+    block_table: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    seq_lens: torch.Tensor
+    context_lens: torch.Tensor
+    start_loc: torch.Tensor
+    block_offset: int
+    block_count: int
+    decode_query_len: int
+
+
 def _as_ascendc_index_kv_cache(
-    index_kv_cache: tuple[torch.Tensor],
+    index_kv_cache: torch.Tensor,
 ) -> torch.Tensor:
     """Convert the runtime index K cache to the AscendC BBND layout.
 
-    The model runner binds this K-only cache as a one-element tuple containing
-    a tensor shaped ``[num_blocks, 128, head_dim]``.  MsaIndexScore expects the
-    BBND shape ``[num_blocks, 128, 1, head_dim]`` instead.
+    The model runner binds this K-only cache as a tensor shaped
+    ``[num_blocks, 128, head_dim]``. MsaIndexScore expects the BBND shape
+    ``[num_blocks, 128, 1, head_dim]`` instead.
     """
-    if not isinstance(index_kv_cache, tuple) or len(index_kv_cache) != 1:
-        raise ValueError("M3 index cache must be a one-tensor tuple containing K")
-    (index_key_cache,) = index_kv_cache
-    if index_key_cache.ndim != 3 or index_key_cache.shape[1] != _MSA_INDEX_BLOCK_SIZE:
+    if index_kv_cache.ndim != 3 or index_kv_cache.shape[1] != _MSA_INDEX_BLOCK_SIZE:
         raise ValueError(
             "M3 index K cache must have shape "
-            f"[num_blocks, {_MSA_INDEX_BLOCK_SIZE}, head_dim], got {tuple(index_key_cache.shape)}"
+            f"[num_blocks, {_MSA_INDEX_BLOCK_SIZE}, head_dim], got {tuple(index_kv_cache.shape)}"
         )
-    return index_key_cache.unsqueeze(2)
+    return index_kv_cache.unsqueeze(2)
 
 
 def _split_main_kv_cache(
@@ -136,7 +149,7 @@ def _build_cu_block_lens(
 @torch.no_grad()
 def _minimax_m3_index_score(
     idx_q: torch.Tensor,
-    index_kv_cache: tuple[torch.Tensor],
+    index_kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -174,7 +187,7 @@ def _minimax_m3_index_score(
 @torch.no_grad()
 def minimax_m3_index_prefill(
     idx_q: torch.Tensor,
-    index_kv_cache: tuple[torch.Tensor],
+    index_kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -231,23 +244,24 @@ def _index_score_topk_candidates(
         rounding_mode="floor",
     ).clamp(min=0, max=block_count)
 
+    global_valid_block_count = torch.div(
+        visible_tokens + block_offset * _MSA_INDEX_BLOCK_SIZE + _MSA_INDEX_BLOCK_SIZE - 1,
+        _MSA_INDEX_BLOCK_SIZE,
+        rounding_mode="floor",
+    ).clamp(min=0)
+    local_block_ids = torch.arange(block_count, device=score.device)
+    global_block_ids = local_block_ids + block_offset
+    valid_blocks = global_block_ids[None, :] < global_valid_block_count[:, None]
+    # A dense raw-score TP chunk can contain whole future speculative blocks
+    # for a shorter request. Remove them before TopK so they cannot displace a
+    # valid candidate and only then be discarded by output validation.
+    score = torch.where(valid_blocks[None, :, :], score, float("-inf"))
+
     if init_blocks > 0 or local_blocks > 0:
-        # start_loc is one value per request, so the AscendC local mask cannot
-        # move when speculative tokens cross a block boundary.  Apply the
-        # forced-block scores here per token, before the one and only TopK.
-        global_valid_block_count = torch.div(
-            visible_tokens + block_offset * _MSA_INDEX_BLOCK_SIZE + _MSA_INDEX_BLOCK_SIZE - 1,
-            _MSA_INDEX_BLOCK_SIZE,
-            rounding_mode="floor",
-        ).clamp(min=0)
-        local_block_ids = torch.arange(block_count, device=score.device)
-        global_block_ids = local_block_ids + block_offset
-        valid_blocks = global_block_ids[None, :] < global_valid_block_count[:, None]
+        # Apply forced-block scores here per token, before the one and only
+        # TopK. This is shared by single-token and speculative decode.
         if init_blocks > 0:
-            # TP callers pass the number of initial blocks that overlap this
-            # local shard, matching the AscendC attribute's local-table
-            # semantics.
-            init_mask = valid_blocks & (local_block_ids[None, :] < init_blocks)
+            init_mask = valid_blocks & (global_block_ids[None, :] < init_blocks)
             score = torch.where(init_mask[None, :, :], 1.0e30, score)
         if local_blocks > 0:
             local_start = (global_valid_block_count - local_blocks).clamp(min=0)
@@ -296,7 +310,7 @@ def _index_score_topk_candidates(
 @torch.no_grad()
 def _minimax_m3_index_decode(
     idx_q: torch.Tensor,
-    index_kv_cache: tuple[torch.Tensor],
+    index_kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -309,12 +323,9 @@ def _minimax_m3_index_decode(
     local_blocks: int,
     decode_query_len: int,
     block_offset: int = 0,
+    block_count: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run AscendC decode score followed by one non-fused local TopK."""
-    # AscendC start_loc is per request.  For q>1, disable its fixed local mask
-    # and apply the equivalent moving mask per speculative token below.
-    ascendc_init_blocks = init_blocks if decode_query_len == 1 else 0
-    ascendc_local_blocks = local_blocks if decode_query_len == 1 else 0
     score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
@@ -323,17 +334,17 @@ def _minimax_m3_index_decode(
         seq_lens,
         start_loc,
         causal_mask,
-        init_blocks=ascendc_init_blocks,
-        local_blocks=ascendc_local_blocks,
     )
+    if block_count is None:
+        block_count = block_table.shape[-1]
     topk_indices, topk_scores = _index_score_topk_candidates(
-        score[..., : block_table.shape[-1]],
+        score[..., :block_count],
         context_lens,
         decode_query_len,
         topk,
         block_offset,
-        init_blocks=init_blocks if decode_query_len > 1 else 0,
-        local_blocks=local_blocks if decode_query_len > 1 else 0,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
     )
     return topk_indices, topk_scores
 
@@ -341,7 +352,7 @@ def _minimax_m3_index_decode(
 @torch.no_grad()
 def minimax_m3_index_decode(
     idx_q: torch.Tensor,
-    index_kv_cache: tuple[torch.Tensor],
+    index_kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -375,30 +386,19 @@ def minimax_m3_index_decode(
 @torch.no_grad()
 def minimax_m3_index_tp_block_parallel_decode(
     idx_q: torch.Tensor,
-    index_kv_cache: tuple[torch.Tensor],
-    block_table: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    seq_lens: torch.Tensor,
-    context_lens: torch.Tensor,
-    start_loc: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    metadata: MiniMaxM3TPDecodeScoreMetadata,
     causal_mask: torch.Tensor,
     *,
-    max_seq_len: int,
     topk: int,
     init_blocks: int,
     local_blocks: int,
-    decode_query_len: int,
     tp_group: Any,
 ) -> torch.Tensor:
-    """Run decode with KV blocks sharded across tensor-parallel ranks."""
+    """Run packed-query scoring and TopK over TP-sharded KV blocks."""
     full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1)
-    tp_size = tp_group.world_size
     tp_rank = tp_group.rank_in_group
-
-    max_block_count = (max_seq_len + _MSA_INDEX_BLOCK_SIZE - 1) // _MSA_INDEX_BLOCK_SIZE
-    blocks_per_tp = (max_block_count + tp_size - 1) // tp_size
-    block_offset = tp_rank * blocks_per_tp
-    block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
+    block_count = metadata.block_count
     if block_count == 0:
         # MsaIndexScore requires a non-empty block-table width. Ranks without
         # logical blocks contribute neutral candidates to the collectives.
@@ -420,35 +420,21 @@ def minimax_m3_index_tp_block_parallel_decode(
             device=full_idx_q.device,
         )
     else:
-        local_block_table = block_table[:, block_offset : block_offset + block_count].contiguous()
-        local_seq_lens = torch.clamp(
-            seq_lens - block_offset * _MSA_INDEX_BLOCK_SIZE,
-            min=0,
-            max=block_count * _MSA_INDEX_BLOCK_SIZE,
-        )
-        local_context_lens = context_lens - block_offset * _MSA_INDEX_BLOCK_SIZE
-        local_start_loc = start_loc - block_offset
-        local_init_blocks = max(
-            0,
-            min(init_blocks - block_offset, block_count),
-        )
-        local_local_blocks = min(local_blocks, block_count)
-        is_last_chunk = block_offset + block_count == max_block_count
-        local_causal_mask = causal_mask if is_last_chunk else None
         local_topk, local_scores = _minimax_m3_index_decode(
             full_idx_q,
             index_kv_cache,
-            local_block_table,
-            cu_seqlens_q,
-            local_seq_lens,
-            local_context_lens,
-            local_start_loc,
-            local_causal_mask,
+            metadata.block_table,
+            metadata.cu_seqlens_q,
+            metadata.seq_lens,
+            metadata.context_lens,
+            metadata.start_loc,
+            None if metadata.decode_query_len == 1 else causal_mask,
             topk=topk,
-            init_blocks=local_init_blocks,
-            local_blocks=local_local_blocks,
-            decode_query_len=decode_query_len,
-            block_offset=block_offset,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            decode_query_len=metadata.decode_query_len,
+            block_offset=metadata.block_offset,
+            block_count=block_count,
         )
 
     gathered_scores = tp_group.all_gather(local_scores.contiguous(), dim=-1)
