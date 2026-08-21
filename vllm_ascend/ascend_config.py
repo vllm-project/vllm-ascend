@@ -200,20 +200,18 @@ class AscendConfig:
             "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
             ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
         )
-        self.ft_communication_ops_abort_timeout_ms = self._get_config_value(
-            additional_config,
-            "ft_communication_ops_abort_timeout_ms",
-            "FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS",
-            ascend_envs.FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS,
-        )
-        if (
-            not isinstance(self.ft_communication_ops_abort_timeout_ms, int)
-            or self.ft_communication_ops_abort_timeout_ms < 0
-        ):
+        # Fault-tolerance communication abort timeout (seconds); when fault
+        # tolerance is enabled and > 0, a hung NPU comm op is aborted after
+        # this many seconds. Drives HCCL_EVENT_TIMEOUT / HCCL_EXEC_TIMEOUT
+        # (= timeout - 1) and set_op_timeout_ms(timeout * 1000). 0 disables.
+        abort_timeout = additional_config.get("ft_communication_abort_timeout", 0)
+        if not isinstance(abort_timeout, int) or not (abort_timeout == 0 or abort_timeout >= 2):
             raise ValueError(
-                "ft_communication_ops_abort_timeout_ms must be a non-negative "
-                f"integer, got {self.ft_communication_ops_abort_timeout_ms}"
+                "ft_communication_abort_timeout must be 0 (disabled) or an "
+                f"integer of at least 2 seconds, "
+                f"got {abort_timeout}"
             )
+        self.ft_communication_abort_timeout = abort_timeout
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1

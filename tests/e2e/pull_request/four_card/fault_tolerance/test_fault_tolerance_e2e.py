@@ -27,7 +27,7 @@ DP_SIZE = 4
 # - NPU: HCSP operator timeout detects the dead peer.
 # - Deadline (45s): slowest fallback (30s) + margin.
 CPU_DISTRIBUTED_TIMEOUT_S = 30
-FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS = 15
+FT_COMMUNICATION_ABORT_TIMEOUT_S = 15
 FAULT_DETECTION_DEADLINE_S = 45
 
 
@@ -129,7 +129,7 @@ def _ft_server_args() -> list[str]:
         "--fault-tolerance-config",
         '{"engine_recovery_timeout_sec": 120}',
         "--additional-config",
-        f'{{"ft_communication_ops_abort_timeout_ms": {FT_COMMUNICATION_OPS_ABORT_TIMEOUT_MS}}}',
+        f'{{"ft_communication_abort_timeout": {FT_COMMUNICATION_ABORT_TIMEOUT_S}}}',
     ]
 
 
