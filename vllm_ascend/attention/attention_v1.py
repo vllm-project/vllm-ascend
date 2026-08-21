@@ -663,10 +663,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         FA3 is a plain torch op captured inside the aclgraph: it reads its
         ``cache_seqlens``/``cu_seqlens_q``/``block_table`` buffers directly at
         replay time and, unlike the CANN V1 path (task group + event), has no
-        replay-side sync.  The buffers therefore must be refreshed on the update
-        stream and the replay stream made to wait BEFORE the replay — otherwise
-        the first decode step reads the capture-time (block_table=zeros) buffers
-        and produces wrong output.
+        replay-side sync.  The buffers therefore must be refreshed BEFORE the
+        replay — otherwise the first decode step reads the capture-time
+        (block_table=zeros) buffers and produces wrong output.
+
+        The copies are issued on the *current* stream, NOT on ``update_stream``
+        followed by ``wait_stream``.  ``current_stream().wait_stream(update_stream)``
+        emits a CANN ``notify wait`` task that fails under the FULL aclgraph
+        replay (the device logs ``sqe_type=7(notify wait)`` then an MTE fault in
+        the FA3 split kernel reading a half-written ``block_table``).  Copying on
+        the current stream keeps the copies strictly ordered before the replay
+        with no cross-stream dependency; the buffers total a few KB, so nothing
+        meaningful is lost by not overlapping them.
 
         Returns True if an FA3 refresh was performed.
         """
@@ -697,44 +705,40 @@ class AscendAttentionBackendImpl(AttentionImpl):
         cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
         for meta in forward_context.attn_metadata.values():
             if meta.seq_lens is not None:
-                with torch.npu.stream(update_stream):
-                    n_batch = cache_seqlens.numel()
-                    n_actual = meta.seq_lens.numel()
-                    n_pad = n_batch - n_actual
+                n_batch = cache_seqlens.numel()
+                n_actual = meta.seq_lens.numel()
+                n_pad = n_batch - n_actual
 
-                    # cache_seqlens: real lengths first, padding requests
-                    # get KV length 1 (dummy, reads block 0 via zero rows).
-                    cache_seqlens[:n_actual].copy_(
-                        meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
+                # cache_seqlens: real lengths first, padding requests
+                # get KV length 1 (dummy, reads block 0 via zero rows).
+                cache_seqlens[:n_actual].copy_(
+                    meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
+                )
+                if n_pad > 0:
+                    cache_seqlens[n_actual:].fill_(1)
+
+                # cu_seqlens_q: real cumulative first, then one query
+                # token per padding request.
+                n_cu = cu_seqlens_q.numel()
+                n_cu_actual = min(meta.query_start_loc.numel(), n_cu)
+                cu_seqlens_q[:n_cu_actual].copy_(meta.query_start_loc[:n_cu_actual])
+                if n_cu_actual < n_cu:
+                    last = int(cu_seqlens_q[n_cu_actual - 1].item())
+                    for i in range(n_cu_actual, n_cu):
+                        last += 1
+                        cu_seqlens_q[i] = last
+
+                # block_table: real rows first, padding rows zeroed so
+                # padding requests point to block 0 (valid memory).
+                if meta.block_tables is not None:
+                    n_bt_r = min(meta.block_tables.shape[0], block_table_buf.shape[0])
+                    n_bt_c = min(meta.block_tables.shape[1], block_table_buf.shape[1])
+                    block_table_buf[:n_bt_r, :n_bt_c].copy_(
+                        meta.block_tables[:n_bt_r, :n_bt_c]
                     )
-                    if n_pad > 0:
-                        cache_seqlens[n_actual:].fill_(1)
-
-                    # cu_seqlens_q: real cumulative first, then one query
-                    # token per padding request.
-                    n_cu = cu_seqlens_q.numel()
-                    n_cu_actual = min(meta.query_start_loc.numel(), n_cu)
-                    cu_seqlens_q[:n_cu_actual].copy_(meta.query_start_loc[:n_cu_actual])
-                    if n_cu_actual < n_cu:
-                        last = int(cu_seqlens_q[n_cu_actual - 1].item())
-                        for i in range(n_cu_actual, n_cu):
-                            last += 1
-                            cu_seqlens_q[i] = last
-
-                    # block_table: real rows first, padding rows zeroed so
-                    # padding requests point to block 0 (valid memory).
-                    if meta.block_tables is not None:
-                        n_bt_r = min(meta.block_tables.shape[0], block_table_buf.shape[0])
-                        n_bt_c = min(meta.block_tables.shape[1], block_table_buf.shape[1])
-                        block_table_buf[:n_bt_r, :n_bt_c].copy_(
-                            meta.block_tables[:n_bt_r, :n_bt_c]
-                        )
-                        if n_bt_r < block_table_buf.shape[0]:
-                            block_table_buf[n_bt_r:].zero_()
+                    if n_bt_r < block_table_buf.shape[0]:
+                        block_table_buf[n_bt_r:].zero_()
                 break
-        # Make the replay stream wait for the copies so the next replay reads
-        # fresh buffers.
-        torch.npu.current_stream().wait_stream(update_stream)
         return True
 
     @staticmethod
