@@ -178,6 +178,14 @@
     - tests/ut/compilation
     - tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py
 
+- name: compilation_graphex_tp_qknorm_rope_fusion_pass
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/compilation/passes/tp_qknorm_rope_fusion_pass.py
+  tests:
+    - tests/ut/compilation
+    - tests/e2e/pull_request/one_card/compile/test_graphex_tp_qknorm_rope_fusion.py
+
 - name: compilation_sp_pass_pass
   optional: false
   source_file_dependencies:
@@ -778,6 +786,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_batch_invariant.py: 550
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 170
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 170
+  tests/e2e/pull_request/one_card/compile/test_graphex_tp_qknorm_rope_fusion.py: 180
   tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py: 210
   tests/e2e/pull_request/one_card/lora/test_ilama_lora.py: 180
   tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 350

@@ -732,6 +732,7 @@ class AscendCompilationConfig:
         enable_static_kernel: bool = False,
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
+        fuse_tp_qknorm_rope: bool = True,
         **kwargs,
     ):
         """
@@ -754,6 +755,12 @@ class AscendCompilationConfig:
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
                 Default: True
+            fuse_tp_qknorm_rope (bool): Whether to enable TP qknorm and rope fusion
+                optimization (full-channel qk-norm with TP-global variance, e.g.
+                MiniMax-M2). When set to True, the graph fusion pass replaces the
+                TP qk-norm + rope op sequence with the fused split_qkv_tp_rmsnorm_rope
+                kernel during torch.compile / NPUGraph capture.
+                Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         from vllm_ascend.utils import is_310p
@@ -770,6 +777,7 @@ class AscendCompilationConfig:
 
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
+        self.fuse_tp_qknorm_rope = fuse_tp_qknorm_rope
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
