@@ -182,12 +182,7 @@ class AscendConfig:
             logger.warning_once(
                 "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
             )
-        self.enable_mlapo = self._get_config_value(
-            additional_config,
-            "enable_mlapo",
-            "VLLM_ASCEND_ENABLE_MLAPO",
-            ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
-        )
+        self.enable_mlapo = additional_config.get("enable_mlapo", True)
         self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
             "msmonitor_use_daemon",
