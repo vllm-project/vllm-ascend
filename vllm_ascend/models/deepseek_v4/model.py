@@ -810,9 +810,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-        # Pre-hc_head residual stream buffer for the MTP draft. Only needed
-        # when speculative decoding is enabled; allocating it unconditionally
-        # would permanently cost max_num_batched_tokens * hc_dim per rank.
+        # Pre-hc_head residual stream buffer for the speculative draft
+        # (MTP / DSpark / DFlash). Only needed when the decoder consumes
+        # target-model hidden states; allocating it unconditionally would
+        # permanently cost max_num_batched_tokens * hc_dim per rank.
+        # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
         self._mtp_hidden_buffer = (
             torch.empty(
@@ -821,7 +823,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
-            if spec_config is not None and spec_config.method == "mtp"
+            if spec_config is not None
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
             else None
         )
 
