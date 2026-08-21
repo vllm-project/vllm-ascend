@@ -188,12 +188,7 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_MLAPO",
             ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
         )
-        self.msmonitor_use_daemon = self._get_config_value(
-            additional_config,
-            "msmonitor_use_daemon",
-            "MSMONITOR_USE_DAEMON",
-            ascend_envs.MSMONITOR_USE_DAEMON,
-        )
+        self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", False)
         self.enable_transpose_kv_cache_by_block = self._get_config_value(
             additional_config,
             "enable_transpose_kv_cache_by_block",
