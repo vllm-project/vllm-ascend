@@ -120,7 +120,6 @@ cd "$WORK_DIR"
 MODEL_PATH=${MODEL_ROOT}/<model-name>
 
 HCCL_OP_EXPANSION_MODE=AIV \
-VLLM_ASCEND_ENABLE_FLASHCOMM1=0 \
 vllm serve "$MODEL_PATH" \
   --served-model-name <served-name> \
   --trust-remote-code \
@@ -129,6 +128,7 @@ vllm serve "$MODEL_PATH" \
   --tensor-parallel-size <TP-size> \
   --max-num-seqs 16 \
   --load-format dummy \
+  --additional-config '{"enable_flashcomm1": false}' \
   --port 8000
 ```
 
@@ -151,8 +151,8 @@ vllm serve "$MODEL_PATH" \
 ### flashcomm1 check (MoE only)
 
 ```bash
-# only evaluate flashcomm1 when model is MoE
-VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+# only evaluate flashcomm1 when model is MoE; merge into additional config
+--additional-config '{"enable_flashcomm1": true}'
 ```
 
 ### Eager fallback (isolation)

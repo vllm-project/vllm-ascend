@@ -62,7 +62,6 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "1536"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
@@ -105,7 +104,7 @@ templates:
       - --quantization
       - "ascend"
       - --additional-config
-      - '{"enable_shared_expert_dp": true}'
+      - '{"enable_shared_expert_dp": true,"enable_flashcomm1":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
@@ -144,7 +143,7 @@ templates:
       - --quantization
       - "ascend"
       - --additional-config
-      - '{"enable_shared_expert_dp": true}'
+      - '{"enable_shared_expert_dp": true,"enable_flashcomm1":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 

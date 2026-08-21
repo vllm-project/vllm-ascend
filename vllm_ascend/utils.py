@@ -831,7 +831,7 @@ def enable_sp(vllm_config=None) -> bool:
             try:
                 _ENABLE_SP = get_ascend_config().enable_flashcomm1
             except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+                _ENABLE_SP = False
 
     return bool(_ENABLE_SP)
 
@@ -1340,7 +1340,7 @@ def enable_dsa_cp() -> bool:
 
     if dsa_cp_enable and not enable_sp():
         raise ValueError(
-            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
+            "DSA CP requires SP to be enabled. Please set additional_config.enable_flashcomm1 to true to use DSA CP."
         )
     return dsa_cp_enable and enable_sp()
 

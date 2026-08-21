@@ -71,7 +71,6 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "256"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
@@ -115,7 +114,7 @@ templates:
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true}'
+      - '{"recompute_scheduler_enable":true,"enable_flashcomm1":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -156,7 +155,7 @@ templates:
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true}'
+      - '{"recompute_scheduler_enable":true,"enable_flashcomm1":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 

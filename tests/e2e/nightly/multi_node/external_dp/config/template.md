@@ -54,7 +54,7 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
-  HCCL_OP_
+  HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_MODELSCOPE: "true"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
@@ -62,7 +62,6 @@ env_common: &env_common
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   HCCL_BUFFSIZE: "256"
   SERVER_PORT: "${PORT}"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0
@@ -87,6 +86,8 @@ templates:
       - --quantization
       - ascend
       - --enable-expert-parallel
+      - --additional-config
+      - '{"enable_flashcomm1": false}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -124,6 +125,8 @@ templates:
       - --quantization
       - ascend
       - --enable-expert-parallel
+      - --additional-config
+      - '{"enable_flashcomm1": false}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",

@@ -45,7 +45,6 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   ASCEND_BUFFER_POOL: "4:8"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
@@ -94,7 +93,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true}'
+      - '{"enable_cpu_binding": true,"enable_flashcomm1":true}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
