@@ -723,6 +723,52 @@ class NPUWorker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+    def _run_to_completion(self, num_tokens, eager) -> float:
+        import time
+
+        for _ in range(5):
+            self.model_runner._dummy_run(
+                num_tokens=num_tokens,
+                is_profile=eager,
+                uniform_decode=True,
+                force_attention=True,
+            )
+
+        latencies: list[float] = []
+        for _ in range(5):
+            torch.npu.synchronize()
+            start = time.perf_counter()
+            self.model_runner._dummy_run(
+                num_tokens=num_tokens,
+                is_profile=eager,
+                uniform_decode=True,
+                force_attention=True,
+            )
+            torch.npu.synchronize()
+            latencies.append((time.perf_counter() - start) * 1000)
+
+        return sorted(latencies)[len(latencies) // 2]
+
+    def _suggest_max_capture_size(self) -> None:
+        cudagraph_capture_sizes = sorted(set(self.vllm_config.compilation_config.cudagraph_capture_sizes))
+        if len(cudagraph_capture_sizes) < 2:
+            return
+
+        x1, x2 = cudagraph_capture_sizes[0], cudagraph_capture_sizes[-1]
+        y1, y2 = (self._run_to_completion(x, False) for x in (x1, x2))
+
+        k = (y2 - y1) / (x2 - x1)
+        b = y2 - k * x2
+        if k <= 0:
+            return
+
+        eager_t0 = self._run_to_completion(x1, True)
+        eager_t1 = self._run_to_completion(min(x2, 256), True)
+
+        ccs = ((eager_t0 + eager_t1) / 2 - b) // k
+
+        logger.info("We suggest setting max-cudagraph-capture-size of roughly %d", ccs)
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
@@ -754,6 +800,7 @@ class NPUWorker(WorkerBase):
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
+            self._suggest_max_capture_size()
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
