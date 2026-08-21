@@ -3620,11 +3620,10 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-            # Share the main-model update_stream with the draft drafter so that
-            # both main and draft updates are serialized on the same stream.
-            # The drafter created its own update_stream in its load_model (which
-            # runs BEFORE this point), so overwrite it here with the main one.
-            if self.drafter is not None:
+            # Serialize main-model and draft-model graph-parameter updates on
+            # one stream.  Independent update streams can deadlock fullgraph
+            # replay when both models update the same captured attention state.
+            if self.drafter is not None and hasattr(self.drafter, "update_stream"):
                 self.drafter.update_stream = self.update_stream
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:

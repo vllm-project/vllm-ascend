@@ -20,8 +20,6 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
 from ..utils import weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -250,19 +248,11 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
-        # In async scheduling or multi-threaded (MT) scenarios, it is possible that
-        # the CPU's record event (from update_attn_params) for the iteration i completes
-        # before the grph replay of iteration i-1.
-        # To ensure proper ordering, we must call synchronize here before replaying,
-        # so that update_attn_params only executes after the previous graph replay has fully completed.
-        # If we do not in main model and in full-graph mode when using merge-eagle-graph,
-        # we do not need to synchronize.
-        # When enable_enpu is on, model_runner orders update vs replay; skip here.
-        # When FULL + EAGLE draft (merge path), replay does not need this barrier.
-        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-        if not self.enable_enpu and need_sync:
-            torch.npu.current_stream().synchronize()
+        # The ordering between graph replay and graph-parameter updates is
+        # established by update_full_graph_params with stream dependencies.
+        # Do not use a device/host synchronize here: on newer CANN/PTA
+        # combinations it can race with the allocator's stream bookkeeping,
+        # and it also serializes unrelated work on the device.
         entry.aclgraph.replay()
         return entry.output
 
@@ -285,6 +275,17 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
+    # Graph-task updates are enqueued on a dedicated stream.  Establish both
+    # sides of the dependency explicitly:
+    #
+    #   current stream (replay) -> update stream -> current stream (next replay)
+    #
+    # This replaces the device-wide synchronize that used to live in
+    # ACLGraphWrapper.__call__.  It is important that main and draft models use
+    # the same update stream in the V1 Eagle path so their updates stay ordered.
+    current_stream = torch.npu.current_stream()
+    update_stream.wait_stream(current_stream)
+
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(
         update_stream,
@@ -294,6 +295,10 @@ def update_full_graph_params(
         speculative_config,
         draft_attn_metadatas=draft_attn_metadatas,
     )
+
+    # Make a subsequent replay on the current stream wait until all graph-task
+    # updates have been enqueued and completed on the update stream.
+    current_stream.wait_stream(update_stream)
 
 
 @dataclass

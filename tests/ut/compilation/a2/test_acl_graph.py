@@ -47,11 +47,14 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
 
 
-def test_update_full_graph_params_dispatches_draft_metadata_by_keyword():
+@patch("vllm_ascend.compilation.acl_graph.torch.npu.current_stream")
+def test_update_full_graph_params_dispatches_draft_metadata_by_keyword(mock_current_stream):
     impl_cls = MagicMock()
     attn_backend = MagicMock()
     attn_backend.get_impl_cls.return_value = impl_cls
     update_stream = MagicMock()
+    current_stream = MagicMock()
+    mock_current_stream.return_value = current_stream
     forward_context = MagicMock()
     vllm_config = MagicMock()
     speculative_config = MagicMock()
@@ -67,6 +70,8 @@ def test_update_full_graph_params_dispatches_draft_metadata_by_keyword():
         draft_attn_metadatas=draft_attn_metadatas,
     )
 
+    update_stream.wait_stream.assert_called_once_with(current_stream)
+    current_stream.wait_stream.assert_called_once_with(update_stream)
     impl_cls.update_graph_params.assert_called_once_with(
         update_stream,
         forward_context,
