@@ -54,7 +54,6 @@ if not _npu_available:
     torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
     torch_npu.__path__ = []
     torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
-    torch_npu.profiler = MagicMock()  # type: ignore[attr-defined]
     torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
     torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt: weight)  # type: ignore[attr-defined]
     torch_npu._C = MagicMock()  # type: ignore[attr-defined]
@@ -66,6 +65,29 @@ if not _npu_available:
     sys.modules["torch_npu"] = torch_npu
     sys.modules["torch_npu._C"] = torch_npu._C
     sys.modules["torch_npu._C._distributed_c10d"] = torch_npu._C._distributed_c10d
+    # worker.py imports: from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
+    atb_ops = types.ModuleType("torch_npu.op_plugin.atb._atb_ops")
+    atb_ops.__spec__ = importlib.util.spec_from_loader("torch_npu.op_plugin.atb._atb_ops", loader=None)
+    atb_ops._register_atb_extensions = MagicMock()  # type: ignore[attr-defined]
+    atb_mod = types.ModuleType("torch_npu.op_plugin.atb")
+    atb_mod.__spec__ = importlib.util.spec_from_loader("torch_npu.op_plugin.atb", loader=None)
+    atb_mod.__path__ = []  # type: ignore[attr-defined]
+    atb_mod._atb_ops = atb_ops  # type: ignore[attr-defined]
+    op_plugin = types.ModuleType("torch_npu.op_plugin")
+    op_plugin.__spec__ = importlib.util.spec_from_loader("torch_npu.op_plugin", loader=None)
+    op_plugin.__path__ = []  # type: ignore[attr-defined]
+    op_plugin.atb = atb_mod  # type: ignore[attr-defined]
+    torch_npu.op_plugin = op_plugin  # type: ignore[attr-defined]
+    sys.modules["torch_npu.op_plugin"] = op_plugin
+    sys.modules["torch_npu.op_plugin.atb"] = atb_mod
+    sys.modules["torch_npu.op_plugin.atb._atb_ops"] = atb_ops
+    # worker.py: from torch_npu.profiler import dynamic_profile as dp
+    profiler_mod = types.ModuleType("torch_npu.profiler")
+    profiler_mod.__spec__ = importlib.util.spec_from_loader("torch_npu.profiler", loader=None)
+    profiler_mod.dynamic_profile = MagicMock()  # type: ignore[attr-defined]
+    torch_npu.profiler = profiler_mod  # type: ignore[attr-defined]
+    sys.modules["torch_npu.profiler"] = profiler_mod
+    torch_npu._npu_matmul_add_fp32 = MagicMock()  # type: ignore[attr-defined]
     acl_rt = types.ModuleType("acl.rt")
     acl_rt.__spec__ = importlib.util.spec_from_loader("acl.rt", loader=None)
     acl_rt.memcpy = MagicMock()  # type: ignore[attr-defined]
