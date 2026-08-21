@@ -147,6 +147,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import msgspec
+import zmq
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -174,6 +176,9 @@ class InstanceInfo:
     decoder_score: float
     decoder_host: str
     decoder_port: int
+    prefill_abort_host: str | None = None
+    prefill_abort_port: int | None = None
+    prefill_abort_endpoints: list[dict[str, Any]] = field(default_factory=list)
 
 
 TAINT_PRIORITY = 1e15
@@ -181,6 +186,9 @@ TAINT_PRIORITY = 1e15
 global_args: argparse.Namespace | None = None
 shared_scheduler: "SharedProxyScheduler | None" = None
 runtime: "WorkerRuntime | None" = None
+_background_abort_tasks: set[asyncio.Task] = set()
+# Static endpoint registry populated by the first response from each prefiller.
+prefill_abort_registry: dict[str, list[dict[str, Any]]] = {}
 
 
 @dataclass
@@ -858,6 +866,62 @@ def with_cancellation(handler_func):
     return wrapper
 
 
+def _send_prefill_abort_sync(host: str, port: int, request_id: str) -> None:
+    context = zmq.Context.instance()
+    socket = context.socket(zmq.REQ)
+    try:
+        socket.setsockopt(zmq.RCVTIMEO, 5000)
+        socket.setsockopt(zmq.SNDTIMEO, 5000)
+        socket.connect(f"tcp://{host}:{port}")
+        socket.send(msgspec.msgpack.encode((b"abort_request_msg", request_id)))
+        if socket.recv() != b"ACK":
+            raise RuntimeError("prefiller abort was not acknowledged")
+    finally:
+        socket.close(linger=0)
+
+
+async def send_prefill_abort(endpoints: list[dict[str, Any]], request_id: str) -> None:
+    if not endpoints:
+        logger.warning("No prefiller side-channel endpoints for request %s", request_id)
+        return
+
+    async def notify(endpoint: dict[str, Any]) -> None:
+        host, port = endpoint.get("host"), endpoint.get("port")
+        if not host or port is None:
+            logger.warning("Invalid prefiller endpoint for request %s: %s", request_id, endpoint)
+            return
+        try:
+            await asyncio.to_thread(_send_prefill_abort_sync, host, int(port), request_id)
+            logger.debug("Prefiller abort acknowledged: request_id=%s endpoint=%s:%s", request_id, host, port)
+        except Exception:
+            logger.exception("Failed to notify prefiller about aborted request %s at %s:%s", request_id, host, port)
+
+    await asyncio.gather(*(notify(endpoint) for endpoint in endpoints))
+
+
+def schedule_prefill_abort(endpoints: list[dict[str, Any]], request_id: str) -> None:
+    task = asyncio.create_task(send_prefill_abort(endpoints, request_id))
+    _background_abort_tasks.add(task)
+
+    def on_done(completed: asyncio.Task) -> None:
+        _background_abort_tasks.discard(completed)
+        if not completed.cancelled():
+            completed.exception()
+
+    task.add_done_callback(on_done)
+
+
+def _get_exception_message(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            return response.text
+        except Exception:
+            pass
+    return str(exc)
+
+
+
 def auth_headers(request_id: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
@@ -922,6 +986,8 @@ async def stream_service_response_with_retry(
     for attempt in range(1, max_retries + 1):
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
+                if response.is_error:
+                    await response.aread()
                 response.raise_for_status()
                 first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
@@ -1004,6 +1070,32 @@ async def assign_instances(
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
 
+    # Register the P-side endpoint list once per prefiller instance. The list is
+    # derived from existing KV metadata; it is not added to every request.
+    if prefiller_key not in prefill_abort_registry:
+        params = kv_transfer_params or {}
+        base_port = params.get("remote_port")
+        default_host = params.get("remote_host")
+        mapping = params.get("remote_multi_nodes_meta_mapping") or {}
+        try:
+            offsets = {int(key) for key in mapping}
+        except (TypeError, ValueError):
+            offsets = set()
+        tp_size = int(params.get("remote_ptp_size") or 1)
+        offsets.update(range(tp_size))
+        endpoints = []
+        if default_host and base_port is not None:
+            for offset in sorted(offsets):
+                host = mapping.get(str(offset), {}).get("host", default_host)
+                endpoints.append({"host": host, "port": int(base_port) + offset})
+        prefill_abort_registry[prefiller_key] = endpoints
+        logger.info(
+            "Registered prefill DP-domain abort endpoints: prefiller=%s endpoints=%s",
+            prefiller_key,
+            [f"{endpoint['host']}:{endpoint['port']}" for endpoint in endpoints],
+        )
+    registered_endpoints = prefill_abort_registry[prefiller_key]
+
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
     except Exception:
@@ -1021,6 +1113,9 @@ async def assign_instances(
         decoder_score=decoder_score,
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
+        prefill_abort_host=kv_transfer_params.get("remote_host"),
+        prefill_abort_port=kv_transfer_params.get("remote_port"),
+        prefill_abort_endpoints=registered_endpoints,
     )
 
 
@@ -1143,6 +1238,9 @@ async def handle_completions_impl(api: str, request: Request):
                             chunk = json.dumps(chunk_json).encode("utf-8")
                         yield chunk
             except asyncio.CancelledError:
+                schedule_prefill_abort(
+                    instance_info.prefill_abort_endpoints, instance_info.request_id
+                )
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
                     instance_info.decoder_host,
@@ -1151,13 +1249,21 @@ async def handle_completions_impl(api: str, request: Request):
                 )
                 raise
             except Exception as exc:
+                schedule_prefill_abort(
+                    instance_info.prefill_abort_endpoints, instance_info.request_id
+                )
                 logger.error(
                     "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
-                    instance_info.decoder_host,
-                    instance_info.decoder_port,
-                    exc,
-                    instance_info.request_id,
+                    instance_info.decoder_host, instance_info.decoder_port, exc, instance_info.request_id,
                 )
+                error_message = _get_exception_message(exc)
+                error_payload = json.dumps({
+                    "error": {"message": error_message, "type": "decoder_error", "request_id": instance_info.request_id}
+                })
+                if stream_flag:
+                    yield f"data: {error_payload}\n\n".encode("utf-8")
+                else:
+                    yield error_payload.encode("utf-8")
             finally:
                 await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
                 released_kv = True
