@@ -36,6 +36,10 @@ class CompressorSPPlan:
     state_sync_gather_compact_indices: tuple[int, ...] = ()
     state_sync_gather_compact_slice: tuple[int, int] | None = None
     state_sync_row_counts_per_rank: tuple[int, ...] = ()
+    rotate_chunk_owners: bool = False
+    request_ids: tuple[str, ...] = ()
+    request_continues: tuple[bool, ...] = ()
+    rank_offsets: tuple[int, ...] = ()
     tp_rank: int = 0
     tp_size: int = 1
 
@@ -83,6 +87,7 @@ def _build_c4_state_replay(
     query_start_loc: Sequence[int],
     request_start_positions: Sequence[int],
     rope_source_rows: int,
+    replay_req_indices: Sequence[int] | None = None,
 ) -> dict[str, tuple[int, ...] | tuple[int, int] | None]:
     flat_to_compressed_row: dict[int, int] = {}
     compressed_row = 0
@@ -97,7 +102,10 @@ def _build_c4_state_replay(
     start_pos: list[int] = []
     compressed_rows: list[int] = []
 
-    for req_index, request_start in enumerate(request_start_positions):
+    if replay_req_indices is None:
+        replay_req_indices = range(len(request_start_positions))
+    for req_index in replay_req_indices:
+        request_start = request_start_positions[req_index]
         req_start = query_start_loc[req_index]
         req_end = query_start_loc[req_index + 1]
         replay_tokens = 8 + (4 if request_start > 0 else 0)
@@ -147,6 +155,10 @@ def build_compressor_sp_plan(
     local_end: int,
     tp_rank: int = 0,
     min_input_tokens: int = 0,
+    request_ids: Sequence[str] | None = None,
+    request_continues: Sequence[bool] | None = None,
+    rank_offsets: Sequence[int] | None = None,
+    rotate_chunk_owners: bool = False,
 ) -> CompressorSPPlan:
     """Plan Compressor sequence-parallel execution for prefill batches.
 
@@ -180,8 +192,6 @@ def build_compressor_sp_plan(
         return disabled("empty_query_start_loc")
 
     num_input_tokens = len(input_positions)
-    if num_input_tokens < min_input_tokens:
-        return disabled("adaptive_small_chunk")
     if query_start_loc[0] != 0 or query_start_loc[-1] != num_input_tokens:
         return disabled("query_start_loc_out_of_bounds")
     if any(query_start_loc[i] > query_start_loc[i + 1] for i in range(len(query_start_loc) - 1)):
@@ -205,21 +215,55 @@ def build_compressor_sp_plan(
         ):
             return disabled("noncontiguous_positions")
 
+    normalized_request_ids = tuple(request_ids[:num_reqs]) if request_ids is not None else ()
+    normalized_request_continues = (
+        tuple(bool(value) for value in request_continues[:num_reqs]) if request_continues is not None else ()
+    )
+    normalized_rank_offsets = (
+        tuple(int(value) % tp_size for value in rank_offsets[:num_reqs]) if rank_offsets is not None else ()
+    )
+    rotate_chunk_owners = bool(
+        rotate_chunk_owners
+        and compress_ratio == 4
+        and len(normalized_request_ids) == num_reqs
+        and all(normalized_request_ids)
+        and len(normalized_request_continues) == num_reqs
+        and len(normalized_rank_offsets) == num_reqs
+    )
+    if num_input_tokens < min_input_tokens and not rotate_chunk_owners:
+        return disabled("adaptive_small_chunk")
+
     num_tokens_pad = ((num_input_tokens + tp_size - 1) // tp_size) * tp_size
     tokens_per_rank = num_tokens_pad // tp_size
-    if (tp_size - 1) * tokens_per_rank >= num_input_tokens:
-        return disabled("zero_token_rank")
-
-    sp_row_counts = [0] * tp_size
-    for flat_index, position in enumerate(input_positions):
-        if (position + 1) % compress_ratio == 0:
-            owner = min(flat_index // tokens_per_rank, tp_size - 1)
-            sp_row_counts[owner] += 1
-
     expected_owned_start = tp_rank * tokens_per_rank
     expected_owned_end = min(expected_owned_start + tokens_per_rank, num_input_tokens)
+
+    owned_token_counts = [0] * tp_size
+    owned_compressed_rows: list[list[int]] = [[] for _ in range(tp_size)]
+    global_compressed_row = 0
+    for req_index in range(num_reqs):
+        req_start = query_start_loc[req_index]
+        req_end = query_start_loc[req_index + 1]
+        req_tokens_per_rank = (query_lens[req_index] + tp_size - 1) // tp_size
+        for flat_index in range(req_start, req_end):
+            if rotate_chunk_owners:
+                logical_owner = min(
+                    (flat_index - req_start) // req_tokens_per_rank,
+                    tp_size - 1,
+                )
+                owner = (logical_owner + normalized_rank_offsets[req_index]) % tp_size
+            else:
+                owner = min(flat_index // tokens_per_rank, tp_size - 1)
+            owned_token_counts[owner] += 1
+            if (input_positions[flat_index] + 1) % compress_ratio == 0:
+                owned_compressed_rows[owner].append(global_compressed_row)
+                global_compressed_row += 1
+
+    if any(count == 0 for count in owned_token_counts):
+        return disabled("zero_token_rank")
     if local_start != expected_owned_start or local_end != expected_owned_end:
         return disabled("invalid_local_range")
+    sp_row_counts = [len(rows) for rows in owned_compressed_rows]
 
     true_ranges: list[tuple[int, int]] = []
     expanded_ranges: list[tuple[int, int]] = []
@@ -231,8 +275,14 @@ def build_compressor_sp_plan(
     for req_index in range(num_reqs):
         req_start = query_start_loc[req_index]
         req_end = query_start_loc[req_index + 1]
-        true_start = max(req_start, local_start)
-        true_end = min(req_end, local_end)
+        if rotate_chunk_owners:
+            req_tokens_per_rank = (query_lens[req_index] + tp_size - 1) // tp_size
+            logical_rank = (tp_rank - normalized_rank_offsets[req_index]) % tp_size
+            true_start = req_start + logical_rank * req_tokens_per_rank
+            true_end = min(true_start + req_tokens_per_rank, req_end)
+        else:
+            true_start = max(req_start, local_start)
+            true_end = min(req_end, local_end)
         if true_start >= true_end:
             continue
 
@@ -293,14 +343,25 @@ def build_compressor_sp_plan(
         rope_source_rows,
     )
 
-    gather_compact_indices = _gather_compact_indices(sp_row_counts)
+    max_rows_per_rank = max(sp_row_counts, default=0)
+    gather_position_by_global_row = [0] * global_compressed_row
+    for rank, rows in enumerate(owned_compressed_rows):
+        for local_row, global_row in enumerate(rows):
+            gather_position_by_global_row[global_row] = rank * max_rows_per_rank + local_row
+    gather_compact_indices = tuple(gather_position_by_global_row)
 
+    replay_req_indices = (
+        tuple(req_index for req_index, continues in enumerate(normalized_request_continues) if not continues)
+        if rotate_chunk_owners
+        else tuple(range(num_reqs))
+    )
     state_replay = (
         _build_c4_state_replay(
             input_positions,
             query_start_loc,
             request_start_positions,
             rope_source_rows,
+            replay_req_indices,
         )
         if compress_ratio == 4
         else {}
@@ -360,6 +421,10 @@ def build_compressor_sp_plan(
         state_sync_gather_compact_indices=state_sync_gather_compact_indices,
         state_sync_gather_compact_slice=_contiguous_slice(state_sync_gather_compact_indices),
         state_sync_row_counts_per_rank=tuple(state_sync_row_counts),
+        rotate_chunk_owners=rotate_chunk_owners,
+        request_ids=normalized_request_ids if rotate_chunk_owners else (),
+        request_continues=(normalized_request_continues if rotate_chunk_owners else ()),
+        rank_offsets=normalized_rank_offsets if rotate_chunk_owners else (),
         tp_rank=tp_rank,
         tp_size=tp_size,
     )

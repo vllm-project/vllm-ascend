@@ -225,6 +225,74 @@ def test_c4_chunked_prefill_uses_absolute_start_position():
     assert plan.state_replay_rope_row_slice == (0, 5)
 
 
+def test_c4_continuing_chunk_rotates_head_owner_without_replay():
+    plan = _plan(
+        input_positions=list(range(8192, 16384)),
+        query_start_loc=[0, 8192],
+        seq_lens=[16384],
+        local_start=6144,
+        local_end=8192,
+        tp_rank=3,
+        request_ids=["request-0"],
+        request_continues=[True],
+        rank_offsets=[3],
+        rotate_chunk_owners=True,
+    )
+
+    assert plan.enabled
+    assert plan.rotate_chunk_owners
+    assert plan.rank_offsets == (3,)
+    assert plan.token_slice == (0, 2048)
+    assert plan.output_keep_slice == (0, 512)
+    assert plan.state_replay_token_indices == ()
+    assert plan.state_replay_start_pos == ()
+    assert plan.gather_compact_slice is None
+    assert plan.gather_compact_indices[:512] == tuple(range(1536, 2048))
+    assert plan.gather_compact_indices[512:] == tuple(range(1536))
+
+
+def test_c4_terminal_rotated_chunk_replays_final_state_once():
+    plan = _plan(
+        input_positions=list(range(8192, 16384)),
+        query_start_loc=[0, 8192],
+        seq_lens=[16384],
+        local_start=6144,
+        local_end=8192,
+        tp_rank=3,
+        request_ids=["request-0"],
+        request_continues=[False],
+        rank_offsets=[3],
+        rotate_chunk_owners=True,
+    )
+
+    assert plan.enabled
+    assert plan.state_replay_token_slice == (8176, 16)
+    assert plan.state_replay_start_pos == (16368,)
+
+
+def test_c4_packed_requests_support_independent_owner_offsets():
+    positions = list(range(16)) + list(range(16))
+    plan = _plan(
+        tp_size=2,
+        input_positions=positions,
+        query_start_loc=[0, 16, 32],
+        seq_lens=[16, 16],
+        local_start=16,
+        local_end=32,
+        tp_rank=1,
+        request_ids=["request-0", "request-1"],
+        request_continues=[True, True],
+        rank_offsets=[0, 1],
+        rotate_chunk_owners=True,
+    )
+
+    assert plan.enabled
+    assert plan.sp_row_counts_per_rank == (4, 4)
+    assert plan.gather_compact_indices == (0, 1, 4, 5, 6, 7, 2, 3)
+    assert plan.req_indices == (0, 1)
+    assert plan.state_replay_req_indices == ()
+
+
 def test_c4_multi_request_replay_uses_full_batch_rope_shape():
     plan = _plan(
         tp_size=2,

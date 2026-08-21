@@ -128,6 +128,10 @@ class CompressorSPMetadata:
     state_sync_gather_compact_indices: torch.Tensor | None = None
     state_sync_gather_compact_slice: tuple[int, int] | None = None
     state_sync_row_counts_per_rank: tuple[int, ...] = ()
+    rotate_chunk_owners: bool = False
+    request_ids: tuple[str, ...] = ()
+    request_continues: tuple[bool, ...] = ()
+    rank_offsets: tuple[int, ...] = ()
     tp_rank: int = 0
     tp_size: int = 1
 
@@ -902,6 +906,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc,
             seq_lens,
             positions,
+            common_attn_metadata.req_ids,
+            common_attn_metadata.prefill_continues,
+            common_attn_metadata.compressor_sp_rank_offsets,
+            common_attn_metadata.compressor_sp_rotate_owners,
         )
         cached = self.common_ratio_to_sas_metadata.get(cache_key)
         if cached is not None:
@@ -927,6 +935,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_end=local_end,
             tp_rank=tp_group.rank_in_group,
             min_input_tokens=min_input_tokens,
+            request_ids=common_attn_metadata.req_ids,
+            request_continues=common_attn_metadata.prefill_continues,
+            rank_offsets=common_attn_metadata.compressor_sp_rank_offsets,
+            rotate_chunk_owners=common_attn_metadata.compressor_sp_rotate_owners,
         )
         metadata = self._to_compressor_sp_metadata(plan)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
@@ -1008,6 +1020,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ),
             state_sync_gather_compact_slice=plan.state_sync_gather_compact_slice,
             state_sync_row_counts_per_rank=plan.state_sync_row_counts_per_rank,
+            rotate_chunk_owners=plan.rotate_chunk_owners,
+            request_ids=plan.request_ids,
+            request_continues=plan.request_continues,
+            rank_offsets=plan.rank_offsets,
             tp_rank=plan.tp_rank,
             tp_size=plan.tp_size,
         )
@@ -1689,6 +1705,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
         coff: int,
         plan: CompressorSPMetadata,
     ) -> None:
+        if plan.state_replay_start_pos is None or plan.state_replay_start_pos.numel() == 0:
+            return
         replay_x = self._select_compressor_sp_rows(x, plan, "state_replay_token")
         replay_block_table = self._select_compressor_sp_rows(
             state_block_table,

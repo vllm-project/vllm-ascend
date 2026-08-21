@@ -342,6 +342,10 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        # request_id -> (current_start, current_head_owner, next_start,
+        # next_head_owner). Repeated metadata builds for one scheduler step are
+        # idempotent, while the next chunk reuses the previous tail owner.
+        self._compressor_sp_rotation_state: dict[str, tuple[int, int, int, int]] = {}
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -2972,6 +2976,90 @@ class NPUModelRunner(GPUModelRunner):
         ]
         is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
         is_prefilling[num_reqs:] = False
+        req_ids = tuple(
+            req_id or "" for req_id in self.input_batch.req_ids[:num_reqs]
+        ) + ("",) * (num_reqs_padded - num_reqs)
+        active_req_ids = tuple(
+            req_id
+            for req_id in self.input_batch.req_ids[: self.input_batch.num_reqs]
+            if req_id is not None
+        )
+        for req_id in tuple(self._compressor_sp_rotation_state):
+            if req_id not in active_req_ids:
+                self._compressor_sp_rotation_state.pop(req_id, None)
+
+        query_starts = self.query_start_loc.cpu[: num_reqs + 1].tolist()
+        query_lens = [
+            query_starts[index + 1] - query_starts[index]
+            for index in range(num_reqs)
+        ]
+        seq_ends = self.optimistic_seq_lens_cpu[:num_reqs].tolist()
+        request_starts = [
+            seq_ends[index] - query_lens[index] for index in range(num_reqs)
+        ]
+        prompt_lens = self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs].tolist()
+        prefill_continues_real = tuple(
+            seq_ends[index] < prompt_lens[index] for index in range(num_reqs)
+        )
+        prefill_continues = prefill_continues_real + (False,) * (
+            num_reqs_padded - num_reqs
+        )
+
+        tp_size = self.parallel_config.tensor_parallel_size
+        rank_offsets: list[int] = []
+        rotation_chain_valid = num_reqs > 0
+        had_rotation_chain = True
+        for req_id, request_start in zip(req_ids[:num_reqs], request_starts):
+            entry = self._compressor_sp_rotation_state.get(req_id)
+            had_rotation_chain &= entry is not None
+            if entry is None:
+                if request_start != 0:
+                    rotation_chain_valid = False
+                rank_offsets.append(0)
+            elif request_start == entry[0]:
+                rank_offsets.append(entry[1])
+            elif request_start == entry[2]:
+                rank_offsets.append(entry[3])
+            else:
+                rotation_chain_valid = False
+                rank_offsets.append(0)
+
+        remaining_prompt_tokens = [
+            prompt_lens[index] - seq_ends[index] for index in range(num_reqs)
+        ]
+        synchronized_prefill = (
+            num_reqs > 0
+            and bool(is_prefilling[:num_reqs].all().item())
+            and len(set(remaining_prompt_tokens)) == 1
+            and len(set(prefill_continues_real)) == 1
+        )
+        starts_rotation = any(prefill_continues_real) and all(
+            query_len >= self.ascend_config.compressor_sp_min_tokens_c4
+            for query_len in query_lens
+        )
+        rotate_compressor_owners = bool(
+            self.use_compress
+            and self.ascend_config.enable_compressor_sp
+            and tp_size > 1
+            and rotation_chain_valid
+            and synchronized_prefill
+            and (had_rotation_chain or starts_rotation)
+        )
+        if rotate_compressor_owners:
+            for index, req_id in enumerate(req_ids[:num_reqs]):
+                tokens_per_rank = (query_lens[index] + tp_size - 1) // tp_size
+                tail_logical_rank = min(
+                    (query_lens[index] - 1) // tokens_per_rank,
+                    tp_size - 1,
+                )
+                next_owner = (rank_offsets[index] + tail_logical_rank) % tp_size
+                self._compressor_sp_rotation_state[req_id] = (
+                    request_starts[index],
+                    rank_offsets[index],
+                    seq_ends[index],
+                    next_owner,
+                )
+        rank_offsets.extend([0] * (num_reqs_padded - num_reqs))
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
@@ -3021,6 +3109,11 @@ class NPUModelRunner(GPUModelRunner):
                 if self._offload_token_to_req is not None
                 else None
             ),
+            req_ids=req_ids,
+            active_req_ids=active_req_ids,
+            prefill_continues=prefill_continues,
+            compressor_sp_rank_offsets=tuple(rank_offsets),
+            compressor_sp_rotate_owners=rotate_compressor_owners,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
