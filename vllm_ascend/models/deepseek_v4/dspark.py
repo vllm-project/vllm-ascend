@@ -72,16 +72,16 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 class DSparkMarkovHead(nn.Module):
     def __init__(self, config: PretrainedConfig, prefix: str) -> None:
         super().__init__()
-        self.markov_w1 = VocabParallelEmbedding(
+        self.markov_w1 = nn.Embedding(
             config.vocab_size,
             config.dspark_markov_rank,
-            prefix=f"{prefix}.markov_w1",
         )
         self.markov_w2 = ParallelLMHead(
             config.vocab_size,
             config.dspark_markov_rank,
             org_num_embeddings=config.vocab_size,
             prefix=f"{prefix}.markov_w2",
+            disable_tp=True,
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
