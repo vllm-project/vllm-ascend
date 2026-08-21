@@ -19,59 +19,19 @@ import dataclasses
 import importlib.util
 import json
 import os
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, overload
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
-from pydantic.dataclasses import dataclass as pydantic_dataclass
-from pydantic.fields import Field as PydanticField
 from pydantic_core import ArgsKwargs
-from typing_extensions import dataclass_transform
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+
+from vllm_ascend.config_utils import config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-
-ConfigT = TypeVar("ConfigT")
-
-
-@overload
-@dataclass_transform(field_specifiers=(PydanticField,))
-def config(cls: type[ConfigT]) -> type[ConfigT]: ...
-
-
-@overload
-@dataclass_transform(field_specifiers=(PydanticField,))
-def config(*, config: ConfigDict | None = None, **kwargs: Any) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
-
-
-@dataclass_transform(field_specifiers=(PydanticField,))
-def config(
-    cls: type[ConfigT] | None = None,
-    *,
-    config: ConfigDict | None = None,
-    **kwargs: Any,
-) -> type[ConfigT] | Callable[[type[ConfigT]], type[ConfigT]]:
-    """Create a vLLM-compatible config dataclass without importing vllm.config.
-
-    Importing ``vllm.config.utils`` here would first execute
-    ``vllm.config.__init__``. During vLLM platform discovery that package is
-    still initializing, so the import creates a cycle through
-    ``torch_utils -> platforms -> vllm_ascend.platform -> ascend_config``.
-    Keep this wrapper aligned with vLLM's ``config`` decorator while avoiding
-    the package-level import.
-    """
-    merged_config = ConfigDict(extra="forbid")
-    if config is not None:
-        merged_config.update(config)
-
-    def decorator(config_cls: type[ConfigT]) -> type[ConfigT]:
-        return pydantic_dataclass(config_cls, config=merged_config, **kwargs)  # type: ignore[return-value]
-
-    return decorator if cls is None else decorator(cls)
 
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:

@@ -45,9 +45,14 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
-def test_ascend_config_import_does_not_load_vllm_config():
+def test_config_modules_do_not_load_vllm_config():
     """Keep platform discovery from recursing into a partial vllm.config."""
-    code = "import sys; import vllm_ascend.ascend_config; assert 'vllm.config' not in sys.modules"
+    code = (
+        "import sys; import vllm_ascend.config_utils; "
+        "assert 'vllm.config' not in sys.modules; "
+        "import vllm_ascend.ascend_config; "
+        "assert 'vllm.config' not in sys.modules"
+    )
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
