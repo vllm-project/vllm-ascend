@@ -277,7 +277,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
 # NZ conversion policy:
 # - 310P: always convert supported weights to FRACTAL_NZ
-# - non-310P: follow VLLM_ASCEND_ENABLE_NZ
+# - non-310P: follow additional_config.weight_nz_mode
 # - FP32: never convert
 # - meta tensor: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:

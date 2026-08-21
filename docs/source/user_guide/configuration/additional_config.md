@@ -68,7 +68,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `mega_moe_max_tokens`               | int  | `65536` | Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator. When load imbalance causes a rank to receive more tokens than this limit, the excess tokens are dropped and skipped from computation, degrading accuracy. Do not set this too large: workspace memory scales linearly with this value. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
-| `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
+| `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled.|
@@ -227,9 +227,9 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 
 **rl_config**
 
-`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it refreshes the global Ascend configuration on every initialization, forces `AscendConfig.weight_nz_mode=0`, synchronizes `VLLM_ASCEND_ENABLE_NZ=0`, sets `VLLM_SERVER_DEV_MODE=1`, and removes the `expandable_segments` entry from `PYTORCH_NPU_ALLOC_CONF` with an informational log. These fixed RL behaviors are not configurable as `rl_config` sub-fields. When `enabled` is `false`, all other sub-fields are ignored.
+`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it refreshes the global Ascend configuration on every initialization, forces `AscendConfig.weight_nz_mode=0`, sets `VLLM_SERVER_DEV_MODE=1`, and removes the `expandable_segments` entry from `PYTORCH_NPU_ALLOC_CONF` with an informational log. These fixed RL behaviors are not configurable as `rl_config` sub-fields. When `enabled` is `false`, all other sub-fields are ignored.
 
-When RL mode is enabled, its fixed NZ and developer-endpoint settings take precedence over top-level configuration and environment variables. `VLLM_BATCH_INVARIANT=1` remains enabled when `rl_config.enable_batch_invariant` is false.
+When RL mode is enabled, its fixed NZ setting takes precedence over the top-level `weight_nz_mode` configuration. `VLLM_BATCH_INVARIANT=1` remains enabled when `rl_config.enable_batch_invariant` is false.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |

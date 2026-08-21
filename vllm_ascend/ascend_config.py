@@ -196,7 +196,6 @@ class RlConfig:
                 ascend_config.weight_nz_mode,
             )
         ascend_config.weight_nz_mode = 0
-        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
         from vllm_ascend.platform import _disable_expandable_segments
 
@@ -303,7 +302,6 @@ class AscendConfig:
             "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
             "msmonitor_use_daemon": "MSMONITOR_USE_DAEMON",
             "enable_transpose_kv_cache_by_block": "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
-            "weight_nz_mode": "VLLM_ASCEND_ENABLE_NZ",
         }
         for key, env_name in _A_FAMILY.items():
             if key in kw:
