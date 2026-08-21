@@ -79,8 +79,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
-        non_causal_multi_token_decode: bool = False,
-        allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -115,7 +113,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             indexer=ascend_indexer,
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
-            non_causal_multi_token_decode=non_causal_multi_token_decode,
             # extra args
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,

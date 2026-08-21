@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """GLM-5 dense MLA draft model for DSpark speculative decoding on Ascend."""
 
-import json
 from collections.abc import Iterable
-from pathlib import Path
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -21,7 +18,6 @@ from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper, g
 from vllm_ascend.models.llama_eagle3 import get_rotation_matrix, get_rotation_path
 from vllm_ascend.models.qwen3_dspark import DSparkConfidenceHead, process_weight
 
-_GLM5_DSPARK_ARCHITECTURE = "Glm5DSparkForCausalLM"
 _GLM5_DSPARK_MLA_FIELDS = (
     "q_lora_rank",
     "kv_lora_rank",
@@ -29,48 +25,6 @@ _GLM5_DSPARK_MLA_FIELDS = (
     "qk_rope_head_dim",
     "v_head_dim",
 )
-
-
-def _load_original_dspark_config(draft_model_config: Any) -> dict[str, Any]:
-    model_path = Path(getattr(draft_model_config, "hf_config_path", None) or draft_model_config.model)
-    config_path = model_path if model_path.name == "config.json" else model_path / "config.json"
-    try:
-        return json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, json.JSONDecodeError):
-        return {}
-
-
-def normalize_glm5_dspark_config(speculative_config: Any) -> bool:
-    """Restore GLM-5 fields that upstream DSpark normalization overwrites."""
-    draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    if draft_model_config is None:
-        return False
-    hf_config = getattr(draft_model_config, "hf_config", None)
-    if hf_config is None:
-        return False
-
-    raw_config = _load_original_dspark_config(draft_model_config)
-    raw_transformer_config = raw_config.get("transformer_layer_config", {})
-    is_glm5_dspark = (
-        getattr(hf_config, "model_type", None) == "glm5_dspark"
-        or _GLM5_DSPARK_ARCHITECTURE in raw_config.get("architectures", [])
-        or raw_transformer_config.get("model_type") == "glm5_dspark"
-    )
-    if not is_glm5_dspark or not all(getattr(hf_config, name, None) is not None for name in _GLM5_DSPARK_MLA_FIELDS):
-        return False
-
-    hf_config.model_type = "glm5_dspark"
-    hf_config.architectures = [_GLM5_DSPARK_ARCHITECTURE]
-    if not hasattr(hf_config, "sliding_window_non_causal"):
-        hf_config.sliding_window_non_causal = raw_config.get("sliding_window_non_causal", True)
-
-    speculative_config.update_arch_()
-    # vLLM's native-model MLA detection is based on a model-type allowlist.
-    # GLM-5 DSpark is registered by vLLM Ascend and is therefore not present in
-    # that list. Mark the reconstructed architecture explicitly so draft
-    # VllmConfig validation applies MLA DCP rules instead of GQA/MQA rules.
-    draft_model_config.model_arch_config.is_deepseek_mla = True
-    return True
 
 
 def _split_interleaved_cos_sin_cache(rotary_emb: nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
@@ -99,7 +53,6 @@ class Glm5DSparkMLAAttention(DeepseekV2MLAAttention):
         *,
         vllm_config: VllmConfig,
         config,
-        causal: bool,
         quant_config,
         prefix: str,
     ) -> None:
@@ -117,7 +70,6 @@ class Glm5DSparkMLAAttention(DeepseekV2MLAAttention):
             cache_config=vllm_config.cache_config,
             quant_config=quant_config,
             prefix=prefix,
-            non_causal_multi_token_decode=not causal,
         )
         # Ascend's cache writer and the proposer both use the inner attention
         # layer name, implementation, and cache directly.
@@ -143,7 +95,6 @@ class Glm5DSparkDecoderLayer(nn.Module):
         self.self_attn = Glm5DSparkMLAAttention(
             vllm_config=vllm_config,
             config=config,
-            causal=not getattr(config, "sliding_window_non_causal", True),
             quant_config=quant_config,
             prefix=maybe_prefix(layer_prefix, "self_attn"),
         )
@@ -190,16 +141,8 @@ class Glm5DSparkModel(nn.Module):
             raise ValueError("GLM-5 MLA DSpark requires a draft model config.")
         self.config = draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
-        self.causal = not getattr(self.config, "sliding_window_non_causal", True)
 
-        required_mla_fields = (
-            "q_lora_rank",
-            "kv_lora_rank",
-            "qk_nope_head_dim",
-            "qk_rope_head_dim",
-            "v_head_dim",
-        )
-        missing_fields = [name for name in required_mla_fields if getattr(self.config, name, None) is None]
+        missing_fields = [name for name in _GLM5_DSPARK_MLA_FIELDS if getattr(self.config, name, None) is None]
         if missing_fields:
             raise ValueError(f"GLM-5 MLA DSpark config is missing fields: {missing_fields}")
 
@@ -259,9 +202,6 @@ class Glm5DSparkModel(nn.Module):
     def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.context_norm(self.context_proj(hidden_states))
 
-    def get_draft_rope_cos_sin_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return self._rope_cos_cache, self._rope_sin_cache
-
     @torch.inference_mode()
     def precompute_and_store_context_kv(
         self,
@@ -315,10 +255,10 @@ class Glm5DSparkModel(nn.Module):
         return [layer.self_attn.attn.layer_name for layer in self.layers]
 
     def get_draft_attn_causal(self) -> list[bool]:
-        return [self.causal] * len(self.layers)
+        return [True] * len(self.layers)
 
 
-class AscendGlm5DSparkForCausalLM(nn.Module):
+class Glm5DSparkForCausalLM(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             ".gate_proj": (".gate_up_proj", 0),
@@ -365,9 +305,6 @@ class AscendGlm5DSparkForCausalLM(nn.Module):
 
     def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(hidden_states)
-
-    def get_draft_rope_cos_sin_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.model.get_draft_rope_cos_sin_cache()
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return self.model.get_draft_kv_cache_layer_names()

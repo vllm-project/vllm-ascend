@@ -513,54 +513,61 @@ class DCPManager:
         dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
 
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
+        if parallel_drafting:
+            assert is_mla, "Parallel DSpark drafting requires an MLA KV cache."
+            draft_query_lens = query_lens_cpu.to(device=seq_lens.device, dtype=seq_lens.dtype)
+            num_draft_reqs = draft_query_lens.shape[0]
+            draft_base_seq_lens = seq_lens[:num_draft_reqs] - draft_query_lens
+            dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
+
+            local_seq_lens = self._get_dcp_local_seq_lens(seq_lens[:num_draft_reqs])
+            dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
+            dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
+
+            mask = self.generate_mtp_attention_mask_for_decode(
+                draft_base_seq_lens.to("cpu").tolist(),
+                query_lens_cpu[:num_draft_reqs].numpy(),
+                num_decode_reqs=num_draft_reqs,
+            )
+            self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
+            self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
+            dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
+            common_attn_metadata.context_parallel_metadata = dcp_metadata
+
+            if common_attn_metadata.is_prefilling is not None:
+                common_attn_metadata.is_prefilling = torch.zeros_like(common_attn_metadata.is_prefilling)
+            return
+
         if is_mla:
-            if parallel_drafting:
-                # The parallel drafter has already removed rejected tokens
-                # from seq_lens and appended the whole proposal query block.
-                draft_query_lens = query_lens_cpu.to(
+            if dcp_metadata.draft_base_seq_lens is None:
+                local_seq_lens = torch.as_tensor(
+                    dcp_metadata.num_computed_tokens_of_dcp,
                     device=seq_lens.device,
-                    dtype=seq_lens.dtype,
                 )
-                num_draft_reqs = draft_query_lens.shape[0]
-                draft_base_seq_lens = seq_lens[:num_draft_reqs] - draft_query_lens
-                dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
-            else:
-                if dcp_metadata.draft_base_seq_lens is None:
-                    local_seq_lens = torch.as_tensor(
-                        dcp_metadata.num_computed_tokens_of_dcp,
-                        device=seq_lens.device,
+                draft_base_seq_lens = local_seq_lens.sum(dim=-1)
+                if original_is_prefilling is not None:
+                    is_prefilling = original_is_prefilling[: draft_base_seq_lens.shape[0]].to(
+                        device=draft_base_seq_lens.device
                     )
-                    draft_base_seq_lens = local_seq_lens.sum(dim=-1)
-                    if original_is_prefilling is not None:
-                        is_prefilling = original_is_prefilling[: draft_base_seq_lens.shape[0]].to(
-                            device=draft_base_seq_lens.device
-                        )
-                        prefill_query_lens = original_query_lens_cpu[: draft_base_seq_lens.shape[0]].to(
-                            device=draft_base_seq_lens.device,
-                            dtype=draft_base_seq_lens.dtype,
-                        )
-                        draft_base_seq_lens = draft_base_seq_lens + torch.where(
-                            is_prefilling,
-                            prefill_query_lens,
-                            0,
-                        )
-                    dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
+                    prefill_query_lens = original_query_lens_cpu[: draft_base_seq_lens.shape[0]].to(
+                        device=draft_base_seq_lens.device,
+                        dtype=draft_base_seq_lens.dtype,
+                    )
+                    draft_base_seq_lens = draft_base_seq_lens + torch.where(
+                        is_prefilling,
+                        prefill_query_lens,
+                        0,
+                    )
+                dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
             seq_lens_for_dcp = dcp_metadata.draft_base_seq_lens
-            if parallel_drafting:
-                seq_lens_for_dcp = seq_lens_for_dcp + draft_query_lens
         else:
             seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
-        if not parallel_drafting:
-            seq_lens_for_dcp = seq_lens_for_dcp + draft_index + 1
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp)
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
         if is_mla and getattr(self, "speculative_config", None) is not None:
             num_draft_reqs = query_lens_cpu.shape[0]
-            draft_histories = dcp_metadata.draft_base_seq_lens[:num_draft_reqs]
-            if not parallel_drafting:
-                draft_histories = draft_histories + draft_index
-            draft_histories = draft_histories.to("cpu")
+            draft_histories = (dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
             mask = self.generate_mtp_attention_mask_for_decode(
                 draft_histories.tolist(),
                 query_lens_cpu[:num_draft_reqs].numpy(),
