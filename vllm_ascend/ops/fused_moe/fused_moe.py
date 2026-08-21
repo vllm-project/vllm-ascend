@@ -201,6 +201,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
+            shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
@@ -214,7 +215,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 # increase with extra hidden states. We also assume that all gate
                 # linear is unquantized so that we the weight is pre-casted in
                 # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                hidden_states_fp32 = hidden_states.float()
+                hidden_states_fp32 = shared_hidden_states.float()
                 before_routed_experts = torch.npu.current_stream().record_event()
                 router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                 after_routed_experts = torch.npu.current_stream().record_event()
@@ -231,7 +232,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             fused_moe_events.after_routed_experts = after_routed_experts
 
             shared_out = self.ascend_shared_experts.forward(
-                hidden_states,
+                shared_hidden_states,
                 fused_moe_events,
             )
             return shared_out, routed_out

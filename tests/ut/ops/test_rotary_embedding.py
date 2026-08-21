@@ -21,6 +21,7 @@ import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
+from vllm_ascend.ops import rotary_embedding as rotary_embedding_ops
 from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
 
 HEAD_SIZE = 64
@@ -30,6 +31,26 @@ BASE = 10000.0
 DTYPE = torch.bfloat16
 SEQ_LEN = 4
 NUM_HEADS = 2
+
+
+def test_get_cos_and_sin_mla_skips_rotary_cache_for_no_rope(monkeypatch):
+    cos_buffer = torch.ones(4, 1, 1, ROTARY_DIM)
+    sin_buffer = torch.zeros(4, 1, 1, ROTARY_DIM)
+    monkeypatch.setattr(rotary_embedding_ops, "_cos_mla", cos_buffer)
+    monkeypatch.setattr(rotary_embedding_ops, "_sin_mla", sin_buffer)
+    monkeypatch.setattr(rotary_embedding_ops, "_cos_cache", None)
+    monkeypatch.setattr(rotary_embedding_ops, "_sin_cache", None)
+
+    cos, sin = rotary_embedding_ops.get_cos_and_sin_mla(
+        torch.tensor([1, 3]),
+        use_cache=True,
+        apply_rope=False,
+    )
+
+    assert cos.data_ptr() == cos_buffer.data_ptr()
+    assert sin.data_ptr() == sin_buffer.data_ptr()
+    torch.testing.assert_close(cos, torch.ones_like(cos))
+    torch.testing.assert_close(sin, torch.zeros_like(sin))
 
 
 def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):

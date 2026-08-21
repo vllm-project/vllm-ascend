@@ -7,8 +7,10 @@ import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
+from vllm.config import VllmConfig, set_current_vllm_config
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.activation import AscendSituAndMul
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
@@ -760,6 +762,150 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     torch.testing.assert_close(output, expected)
 
 
+def test_shared_expert_consistency_uses_projection_input_width(monkeypatch):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.hidden_size = 3584
+    shared_experts.shared_expert_input_size = 7168
+    shared_experts.in_dtype = torch.float16
+    output = torch.ones(10, 7168)
+    shared_experts.layer = MagicMock(return_value=output)
+    shared_experts.part1 = MagicMock(return_value=output)
+    shared_experts.part2 = MagicMock(return_value=output)
+    random_input = torch.ones(10, 7168)
+    random = MagicMock(return_value=random_input)
+    monkeypatch.setattr(shared_experts_module.torch, "rand", random)
+
+    shared_experts.validate_consistency()
+
+    random.assert_called_once_with(
+        10,
+        7168,
+        device="npu",
+        dtype=torch.float16,
+    )
+    shared_experts.layer.assert_called_once()
+    torch.testing.assert_close(
+        shared_experts.layer.call_args.args[0],
+        random_input,
+    )
+
+
+def _make_quantized_situ_shared_experts(quant_type, gate_up_proj, down_proj):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.layer = SimpleNamespace(
+        gate_up_proj=gate_up_proj,
+        down_proj=down_proj,
+    )
+    shared_experts.multistream_overlap = False
+    shared_experts.quant_type = quant_type
+    with set_current_vllm_config(VllmConfig()):
+        shared_experts.situ_activation = AscendSituAndMul(beta=4.0, linear_beta=25.0)
+    shared_experts.lora_context = None
+    shared_experts.parallel_mode = MagicMock(
+        return_value=SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF,
+    )
+    return shared_experts
+
+
+def _make_shared_expert_events():
+    event = MagicMock()
+    return FusedMoEEvents(
+        before_routed_experts=event,
+        after_routed_experts=event,
+        before_dispatch=event,
+        before_gmm2=event,
+        before_combine=event,
+    )
+
+
+def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
+    gate_up_proj = SimpleNamespace(
+        weight=torch.ones(4, 4, dtype=torch.int8),
+        weight_scale=torch.ones(4),
+        weight_scale_fp32=torch.ones(4),
+    )
+    down_proj = SimpleNamespace(
+        weight=torch.ones(2, 4, dtype=torch.int8),
+        weight_scale=torch.ones(2),
+    )
+    shared_experts = _make_quantized_situ_shared_experts(QuantType.W8A8, gate_up_proj, down_proj)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.ones(2, 4, dtype=torch.int32)
+    quantized_situ = torch.ones(2, 2, dtype=torch.int8)
+    situ_scale = torch.ones(2)
+    expected = torch.randn(2, 2, dtype=torch.bfloat16)
+    dequant_situ_quant = MagicMock(return_value=(quantized_situ, situ_scale))
+
+    monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        shared_experts_module.torch_npu,
+        "npu_dynamic_quant",
+        MagicMock(return_value=(quantized_input, input_scale)),
+    )
+    monkeypatch.setattr(
+        shared_experts_module.torch_npu,
+        "npu_quant_matmul",
+        MagicMock(side_effect=[gate_up_out, expected]),
+    )
+    monkeypatch.setattr(
+        shared_experts_module.torch.ops,
+        "_C_ascend",
+        SimpleNamespace(dequant_situ_quant=dequant_situ_quant),
+    )
+
+    output = shared_experts.forward(hidden_states, _make_shared_expert_events())
+
+    assert output is expected
+    situ_kwargs = dequant_situ_quant.call_args.kwargs
+    assert situ_kwargs["x"] is gate_up_out
+    assert situ_kwargs["beta"] == 4.0
+    assert situ_kwargs["linear_beta"] == 25.0
+
+
+def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
+    quantized_input = torch.ones(2, 4, dtype=torch.float8_e4m3fn)
+    input_scale = torch.ones(2, 1)
+    gate_up_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    quantized_situ = torch.ones(2, 2, dtype=torch.float8_e4m3fn)
+    situ_scale = torch.ones(2, 1)
+    expected = torch.randn(2, 2, dtype=torch.bfloat16)
+    gate_up_proj = MagicMock(return_value=(gate_up_out, None))
+    gate_up_proj.weight_scale = torch.ones(1)
+    down_proj = MagicMock(return_value=(expected, None))
+    down_proj.weight_scale = torch.ones(1)
+    shared_experts = _make_quantized_situ_shared_experts(QuantType.W4A8MXFP, gate_up_proj, down_proj)
+    situ_mx_quant = MagicMock(return_value=(quantized_situ, situ_scale))
+
+    monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        shared_experts_module.torch_npu,
+        "npu_dynamic_mx_quant",
+        MagicMock(return_value=(quantized_input, input_scale)),
+    )
+    monkeypatch.setattr(
+        shared_experts_module.torch.ops,
+        "_C_ascend",
+        SimpleNamespace(situ_mx_quant=situ_mx_quant),
+    )
+
+    output = shared_experts.forward(torch.randn(2, 4, dtype=torch.bfloat16), _make_shared_expert_events())
+
+    assert output is expected
+    situ_kwargs = situ_mx_quant.call_args.kwargs
+    assert situ_kwargs["x"] is gate_up_out
+    assert situ_kwargs["beta"] == 4.0
+    assert situ_kwargs["linear_beta"] == 25.0
+    assert situ_kwargs["dst_type"] == shared_experts_module.SITU_MX_DST_TYPE_E4M3FN
+
+
 @pytest.mark.parametrize(
     (
         "enable_flashcomm1",
@@ -992,3 +1138,53 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
         )
         assert result is routed_out
         ascend_shared_experts.forward.assert_not_called()
+
+
+def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    routed_hidden_states = torch.randn(2, 4)
+    shared_hidden_states = torch.randn(2, 8)
+    router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    shared_out = torch.randn(2, 8)
+    routed_events = FusedMoEEvents(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
+    )
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, routed_events)))
+    runner.ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    current_stream = MagicMock()
+
+    monkeypatch.setattr(
+        AscendMoERunner,
+        "is_internal_router",
+        property(lambda _: False),
+    )
+    monkeypatch.setattr(
+        fused_moe_module.torch.npu,
+        "current_stream",
+        lambda: current_stream,
+    )
+
+    result = runner._forward_impl(
+        routed_hidden_states,
+        router_logits,
+        shared_experts_input=shared_hidden_states,
+    )
+
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=routed_hidden_states,
+        router_logits=router_logits,
+        input_ids=None,
+    )
+    runner.ascend_shared_experts.forward.assert_called_once_with(
+        shared_hidden_states,
+        routed_events,
+    )
+    assert result[0] is shared_out
+    assert result[1] is routed_out

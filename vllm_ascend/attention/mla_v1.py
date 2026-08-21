@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -198,10 +198,19 @@ class AscendMLAMetadata:
     attn_mask: torch.Tensor = None
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
+    causal: bool = True
 
     decode: AscendMLADecodeMetadata | None = None
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
+
+    # Async parallel drafting publishes optimistic host KV lengths while a
+    # side stream copies this step's reject counts. The first FIA layer
+    # finalizes the host list once; layers sharing this metadata reuse it.
+    pending_reject_cpu: torch.Tensor | None = None
+    pending_reject_event: Any = None
+    pending_reject_num_reqs: int = 0
+    reject_finalized: bool = False
 
     def __post_init__(self):
         pass
@@ -211,6 +220,33 @@ class AscendMLAMetadata:
         #     raise ValueError(
         #         f"Only {supported_head_sizes} are supported for head_dim,",
         #         f"received {self.head_dim}.")
+
+
+def _finalize_pending_parallel_draft_rejects(
+    attn_metadata: AscendMLAMetadata,
+) -> None:
+    """Finalize the host KV lengths consumed by MLA FIA exactly once."""
+    num_reqs = attn_metadata.pending_reject_num_reqs
+    if num_reqs <= 0 or attn_metadata.reject_finalized:
+        return
+
+    event = attn_metadata.pending_reject_event
+    counts_cpu = attn_metadata.pending_reject_cpu
+    decode_meta = attn_metadata.decode
+    if event is None or counts_cpu is None or decode_meta is None:
+        raise RuntimeError("Incomplete deferred reject metadata for MLA parallel drafting")
+    if len(decode_meta.seq_lens_list) < num_reqs:
+        raise RuntimeError(
+            "MLA parallel-draft reject metadata has more requests than sequence lengths: "
+            f"{num_reqs} > {len(decode_meta.seq_lens_list)}"
+        )
+
+    event.synchronize()
+    reject_counts = counts_cpu[:num_reqs].tolist()
+    for req_idx, reject_count in enumerate(reject_counts):
+        decode_meta.seq_lens_list[req_idx] -= reject_count
+
+    attn_metadata.reject_finalized = True
 
 
 M = TypeVar("M", bound=AscendMLAMetadata)
@@ -260,6 +296,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+        static_forward_context = vllm_config.compilation_config.static_forward_context
+        layer_rope_modes = {static_forward_context[layer_name].impl.use_mla_rope for layer_name in layer_names}
+        if len(layer_rope_modes) > 1:
+            raise ValueError("An MLA cache group cannot mix RoPE and no-RoPE layers.")
+        self.use_mla_rope = layer_rope_modes.pop() if layer_rope_modes else True
         self.cos_cache = None
         self.sin_cache = None
 
@@ -440,9 +481,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
+        if common_attn_metadata.parallel_draft_seq_lens_cpu is not None:
+            self.seq_lens = common_attn_metadata.parallel_draft_seq_lens_cpu[:num_reqs]
         # Prefer _seq_lens_cpu (always available, updated during draft
         # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
+        elif common_attn_metadata._seq_lens_cpu is not None:
             self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
@@ -471,12 +514,17 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             num_prefills=self.num_prefills,
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             attn_state=common_attn_metadata.attn_state,
+            causal=common_attn_metadata.causal,
             prefill=prefill_metadata,
             decode=decode_metadata,
             query_start_loc=query_start_loc,
             block_tables=self.block_table,
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
+            pending_reject_cpu=common_attn_metadata.parallel_draft_num_reject_cpu,
+            pending_reject_event=common_attn_metadata.parallel_draft_num_reject_event,
+            pending_reject_num_reqs=common_attn_metadata.parallel_draft_num_reject_num_reqs,
+            reject_finalized=False,
         )
 
     def build_chunked_metadata(
@@ -553,7 +601,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         prefill_query_start_loc = query_start_loc[reqs_start:] - query_start_loc[reqs_start]
 
         prefill_input_positions = input_positions[tokens_start:]
-        cos, sin = get_cos_and_sin_mla(prefill_input_positions)
+        cos, sin = get_cos_and_sin_mla(
+            prefill_input_positions,
+            apply_rope=self.use_mla_rope,
+        )
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
         actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
         return AscendMLAPrefillMetadata(
@@ -637,7 +688,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
                 )
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+        cos, sin = get_cos_and_sin_mla(
+            input_positions,
+            use_cache=True,
+            apply_rope=self.use_mla_rope,
+        )
         decode_metadata = self.decode_metadata_cls(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -687,6 +742,17 @@ class PrefillMLAPreprocessResult(NamedTuple):
     value: torch.Tensor | None = None
 
 
+def _apply_output_gate(o_proj_input: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    """Align an MLA output gate with the rank-local FlashComm token shard."""
+    gate = torch.ops.vllm.maybe_chunk_residual(o_proj_input, gate)
+    return o_proj_input.mul_(torch.sigmoid(gate))
+
+
+def _project_output_gate(g_proj: torch.nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Project the local token shard; the parallel linear owns its gather."""
+    return g_proj(hidden_states.contiguous())[0]
+
+
 class AscendMLAImpl(MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -726,6 +792,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
+        self.g_proj = kwargs["g_proj"]
+        self.use_output_gate = self.g_proj is not None
+        self.use_mla_rope = kwargs["use_mla_rope"]
         self.vllm_config = get_current_vllm_config()
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -751,6 +820,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         # next power of 2.
         self.num_heads_padded = 1 << (self.num_heads - 1).bit_length()
         self.head_padding = self.num_heads_padded - self.num_heads
+        self.mlapo_num_heads = self.num_heads
+        self.mlapo_weight_quant_mode = 3
 
     @staticmethod
     def update_graph_params(
@@ -814,15 +885,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                 else:
                     attn_metadata_current = attn_metadata
 
-                seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
+                layer_metadata = attn_metadata_current[key]
+                # Full-graph replay bypasses the Python attention forward.
+                _finalize_pending_parallel_draft_rejects(layer_metadata)
+                seq_lens_list = layer_metadata.decode.seq_lens_list
                 if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
+                    actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
                     actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
                 elif _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
-                    block_table = attn_metadata_current[key].decode.block_table
+                    actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
+                    block_table = layer_metadata.decode.block_table
                     # TODO: This is a hack and should be fixed in the future.
                     if speculative_config.disable_padded_drafter_batch:
                         block_table = block_table[: len(actual_seq_lengths)]
@@ -938,26 +1012,36 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
+        self.mlapo_W_UK_T = self.W_UK_T
 
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
         if self.enable_mlapo:
-            # Currently mlapo only supports W8A8 and W8A8MXFP8 quantization in MLA scenario
-            # TODO(whx): modify this limitation when mlapo supports floating point
-            if self.fused_qkv_a_proj is None or (
-                not isinstance(
-                    getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
-                )
-                and not isinstance(
-                    getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None),
-                    AscendW8A8MXFP8DynamicLinearMethod,
-                )
-            ):
+            device_type = get_ascend_device_type()
+            layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
+            if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
+                quant_method = None
+            else:
+                # Quantized Ascend linears always expose their concrete scheme
+                # through AscendLinearMethod.quant_method. Let an unsupported
+                # wrapper fail here instead of silently disabling MLAPO.
+                quant_method = layer_quant_method.quant_method
+            self._mlapo_quant_type = type(quant_method) if quant_method is not None else None
+            supports_quantized_weights = isinstance(
+                quant_method,
+                (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+            )
+            supports_native_weights = device_type == AscendDeviceType.A5 and isinstance(
+                layer_quant_method,
+                UnquantizedLinearMethod,
+            )
+            if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
-                    "mlapo only supports W8A8 quantization in MLA. "
-                    "Some layers not W8A8 quantized, mlapo disabled for these layers."
+                    "MLAPO supports W8A8/W8A8-MXFP8 weights, plus native "
+                    "floating-point weights on A5. Some layers use an "
+                    "unsupported weight type, so MLAPO is disabled for these layers."
                 )
         if self.enable_mlapo:
             if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1069,24 +1153,62 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
         assert self.fused_qkv_a_proj is not None
 
-        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
+        is_native = self._mlapo_quant_type is None
+        fused_weight = self.fused_qkv_a_proj.weight.data
+        if is_native:
+            # Native Linear stores [out_features, in_features], while the
+            # prolog consumes [in_features, out_features].
+            fused_weight = fused_weight.T
+
+        weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
 
-        weight_uq_qr = self.q_proj.weight.data.contiguous()
-        self.weight_uq_qr_scale = self.q_proj.weight_scale.data.transpose(0, 1)
-        self.weight_uq_qr_scale = self.weight_uq_qr_scale.reshape(
-            -1, self.weight_uq_qr_scale.shape[1] * self.weight_uq_qr_scale.shape[2]
-        )
+        weight_uq_qr = self.q_proj.weight.data
+        if is_native:
+            weight_uq_qr = weight_uq_qr.T.contiguous()
+            if self.head_padding > 0:
+                weight_uq_qr = weight_uq_qr.view(
+                    self.q_lora_rank,
+                    self.num_heads,
+                    self.qk_head_dim,
+                )
+                weight_uq_qr = F.pad(
+                    weight_uq_qr,
+                    (0, 0, 0, self.head_padding),
+                )
+                weight_uq_qr = weight_uq_qr.view(
+                    self.q_lora_rank,
+                    self.num_heads_padded * self.qk_head_dim,
+                )
+        weight_uq_qr = weight_uq_qr.contiguous()
         self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
 
-        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
+        weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
-        weight_scale = self.fused_qkv_a_proj.weight_scale
-        weight_scale = weight_scale.transpose(0, 1)
-        weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
-        self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
-        self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
+        self.mlapo_weight_quant_mode = 0 if is_native else 3
+        if is_native:
+            self.mlapo_num_heads = self.num_heads_padded
+            if self.head_padding > 0:
+                self.mlapo_W_UK_T = F.pad(
+                    self.W_UK_T,
+                    (0, 0, 0, 0, 0, self.head_padding),
+                )
+        else:
+            weight_uq_qr_scale = self.q_proj.weight_scale.data.transpose(0, 1)
+            self.weight_uq_qr_scale = weight_uq_qr_scale.reshape(
+                -1,
+                weight_uq_qr_scale.shape[1] * weight_uq_qr_scale.shape[2],
+            )
+
+            weight_scale = self.fused_qkv_a_proj.weight_scale
+            weight_scale = weight_scale.transpose(0, 1)
+            weight_scale = weight_scale.reshape(
+                -1,
+                weight_scale.shape[1] * weight_scale.shape[2],
+            )
+            self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
+            self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
         if self.fa_quant_layer:
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
             self.quant_kscale = layer.quant_kscale
@@ -1293,6 +1415,37 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         return attn_output
 
+    def _exec_kv_no_rope(
+        self,
+        kv_no_split: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalize and cache K3 MLA KV without rotating its raw slice."""
+        assert self.kv_a_layernorm is not None
+        assert len(kv_cache) > 1
+        num_tokens = kv_no_split.shape[0]
+        kv_no_split = kv_no_split.view(
+            num_tokens,
+            self.num_kv_heads,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+        )
+        kv_c, k_pe = kv_no_split.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1,
+        )
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
+        k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
+        DeviceOperator.reshape_and_cache(
+            key=kv_c_normed,
+            value=k_pe,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slots,
+        )
+        return k_pe, kv_c_normed
+
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1301,6 +1454,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
+        if not self.use_mla_rope:
+            self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+            return kv_cache[1], kv_cache[0]
+
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1333,6 +1490,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
+        if not self.use_mla_rope:
+            return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1364,6 +1524,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        if not self.use_mla_rope:
+            return x
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
@@ -1382,6 +1544,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        _finalize_pending_parallel_draft_rejects(attn_metadata)
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
@@ -1433,8 +1596,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                 q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, dim]
             attn_output_shape = (self.num_heads_padded, num_tokens, self.kv_lora_rank)
-            sparse_mode = 3
-            attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            if not attn_metadata.causal:
+                # K3's DSpark draft block is bidirectional. With FIA this is
+                # sparse_mode=0 and no mask; a default mask here would hide the
+                # upper triangle and silently make the draft causal.
+                sparse_mode = 0
+                attn_mask = None
+            else:
+                sparse_mode = 3
+                attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
@@ -1577,6 +1747,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         return self._v_up_proj(attn_output)
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
+        if self.mlapo_num_heads > self.num_heads:
+            decode_q_nope = decode_q_nope[:, : self.num_heads]
+            decode_q_pe = decode_q_pe[:, : self.num_heads]
         return decode_q_nope, decode_q_pe
 
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata):
@@ -1723,15 +1896,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
         o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
+        gate = None
+        if self.use_output_gate:
+            assert self.g_proj is not None
+            gate = _project_output_gate(self.g_proj, hidden_states)
+
         # MLA Preprocess
-        if (self.fa_quant_layer or self.enable_mlapo) and (
-            attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0
+        can_use_decode_prolog = self.use_mla_rope or get_ascend_device_type() == AscendDeviceType.A5
+        if (
+            (self.fa_quant_layer or self.enable_mlapo)
+            and can_use_decode_prolog
+            and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            and attn_metadata.num_prefills == 0
         ):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
             decode_preprocess_res, prefill_preprocess_res = DeviceOperator.mla_preprocess_only_decode(
-                self, hidden_states, kv_cache, attn_metadata
+                self,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                use_mla_rope=self.use_mla_rope,
             )
         else:
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
@@ -1766,6 +1952,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
+        if gate is not None:
+            _apply_output_gate(o_proj_input, gate)
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 

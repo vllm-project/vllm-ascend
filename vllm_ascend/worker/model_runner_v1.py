@@ -394,6 +394,9 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # reinit valid_sampled_token_count_cpu with torch.int64 dtype
+        self.num_rejected_tokens_cpu: torch.Tensor | None = None
+        self.num_rejected_tokens_event: torch.npu.Event | None = None
+        self.num_rejected_tokens_copy_stream = None
         if self.use_async_scheduling and self.num_spec_tokens:
             self.valid_sampled_token_count_cpu = torch.empty(
                 self.max_num_reqs,
@@ -401,6 +404,14 @@ class NPUModelRunner(GPUModelRunner):
                 device="cpu",
                 pin_memory=self.pin_memory,
             )
+            self.num_rejected_tokens_cpu = torch.empty(
+                self.max_num_reqs,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
+            self.num_rejected_tokens_event = torch.npu.Event()
+            self.num_rejected_tokens_copy_stream = torch.npu.Stream()
 
         try:
             self.dcp_size = get_dcp_group().world_size
@@ -1447,6 +1458,25 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
+    def _copy_num_rejected_tokens(self, num_rejected_tokens_gpu: torch.Tensor) -> None:
+        """Copy current reject counts to pinned host memory on a side stream."""
+        event = self.num_rejected_tokens_event
+        copy_stream = self.num_rejected_tokens_copy_stream
+        counts_cpu = self.num_rejected_tokens_cpu
+        if event is None:
+            return
+        assert copy_stream is not None and counts_cpu is not None
+
+        default_stream = torch.npu.current_stream()
+        with torch.npu.stream(copy_stream):
+            copy_stream.wait_stream(default_stream)
+            num_reqs = num_rejected_tokens_gpu.shape[0]
+            counts_cpu[:num_reqs].copy_(
+                num_rejected_tokens_gpu[:num_reqs],
+                non_blocking=True,
+            )
+            event.record()
+
     def propose_draft_token_ids(
         self,
         valid_sampled_token_ids: torch.Tensor | list[list[int]],
@@ -1630,6 +1660,8 @@ class NPUModelRunner(GPUModelRunner):
                             common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
                         )
                     )
+                if num_rejected_tokens_gpu is not None:
+                    self._copy_num_rejected_tokens(num_rejected_tokens_gpu)
                 target_token_ids = self.input_ids.gpu[token_indices]
                 target_positions = self._get_positions(token_indices)
                 if self.use_aux_hidden_state_outputs:
@@ -2760,10 +2792,15 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        # A one-token chunk can still be prefill at a P/D handoff. Decode graph
+        # replay is valid only after every prompt has been fully computed.
+        is_all_decode = np.all(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            >= self.input_batch.num_prompt_tokens[:num_reqs]
+        )
         uniform_decode = (
             (
-                (is_all_decode if self.speculative_config else True)
+                is_all_decode
                 and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
@@ -3694,10 +3731,26 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter,
                 AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
             )
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
-        
+            if isinstance(self.drafter, AscendDSparkProposer):
+                if isinstance(self.kernel_block_sizes, list):
+                    draft_kernel_block_sizes = [
+                        int(sizes[0] if isinstance(sizes, (list, tuple)) else sizes)
+                        for sizes in self.kernel_block_sizes
+                    ]
+                else:
+                    draft_kernel_block_sizes = [int(self.kernel_block_sizes)]
+                self.drafter.initialize_attn_backend(
+                    kv_cache_config,
+                    draft_kernel_block_sizes,
+                )
+            else:
+                block_size = (
+                    self.kernel_block_sizes[0]
+                    if isinstance(self.kernel_block_sizes, list)
+                    else self.kernel_block_sizes
+                )
+                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+
         if (
             self.speculative_config
             and self.speculative_config.uses_extract_hidden_states()
@@ -4755,6 +4808,7 @@ class NPUModelRunner(GPUModelRunner):
                         head_size=head_size,
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
+                        non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                     )
                     attn_layer_names.add(layer_name)
 

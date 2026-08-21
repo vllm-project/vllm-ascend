@@ -78,6 +78,7 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 #       swapped inside _balance_run_engine_core only when balance is enabled)
 from vllm_ascend.patch.platform import patch_dyntra_lb_core as _dyntra_patch  # noqa: E402
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
+    AscendKVCacheManager,
     BalanceScheduler,
     _balance_run_engine_core,
     _balance_scheduling_enabled,
@@ -132,6 +133,32 @@ def test_balance_config_fallback_accepts_legacy_top_level_config():
 
     with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
         assert _balance_scheduling_enabled(vllm_config) is True
+
+
+@pytest.mark.parametrize(
+    "params",
+    [None, {"do_remote_decode": True}],
+)
+def test_non_consumer_requests_use_all_group_prefix_lookup(monkeypatch, params):
+    manager = AscendKVCacheManager.__new__(AscendKVCacheManager)
+    request = SimpleNamespace(kv_transfer_params=params)
+    expected = (object(), 64, 32)
+    monkeypatch.setattr(manager, "get_computed_blocks", lambda actual: expected)
+
+    assert manager.get_computed_blocks_for_connector(request) == (*expected, False)
+
+
+def test_remote_prefill_consumer_keeps_connector_prefix_lookup(monkeypatch):
+    manager = AscendKVCacheManager.__new__(AscendKVCacheManager)
+    request = SimpleNamespace(kv_transfer_params={"do_remote_prefill": True})
+    expected = (object(), 96, 0, True)
+    monkeypatch.setattr(
+        AscendKVCacheManager.__bases__[0],
+        "get_computed_blocks_for_connector",
+        lambda self, actual: expected,
+    )
+
+    assert manager.get_computed_blocks_for_connector(request) == expected
 
 
 @pytest.mark.parametrize("balance_enabled", [False, True])
@@ -458,6 +485,9 @@ def test_module_level_swaps_and_wrapper_chain_take_effect():
     """
     assert _upstream_sched_mod.Scheduler is BalanceScheduler, (
         "patch did not rebind vllm.v1.core.sched.scheduler.Scheduler"
+    )
+    assert _upstream_sched_mod.KVCacheManager is AscendKVCacheManager, (
+        "patch did not install the request-aware KVCacheManager"
     )
     # DPEngineCoreProc is NOT swapped at import -- it stays pristine and is
     # swapped inside _balance_run_engine_core only when balance is enabled.

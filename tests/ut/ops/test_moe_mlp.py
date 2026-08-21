@@ -7,10 +7,12 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch_npu  # noqa: F401  -- registers torch.npu used by the module under test
 from torch.nn import functional as F
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.activation import AscendSituAndMul
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
@@ -117,6 +119,51 @@ class TestSwigluOaiDynamicMxQuant(unittest.TestCase):
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
+    def test_unquant_situ_uses_upstream_activation_contract(self):
+        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+        gate_up_out = torch.randn(2, 16, dtype=torch.bfloat16)
+        expected_output = torch.randn(2, 8, dtype=torch.bfloat16)
+        with set_current_vllm_config(VllmConfig()):
+            expected_activation = AscendSituAndMul(beta=4.0, linear_beta=25.0).forward_native(gate_up_out)
+
+            with patch(
+                f"{MOE_MLP}.torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up_out], [expected_output]],
+                create=True,
+            ) as grouped_matmul:
+                output, _ = unquant_apply_mlp(
+                    hidden_states=hidden_states,
+                    w1=torch.randn(1, 8, 16),
+                    w2=torch.randn(1, 8, 8),
+                    group_list=torch.tensor([1, 1]),
+                    activation=MoEActivation.SITU,
+                    activation_situ_beta=4.0,
+                    activation_situ_linear_beta=25.0,
+                    need_trans=False,
+                )
+
+        self.assertIs(output, expected_output)
+        torch.testing.assert_close(grouped_matmul.call_args_list[1].kwargs["x"][0], expected_activation)
+
+    def test_quant_situ_dispatches_explicit_beta_parameters(self):
+        expected = torch.randn(2, 8)
+        with patch(f"{MOE_MLP}._w4a8_situ_apply_mlp", return_value=expected) as situ_mlp:
+            output = quant_apply_mlp(
+                hidden_states=torch.randn(2, 8),
+                w1=torch.randn(1, 8, 16),
+                w1_scale=torch.ones(1),
+                w2=torch.randn(1, 8, 8),
+                w2_scale=torch.ones(1),
+                group_list=torch.tensor([1, 1]),
+                activation=MoEActivation.SITU,
+                activation_situ_beta=4.0,
+                activation_situ_linear_beta=25.0,
+            )
+
+        self.assertIs(output, expected)
+        self.assertEqual(situ_mlp.call_args.kwargs["activation_situ_beta"], 4.0)
+        self.assertEqual(situ_mlp.call_args.kwargs["activation_situ_linear_beta"], 25.0)
+
     def test_unquant_swigluoai_uninterleave_falls_back_on_a5(self):
         hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
         gate_up_out = torch.randn(2, 16, dtype=torch.bfloat16)
@@ -405,6 +452,39 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         quant_kwargs = mock_quant.call_args.kwargs
         self.assertEqual(quant_kwargs["activation"], MoEActivation.SWIGLUSTEP)
         self.assertEqual(quant_kwargs["swiglu_limit"], 5.0)
+        mock_unquant.assert_not_called()
+
+    def test_request_quant_path_passes_situ_parameters(self):
+        expected = torch.randn(1, 2)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.ones((1, 2), dtype=torch.float32),
+            group_list=torch.tensor([1], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
+                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
+                w1_scale=[torch.ones((1,), dtype=torch.float32)],
+                w2_scale=[torch.ones((1,), dtype=torch.float32)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=False,
+            activation=MoEActivation.SITU,
+            activation_situ_beta=4.0,
+            activation_situ_linear_beta=25.0,
+        )
+
+        with (
+            patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch(f"{MOE_MLP}.unquant_apply_mlp") as mock_unquant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        self.assertEqual(mock_quant.call_args.kwargs["activation"], MoEActivation.SITU)
+        self.assertEqual(mock_quant.call_args.kwargs["activation_situ_beta"], 4.0)
+        self.assertEqual(mock_quant.call_args.kwargs["activation_situ_linear_beta"], 25.0)
         mock_unquant.assert_not_called()
 
     def test_request_quant_path_passes_gelu_activation(self):

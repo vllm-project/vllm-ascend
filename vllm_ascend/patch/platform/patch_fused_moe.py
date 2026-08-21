@@ -42,6 +42,16 @@ from vllm_ascend.distributed.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
+_KIMI_VENDOR_LATENT_RUNNERS = {
+    (
+        "vllm.models.kimi_k3.amd.latent_moe_runner",
+        "ROCmLatentMoERunner",
+    ),
+    (
+        "vllm.models.kimi_k3.nvidia.latent_moe_runner",
+        "LatentMoERunner",
+    ),
+}
 
 # Capture the real original before fused_moe.py's module-level code runs.
 _original_FusedMoE = _fused_moe_layer.FusedMoEFactory
@@ -138,6 +148,19 @@ def _ascend_FusedMoE(
             tid2eid=hash_indices_table_for_legacy_path,
             eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
         )
+    if (
+        runner_cls is not None
+        and (
+            runner_cls.__module__,
+            runner_cls.__name__,
+        )
+        in _KIMI_VENDOR_LATENT_RUNNERS
+    ):
+        # Kimi's in-tree CUDA/ROCm runners implement vendor-specific latent
+        # tail optimizations.  Passing either class bypasses vLLM's
+        # PluggableLayer dispatch, so leave the runner unspecified and let the
+        # registered AscendMoERunner handle the same input/output transforms.
+        runner_cls = None
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
     routed_experts_args["n_shared_experts"] = n_shared_experts
     if hash_indices_table_for_legacy_path is not None:

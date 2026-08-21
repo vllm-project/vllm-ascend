@@ -66,7 +66,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
@@ -99,6 +99,27 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     if "enable_balance_scheduling" in additional_config:
         return bool(additional_config["enable_balance_scheduling"])
     return False
+
+
+class AscendKVCacheManager(KVCacheManager):
+    """Use partial hybrid cache hits only for remote-prefill consumers.
+
+    vLLM 0.27 moved this connector-specific lookup from ``Scheduler.schedule``
+    into ``KVCacheManager``. A producer or an ordinary local request has no
+    remote Mamba state to complete a partial-group hit, so it must keep using
+    the normal all-group lookup. Remote-prefill consumers retain the upstream
+    connector lookup because their missing state is supplied by the producer.
+    """
+
+    def get_computed_blocks_for_connector(
+        self,
+        request: Request,
+    ) -> tuple[KVCacheBlocks, int, int, bool]:
+        params = request.kv_transfer_params or {}
+        if not params.get("do_remote_prefill", False):
+            blocks, num_local, shared_boundary = self.get_computed_blocks(request)
+            return blocks, num_local, shared_boundary, False
+        return super().get_computed_blocks_for_connector(request)
 
 
 class BalanceScheduler(Scheduler):
@@ -880,6 +901,11 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
         self.scheduler.balance_gather()
         return result
 
+
+# ``Scheduler.__init__`` resolves ``KVCacheManager`` from its module at call
+# time. Keep the producer/local all-group lookup active for both the default
+# scheduler and custom scheduler subclasses used by P/D deployments.
+_sched_mod.KVCacheManager = AscendKVCacheManager
 
 # The scheduler is constructed as ``Scheduler(...)`` from
 # ``vllm.v1.core.sched.scheduler``. This takes effect when scheduler_cls is

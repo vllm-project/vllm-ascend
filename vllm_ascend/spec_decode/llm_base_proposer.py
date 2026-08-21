@@ -26,6 +26,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -59,12 +60,23 @@ from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _disable_flash_comm_v1_context,
     _maybe_eager_context,
+    build_parallel_draft_seq_lens_cpu,
     patch_tensor_parallel_group,
 )
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
+
+_HIDDEN_STATE_DRAFTER_TYPES = (
+    Eagle3LlamaForCausalLM,
+    DFlashQwen3ForCausalLM,
+    Qwen3DSparkForCausalLM,
+    K3DSparkForCausalLM,
+    Eagle3VwnLlamaForCausalLM,
+    Eagle3DeepseekV2ForCausalLM,
+    DSparkDeepseekV4ForCausalLM,
+)
 
 
 # split hidden states along dimension of sequence
@@ -136,7 +148,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return config.image_token_id
         if model_name == "PixtralForConditionalGeneration":
             return config.vision_config.image_token_id
-        if model_name == "KimiK25ForConditionalGeneration":
+        if model_name in {
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        }:
             return config.media_placeholder_token_id
         return config.image_token_index
 
@@ -279,6 +295,176 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _maybe_anti_rotate_draft_projection(self) -> None:
+        """Align a draft hidden-state projection with a QuaRot target."""
+        if self.method not in ("dflash", "dspark"):
+            return
+        # Qwen3 DSpark aligns fc.* in its model-specific weight loader and owns
+        # separate embedding/lm_head weights, so no generic alignment is needed.
+        if isinstance(self.model, Qwen3DSparkForCausalLM):
+            return
+
+        rotation = self._load_quarot_rotation(self.vllm_config.model_config.model)
+        if rotation is None:
+            return
+
+        # Keep the full-precision rotation until the shared embedding/lm_head
+        # boundaries are handled below. A draft without its own boundary
+        # modules must not consume the rotated target tensors directly.
+        rotation = rotation.to(self.device, dtype=torch.float32)
+        self._quarot_rotation = rotation
+        draft_model = getattr(self.model, "model", None)
+        projection_name = "fc"
+        projection = getattr(draft_model, projection_name, None) if draft_model is not None else None
+        if projection is None:
+            # K3 MLA DSpark projects a concatenation of target auxiliary hidden
+            # states through context_proj, so every target-width input block
+            # needs the same basis alignment.
+            projection_name = "context_proj"
+            projection = getattr(draft_model, projection_name, None) if draft_model is not None else None
+        if projection is None:
+            raise ValueError("QuaRot target requires a draft hidden-state projection named fc or context_proj.")
+
+        projection_weight = projection.weight
+        out_features, in_features = projection_weight.shape
+        hidden_size = rotation.shape[0]
+        if in_features % hidden_size != 0:
+            raise ValueError(
+                "QuaRot draft projection input is incompatible with the "
+                f"target rotation: {projection_name}.in_features="
+                f"{in_features}, rotation_dim={hidden_size}."
+            )
+        num_features = in_features // hidden_size
+        projection_blocks = projection_weight.data.to(torch.float32).reshape(
+            out_features,
+            num_features,
+            hidden_size,
+        )
+        aligned = torch.matmul(projection_blocks, rotation)
+        projection_weight.data.copy_(aligned.reshape(out_features, in_features).to(projection_weight.dtype))
+        logger.info(
+            "[spec_decode/quarot] Aligned draft %s.weight with target rotation (num_features=%d, projection=%s).",
+            projection_name,
+            num_features,
+            tuple(projection_weight.shape),
+        )
+
+    def _copy_unrotated_shared_weight(
+        self,
+        draft_layer: nn.Module,
+        target_layer: nn.Module,
+        label: str,
+    ) -> bool:
+        """Copy a rotated target weight into a draft-owned layer."""
+        rotation = getattr(self, "_quarot_rotation", None)
+        if rotation is None:
+            return False
+        draft_weight = getattr(draft_layer, "weight", None)
+        target_weight = getattr(target_layer, "weight", None)
+        if not isinstance(draft_weight, torch.Tensor) or not isinstance(
+            target_weight,
+            torch.Tensor,
+        ):
+            logger.warning(
+                "[spec_decode/quarot] Cannot align shared %s: weight tensor missing.",
+                label,
+            )
+            return False
+        if draft_weight.shape != target_weight.shape or target_weight.shape[-1] != rotation.shape[0]:
+            logger.warning(
+                "[spec_decode/quarot] Cannot align shared %s: draft=%s, target=%s, rotation=%s.",
+                label,
+                tuple(draft_weight.shape),
+                tuple(target_weight.shape),
+                tuple(rotation.shape),
+            )
+            return False
+
+        unrotated = torch.matmul(
+            target_weight.data.to(torch.float32),
+            rotation.T,
+        )
+        draft_weight.data.copy_(unrotated.to(draft_weight.dtype))
+        logger.info(
+            "[spec_decode/quarot] Copied and aligned shared %s (weight=%s).",
+            label,
+            tuple(draft_weight.shape),
+        )
+        return True
+
+    def _prepare_unrotated_shared_layer(
+        self,
+        draft_layer: nn.Module | None,
+        target_layer: nn.Module,
+        label: str,
+    ) -> nn.Module | None:
+        """Return a draft-owned unrotated layer for a QuaRot target."""
+        if getattr(self, "_quarot_rotation", None) is None:
+            return None
+        if draft_layer is None:
+            # AscendVocabParallelEmbedding owns a coordinator containing
+            # non-pickleable ProcessGroups. Reuse the coordinator while
+            # independently cloning the module parameters.
+            comm_group = getattr(target_layer, "comm_group", None)
+            memo = {id(comm_group): comm_group} if comm_group is not None else None
+            draft_layer = copy.deepcopy(target_layer, memo)
+        if not self._copy_unrotated_shared_weight(
+            draft_layer,
+            target_layer,
+            label,
+        ):
+            raise ValueError(
+                f"QuaRot requires a compatible draft-owned {label}; refusing to alias the rotated target layer."
+            )
+        return draft_layer
+
+    @staticmethod
+    def _load_quarot_rotation(
+        target_model_path: str,
+    ) -> torch.Tensor | None:
+        """Load the target checkpoint's optional global rotation."""
+        import json
+        from pathlib import Path
+
+        from safetensors.torch import load_file
+
+        descriptor_path = Path(target_model_path) / "quant_model_description.json"
+        if not descriptor_path.exists():
+            return None
+        try:
+            with open(descriptor_path) as descriptor_file:
+                descriptor = json.load(descriptor_file)
+            relative_path = (
+                descriptor.get("optional", {})
+                .get("quarot", {})
+                .get("rotation_map", {})
+                .get("global_rotation", "optional/quarot.safetensors")
+            )
+        except (ValueError, OSError) as error:
+            logger.warning(
+                "[spec_decode/quarot] Failed to read %s (%s); skipping draft alignment.",
+                descriptor_path,
+                error,
+            )
+            return None
+
+        rotation_path = Path(target_model_path) / relative_path
+        if not rotation_path.exists():
+            logger.warning(
+                "[spec_decode/quarot] Rotation file %s is missing; skipping draft alignment.",
+                rotation_path,
+            )
+            return None
+        try:
+            return load_file(rotation_path)["global_rotation"]
+        except Exception as error:
+            logger.warning(
+                "[spec_decode/quarot] Failed to load rotation %s: %s",
+                rotation_path,
+                error,
+            )
+            return None
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -309,6 +495,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         with self.maybe_eager_context:
             self.model = self._get_model()
+
+        self._maybe_anti_rotate_draft_projection()
 
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
@@ -360,6 +548,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(model)
+        # Projection, embedding, and lm_head boundaries are now aligned. Do not
+        # keep a full-precision model-sized tensor alive through graph capture.
+        self._quarot_rotation = None
 
         if (
             self.parallel_drafting
@@ -444,9 +635,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
 
             if share_embeddings:
-                if hasattr(self.model.model, "embed_tokens"):
-                    del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+                draft_embed_tokens = getattr(
+                    self.model.model,
+                    "embed_tokens",
+                    None,
+                )
+                unrotated_embed_tokens = self._prepare_unrotated_shared_layer(
+                    draft_embed_tokens,
+                    target_embed_tokens,
+                    "draft embed_tokens.weight",
+                )
+                if unrotated_embed_tokens is not None:
+                    self.model.model.embed_tokens = unrotated_embed_tokens
+                else:
+                    if hasattr(self.model.model, "embed_tokens"):
+                        del self.model.model.embed_tokens
+                    self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
                 "[spec_decode/base] PP>1: draft model loaded its own vocab embedding"
@@ -481,17 +685,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
+                target_lm_head = None
                 if hasattr(model, "lm_head"):
-                    self.model.lm_head = model.lm_head
+                    target_lm_head = model.lm_head
                 elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                    self.model.lm_head = model.get_language_model().lm_head
-                else:
+                    target_lm_head = model.get_language_model().lm_head
+                if target_lm_head is None:
                     logger.warning(
                         "[spec_decode/base] Target model has no accessible lm_head"
                         " for sharing. Draft model will use its own lm_head."
                         " This may cause incorrect logits if the draft lm_head"
                         " is not trained."
                     )
+                else:
+                    unrotated_lm_head = self._prepare_unrotated_shared_layer(
+                        getattr(self.model, "lm_head", None),
+                        target_lm_head,
+                        "draft lm_head.weight",
+                    )
+                    self.model.lm_head = target_lm_head if unrotated_lm_head is None else unrotated_lm_head
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -736,6 +948,43 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _prepare_parallel_draft_seq_lens_cpu(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        batch_size: int,
+        has_rejected_tokens: bool,
+    ) -> None:
+        """Publish exact-at-forward host KV lengths for DSpark.
+
+        DSpark overrides the first-pass input builder and updates device
+        sequence lengths directly. Extend the host mirror here and attach the
+        side-stream reject copy for MLA to finalize immediately before FIA.
+        """
+        if self.method != "dspark" or not self.parallel_drafting:
+            return
+
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        if seq_lens_cpu is None:
+            return
+
+        assert self.runner is not None
+        reject_event = self.runner.num_rejected_tokens_event
+        async_padded = has_rejected_tokens and reject_event is not None
+        if not has_rejected_tokens or async_padded:
+            common_attn_metadata.parallel_draft_seq_lens_cpu = build_parallel_draft_seq_lens_cpu(
+                seq_lens_cpu,
+                batch_size,
+                self.num_query_per_req,
+            )
+            if async_padded:
+                common_attn_metadata.parallel_draft_num_reject_cpu = self.runner.num_rejected_tokens_cpu
+                common_attn_metadata.parallel_draft_num_reject_event = reject_event
+                common_attn_metadata.parallel_draft_num_reject_num_reqs = batch_size
+
     def _propose(
         self,
         num_speculative_tokens: int,
@@ -787,17 +1036,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method in ("eagle3", "dflash", "dspark"):
-            assert isinstance(
-                self.get_model(),
-                (
-                    Eagle3LlamaForCausalLM,
-                    DFlashQwen3ForCausalLM,
-                    Qwen3DSparkForCausalLM,
-                    Eagle3VwnLlamaForCausalLM,
-                    Eagle3DeepseekV2ForCausalLM,
-                    DSparkDeepseekV4ForCausalLM,
-                ),
-            )
+            assert isinstance(self.get_model(), _HIDDEN_STATE_DRAFTER_TYPES)
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
@@ -898,6 +1137,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
+
+        self._prepare_parallel_draft_seq_lens_cpu(
+            common_attn_metadata,
+            batch_size,
+            has_rejected_tokens=num_rejected_tokens_gpu is not None,
+        )
 
         if self.draft_window_size is not None:
             self.sliding_window.apply(common_attn_metadata)
@@ -1082,6 +1327,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.method in ("dflash", "dspark"):
             self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
+            inputs_embeds, model_positions = self._maybe_shard_parallel_draft_embeddings(
+                inputs_embeds,
+                model_positions,
+            )
+            model_kwargs["inputs_embeds"] = inputs_embeds
+            model_kwargs["positions"] = model_positions
         else:
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
@@ -2084,6 +2335,42 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if _EXTRA_CTX.flash_comm_v1_enabled:
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
+
+    def _maybe_shard_parallel_draft_embeddings(
+        self,
+        inputs_embeds: torch.Tensor | None,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """Enter FlashComm sequence parallelism before DFlash/DSpark layers.
+
+        Multimodal target models provide full-sequence ``inputs_embeds`` to
+        the draft model.  Unlike the hidden-state drafter path, DFlash and
+        DSpark bypass the common pre-model sharding block.  Shard these
+        embeddings and their RoPE positions together so the first draft
+        attention output and its residual use the same token partition on
+        every TP rank.
+
+        """
+        if inputs_embeds is None:
+            return None, positions
+        if _EXTRA_CTX.flash_comm_v1_enabled:
+            inputs_embeds = split_inputs_tp_to_sp(
+                inputs_embeds,
+                inputs_embeds,
+            )
+            if positions.ndim == 1:
+                positions = split_inputs_tp_to_sp(positions, positions)
+            else:
+                # M-RoPE positions are [axes, tokens], while ordinary
+                # positions are [tokens].  ``split_inputs_tp_to_sp`` always
+                # shards its leading dimension, so temporarily move the token
+                # axis to the front and restore the model-facing layout.
+                token_major_positions = positions.movedim(-1, 0)
+                positions = split_inputs_tp_to_sp(
+                    token_major_positions,
+                    token_major_positions,
+                ).movedim(0, -1)
+        return inputs_embeds, positions
 
     def maybe_all_gather_and_unpad(
         self,

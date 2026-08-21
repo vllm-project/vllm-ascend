@@ -102,6 +102,29 @@ _MINIMAX_M3_PACKED_MODULES = {
     "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
 }
 
+_KIMI_K3_PACKED_MODULES = {
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+    # vLLM 0.27 packs every full-rank KDA input projection into one
+    # in_proj_qkvgfab module. ModelSlim checkpoints still describe the
+    # original checkpoint shards independently.
+    "in_proj_qkvgfab": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "g_proj",
+        "f_a_proj",
+        "b_proj",
+    ],
+    # QuaRot checkpoints quantize q/k/v while keeping the KDA gates in
+    # floating point.  The Ascend adapter splits that mixed-precision module
+    # into two precision-compatible packed projections.
+    "in_proj_qkv": ["q_proj", "k_proj", "v_proj"],
+    "in_proj_gfab": ["g_proj", "f_a_proj", "b_proj"],
+    "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+}
+
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
     "minimax_m3": _MINIMAX_M3_PACKED_MODULES,
     "minimax_m3_vl": _MINIMAX_M3_PACKED_MODULES,
@@ -154,6 +177,10 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     },
+    "kimi_k3": _KIMI_K3_PACKED_MODULES,
+    # Quant methods are resolved while the nested text model is active, so
+    # the current vLLM config exposes the text config's model type here.
+    "kimi_linear": _KIMI_K3_PACKED_MODULES,
     "deepseek_v32": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
@@ -654,6 +681,25 @@ class AscendModelSlimConfig(QuantizationConfig):
         cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
+    def uses_kimi_k3_mixed_kda_projection(self, prefix: str) -> bool:
+        """Return whether Kimi K3's packed KDA input must be split.
+
+        vLLM 0.27 packs q/k/v and the full-rank KDA gates into one linear
+        layer.  ModelSlim QuaRot checkpoints intentionally keep q/k/v W8A8
+        while storing g/f_a/b in floating point, which cannot be represented
+        by one quantization method.  Only accept that known layout here; other
+        mixed packed layouts retain the normal validation error.
+        """
+        suffix = ".in_proj_qkvgfab"
+        attention_prefix = prefix[: -len(suffix)] if prefix.endswith(suffix) else prefix
+        quant_types = {
+            name: self.quant_description.get(f"{attention_prefix}.{name}.weight")
+            for name in ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj")
+        }
+        qkv_types = {quant_types[name] for name in ("q_proj", "k_proj", "v_proj")}
+        gate_types = {quant_types[name] for name in ("g_proj", "f_a_proj", "b_proj")}
+        return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
+
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
         proj_name = prefix.split(".")[-1]
         if proj_name in packed_modules_mapping:
@@ -729,6 +775,14 @@ class AscendModelSlimConfig(QuantizationConfig):
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
+            if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
+                # The Ascend K3 adapter replaces this temporary module with a
+                # W8A8 q/k/v projection plus a FLOAT gate projection directly
+                # after upstream construction.
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+                logger.debug("Temporarily select unquantized Kimi K3 mixed KDA projection for %s", prefix)
+                return AscendUnquantizedLinearMethod()
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod

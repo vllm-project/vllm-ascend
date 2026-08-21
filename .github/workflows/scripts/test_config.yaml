@@ -230,9 +230,11 @@
 - name: distributed
   optional: false
   source_file_dependencies:
+    - examples/disaggregated_prefill_v1
     - vllm_ascend/distributed
     - vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
   tests:
+    - tests/ut/test_disaggregated_prefill_proxy.py
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
@@ -314,6 +316,7 @@
     - tests/ut/models/test_deepseek_v4_compressor.py
     - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
+    - tests/ut/models/test_kimi_k3_adapter.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: models_minimax_m3
@@ -339,6 +342,7 @@
     - vllm_ascend/ops/rotary_embedding.py
     - vllm_ascend/ops/vocab_parallel_embedding.py
     - vllm_ascend/ops/register_custom_ops.py
+    - vllm_ascend/ops/kimi_kda.py
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
