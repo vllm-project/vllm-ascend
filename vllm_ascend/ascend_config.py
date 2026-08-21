@@ -60,12 +60,7 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
-        from vllm_ascend import envs as ascend_envs
-
-        self.scheduler_config = SchedulerConfig(
-            additional_config,
-            balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
-        )
+        self.scheduler_config = SchedulerConfig(additional_config)
         if self.scheduler_config.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
@@ -88,12 +83,7 @@ class AscendConfig:
                 "or disable profiling_chunk_config."
             )
 
-        self.enable_flashcomm1 = self._get_config_value(
-            additional_config,
-            "enable_flashcomm1",
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1",
-            ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
-        )
+        self.enable_flashcomm1 = additional_config.get("enable_flashcomm1", False)
         if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
             raise ValueError(
                 "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
@@ -156,50 +146,27 @@ class AscendConfig:
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
-        self.enable_fused_mc2 = self._get_config_value(
-            additional_config,
-            "enable_fused_mc2",
-            "VLLM_ASCEND_ENABLE_FUSED_MC2",
-            ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
-        )
+        self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", 0)
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
         assert not (
             self.enable_fused_mc2 == 1
             and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        ), (
-            "MiniMax M3 does not support enable_fused_mc2=1. Please set "
-            "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
-        )
+        ), "MiniMax M3 does not support enable_fused_mc2=1. Please set additional_config.enable_fused_mc2 to 0."
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
-                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
         if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vllm_config):
             self.enable_fused_mc2 = 0
             logger.warning_once(
-                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+                "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
-        self.enable_mlapo = self._get_config_value(
-            additional_config,
-            "enable_mlapo",
-            "VLLM_ASCEND_ENABLE_MLAPO",
-            ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
-        )
-        self.msmonitor_use_daemon = self._get_config_value(
-            additional_config,
-            "msmonitor_use_daemon",
-            "MSMONITOR_USE_DAEMON",
-            ascend_envs.MSMONITOR_USE_DAEMON,
-        )
-        self.enable_transpose_kv_cache_by_block = self._get_config_value(
-            additional_config,
-            "enable_transpose_kv_cache_by_block",
-            "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
-            ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
-        )
+        self.enable_mlapo = additional_config.get("enable_mlapo", True)
+        self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", False)
+        self.enable_transpose_kv_cache_by_block = additional_config.get("enable_transpose_kv_cache_by_block", True)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -236,12 +203,7 @@ class AscendConfig:
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
-        self.weight_nz_mode = self._get_config_value(
-            additional_config,
-            "weight_nz_mode",
-            "VLLM_ASCEND_ENABLE_NZ",
-            ascend_envs.VLLM_ASCEND_ENABLE_NZ,
-        )
+        self.weight_nz_mode = additional_config.get("weight_nz_mode", 1)
 
         from vllm_ascend.utils import model_uses_sfa_sparse
 
@@ -361,20 +323,6 @@ class AscendConfig:
                 "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
                 "supported because the indexer cache remains device-resident."
             )
-
-    @staticmethod
-    def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
-        if config_key in additional_config:
-            value = additional_config[config_key]
-            logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
-            return value
-        if env_key in os.environ:
-            logger.info_once(
-                f"AscendConfig.{config_key} falls back to environment variable {env_key} with value {env_value}. "
-                f"Please use additional_config.{config_key} instead, because {env_key} will be removed in the "
-                "next release."
-            )
-        return env_value
 
     @classmethod
     def _check_mooncake_c8_kv_cache_quant(cls, vllm_config: "VllmConfig") -> None:
@@ -590,8 +538,6 @@ class RlConfig:
                 ascend_config.weight_nz_mode,
             )
         ascend_config.weight_nz_mode = 0
-        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
-
         from vllm_ascend.platform import _disable_expandable_segments
 
         _disable_expandable_segments()
@@ -1177,7 +1123,7 @@ class DyntraLBConfig:
 class SchedulerConfig:
     """Configuration object for ``additional_config[\"scheduler_config\"]``."""
 
-    def __init__(self, additional_config: dict[str, Any], balance_env_value: Any):
+    def __init__(self, additional_config: dict[str, Any]):
         scheduler_config = additional_config.get("scheduler_config")
         if scheduler_config is None:
             scheduler_config = {}
@@ -1189,8 +1135,7 @@ class SchedulerConfig:
             scheduler_config,
             additional_config,
             "enable_balance_scheduling",
-            balance_env_value,
-            "VLLM_ASCEND_BALANCE_SCHEDULING",
+            False,
         )
         self.recompute_scheduler_enable = self._get_config_value(
             scheduler_config,
@@ -1215,7 +1160,6 @@ class SchedulerConfig:
         additional_config: dict[str, Any],
         config_key: str,
         default: Any,
-        env_key: str | None = None,
     ) -> Any:
         if config_key in scheduler_config:
             if config_key in additional_config:
@@ -1235,17 +1179,6 @@ class SchedulerConfig:
             )
             return additional_config[config_key]
 
-        if env_key is not None and env_key in os.environ:
-            logger.info_once(
-                "AscendConfig.scheduler_config.%s falls back to environment variable %s with value %s. "
-                "Please use additional_config.scheduler_config.%s instead, because %s will be removed in the "
-                "next release.",
-                config_key,
-                env_key,
-                default,
-                config_key,
-                env_key,
-            )
         return default
 
 

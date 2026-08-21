@@ -56,14 +56,14 @@ From the workflow perspective, we can see how the final test script is executed.
     - name: prefiller node # optional: just for description, not used in code
       envs:
         <<: *env_common
-        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+        additional_config.enable_flashcomm1: 1
         # Continue to add other envs if needed
       server_cmd: >
         vllm serve ...
     - name: decoder node # optional: just for description, not used in code
       envs:
         <<: *env_common
-        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+        additional_config.enable_flashcomm1: 1
         # Continue to add other envs if needed
       server_cmd: >
         vllm serve ...

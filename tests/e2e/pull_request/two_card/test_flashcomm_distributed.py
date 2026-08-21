@@ -34,7 +34,6 @@ QWEN_DENSE_MODELS = [
 ]
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_deepseek_v2_lite_fc1_tp2() -> None:
     example_prompts = [
         "test" * 1001,
@@ -48,6 +47,7 @@ def test_deepseek_v2_lite_fc1_tp2() -> None:
         enable_expert_parallel=True,
         enforce_eager=True,
         quantization="ascend",
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -77,7 +77,6 @@ def test_deepseek_v2_lite_fc1_model_runner_v2_tp2() -> None:
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_fc1_tp2(model):
     example_prompts = [
         "Hello, my name is",
@@ -91,12 +90,12 @@ def test_qwen3_dense_fc1_tp2(model):
         tensor_parallel_size=2,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         quantization="ascend",
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     example_prompts = [
         "Hello, my name is",
@@ -110,5 +109,6 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
         tensor_parallel_size=2,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         quantization="ascend",
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

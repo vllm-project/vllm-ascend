@@ -131,11 +131,9 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true,"enable_flashcomm1":true}' \
 --host 0.0.0.0 \
 --port 8000 \
 --data-parallel-size 2 \
@@ -184,11 +182,9 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=10
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true,"enable_flashcomm1":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -231,11 +227,9 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=10
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true,"enable_flashcomm1":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -282,14 +276,12 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=100
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true,"enable_flashcomm1":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -333,14 +325,12 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=100
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true,"enable_flashcomm1":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -424,7 +414,6 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
@@ -450,7 +439,7 @@ Parameter descriptions:
         --quantization ascend \
         --enforce-eager \
         --no-enable-prefix-caching \
-        --additional-config '{"enable_dsa_cp": true}' \
+        --additional-config '{"enable_dsa_cp": true, "enable_flashcomm1": true}' \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -497,7 +486,6 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
@@ -523,7 +511,7 @@ Parameter descriptions:
         --quantization ascend \
         --enforce-eager \
         --no-enable-prefix-caching \
-        --additional-config '{"enable_dsa_cp": true}' \
+        --additional-config '{"enable_dsa_cp": true, "enable_flashcomm1": true}' \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",

@@ -10,7 +10,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 
 _server_cmd: &server_cmd
@@ -73,6 +72,8 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"enable_flashcomm1":true}'
     benchmarks:
       <<: *benchmarks
 
