@@ -4,10 +4,11 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import msgspec
 import pytest
+import torch
 import zmq
 from vllm.v1.request import RequestStatus
 
@@ -189,7 +190,12 @@ def test_recving_thread_socket_pool_creates_once_and_reuses_by_endpoint(
 
     assert first is second is socket
     context_cls.assert_called_once_with()
-    make_socket.assert_called_once_with(ctx=context, path=path, socket_type=zmq.REQ, bind=False)
+    make_socket.assert_called_once_with(
+        ctx=context,
+        path=path,
+        socket_type=zmq.REQ,  # type: ignore[attr-defined]
+        bind=False,
+    )
     assert socket.setsockopt.call_count == 2
 
 
@@ -299,3 +305,142 @@ def test_update_connector_output_routes_worker_completion_and_scheduler_ack() ->
     scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
     assert output.finished_sending == {"request-p"}
     assert scheduler._reqs_need_send == {}
+
+
+class _StopLoop(BaseException):
+    """Stop an otherwise unbounded thread loop after one test iteration."""
+
+
+def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
+    scheduler.group_unique_specs = [[make_full_spec()]]
+    assert scheduler._needs_prefill_token_truncation() is False
+
+    scheduler.vllm_config.model_config.hf_config.compress_ratios = [2]
+    assert scheduler._needs_prefill_token_truncation() is True
+
+    scheduler.vllm_config.model_config.hf_config.compress_ratios = None
+    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    assert scheduler._needs_prefill_token_truncation() is True
+
+
+def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.need_truncate = True
+    request = make_request(
+        prompt_token_ids=[1, 2, 3],
+        num_prompt_tokens=3,
+        _all_token_ids=[1, 2, 3],
+        kv_transfer_params={},
+        max_tokens=8,
+    )
+
+    scheduler._truncate_request_for_prefill(request)
+    scheduler._truncate_request_for_prefill(request)
+
+    assert request.prompt_token_ids == [1, 2]
+    assert request._all_token_ids == [1, 2]
+    assert request.num_prompt_tokens == 2
+    assert request.max_tokens == 1
+    assert request.kv_transfer_params["_p_side_truncated"] is True
+
+
+def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.need_truncate = True
+    prompt_embeds = torch.arange(12).reshape(3, 4)
+    request = make_request(
+        prompt_token_ids=None,
+        prompt_embeds=prompt_embeds,
+        num_prompt_tokens=3,
+        _all_token_ids=[1, 2, 3],
+        kv_transfer_params={},
+    )
+
+    scheduler._truncate_request_for_prefill(request)
+
+    assert torch.equal(request.prompt_embeds, prompt_embeds[:2])
+    assert request.num_prompt_tokens == 2
+
+
+def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
+    thread = make_sending_thread()
+    thread._handle_finished_request = MagicMock()  # type: ignore[method-assign]
+    encoder = msgspec.msgpack.Encoder()
+    socket = MagicMock()
+    socket.recv_multipart.side_effect = [
+        [b"worker", b"", encoder.encode((b"get_meta_msg",))],
+        [b"worker", b"", encoder.encode((b"done_recving_msg", "request-p"))],
+        _StopLoop(),
+    ]
+
+    with pytest.raises(_StopLoop):
+        thread._run_busy_loop(socket)
+
+    assert socket.send_multipart.call_args_list == [
+        call((b"worker", b"", thread.encoded_metadata)),
+        call((b"worker", b"", ACK_MSG)),
+    ]
+    thread._handle_finished_request.assert_called_once_with("request-p")
+
+
+def test_recving_run_requeues_failed_completion() -> None:
+    ready_event = threading.Event()
+    thread = MooncakeSchedulerRecvingThread(ready_event)
+    request = ("10.0.0.1", 6000, "request-p")
+    request_queue = MagicMock()
+    request_queue.get.side_effect = [request, _StopLoop()]
+    thread.request_queue = request_queue
+    thread._send_done_recving = MagicMock(side_effect=RuntimeError("network error"))  # type: ignore[method-assign]
+
+    with pytest.raises(_StopLoop):
+        thread.run()
+
+    assert ready_event.is_set()
+    request_queue.put.assert_called_once_with(request)
+    request_queue.task_done.assert_called_once_with()
+
+
+def test_set_worker_metadata_starts_only_one_producer_sending_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
+    scheduler.side_channel_host = "127.0.0.1"
+    scheduler.side_channel_port = 6000
+    scheduler.tp_size = 1
+    scheduler.pp_size = 1
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+    created: list[MagicMock] = []
+
+    def make_fake_thread(*args, **_kwargs):
+        fake = MagicMock()
+        ready_event = args[-1]
+        fake.start.side_effect = ready_event.set
+        fake.is_alive.return_value = True
+        created.append(fake)
+        return fake
+
+    thread_cls = MagicMock(side_effect=make_fake_thread)
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.MooncakeSchedulerSendingThread",
+        thread_cls,
+    )
+    metadata = {0: make_transfer_metadata()}
+
+    scheduler.set_xfer_handshake_metadata_from_workers(metadata)
+    scheduler.set_xfer_handshake_metadata_from_workers(metadata)
+
+    thread_cls.assert_called_once()
+    created[0].start.assert_called_once_with()
+
+
+def test_set_worker_metadata_is_ignored_on_consumer() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
+
+    scheduler.set_xfer_handshake_metadata_from_workers({0: make_transfer_metadata()})
+
+    assert scheduler._sending_thread is None

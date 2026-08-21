@@ -3,19 +3,26 @@
 import queue
 import threading
 from concurrent.futures import Future
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
+import torch
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+    MooncakeTransferMetadataGroups,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
     MooncakePullConnectorWorker,
     MooncakePullRecvingThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import SizedDict
 
 from .helpers import (
     make_full_spec,
@@ -488,3 +495,687 @@ def test_connector_worker_exposes_finished_and_invalid_blocks() -> None:
 
     assert worker.get_finished() == (set(), {"request"})
     assert worker.get_block_ids_with_load_errors() == {10, 11}
+
+
+class _StopWorkerLoop(BaseException):
+    """Stop the worker's unbounded queue loop after one test iteration."""
+
+
+def test_get_remote_metadata_fetches_once_and_populates_layout_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = make_thread()
+    thread.encoder = msgspec.msgpack.Encoder()
+    thread.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
+    thread.remote_metadata = SizedDict()
+    thread.remote_tp_rank_groups = SizedDict()
+    thread.remote_layer_index_pairs = SizedDict()
+    expected = make_metadata_groups()
+    socket = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = socket
+    send = MagicMock()
+    recv = MagicMock(return_value=msgspec.msgpack.encode(expected))
+    thread._build_remote_transfer_layout = MagicMock(  # type: ignore[method-assign]
+        return_value=({0: {(0, 0): [[0]]}}, {0: [(0, 0)]})
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.zmq_ctx",
+        MagicMock(return_value=context),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_send",
+        send,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_recv",
+        recv,
+    )
+
+    first = thread._get_remote_metadata("engine-p", "10.0.0.1", 6000)
+    second = thread._get_remote_metadata("engine-p", "10.0.0.1", 6000)
+
+    assert first is second
+    send.assert_called_once()
+    recv.assert_called_once()
+    thread._build_remote_transfer_layout.assert_called_once_with(expected)
+    assert thread.remote_tp_rank_groups["engine-p"] == {0: {(0, 0): [[0]]}}
+    assert thread.remote_layer_index_pairs["engine-p"] == {0: [(0, 0)]}
+
+
+def test_get_remote_metadata_rejects_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = make_thread()
+    thread.encoder = msgspec.msgpack.Encoder()
+    thread.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
+    thread.remote_metadata = SizedDict()
+    socket = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = socket
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.zmq_ctx",
+        MagicMock(return_value=context),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_send",
+        MagicMock(),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_recv",
+        MagicMock(return_value=b""),
+    )
+
+    with pytest.raises(RuntimeError, match="returned no transfer metadata"):
+        thread._get_remote_metadata("engine-p", "10.0.0.1", 6000)
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_error"),
+    [
+        (replace(make_metadata_groups(), engine_id="wrong"), "engine ID mismatch"),
+        (replace(make_metadata_groups(), pcp_size=2), "requires remote pcp_size=1"),
+        (replace(make_metadata_groups(), metadata_by_pp_rank={}), "no PP metadata"),
+        (
+            replace(
+                make_metadata_groups(),
+                metadata_by_pp_rank={0: replace(make_pp_metadata(), metadata_by_tp_rank={})},
+            ),
+            "no TP metadata",
+        ),
+        (
+            make_metadata_groups(
+                pp_metadata=make_pp_metadata(tp_base_addrs={2: [[5000]]}),
+            ),
+            "invalid TP ranks",
+        ),
+    ],
+)
+def test_validate_remote_metadata_rejects_invalid_topology(
+    metadata: MooncakeTransferMetadataGroups,
+    expected_error: str,
+) -> None:
+    with pytest.raises(ValueError, match=expected_error):
+        MooncakePullRecvingThread._validate_remote_metadata(metadata, "engine-p")
+
+
+def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = make_thread(device=0, ready_event=threading.Event())
+    requests = {
+        "request-a": make_req_meta(local=([10],)),
+        "request-b": make_req_meta(local=([20],)),
+    }
+    request_queue = MagicMock()
+    request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
+    thread.request_queue = request_queue
+    thread._handle_requests = MagicMock(return_value={"request-b"})  # type: ignore[method-assign]
+    set_device = MagicMock()
+    monkeypatch.setattr(torch.npu, "set_device", set_device)
+
+    with pytest.raises(_StopWorkerLoop):
+        thread.run()
+
+    set_device.assert_called_once_with(0)
+    assert thread.ready_event.is_set()
+    assert thread.invalid_block_ids == {20}
+    assert thread.get_and_clear_finished_requests() == {"request-a", "request-b"}
+    request_queue.task_done.assert_called_once_with()
+
+
+def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+    thread = make_thread(
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000]],
+        block_strides=[[256]],
+        block_lens=[[128]],
+    )
+    remote = make_pp_metadata(
+        block_strides=[[512]],
+        block_lens=[[128]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    thread._append_spec_transfer_addresses(
+        0,
+        0,
+        1,
+        1,
+        {(0, 0): [("request", [1, 2], [3, 4])]},
+        remote,
+        src,
+        dst,
+        lengths,
+    )
+
+    assert src == [1256, 1512]
+    assert dst == [6536, 7048]
+    assert lengths == [128, 128]
+
+
+def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
+    spec = SimpleNamespace(
+        dtypes=(torch.float16, torch.float16),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+    )
+    thread = make_thread(
+        tp_size=1,
+        tp_rank=0,
+        kv_caches_base_addr=[[1000, 2000]],
+        block_shapes=[[(3, 16), (2, 4, 4)]],
+        block_strides=[[96, 64]],
+        block_lens=[[96, 64]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(3, 8), (1, 4, 4)]],
+        block_strides=[[48, 32]],
+        block_lens=[[48, 32]],
+        tp_base_addrs={0: [[5000, 6000]], 1: [[7000, 8000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    thread._append_mamba_transfer_addresses(
+        spec,  # type: ignore[arg-type]
+        remote_tp_rank=1,
+        remote_tp_size=2,
+        transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
+        remote_metadata=remote,
+        src_list=src,
+        dst_list=dst,
+        length_list=lengths,
+    )
+
+    assert src == [1104, 1136, 1168, 1116, 1148, 1180, 1124, 1156, 1188, 2096]
+    assert dst == [7096, 7112, 7128, 7104, 7120, 7136, 7108, 7124, 7140, 8064]
+    assert lengths == [8, 8, 8, 4, 4, 4, 4, 4, 4, 32]
+
+
+@pytest.mark.parametrize(
+    (
+        "local_dcp_size",
+        "local_dcp_rank",
+        "remote_dcp_size",
+        "candidate_ranks",
+        "remote_blocks",
+        "expected",
+    ),
+    [
+        (1, 0, 4, [0, 1, 2, 3], [20], [(0, [10], [20]), (1, [11], [20])]),
+        (4, 2, 1, [0], list(range(20, 28)), [(0, [10, 11], [22, 26])]),
+        (4, 2, 4, [0, 1, 2, 3], [20, 21], [(2, [10, 11], [20, 21])]),
+    ],
+)
+def test_compute_same_block_size_dcp_matrix(
+    local_dcp_size: int,
+    local_dcp_rank: int,
+    remote_dcp_size: int,
+    candidate_ranks: list[int],
+    remote_blocks: list[int],
+    expected: list[tuple[int, list[int], list[int]]],
+) -> None:
+    thread = make_thread(
+        tp_size=max(local_dcp_size, 1),
+        tp_rank=local_dcp_rank,
+        dcp_size=local_dcp_size,
+        dcp_rank=local_dcp_rank,
+    )
+
+    result = thread._compute_group_block_ids(
+        "request",
+        [candidate_ranks],
+        remote_dcp_size,
+        0,
+        16,
+        16,
+        [10, 11],
+        [10, 11],
+        remote_blocks,
+        128,
+        128,
+        0,
+        1,
+        1,
+        make_full_spec(),
+        0,
+    )
+
+    assert result == expected
+
+
+def test_compute_dcp_stops_when_remote_prompt_has_fewer_blocks() -> None:
+    thread = make_thread(tp_size=4, tp_rank=2, dcp_size=4, dcp_rank=2)
+
+    result = thread._compute_group_block_ids(
+        "request",
+        [[0]],
+        1,
+        0,
+        16,
+        16,
+        [10, 11],
+        [10, 11],
+        [20, 21, 22],
+        128,
+        47,
+        0,
+        1,
+        1,
+        make_full_spec(),
+        0,
+    )
+
+    assert result == [(0, [10], [22])]
+
+
+def test_get_remote_metadata_propagates_network_error_without_caching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = make_thread()
+    thread.encoder = msgspec.msgpack.Encoder()
+    thread.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
+    thread.remote_metadata = SizedDict()
+    context = MagicMock()
+    context.__enter__.return_value = MagicMock()
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.zmq_ctx",
+        MagicMock(return_value=context),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_send",
+        MagicMock(),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_recv",
+        MagicMock(side_effect=RuntimeError("timed out")),
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        thread._get_remote_metadata("engine-p", "10.0.0.1", 6000)
+
+    assert thread.remote_metadata.get("engine-p") is None
+
+
+@pytest.mark.parametrize(("is_consumer", "expected_thread_count"), [(True, 1), (False, 0)])
+def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+    is_consumer: bool,
+    expected_thread_count: int,
+) -> None:
+    worker = MooncakePullConnectorWorker.__new__(MooncakePullConnectorWorker)
+    worker.kv_transfer_config = SimpleNamespace(is_kv_consumer=is_consumer)
+    worker.engine = MagicMock()
+    worker.vllm_config = MagicMock()
+    worker.kv_cache_config = MagicMock()
+    worker.kv_cache_specs = [make_full_spec()]
+    worker.layer_name_to_group_index = {"model.layers.0.self_attn": 0}
+    worker.layer_name_to_spec_index = {"model.layers.0.self_attn": 0}
+    worker.tp_rank = worker.pp_rank = worker.dp_rank = worker.pcp_rank = worker.dcp_rank = 0
+    worker.tp_size = worker.pp_size = worker.dp_size = worker.pcp_size = worker.dcp_size = 1
+    worker._recving_thread = None
+
+    def fake_register(instance: MooncakePullConnectorWorker, _kv_caches: object) -> None:
+        instance.xfer_handshake_metadata = make_transfer_metadata()
+
+    created_threads: list[MagicMock] = []
+
+    def fake_thread(**kwargs: object) -> MagicMock:
+        ready_event = kwargs["ready_event"]
+        assert isinstance(ready_event, threading.Event)
+        thread = MagicMock()
+        thread.start.side_effect = ready_event.set
+        thread.is_alive.return_value = True
+        created_threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.MooncakeBaseConnectorWorker.register_kv_caches",
+        fake_register,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.MooncakePullRecvingThread",
+        fake_thread,
+    )
+    monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=0))
+
+    worker.register_kv_caches({})
+
+    assert len(created_threads) == expected_thread_count
+    if is_consumer:
+        created_threads[0].start.assert_called_once_with()
+        assert worker._recving_thread is created_threads[0]
+    else:
+        assert worker._recving_thread is None
+
+
+def test_mamba_unequal_tp_slices_into_wider_remote_cache() -> None:
+    spec = SimpleNamespace(
+        dtypes=(torch.float16, torch.float16),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+    )
+    thread = make_thread(
+        tp_size=2,
+        tp_rank=1,
+        kv_caches_base_addr=[[1000, 2000]],
+        block_shapes=[[(3, 8), (1, 4, 4)]],
+        block_strides=[[48, 32]],
+        block_lens=[[48, 32]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(3, 16), (2, 4, 4)]],
+        block_strides=[[96, 64]],
+        block_lens=[[96, 64]],
+        tp_base_addrs={0: [[5000, 6000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    thread._append_mamba_transfer_addresses(
+        spec,  # type: ignore[arg-type]
+        remote_tp_rank=0,
+        remote_tp_size=1,
+        transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
+        remote_metadata=remote,
+        src_list=src,
+        dst_list=dst,
+        length_list=lengths,
+    )
+
+    assert src == [1048, 1064, 1080, 1056, 1072, 1088, 1060, 1076, 1092, 2032]
+    assert dst == [5200, 5232, 5264, 5212, 5244, 5276, 5220, 5252, 5284, 6160]
+    assert lengths == [8, 8, 8, 4, 4, 4, 4, 4, 4, 32]
+
+@pytest.mark.parametrize(
+    (
+        "local_tp_size",
+        "remote_tp_size",
+        "local_heads",
+        "remote_heads",
+        "local_dcp_size",
+        "remote_dcp_size",
+        "fixed_heads",
+        "expected_heads",
+    ),
+    [
+        (8, 4, 1, 1, 1, 1, None, 4),
+        (4, 8, 2, 1, 1, 1, None, 8),
+        (16, 8, 1, 1, 4, 2, None, 4),
+        (8, 16, 1, 1, 2, 4, None, 4),
+        (16, 8, 1, 1, 4, 2, 1, 1),
+    ],
+)
+def test_infer_total_kv_heads_across_tp_and_dcp_strategies(
+    local_tp_size: int,
+    remote_tp_size: int,
+    local_heads: int,
+    remote_heads: int,
+    local_dcp_size: int,
+    remote_dcp_size: int,
+    fixed_heads: int | None,
+    expected_heads: int,
+) -> None:
+    thread = make_thread(tp_size=local_tp_size)
+
+    assert (
+        thread._infer_total_num_kv_heads(
+            local_num_kv_heads=local_heads,
+            remote_num_kv_heads=remote_heads,
+            remote_tp_size=remote_tp_size,
+            local_dcp_size=local_dcp_size,
+            remote_dcp_size=remote_dcp_size,
+            fixed_total_num_kv_heads=fixed_heads,
+        )
+        == expected_heads
+    )
+
+
+def test_infer_total_kv_heads_rejects_inconsistent_topology() -> None:
+    thread = make_thread(tp_size=4)
+
+    with pytest.raises(ValueError, match="inconsistent total KV head counts"):
+        thread._infer_total_num_kv_heads(
+            local_num_kv_heads=2,
+            remote_num_kv_heads=2,
+            remote_tp_size=8,
+            local_dcp_size=1,
+            remote_dcp_size=1,
+            fixed_total_num_kv_heads=None,
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "local_tp_size",
+        "local_tp_rank",
+        "local_dcp_size",
+        "remote_tp_size",
+        "remote_dcp_size",
+        "total_heads",
+        "expected_groups",
+    ),
+    [
+        (4, 2, 1, 8, 1, 4, [[4, 5]]),
+        (2, 0, 1, 4, 1, 8, [[0], [1]]),
+        (16, 10, 4, 8, 2, 4, [[4, 5]]),
+        (8, 5, 2, 16, 4, 4, [[8, 9, 10, 11]]),
+        (8, 6, 4, 16, 4, 4, [[8, 9, 10, 11], [12, 13, 14, 15]]),
+        (16, 13, 4, 8, 4, 4, [[4, 5, 6, 7]]),
+        (4, 3, 4, 8, 8, 1, [list(range(8))]),
+        (8, 6, 8, 4, 4, 1, [list(range(4))]),
+    ],
+)
+def test_attention_remote_tp_rank_groups_cover_tp_and_dcp_matrix(
+    local_tp_size: int,
+    local_tp_rank: int,
+    local_dcp_size: int,
+    remote_tp_size: int,
+    remote_dcp_size: int,
+    total_heads: int,
+    expected_groups: list[list[int]],
+) -> None:
+    thread = make_thread(tp_size=local_tp_size, tp_rank=local_tp_rank, dcp_size=local_dcp_size)
+
+    assert (
+        thread._get_attention_remote_tp_rank_groups(
+            remote_tp_size=remote_tp_size,
+            local_dcp_size=local_dcp_size,
+            remote_dcp_size=remote_dcp_size,
+            total_num_kv_heads=total_heads,
+        )
+        == expected_groups
+    )
+
+
+def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
+    full_thread = make_thread(
+        tp_size=16,
+        tp_rank=10,
+        dcp_size=4,
+        block_shapes=[[(1, 16, 4)]],
+    )
+    full_remote = make_pp_metadata(block_shapes=[[(1, 16, 4)]])
+    assert full_thread._get_layer_remote_tp_rank_groups(
+        0, 0, make_full_spec(), full_remote, remote_tp_size=8, remote_dcp_size=2
+    ) == [[4, 5]]
+
+    mla_thread = make_thread(tp_size=4, tp_rank=2, dcp_size=4)
+    mla_spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+    assert mla_thread._get_layer_remote_tp_rank_groups(
+        0, 0, mla_spec, make_pp_metadata(), remote_tp_size=8, remote_dcp_size=8
+    ) == [list(range(8))]
+
+    swa_thread = make_thread(
+        tp_size=4,
+        tp_rank=2,
+        dcp_size=4,
+        block_shapes=[[(1, 16, 4)]],
+    )
+    swa_remote = make_pp_metadata(block_shapes=[[(1, 16, 4)]])
+    assert swa_thread._get_layer_remote_tp_rank_groups(
+        0, 0, make_sliding_spec(), swa_remote, remote_tp_size=4, remote_dcp_size=4
+    ) == [[2]]
+
+
+@pytest.mark.parametrize(
+    (
+        "local_dcp_size",
+        "local_dcp_rank",
+        "remote_dcp_size",
+        "candidate_ranks",
+        "local_blocks",
+        "remote_blocks",
+        "expected",
+    ),
+    [
+        (
+            1,
+            0,
+            4,
+            [0, 1, 2, 3],
+            [10, 11, 12, 13],
+            [20],
+            [(0, [10], [20]), (1, [11], [20]), (2, [12], [20]), (3, [13], [20])],
+        ),
+        (4, 3, 2, [4, 5], [10, 11], [20, 21, 22, 23], [(5, [10, 11], [21, 23])]),
+        (
+            2,
+            1,
+            4,
+            [4, 5, 6, 7],
+            [10, 11, 12, 13],
+            [20, 21],
+            [(5, [10, 12], [20, 21]), (7, [11, 13], [20, 21])],
+        ),
+        (4, 2, 4, [4, 5, 6, 7], [10, 11], [20, 21], [(6, [10, 11], [20, 21])]),
+    ],
+)
+def test_compute_block_ids_across_equal_block_size_dcp_matrix(
+    local_dcp_size: int,
+    local_dcp_rank: int,
+    remote_dcp_size: int,
+    candidate_ranks: list[int],
+    local_blocks: list[int],
+    remote_blocks: list[int],
+    expected: list[tuple[int, list[int], list[int]]],
+) -> None:
+    thread = make_thread(
+        tp_size=max(local_dcp_size, 1),
+        tp_rank=local_dcp_rank,
+        dcp_size=local_dcp_size,
+        dcp_rank=local_dcp_rank,
+    )
+
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[candidate_ranks],
+        remote_dcp_size=remote_dcp_size,
+        spec_index=0,
+        local_block_size=16,
+        remote_block_size=16,
+        local_group_block_ids=local_blocks,
+        local_full_group_block_ids=local_blocks,
+        remote_group_block_ids=remote_blocks,
+        local_num_prompt_tokens=256,
+        remote_num_prompt_tokens=256,
+        num_computed_tokens=0,
+        local_block_size_scale=1,
+        remote_block_size_scale=1,
+        spec=make_full_spec(),
+        selection_index=0,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "local_dcp_size",
+        "local_dcp_rank",
+        "remote_dcp_size",
+        "candidate_ranks",
+        "local_block_size",
+        "remote_block_size",
+        "local_scale",
+        "remote_scale",
+        "local_blocks",
+        "remote_blocks",
+        "prompt_tokens",
+        "expected",
+    ),
+    [
+        (
+            2,
+            0,
+            4,
+            [0, 1, 2, 3],
+            16,
+            32,
+            1,
+            2,
+            [10, 11, 12, 13],
+            [20],
+            128,
+            [(0, [10], [40]), (1, [11], [40]), (2, [12], [40]), (3, [13], [40])],
+        ),
+        (
+            4,
+            1,
+            2,
+            [4, 5],
+            32,
+            16,
+            2,
+            1,
+            [10, 11],
+            [30, 31, 32, 33, 34, 35],
+            256,
+            [(4, [20, 22], [31, 35]), (5, [21, 23], [31, 35])],
+        ),
+    ],
+)
+def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
+    local_dcp_size: int,
+    local_dcp_rank: int,
+    remote_dcp_size: int,
+    candidate_ranks: list[int],
+    local_block_size: int,
+    remote_block_size: int,
+    local_scale: int,
+    remote_scale: int,
+    local_blocks: list[int],
+    remote_blocks: list[int],
+    prompt_tokens: int,
+    expected: list[tuple[int, list[int], list[int]]],
+) -> None:
+    thread = make_thread(
+        tp_size=max(local_dcp_size, 1),
+        tp_rank=local_dcp_rank,
+        dcp_size=local_dcp_size,
+        dcp_rank=local_dcp_rank,
+    )
+
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[candidate_ranks],
+        remote_dcp_size=remote_dcp_size,
+        spec_index=0,
+        local_block_size=local_block_size,
+        remote_block_size=remote_block_size,
+        local_group_block_ids=local_blocks,
+        local_full_group_block_ids=local_blocks,
+        remote_group_block_ids=remote_blocks,
+        local_num_prompt_tokens=prompt_tokens,
+        remote_num_prompt_tokens=prompt_tokens,
+        num_computed_tokens=0,
+        local_block_size_scale=local_scale,
+        remote_block_size_scale=remote_scale,
+        spec=make_full_spec(local_block_size),
+        selection_index=0,
+    )
+
+    assert result == expected
