@@ -62,6 +62,11 @@ on:
         required: false
         default: 120
         description: 'Selected tests job timeout in minutes.'
+      run_upstream:
+        type: boolean
+        required: false
+        default: false
+        description: 'Run vLLM upstream PR tests'
     secrets:
       OBS_ACCESS_KEY_PRECISION:
         required: false
@@ -88,6 +93,7 @@ jobs:
       fail-fast: false
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
+        part: [0]
     runs-on: ${{ matrix.group.runner }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
@@ -131,6 +137,7 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
+          sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -241,6 +248,7 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
+          uv pip install tblib
 
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
@@ -294,6 +302,28 @@ jobs:
             "with-device" \
             ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
+
+      - name: Run selected tests upstream with device
+        # Only the first A2 1-card partition runs upstream tests so 2/4/8-card,
+        # 310P, A5, CPU, and later a2_x1 shards are unchanged.
+        if: >-
+          ${{
+            inputs.run_upstream &&
+            matrix.group.npu_type == 'a2' &&
+            matrix.group.num_npus == 1 &&
+            startsWith(matrix.group.partition, '1-')
+          }}
+        working-directory: ./vllm-empty
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python3 ../.github/workflows/scripts/run_suite.py \
+            --suite e2e-upstream_pr \
+            --auto-partition-id "${{ matrix.part }}" \
+            --auto-partition-size 1 \
+            --continue-on-error
 
       - name: Run selected tests without device
         if: ${{ matrix.group.npu_type == 'cpu' }}
