@@ -105,6 +105,16 @@ def config_deprecated_logging():
     warnings_logger.propagate = False
 
 
+def _refresh_hybrid_mamba_cache_config(vllm_config: VllmConfig) -> None:
+    """Recompute hybrid MLA/Mamba cache alignment after quant config loads."""
+    if not getattr(vllm_config.model_config, "is_hybrid", False):
+        return
+
+    from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
+
+    HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
+
+
 def prune_capture_sizes_for_950(vllm_config):
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
@@ -421,6 +431,7 @@ class NPUPlatform(Platform):
             return
 
         maybe_auto_detect_quantization(vllm_config)
+        _refresh_hybrid_mamba_cache_config(vllm_config)
 
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
