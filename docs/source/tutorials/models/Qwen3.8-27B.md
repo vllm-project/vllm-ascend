@@ -467,15 +467,30 @@ On this 64K/3K concurrency-10 run, MXFP8 did not outperform W8A8.
 
 ## 9 Performance Tuning
 
-Use the deployment values above as a baseline. Adjust `max-model-len`,
-`max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization`
-together for the target workload.
+### 9.1 Recommended Configurations
 
-Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
-and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md)
-for additional guidance.
+> **Note**: The current documentation focuses on the rapid adaptation and validation of the Qwen3.8-27B model on Ascend NPUs. Performance tuning results have not yet been fully verified. Recommended configurations for typical scenarios (e.g., long context, low latency, and high throughput) will be supplemented and updated here once the corresponding validation is completed. In the meantime, please refer to [Section 9.2](#92-tuning-guidelines) for general tuning guidance.
 
-### 9.1 Optimizations That Require Explicit Enabling
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Model-Specific Optimizations
+
+##### Optimizations Enabled by Default
+
+The following optimizations are enabled by default and require no additional configuration:
+
+| Optimization Technique | Technical Principle | Performance Benefit |
+| --- | --- | --- |
+| Chunked Prefill | The vLLM V1 scheduler splits long prefill inputs into chunks, with each step processing at most `--max-num-batched-tokens` tokens. | Reduces per-step memory peaks, enabling larger batch sizes and higher throughput. |
+| Full Decode ACL Graph | Captures and replays the entire decode graph at once using `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`. | Reduces per-step operator dispatch overhead, stabilizing decode latency. |
+| CPU Binding | Binds worker threads to dedicated CPU cores via `--additional-config '{"enable_cpu_binding":true}'`. | Reduces CPU scheduling jitter and stabilizes decode latency. |
+
+##### Optimizations That Require Explicit Enabling
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | --- | --- | --- | --- | --- |
