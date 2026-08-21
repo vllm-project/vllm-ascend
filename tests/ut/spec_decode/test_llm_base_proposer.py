@@ -23,7 +23,11 @@ from types import SimpleNamespace
 import pytest
 from vllm.config import CUDAGraphMode
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import (
+    AscendSpecDecodeBaseProposer,
+    _is_glm_model,
+    _supports_spec_decode_graph,
+)
 from vllm_ascend.spec_decode.utils import _disable_flash_comm_v1_context
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
@@ -39,6 +43,35 @@ NON_FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.NONE,
     CUDAGraphMode.PIECEWISE,
 ]
+
+
+def test_glm_moe_dsa_mtp_supports_spec_decode_graph():
+    model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa"))
+
+    assert _is_glm_model(model_config)
+    assert _supports_spec_decode_graph(model_config, "mtp")
+
+
+@pytest.mark.parametrize("model_type", ["glm", "chatglm", "glm4_moe"])
+def test_other_glm_mtp_variants_remain_eager(model_type: str):
+    model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type))
+
+    assert _is_glm_model(model_config)
+    assert not _supports_spec_decode_graph(model_config, "mtp")
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "draft_model", "dflash", "dspark"])
+def test_other_glm_spec_decode_methods_remain_eager(method: str):
+    model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa"))
+
+    assert not _supports_spec_decode_graph(model_config, method)
+
+
+def test_non_glm_spec_decode_graph_support_is_unchanged():
+    model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="deepseek_v3"))
+
+    assert not _is_glm_model(model_config)
+    assert _supports_spec_decode_graph(model_config, "eagle")
 
 
 class TestMultimodalImageTokenIndex:

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import torch
 from vllm.compilation.cuda_graph import CUDAGraphOptions
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
 from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
@@ -75,6 +75,35 @@ def test_update_full_graph_params_dispatches_draft_metadata_by_keyword():
         speculative_config,
         draft_attn_metadatas=draft_attn_metadatas,
     )
+
+
+def test_update_full_graph_params_scopes_config_to_backend_resolution():
+    previous_config = get_current_vllm_config_or_none()
+    vllm_config = MagicMock()
+    impl_cls = MagicMock()
+    attn_backend = MagicMock()
+
+    def get_impl_cls():
+        assert get_current_vllm_config_or_none() is vllm_config
+        return impl_cls
+
+    def update_graph_params(*args, **kwargs):
+        assert get_current_vllm_config_or_none() is previous_config
+
+    attn_backend.get_impl_cls.side_effect = get_impl_cls
+    impl_cls.update_graph_params.side_effect = update_graph_params
+
+    update_full_graph_params(
+        attn_backend,
+        MagicMock(),
+        MagicMock(),
+        8,
+        vllm_config,
+    )
+
+    attn_backend.get_impl_cls.assert_called_once_with()
+    impl_cls.update_graph_params.assert_called_once()
+    assert get_current_vllm_config_or_none() is previous_config
 
 
 class TestACLGraphEntry(TestBase):
