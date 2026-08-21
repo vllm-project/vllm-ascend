@@ -271,20 +271,22 @@ class TestSequenceRowParallelOp(unittest.TestCase):
         op.unique_prefix = "model.layers.0.mlp.down_proj"
         return op
 
-    def test_mxfp8_tuple_uses_dedicated_custom_op(self):
+    def test_prequantized_tuple_uses_with_scale_custom_op(self):
         op = self._make_op()
         quantized_input = torch.empty(8, 16, dtype=torch.float8_e4m3fn)
         input_scale = torch.empty(8, 1, 2, dtype=torch.uint8)
         expected = torch.empty(2, 8, dtype=torch.bfloat16)
 
-        with patch.object(torch.ops.vllm, "matmul_and_reduce_mxfp8", return_value=expected, create=True) as mock_mxfp8:
+        with patch.object(
+            torch.ops.vllm, "matmul_and_reduce_with_scale", return_value=expected, create=True
+        ) as mock_with_scale:
             output, output_bias = op.apply_impl((quantized_input, input_scale))
 
         self.assertIs(output, expected)
         self.assertIsNone(output_bias)
-        mock_mxfp8.assert_called_once_with(quantized_input, input_scale, op.unique_prefix)
+        mock_with_scale.assert_called_once_with(quantized_input, input_scale, op.unique_prefix)
 
-    def test_mxfp8_tuple_must_be_prepartitioned(self):
+    def test_prequantized_tuple_must_be_prepartitioned(self):
         op = self._make_op(input_is_parallel=False)
         quantized_input = torch.empty(8, 16, dtype=torch.float8_e4m3fn)
         input_scale = torch.empty(8, 1, 2, dtype=torch.uint8)
@@ -292,8 +294,8 @@ class TestSequenceRowParallelOp(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must already be partitioned"):
             op.apply_impl((quantized_input, input_scale))
 
-    def test_mxfp8_custom_op_reconstructs_quantized_input_tuple(self):
-        from vllm_ascend.ops.register_custom_ops import _matmul_and_reduce_mxfp8_impl
+    def test_with_scale_custom_op_reconstructs_quantized_input_tuple(self):
+        from vllm_ascend.ops.register_custom_ops import _matmul_and_reduce_with_scale_impl
 
         quantized_input = torch.empty(8, 16, dtype=torch.float8_e4m3fn)
         input_scale = torch.empty(8, 1, 2, dtype=torch.uint8)
@@ -310,10 +312,36 @@ class TestSequenceRowParallelOp(unittest.TestCase):
             "vllm_ascend.ops.register_custom_ops.get_forward_context",
             return_value=forward_context,
         ):
-            output = _matmul_and_reduce_mxfp8_impl(quantized_input, input_scale, "model.layers.0.mlp.down_proj")
+            output = _matmul_and_reduce_with_scale_impl(quantized_input, input_scale, "model.layers.0.mlp.down_proj")
 
         self.assertIs(output, expected)
         layer.custom_op.matmul_and_reduce.assert_called_once_with((quantized_input, input_scale), None)
+
+    def test_with_scale_fake_uses_layer_params_dtype(self):
+        from vllm_ascend.ops.register_custom_ops import _matmul_and_reduce_with_scale_impl_fake
+
+        quantized_input = torch.empty(8, 16, dtype=torch.int8)
+        input_scale = torch.empty(8, 1, dtype=torch.float32)
+        layer = MagicMock()
+        layer.output_size_per_partition = 4
+        layer.params_dtype = torch.float16
+        forward_context = MagicMock()
+        forward_context.no_compile_layers = {"model.layers.0.mlp.down_proj": layer}
+
+        with (
+            patch(
+                "vllm_ascend.ops.register_custom_ops.get_forward_context",
+                return_value=forward_context,
+            ),
+            patch("vllm_ascend.ops.register_custom_ops._EXTRA_CTX") as extra_ctx,
+        ):
+            extra_ctx.flash_comm_v1_enabled = False
+            output = _matmul_and_reduce_with_scale_impl_fake(
+                quantized_input, input_scale, "model.layers.0.mlp.down_proj"
+            )
+
+        self.assertEqual(output.shape, (8, 4))
+        self.assertEqual(output.dtype, torch.float16)
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):

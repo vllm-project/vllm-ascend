@@ -321,7 +321,9 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         super().__init__(layer)
         self.unique_prefix = None
 
-    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+    def apply_impl(
+        self, input_: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
 
         Implemented multiple optimization projects for dense models, such as FlashComm and
@@ -341,9 +343,9 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
         elif isinstance(input_parallel, tuple):
             # Custom-op schemas cannot express a Tensor-or-tuple union, so pass
-            # the pre-quantized activation and its MX scale as separate tensors.
+            # the pre-quantized activation and its scale as separate tensors.
             quantized_input, input_scale = input_parallel
-            output = torch.ops.vllm.matmul_and_reduce_mxfp8(quantized_input, input_scale, self.unique_prefix)
+            output = torch.ops.vllm.matmul_and_reduce_with_scale(quantized_input, input_scale, self.unique_prefix)
         else:
             output = torch.ops.vllm.matmul_and_reduce(input_parallel, self.unique_prefix)
 

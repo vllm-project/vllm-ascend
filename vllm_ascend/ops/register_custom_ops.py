@@ -158,15 +158,15 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor, layer_name: str) 
     return output
 
 
-def _matmul_and_reduce_mxfp8_impl(
+def _matmul_and_reduce_with_scale_impl(
     quantized_input: torch.Tensor, input_scale: torch.Tensor, layer_name: str
 ) -> torch.Tensor:
-    # Reconstruct the tuple consumed by MXFP8 quant methods only after crossing
-    # the Tensor-only custom-op schema boundary.
+    # Reconstruct the pre-quantized input tuple only after crossing the
+    # Tensor-only custom-op schema boundary.
     return _run_matmul_and_reduce((quantized_input, input_scale), layer_name)
 
 
-def _matmul_and_reduce_mxfp8_impl_fake(
+def _matmul_and_reduce_with_scale_impl_fake(
     quantized_input: torch.Tensor, input_scale: torch.Tensor, layer_name: str
 ) -> torch.Tensor:
     forward_context = get_forward_context()
@@ -177,7 +177,7 @@ def _matmul_and_reduce_mxfp8_impl_fake(
     return torch.empty(
         size=(num_tokens, self.output_size_per_partition),
         device=quantized_input.device,
-        dtype=torch.bfloat16,
+        dtype=self.params_dtype,
     )
 
 
@@ -260,9 +260,9 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
-    op_name="matmul_and_reduce_mxfp8",
-    op_func=_matmul_and_reduce_mxfp8_impl,
-    fake_impl=_matmul_and_reduce_mxfp8_impl_fake,
+    op_name="matmul_and_reduce_with_scale",
+    op_func=_matmul_and_reduce_with_scale_impl,
+    fake_impl=_matmul_and_reduce_with_scale_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
