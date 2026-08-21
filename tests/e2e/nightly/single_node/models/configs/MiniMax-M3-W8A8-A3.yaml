@@ -77,4 +77,5 @@ test_cases:
         batch_size: 64
         baseline: 72
         temperature: 1.0
+        top_p: 0.95
         threshold: 2
