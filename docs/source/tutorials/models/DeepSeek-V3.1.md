@@ -227,7 +227,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
@@ -246,12 +245,13 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.92 \
     --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}'
     ```
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
@@ -340,11 +340,10 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
     --data-parallel-size 4 \
@@ -393,11 +392,10 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
     --headless \

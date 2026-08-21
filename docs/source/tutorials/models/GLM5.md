@@ -148,7 +148,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
@@ -167,7 +166,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -182,7 +181,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
@@ -202,7 +200,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -221,7 +219,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
@@ -241,7 +238,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true}}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -263,7 +260,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm optimization to reduce communication overhead (mainly benefits the prefill path). With FlashComm enabled, `layer_sharding` cannot include `o_proj`.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables the MLA preprocess fusion operator (MlaPreprocessOperation). Enabled by default for w8a8 models — significantly improves Decode performance but consumes more NPU memory; set `VLLM_ASCEND_ENABLE_MLAPO=0` if memory is a priority. Recommended for w8a8; w4a8 may not benefit.
-- `VLLM_ASCEND_BALANCE_SCHEDULING=1`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler.
+- `additional_config.scheduler_config.enable_balance_scheduling=true`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler.
 
 **Performance tuning notes for single-node:**
 
@@ -303,11 +300,10 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -346,11 +342,10 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -395,7 +390,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
@@ -417,7 +411,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true}}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -440,7 +434,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
@@ -464,7 +457,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true}}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -551,7 +544,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
@@ -575,7 +567,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"multistream_overlap_shared_expert": true}' \
+--additional-config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -600,7 +592,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
@@ -626,7 +617,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"multistream_overlap_shared_expert": true}' \
+--additional-config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
