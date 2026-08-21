@@ -736,13 +736,13 @@ After several minutes, you will get the performance evaluation result.
 |----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|
 | High Throughput | Single-Node | 16 | 4 | 4 | none | On | On  | On |
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |
-| Long Context | Single-Node | 16 | 8 | 1 | none | On | On | Off |
+| Long Context | Single-Node | 16 | 8 | 2 | none | On | On | On |
 
 Key Parameter Descriptions:
 
 * `MTP Speculation Num`: set to `3` only in Low Latency (via `speculative-config(eagle3)`) to cut decode rounds per token; kept none in High Throughput and Long Context where raw throughput/context capacity outweighs per-token latency gains.
 * `FUSED_MC2`: a MoE-specific fused dispatch/combine optimization, applicable since Qwen3-235B-A22B is a true MoE model; kept On in High Throughput and Long Context (sufficient MoE dispatch volume to benefit), but Off in Low Latency (low concurrency doesn't offset the fusion overhead).
-* `Async Scheduling`: a general scheduler-level optimization independent of MoE/dense architecture; kept On in High Throughput and Low Latency to reduce TPOT under concurrent decode, but Off in Long Context.
+
 
 > For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment)
 
