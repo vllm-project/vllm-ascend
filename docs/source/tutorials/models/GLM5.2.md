@@ -233,7 +233,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8077 \
     --api-server-count 1 \
@@ -289,7 +289,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -470,7 +470,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
             --host 0.0.0.0 \
             --port 9081 \
             --pipeline-parallel-size 2 \
@@ -543,7 +543,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
             --host 0.0.0.0 \
             --port 9082 \
             --pipeline-parallel-size 2 \
@@ -615,7 +615,7 @@ Before you start, please
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -685,7 +685,7 @@ Before you start, please
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1288,7 +1288,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
 --host 0.0.0.0 \
 --port 8077 \
 --api-server-count 1 \
@@ -1346,7 +1346,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
 --host 0.0.0.0 \
 --port 8077 \
 --headless \
@@ -1420,7 +1420,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 9081 \
     --data-parallel-size 2 \
@@ -1490,7 +1490,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 9082 \
     --data-parallel-size 2 \
@@ -1562,7 +1562,7 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
@@ -1634,7 +1634,7 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
