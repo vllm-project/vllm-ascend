@@ -334,6 +334,8 @@ class MooncakePullRecvingThread(threading.Thread):
         """Infer and validate the total KV heads for one transfer spec."""
         if fixed_total_num_kv_heads is not None:
             return fixed_total_num_kv_heads
+        if remote_num_kv_heads is None:
+            raise ValueError("Remote KV head count is required when it cannot be inferred from the cache spec")
         assert max(self.tp_size, remote_tp_size) % min(self.tp_size, remote_tp_size) == 0
         assert max(local_num_kv_heads, remote_num_kv_heads) % min(local_num_kv_heads, remote_num_kv_heads) == 0
         local_head_tp_size = self.tp_size // local_dcp_size
@@ -778,6 +780,7 @@ class MooncakePullRecvingThread(threading.Thread):
                 local_shape = local_shapes[cache_index]
                 remote_shape = remote_shapes[cache_index]
 
+                address_slices: list[tuple[int, int, int]]
                 if self.tp_size == remote_tp_size:
                     if remote_tp_rank != self.tp_rank or local_block_len != remote_block_len:
                         raise ValueError(
@@ -793,6 +796,8 @@ class MooncakePullRecvingThread(threading.Thread):
                         )
                     dtype_size = torch.tensor([], dtype=spec.dtypes[cache_index]).element_size()
                     mamba_type = spec.mamba_type
+                    local_projection_widths: tuple[int, ...]
+                    remote_projection_widths: tuple[int, ...]
                     if mamba_type == MambaAttentionBackendEnum.MAMBA1:
                         local_projection_widths = (local_shape[1],)
                         remote_projection_widths = (remote_shape[1],)
@@ -848,7 +853,7 @@ class MooncakePullRecvingThread(threading.Thread):
                             f"{self.layer_names[local_layer_index]!r}: local={local_shape}, remote={remote_shape}"
                         )
 
-                    address_slices: list[tuple[int, int, int]] = []
+                    address_slices = []
                     local_projection_offset = 0
                     remote_projection_offset = 0
                     for local_projection_width, remote_projection_width in zip(
@@ -1157,9 +1162,9 @@ class MooncakePullRecvingThread(threading.Thread):
             return cached_metadata
 
         path = make_zmq_path("tcp", remote_host, remote_port)
-        with zmq_ctx(zmq.REQ, path) as sock:
-            sock.setsockopt(zmq.SNDTIMEO, 1000)
-            sock.setsockopt(zmq.RCVTIMEO, 1000)
+        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.SNDTIMEO, 1000)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
             ensure_zmq_send(
                 sock,
                 self.encoder.encode((b"get_meta_msg",)),
@@ -1206,6 +1211,8 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         """Register caches and start the D-side pull execution thread."""
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_consumer:
+            if not isinstance(self.xfer_handshake_metadata, MooncakeTransferMetadata):
+                raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
             ready_event = threading.Event()
             self._recving_thread = MooncakePullRecvingThread(
                 engine=self.engine,

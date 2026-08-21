@@ -217,20 +217,20 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         path = make_zmq_path("tcp", self.host, self.port)
         try:
             logger.info("Mooncake scheduler sending thread listening on %s", path)
-            with zmq_ctx(zmq.ROUTER, path) as sock:
-                sock.setsockopt(zmq.RCVTIMEO, 1000)
+            with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore[attr-defined]
+                sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
                 self.ready_event.set()
                 self._run_busy_loop(sock)
         except Exception:
             self.ready_event.set()
             logger.exception("Mooncake scheduler sending thread failed on %s", path)
 
-    def _run_busy_loop(self, sock: zmq.Socket) -> None:
+    def _run_busy_loop(self, sock: Any) -> None:
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while True:
             try:
                 frames = sock.recv_multipart()
-            except zmq.Again:
+            except zmq.Again:  # type: ignore[attr-defined]
                 continue
 
             identity = frames[0]
@@ -313,9 +313,9 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
 
     def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str) -> None:
         path = make_zmq_path("tcp", remote_host, remote_port)
-        with zmq_ctx(zmq.REQ, path) as sock:
-            sock.setsockopt(zmq.SNDTIMEO, 1000)
-            sock.setsockopt(zmq.RCVTIMEO, 1000)
+        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.SNDTIMEO, 1000)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
             ensure_zmq_send(
                 sock,
                 self.encoder.encode((DONE_RECVING_MSG, request_id)),
