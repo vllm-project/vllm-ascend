@@ -1,53 +1,52 @@
 # aclnnMsaIndexScore
 
-[📄 查看源码](https://gitcode.com/cann/ops-transformer/tree/master/attention/msa_index_score)
+[📄 View Source](https://gitcode.com/cann/ops-transformer/tree/master/attention/msa_index_score)
 
-## 产品支持情况
+## Product Support
 
-| 产品                                                      | 是否支持 |
-| --------------------------------------------------------- | :------: |
-| <term>Atlas A2 训练系列产品/Atlas 800I A2 推理产品</term> |    √     |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>  |    √     |
-| <term>Ascend 950PR/Ascend 950DT</term>                    |    ×     |
+| Product                                                               | Supported |
+| --------------------------------------------------------------------- | :-------: |
+| <term>Atlas A2 Training Series/Atlas 800I A2 Inference Product</term> |     √     |
+| <term>Atlas A3 Training Series/Atlas A3 Inference Series</term>       |     √     |
+| <term>Ascend 950PR/Ascend 950DT</term>                                |     ×     |
 
-## 功能说明
+## Function Description
 
-- **算子功能**：计算 MSA（MiniMax Sparse Attention）模块 Index Branch 中的 block score。对每个 query token 与每个 KV sparse block，取该 block 内所有因果可见 token 的 $Q_{idx}$ 和 $K_{idx}$（可选 int8 反量化）的"matmul+maxpool"运算获得逐block的重要性分数score，用作 Index Branch 中后续的 TopK 输入。Prefill 与 Decode 由同一接口承载。
+- **Operator behavior**: Computes block scores for the Index Branch of the MSA (MiniMax Sparse Attention) module. For every query token and KV sparse block, it applies matmul and max-pooling to $Q_{idx}$ and $K_{idx}$ over all causally visible tokens in the block, with optional INT8 dequantization. The resulting per-block importance scores are used as the input to the subsequent TopK stage. Prefill and decode share the same interface.
 
-- **计算公式**：
+- **Formulas**:
 
-    - 非量化场景：
+    - Non-quantized:
 
-    $$
-    score = Maxpool[ Q_{idx}@K_{idx}^{T} ]
-    $$
+  $$
+  score = Maxpool[ Q_{idx}@K_{idx}^{T} ]
+  $$
+    - INT8-quantized:
 
-    - int8量化场景：
+  $$
+  score = Maxpool[ scale \cdot Q_{idx}@K_{idx}^{T}  ]
+  $$
 
-    $$
-    score = Maxpool[ scale \cdot Q_{idx}@K_{idx}^{T}  ]
-    $$
+  Complete formula, including the causal mask and $local\_mask$:
 
-    完整公式（含因果 mask 与 local_mask）：
+  $$
+  score = Maxpool[(scale \cdot) Q_{idx}@K_{idx}^{T} + atten\_mask] + local\_mask
+  $$
 
-    $$
-    score = Maxpool[(scale \cdot) Q_{idx}@K_{idx}^{T} + atten\_mask] + local\_mask
-    $$
+  $local\_mask$ is generated from `startLoc`, `initBlocks`, and `localBlocks`. Logical blocks in $[0, initBlocks)$ are assigned $1\mathrm{e}30$. Blocks in the window $[max(0, startLoc+1-localBlocks), startLoc]$ are assigned $1\mathrm{e}29$, overriding an init-block score at the same position. Setting both block counts to 0 disables $local\_mask$.
 
-    $local\_mask$ 由 `startLoc`、`initBlocks`、`localBlocks` 生成：逻辑 block $[0, initBlocks)$ 写入 $1\mathrm{e}30$；窗口 $[max(0, startLoc+1-localBlocks), startLoc]$ 写入 $1\mathrm{e}29$（覆盖同位置的 init）。两者均为 0 时关闭 $local\_mask$。
+- **Notation**:
 
-- **参数介绍**：
+  > - B (Batch Size) is the number of input samples.
+  > - S (Sequence Length) is the sequence length. $S1$ is the query length and $S2$ is the key length.
+  > - T is the sum of sequence lengths across the batch. $T1$ is for queries and $T2$ is for keys.
+  > - N (Head Num) is the number of heads. $N1$ is the number of query heads and $N2$ is the number of key heads.
+  > - D (Head Dim) is the dimension of each attention head.
+  > - For PageAttention, $block\_num$ is the total number of physical blocks, $block\_size$ is the number of tokens per block, and $maxBlockNumPerSeq$ is the maximum number of logical blocks per batch item, typically $\ge\lceil S2/block\_size\rceil$. $M_b=\lceil S2/block\_size\rceil$ is the total number of logical blocks.
 
-    > - B（Batch Size）表示输入样本批量大小
-    > - S（Sequence Length）表示序列长度，$S1$ 为 query 侧、$S2$ 为 key 侧
-    > - T 表示所有 Batch 序列长度累加和，$T1$ 为 query 侧、$T2$ 为 key 侧
-    > - N（Head Num）表示头数，$N1$ 为 query 侧、$N2$ 为 key 侧
-    > - D（Head Dim）表示单个注意力头维度；
-    > - PageAttention 场景下 $block\_num$ 为物理 block 总数、$block\_size$ 为每个 block 的 token 数，$maxBlockNumPerSeq$ 为每个 batch 最大逻辑 block 数（通常 $\ge\lceil S2/block\_size\rceil$），$M_b=\lceil S2/block\_size\rceil$为逻辑 block 总数
+## Function Prototypes
 
-## 函数原型
-
-每个算子分为[两段式接口](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/two_phase_api.md)，必须先调用 `aclnnMsaIndexScoreGetWorkspaceSize` 接口获取入参并计算所需 workspace 大小，再调用 `aclnnMsaIndexScore` 接口执行计算。
+This operator uses a [two-stage interface](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/two_phase_api.md). Call `aclnnMsaIndexScoreGetWorkspaceSize` first to validate the inputs and obtain the required workspace size, then call `aclnnMsaIndexScore` to execute the computation.
 
 ```cpp
 aclnnStatus aclnnMsaIndexScoreGetWorkspaceSize(
@@ -75,67 +74,66 @@ aclnnStatus aclnnMsaIndexScore(
 
 ## aclnnMsaIndexScoreGetWorkspaceSize
 
-### 参数说明
+### Parameters
 
-| 参数名                        | 输入/输出 | 描述                                              | 使用说明                                                     | 数据类型                     | 数据格式 | 维度                                                         |
-| ----------------------------- | --------- | ------------------------------------------------- | ------------------------------------------------------------ | ---------------------------- | -------- | ------------------------------------------------------------ |
-| query                         | 输入      | 公式中的$Q_{idx}$                                 | 支持的shape为：TND                                           | BFLOAT16, FLOAT16            | ND       | 3（$[T1, N1, D]$）                                           |
-| key                           | 输入      | 公式中的$K_{idx}$                                 | 支持的shape为：TND、BNBD、BBND                               | BFLOAT16, FLOAT16, INT8      | ND, NZ   | 3（$[T2, N2, D]$）或 4（$[block\_num, N2, block\_size, D]$、$[block\_num, block\_size, N2, D]$） |
-| blockTableOptional            | 输入      | 表示当前传入的使用PageAttention存储的block映射表  | PageAttention场景下，blockTableOptional需为2维；第二维长度不能小于 $maxBlockNumPerSeq$ | INT32                        | ND       | 2（$[B, S2/block\_size]$）                                   |
-| scaleOptional                 | 输入      | 公式中的$scale$，反量化系数                       | 非量化场景传入`nullptr`；量化场景时必选。PA 为 BNB/BBN；TND 为 $[T2, N2]$（N2=1 时可 $[T2]$） | FLOAT                        | ND, NZ   | 3（$[block\_num, N2, block\_size]$、$[block\_num, block\_size, N2]$）或 2（$[T2, N2]$） |
-| attenMaskOptional             | 输入      | 控制因果可见的mask掩码。                          | 仅在sparseMode=3时使用，作为base mask控制causal可见；取值为1代表该位不参与计算，为0代表该位参与计算 | INT8                         | ND       | 2（$[2048, 2048]$）                                          |
-| actualSeqQlenOptional | 输入      | 每个Batch中，Query的有效token数                   | 当传入TND时，该入参必须传入，单调不减（前缀和）              | INT32                        | ND       | 1（$[B+1]$）                                                 |
-| actualSeqKlenOptional   | 输入      | 每个Batch中，Key的有效token数                     | key 为 TND 时必须传入，单调不减（前缀和，$[B+1]$）；PageAttention 场景下为各请求可见 $S2$（$[B]$） | INT32                        | ND       | 1（$[B]$ 或 $[B+1]$）                                        |
-| startLoc                      | 输入      | 当前 query 所在逻辑 block 索引（非 token 前缀） | 与 `initBlocks` / `localBlocks` 一起生成 $local\_mask$ | INT32                        | ND       | 1（$[B]$）                                                   |
-| layoutKeyOptional             | 输入      | key 的数据排布                                | 取值 `"TND"` / `"BBND"` / `"BNBD"`。不传或空串时默认 `"BBND"`。必须与 `key` 实际 shape 一致，不可仅凭维度推断 | CHAR*                        | -        | -                                                            |
-| sparseMode                    | 输入      | 表示sparse的模式                                  | 为0时，代表defaultMask模式；为3时，代表rightDownCausal模式的mask，对应以右顶点为划分的下三角场景。 | INT64                        | -        | -                                                            |
-| initBlocks                    | 输入      | $local\_mask$ 强制选中的头部 block 数             | 对逻辑 block $[0, initBlocks)$ 写入高分 $1\mathrm{e}30$。可选，默认 $0$；须 $\ge 0$ 且 $\le maxBlockNumPerSeq$ | INT64                        | -        | -                                                            |
-| localBlocks                   | 输入      | $local\_mask$ 强制选中的局部窗口长度              | 窗口为 $[max(0, startLoc+1-localBlocks), startLoc]$，写入高分 $1\mathrm{e}29$（覆盖同位置 init）。可选，默认 $1$（对齐 MiniMax HF）；与 Triton raw score 对齐时置 $0$ | INT64                        | -        | -                                                            |
-| score                         | 输出      | 公式中的$score$                                   | 逐block的重要性分数；末维为对齐后的逻辑 block 数             | FLOAT                        | ND       | 3（$[N1, T1, RoundUp(maxBlockNumPerSeq, 16)]$）              |
-| workspaceSize                 | 输出      | 所需 workspace 字节数                             | -                                                            | uint64_t                     | -        | -                                                            |
-| executor                      | 输出      | 算子执行器                                        | -                                                            | aclOpExecutor**              | -        | -                                                            |
+| Parameter             | Input/Output | Description                                        | Usage                                                                                                                                                                                                                  | Data Type               | Format | Dimensions                                                                                      |
+| --------------------- | ------------ | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | ------ | ----------------------------------------------------------------------------------------------- |
+| query                 | Input        | $Q_{idx}$ in the formula                           | The supported layout is TND.                                                                                                                                                                                           | BFLOAT16, FLOAT16       | ND     | 3 ($[T1, N1, D]$)                                                                               |
+| key                   | Input        | $K_{idx}$ in the formula                           | The supported layouts are TND, BNBD, and BBND.                                                                                                                                                                         | BFLOAT16, FLOAT16, INT8 | ND, NZ | 3 ($[T2, N2, D]$) or 4 ($[block\_num, N2, block\_size, D]$, $[block\_num, block\_size, N2, D]$) |
+| blockTableOptional    | Input        | PageAttention logical-to-physical block mapping    | Required for PageAttention. It must be 2D, and its second dimension must be at least $maxBlockNumPerSeq$.                                                                                                              | INT32                   | ND     | 2 ($[B, S2/block\_size]$)                                                                       |
+| scaleOptional         | Input        | Dequantization coefficient $scale$ in the formula  | Pass `nullptr` for non-quantized input. This parameter is required for quantized input. Its layout is BNB/BBN for PageAttention or $[T2, N2]$ for TND; $[T2]$ is also accepted when N2=1.                              | FLOAT                   | ND, NZ | 3 ($[block\_num, N2, block\_size]$, $[block\_num, block\_size, N2]$) or 2 ($[T2, N2]$)          |
+| attenMaskOptional     | Input        | Mask controlling causal visibility                 | Used only when `sparseMode=3` as the base causal mask. A value of 1 excludes the position from computation, while 0 includes it.                                                                                       | INT8                    | ND     | 2 ($[2048, 2048]$)                                                                              |
+| actualSeqQlenOptional | Input        | Valid query-token counts for each batch item       | Required for TND input. Values must be non-decreasing prefix sums.                                                                                                                                                     | INT32                   | ND     | 1 ($[B+1]$)                                                                                     |
+| actualSeqKlenOptional | Input        | Valid key-token counts for each batch item         | For a TND key, this parameter is required and contains non-decreasing prefix sums with shape $[B+1]$. For PageAttention, it contains the visible $S2$ for each request with shape $[B]$.                               | INT32                   | ND     | 1 ($[B]$ or $[B+1]$)                                                                            |
+| startLoc              | Input        | Logical block index containing the current query   | Used with `initBlocks` and `localBlocks` to generate $local\_mask$. It is a block index, not a token prefix.                                                                                                           | INT32                   | ND     | 1 ($[B]$)                                                                                       |
+| layoutKeyOptional     | Input        | Key layout                                         | Supported values are `"TND"`, `"BBND"`, and `"BNBD"`. An omitted or empty value defaults to `"BBND"`. It must match the actual `key` shape and must not be inferred from the number of dimensions alone.               | CHAR*                   | -      | -                                                                                               |
+| sparseMode            | Input        | Sparse-mask mode                                   | 0 selects `defaultMask`; 3 selects the `rightDownCausal` mask, a lower-triangular region aligned to the upper-right vertex.                                                                                            | INT64                   | -      | -                                                                                               |
+| initBlocks            | Input        | Number of leading blocks forced by $local\_mask$   | Assigns $1\mathrm{e}30$ to logical blocks in $[0, initBlocks)$. Optional; defaults to 0. The value must be $\ge 0$ and $\le maxBlockNumPerSeq$.                                                                        | INT64                   | -      | -                                                                                               |
+| localBlocks           | Input        | Length of the local window forced by $local\_mask$ | Assigns $1\mathrm{e}29$ to $[max(0, startLoc+1-localBlocks), startLoc]$, overriding init-block scores at the same positions. Optional; defaults to 1 to match MiniMax HF. Set it to 0 when matching Triton raw scores. | INT64                   | -      | -                                                                                               |
+| score                 | Output       | $score$ in the formula                             | Per-block importance scores. The final dimension is the aligned number of logical blocks.                                                                                                                              | FLOAT                   | ND     | 3 ($[N1, T1, RoundUp(maxBlockNumPerSeq, 16)]$)                                                  |
+| workspaceSize         | Output       | Required workspace size in bytes                   | -                                                                                                                                                                                                                      | uint64_t                | -      | -                                                                                               |
+| executor              | Output       | Operator executor                                  | -                                                                                                                                                                                                                      | aclOpExecutor**         | -      | -                                                                                               |
 
-### 返回值
+### Return Values
 
-| 返回码                  | 错误码 | 说明                                     |
-| ----------------------- | ------ | ---------------------------------------- |
-| ACLNN_SUCCESS           | 0      | 执行成功                                 |
-| ACLNN_ERR_PARAM_NULLPTR | 161001 | 必选入参或出参为空指针                   |
-| ACLNN_ERR_PARAM_INVALID | 161002 | 数据类型、数据格式、维度或取值不满足约束 |
+| Return Code             | Error Code | Description                                                     |
+| ----------------------- | ---------- | --------------------------------------------------------------- |
+| ACLNN_SUCCESS           | 0          | Execution succeeded.                                            |
+| ACLNN_ERR_PARAM_NULLPTR | 161001     | A required input or output is a null pointer.                   |
+| ACLNN_ERR_PARAM_INVALID | 161002     | A data type, format, dimension, or value violates a constraint. |
 
 ## aclnnMsaIndexScore
 
-### 参数说明
+### Parameters
 
-| 参数名        | 输入/输出 | 描述                               |
-| ------------- | --------- | ---------------------------------- |
-| workspace     | 输入      | device 侧 workspace 地址           |
-| workspaceSize | 输入      | workspace 字节数，由第一段接口返回 |
-| executor      | 输入      | 算子执行器，由第一段接口返回       |
-| stream        | 输入      | acl stream                         |
+| Parameter     | Input/Output | Description                                                    |
+| ------------- | ------------ | -------------------------------------------------------------- |
+| workspace     | Input        | Device-side workspace address.                                 |
+| workspaceSize | Input        | Workspace size in bytes returned by the first-stage interface. |
+| executor      | Input        | Operator executor returned by the first-stage interface.       |
+| stream        | Input        | ACL stream.                                                    |
 
-### 返回值
+### Return Values
 
-| 返回码                  | 错误码 | 说明       |
-| ----------------------- | ------ | ---------- |
-| ACLNN_SUCCESS           | 0      | 执行成功   |
-| ACLNN_ERR_PARAM_INVALID | 161002 | 参数不合法 |
+| Return Code             | Error Code | Description          |
+| ----------------------- | ---------- | -------------------- |
+| ACLNN_SUCCESS           | 0          | Execution succeeded. |
+| ACLNN_ERR_PARAM_INVALID | 161002     | Invalid parameter.   |
 
-## 约束说明
+## Constraints
 
-- 当前 $block\_size$ 值使用128。
-- `layoutKeyOptional` 必须显式指定 key 布局：`"BBND"`（$[block\_num, block\_size, N2, D]$）、`"BNBD"`（$[block\_num, N2, block\_size, D]$）或 `"TND"`（$[T2, N2, D]$）。不传时默认 `"BBND"`。
-- PageAttention（`layoutKey` 为 `"BBND"` / `"BNBD"`）场景下，`blockTableOptional` 必须传入；TND key 场景不得传入 `blockTableOptional`，`actualSeqKlenOptional` 为 $[B+1]$ 前缀和。
-- 非量化场景下，`key` dtype 与 `query` 相同（当前为 BFLOAT16 / FLOAT16），`scaleOptional` 必须为 `nullptr`；量化场景下仅支持 INT8，`scaleOptional` 必选，dtype 为 FLOAT：PA 为 $[block\_num, N2, block\_size]$ 或 $[block\_num, block\_size, N2]$，TND 为 $[T2, N2]$。当前不支持 FP8 与 <term>Ascend 950PR/Ascend 950DT</term>。
-- `sparseMode` 当前仅支持 0、3：
-    - 为 0 时，代表 defaultMask 模式，`attenMaskOptional` 传入 `nullptr`；
-    - 为 3 时，代表 rightDownCausal 模式，`attenMaskOptional` 必须传入，shape 为 $[2048, 2048]$，取值为 1 代表该位不参与计算，为 0 代表该位参与计算。
-- `initBlocks`、`localBlocks` 必须 $\ge 0$ 且不超过逻辑 block 数（PA 为 `blockTableOptional` 第二维；TND 为 score 末维对齐宽度）。两者均为 0 时跳过 $local\_mask$。
+- The current $block\_size$ is 128.
+- `layoutKeyOptional` must explicitly identify the key layout: `"BBND"` for $[block\_num, block\_size, N2, D]$, `"BNBD"` for $[block\_num, N2, block\_size, D]$, or `"TND"` for $[T2, N2, D]$. If omitted, it defaults to `"BBND"`.
+- For PageAttention (`layoutKey` is `"BBND"` or `"BNBD"`), `blockTableOptional` is required. For a TND key, `blockTableOptional` must be omitted and `actualSeqKlenOptional` must contain $[B+1]$ prefix sums.
+- For non-quantized input, `key` must have the same data type as `query`, currently BFLOAT16 or FLOAT16, and `scaleOptional` must be `nullptr`. Quantized input supports INT8 only and requires a FLOAT `scaleOptional`: $[block\_num, N2, block\_size]$ or $[block\_num, block\_size, N2]$ for PageAttention, and $[T2, N2]$ for TND. FP8 and <term>Ascend 950PR/Ascend 950DT</term> are not currently supported.
+- `sparseMode` currently supports only 0 and 3:
+    - 0 selects `defaultMask`, and `attenMaskOptional` must be `nullptr`.
+    - 3 selects `rightDownCausal`, and `attenMaskOptional` is required with shape $[2048, 2048]$. A value of 1 excludes the position from computation, while 0 includes it.
+- `initBlocks` and `localBlocks` must be $\ge 0$ and must not exceed the number of logical blocks: the second dimension of `blockTableOptional` for PageAttention, or the aligned final score dimension for TND. Setting both to 0 skips $local\_mask$.
 
+## Example
 
-## 调用示例
-
-示例代码如下（BBND PageAttention）。TND：`layoutKeyOptional="TND"`，`key` 为 $[T2, N2, D]$，`blockTableOptional` 传 `nullptr`，`actualSeqKlenOptional` 为 $[B+1]$ 前缀和。BNBD：`layoutKeyOptional="BNBD"`，`key` 为 $[block\_num, N2, block\_size, D]$。含 TND/BNBD 的精度自验证见 [test_aclnn_msa_index_score.cpp](../examples/test_aclnn_msa_index_score.cpp)。
+The following example uses BBND PageAttention. For TND, set `layoutKeyOptional="TND"`, use a $[T2, N2, D]$ `key`, pass `nullptr` for `blockTableOptional`, and provide $[B+1]$ prefix sums in `actualSeqKlenOptional`. For BNBD, set `layoutKeyOptional="BNBD"` and use a $[block\_num, N2, block\_size, D]$ `key`. See [test_aclnn_msa_index_score.cpp](../examples/test_aclnn_msa_index_score.cpp) for TND and BNBD accuracy self-checks.
 
 ```Cpp
 #include <iostream>
@@ -257,10 +255,10 @@ int InitializeTensors(TensorResources& resources) {
   std::vector<uint16_t> queryHostData(GetShapeSize(queryShape), 0x3C00);  // fp16 1.0
   std::vector<uint16_t> keyHostData(GetShapeSize(keyShape), 0x3C00);
   std::vector<int32_t> blockTableHostData = {0, 1};
-  std::vector<int8_t> attenMaskHostData(GetShapeSize(attenMaskShape), 0);  // 0: 参与计算
+  std::vector<int8_t> attenMaskHostData(GetShapeSize(attenMaskShape), 0);  // 0: included in computation
   std::vector<int32_t> actualSeqQlenHostData = {0, static_cast<int32_t>(T1)};
   std::vector<int32_t> actualSeqKlenHostData = {static_cast<int32_t>(S2)};
-  std::vector<int32_t> startLocHostData = {1};  // 当前 query 所在逻辑 block 索引
+  std::vector<int32_t> startLocHostData = {1};  // Logical block index containing the current query
   std::vector<float> scoreHostData(GetShapeSize(scoreShape), 0.0f);
 
   int ret = CreateAclTensor(queryHostData, queryShape, &resources.queryDeviceAddr,
@@ -316,7 +314,7 @@ int ExecuteMsaIndexScore(TensorResources& resources, aclrtStream stream,
   char layoutKey[] = "BBND";
   aclOpExecutor* executor = nullptr;
 
-  // 非量化：scaleOptional 传 nullptr
+  // Non-quantized input: pass nullptr for scaleOptional
   int ret = aclnnMsaIndexScoreGetWorkspaceSize(
       resources.queryTensor,
       resources.keyTensor,
@@ -479,17 +477,17 @@ int main() {
 }
 ```
 
-TND / BNBD 与上面 BBND 示例的差异如下（完整精度用例见 [test_aclnn_msa_index_score.cpp](../examples/test_aclnn_msa_index_score.cpp) 中的 `L1-bnbd*`、`L1-tnd*`、`L0-tnd-tiny`）。
+The TND and BNBD cases differ from the BBND example above as shown below. See the `L1-bnbd*`, `L1-tnd*`, and `L0-tnd-tiny` cases in [test_aclnn_msa_index_score.cpp](../examples/test_aclnn_msa_index_score.cpp) for complete accuracy tests.
 
 ```Cpp
-// BNBD PageAttention：layoutKey="BNBD"，key 为 [block_num, N2, block_size, D]
+// BNBD PageAttention: layoutKey="BNBD"; key is [block_num, N2, block_size, D]
 char layoutKeyBnbd[] = "BNBD";
 std::vector<int64_t> keyShapeBnbd = {blockNum, N2, blockSize, D};
 
-// TND packed key：layoutKey="TND"，不传 blockTableOptional，actualSeqKlenOptional 为 [B+1] 前缀和
+// Packed TND key: layoutKey="TND"; omit blockTableOptional; actualSeqKlenOptional is a [B+1] prefix sum
 char layoutKeyTnd[] = "TND";
 constexpr int64_t T2 = 256;
 std::vector<int64_t> keyShapeTnd = {T2, N2, D};
-std::vector<int64_t> actualSeqKlenShapeTnd = {B + 1};  // 例如 {0, T2}
+std::vector<int64_t> actualSeqKlenShapeTnd = {B + 1};  // For example, {0, T2}
 aclTensor* blockTableTnd = nullptr;
 ```
