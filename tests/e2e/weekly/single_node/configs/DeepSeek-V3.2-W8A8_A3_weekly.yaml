@@ -14,7 +14,6 @@ _envs: &envs
       ASCEND_A3_ENABLE: "1"
       VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
       SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -134,6 +133,9 @@ test_cases:
     envs:
       <<: *envs
     server_cmd: *server_cmd
+    server_cmd_extra:
+      - --additional-config
+      - '{"enable_mlapo":true}'
     benchmarks:
       <<: *benchmarks
   - name: "DeepSeek-V3.2-W8A8-mix-perf"
@@ -143,6 +145,8 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--async-scheduling"
+      - --additional-config
+      - '{"enable_mlapo":true}'
     benchmarks:
       <<: *benchmarks_2048
 
