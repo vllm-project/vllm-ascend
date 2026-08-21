@@ -335,23 +335,31 @@ class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
     ) -> MoEPrepareOutput:
         self.num_tokens = hidden_states.shape[0]
         ascend_config = get_ascend_config()
-        target_num_tokens = get_a5_mega_moe_buffer_tokens_per_rank(ascend_config.vllm_config)
+        buffer_tokens_per_rank = get_a5_mega_moe_buffer_tokens_per_rank(ascend_config.vllm_config)
         max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
         if max_tokens_across_dp is None:
             max_tokens_across_dp = self.num_tokens
-        if max_tokens_across_dp > target_num_tokens or self.num_tokens > target_num_tokens:
+        if max_tokens_across_dp < self.num_tokens:
+            raise ValueError(
+                "MegaMoE synchronized token count cannot be smaller than the local token count: "
+                f"max_across_dp={max_tokens_across_dp}, local={self.num_tokens}."
+            )
+        if max_tokens_across_dp > buffer_tokens_per_rank:
             raise ValueError(
                 "MegaMoE input exceeds the symmetric buffer token capacity: "
-                f"capacity={target_num_tokens}, max_across_dp={max_tokens_across_dp}, "
+                f"capacity={buffer_tokens_per_rank}, max_across_dp={max_tokens_across_dp}, "
                 f"local={self.num_tokens}."
             )
 
+        target_num_tokens = max_tokens_across_dp
         self.padded_num_tokens = target_num_tokens
         pad_size = target_num_tokens - self.num_tokens
         logger.debug(
-            "A5 MegaMoE prepare: local_num_tokens=%s, max_tokens_across_dp=%s, target_num_tokens=%s, pad_size=%s",
+            "A5 MegaMoE prepare: local_num_tokens=%s, max_tokens_across_dp=%s, "
+            "buffer_tokens_per_rank=%s, target_num_tokens=%s, pad_size=%s",
             self.num_tokens,
             max_tokens_across_dp,
+            buffer_tokens_per_rank,
             target_num_tokens,
             pad_size,
         )

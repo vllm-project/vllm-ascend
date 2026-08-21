@@ -214,9 +214,9 @@ class MegaMoEBackend:
                 w1_scale,
                 w2_scale,
             )
-        if fused_experts_input.hidden_states.shape[0] != buffer_tokens_per_rank:
+        if fused_experts_input.hidden_states.shape[0] > buffer_tokens_per_rank:
             raise ValueError(
-                "A5 MegaMoE input must match the symmetric buffer token capacity: "
+                "A5 MegaMoE input exceeds the symmetric buffer token capacity: "
                 f"num_tokens={fused_experts_input.hidden_states.shape[0]}, "
                 f"mega_moe_buffer_tokens_per_rank={buffer_tokens_per_rank}."
             )
