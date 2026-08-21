@@ -55,7 +55,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -1109,7 +1108,7 @@ class KVCacheRecvingThread(threading.Thread):
         if not (need_cat_cache or need_nz_cache):
             return
 
-        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
+        use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
         for group_idx, reformat_block_ids, _, layer_indices in ready_attention_group_reformat_block_ids:
             group_spec = self.kv_group2layeridx[group_idx][0]
             if MooncakeConnectorWorker._group_skip_kv_reformat(group_spec):
