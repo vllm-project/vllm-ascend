@@ -2016,7 +2016,7 @@ def ensure_zmq_send(
 def ensure_zmq_recv(
     socket: zmq.Socket,  # type: ignore
     path: str,
-    max_retries: int = 3,
+    max_retries: int = 2,
 ) -> bytes:
     retries_left = max_retries
     while True:
