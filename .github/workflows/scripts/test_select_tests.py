@@ -170,43 +170,43 @@ def test_route_helpers():
                 "tests/ut/.+/a3_2": {"default": "a3_x2"},
                 "tests/ut/.+/310p": {"default": "310p_x1"},
                 "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
+                "tests/e2e/pull_request/two_card(?:/[^/]+)*/acc(?:/|$)": {"default": "a3_acc_x2"},
                 "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
+                "tests/e2e/pull_request/four_card(?:/[^/]+)*/acc(?:/|$)": {"default": "a3_acc_x4"},
                 "tests/e2e/pull_request/four_card": {"default": "a3_x4", "310p": "310p_x4"},
+                "tests/e2e/pull_request/eight_card(?:/[^/]+)*/acc(?:/|$)": {"default": "a3_acc_x8"},
                 "tests/e2e/pull_request/eight_card": {"default": "a3_x8"},
             }
         }
     )
 
     assert select_tests._pytest_node_file_path("tests/e2e/test_x.py::TestCase::test_a") == "tests/e2e/test_x.py"
-    assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == (2, select_tests.NpuType.A2)
-    assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py::test_case") == (2, select_tests.NpuType.A2)
-    assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == (1, select_tests.NpuType.A2)
-    assert select_tests._route_ut_dir("tests/ut/mod/a3_8/test_x.py") == (8, select_tests.NpuType.A3)
-    assert select_tests._route_ut_dir("tests/ut/mod/a3_4/test_x.py") == (4, select_tests.NpuType.A3)
-    assert select_tests._route_ut_dir("tests/ut/mod/a3_2/test_x.py") == (2, select_tests.NpuType.A3)
-    assert select_tests._route_ut_dir("tests/ut/mod/310p/test_x.py") == (1, select_tests.NpuType._310P)
+    assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == "a2_x2"
+    assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py::test_case") == "a2_x2"
+    assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == "a2_x1"
+    assert select_tests._route_ut_dir("tests/ut/mod/a3_8/test_x.py") == "a3_x8"
+    assert select_tests._route_ut_dir("tests/ut/mod/a3_4/test_x.py") == "a3_x4"
+    assert select_tests._route_ut_dir("tests/ut/mod/a3_2/test_x.py") == "a3_x2"
+    assert select_tests._route_ut_dir("tests/ut/mod/310p/test_x.py") == "310p_x1"
     assert select_tests._route_ut_dir("tests/ut/_310p/test_x.py") == select_tests._DEFAULT_KEY
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/four_card/") == (4, select_tests.NpuType.A3)
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/eight_card/") == (8, select_tests.NpuType.A3)
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/two_card/") == (2, select_tests.NpuType.A3)
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/one_card/") == (1, select_tests.NpuType.A2)
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/four_card/") == "a3_x4"
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/four_card/acc/") == "a3_acc_x4"
+    assert (
+        select_tests._route_e2e_file("tests/e2e/pull_request/four_card/features/deep/acc/test_accuracy.py")
+        == "a3_acc_x4"
+    )
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/eight_card/") == "a3_x8"
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/two_card/") == "a3_x2"
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/two_card/acc/test_accuracy.py") == "a3_acc_x2"
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/two_card/not_acc/test_accuracy.py") == "a3_x2"
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/four_card/accuracy/test_x.py") == "a3_x4"
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/eight_card/a/b/c/acc/test_accuracy.py") == "a3_acc_x8"
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/one_card/") == "a2_x1"
     assert select_tests._route_e2e_dir("tests/e2e/other/") is None
-    assert select_tests._route_e2e_file("tests/e2e/pull_request/four_card/test_x_310p.py") == (
-        4,
-        select_tests.NpuType._310P,
-    )
-    assert select_tests._route_e2e_file("tests/e2e/pull_request/one_card/test_x_310p.py") == (
-        1,
-        select_tests.NpuType._310P,
-    )
-    assert select_tests._route_e2e_file("tests/e2e/pull_request/two_card/test_x.py::test_case") == (
-        2,
-        select_tests.NpuType.A3,
-    )
-    assert select_tests._route_e2e_file("tests/e2e/pull_request/eight_card/test_x.py::test_case") == (
-        8,
-        select_tests.NpuType.A3,
-    )
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/four_card/test_x_310p.py") == "310p_x4"
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/one_card/test_x_310p.py") == "310p_x1"
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/two_card/test_x.py::test_case") == "a3_x2"
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/eight_card/test_x.py::test_case") == "a3_x8"
 
 
 def test_scan_ut_test_dir(tmp_path):
@@ -237,11 +237,11 @@ def test_scan_ut_test_dir(tmp_path):
     assert sorted(groups[select_tests._DEFAULT_KEY]) == sorted(
         [str(mixed / "test_root.py"), str(nested / "test_nested.py")]
     )
-    assert groups[(2, select_tests.NpuType.A3)] == [str(a3 / "test_a3.py")]
+    assert groups["a3_x2"] == [str(a3 / "test_a3.py")]
 
     groups = defaultdict(list)
     select_tests._scan_ut_test_dir(str(a3), groups)
-    assert groups[(2, select_tests.NpuType.A3)] == [str(a3 / "test_a3.py")]
+    assert groups["a3_x2"] == [str(a3 / "test_a3.py")]
 
 
 def test_scan_e2e_test_dir(tmp_path, capsys):
@@ -264,13 +264,13 @@ def test_scan_e2e_test_dir(tmp_path, capsys):
     test_310p.write_text("")
     helper.write_text("")
     select_tests._scan_e2e_test_dir(str(one_card), groups)
-    assert str(test_one) in groups[(1, select_tests.NpuType.A2)]
-    assert str(test_310p) in groups[(1, select_tests.NpuType._310P)]
-    assert str(helper) not in groups[(1, select_tests.NpuType.A2)]
+    assert str(test_one) in groups["a2_x1"]
+    assert str(test_310p) in groups["310p_x1"]
+    assert str(helper) not in groups["a2_x1"]
 
     nodeid = f"{test_one}::test_specific_case"
     select_tests._scan_e2e_test_dir(nodeid, groups)
-    assert nodeid in groups[(1, select_tests.NpuType.A2)]
+    assert nodeid in groups["a2_x1"]
 
     parent = tmp_path / "tests" / "e2e" / "pull_request"
     two_card = parent / "two_card"
@@ -278,7 +278,7 @@ def test_scan_e2e_test_dir(tmp_path, capsys):
     test_two = two_card / "test_two.py"
     test_two.write_text("")
     select_tests._scan_e2e_test_dir(str(parent), groups)
-    assert str(test_two) in groups[(2, select_tests.NpuType.A3)]
+    assert str(test_two) in groups["a3_x2"]
 
 
 def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
@@ -303,12 +303,16 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)
     runners = select_tests._load_runners()
-    assert select_tests._find_runner(0, select_tests.NpuType.CPU, runners).label == "cpu-runner"
-    assert select_tests._find_runner(1, select_tests.NpuType.A2, runners).label == "a2-runner"
-    assert select_tests._find_runner(2, select_tests.NpuType.A2, runners) is None
+    assert runners["cpu-runner"].npu_type == select_tests.NpuType.CPU
+    assert runners["a2-runner"].num_npus == 1
+    partitions = {
+        "cpu_x0": select_tests.PartitionInfo("cpu-runner", 1),
+        "a2_x1": select_tests.PartitionInfo("a2-runner", 1),
+    }
     assert select_tests._resolve_to_runners(
-        {select_tests._DEFAULT_KEY: ["tests/ut/b.py", "tests/ut/a.py"], (1, select_tests.NpuType.A2): ["e2e.py"]},
+        {select_tests._DEFAULT_KEY: ["tests/ut/b.py", "tests/ut/a.py"], "a2_x1": ["e2e.py"]},
         runners,
+        partitions,
     ) == [
         {
             "num_npus": 0,
@@ -316,7 +320,7 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
             "runner": "cpu-runner",
             "tests": "tests/ut/a.py tests/ut/b.py",
             "image_tag": "cpu-img",
-            "partition": "1-1",
+            "partition": "cpu_x0(1-1)",
         },
         {
             "num_npus": 1,
@@ -325,12 +329,32 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
             "tests": "e2e.py",
             "image_tag": "a2-img",
             "csrc_cache_target": "a2-arm64-ubuntu",
-            "partition": "1-1",
+            "partition": "a2_x1(1-1)",
         },
     ]
     with pytest.raises(SystemExit):
-        select_tests._resolve_to_runners({(2, select_tests.NpuType.A2): ["x"]}, runners)
-    assert "no runner available" in capsys.readouterr().err
+        select_tests._resolve_to_runners({"a2_x2": ["x"]}, runners, partitions)
+    assert "is not configured" in capsys.readouterr().err
+
+    partitions["a2_x2"] = select_tests.PartitionInfo("missing-runner", 1)
+    with pytest.raises(SystemExit):
+        select_tests._resolve_to_runners({"a2_x2": ["x"]}, runners, partitions)
+    assert "selects unknown runner label 'missing-runner'" in capsys.readouterr().err
+
+    assert select_tests._load_partition_config({"partition": {"a2_x1": {"runner_label": "a2-runner", "count": 3}}}) == {
+        "a2_x1": select_tests.PartitionInfo("a2-runner", 3)
+    }
+    assert select_tests._load_partition_config(
+        {"partition": {"a5_x4": {"runner_label": "a5-runner", "count": 1, "override_only": True}}}
+    ) == {"a5_x4": select_tests.PartitionInfo("a5-runner", 1, override_only=True)}
+    with pytest.raises(ValueError, match="must be a mapping"):
+        select_tests._load_partition_config({"partition": {"a2_x1": 3}})
+    with pytest.raises(ValueError, match="count must be at least 1"):
+        select_tests._load_partition_config({"partition": {"a2_x1": {"runner_label": "a2-runner", "count": 0}}})
+    with pytest.raises(ValueError, match="override_only must be a boolean"):
+        select_tests._load_partition_config(
+            {"partition": {"a5_x4": {"runner_label": "a5-runner", "override_only": "true"}}}
+        )
 
     test_groups = [
         {
@@ -416,7 +440,19 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
         "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
         "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
     }
-    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
+    _write_two_doc_config(
+        config_path,
+        config,
+        {
+            "runner_mapping": runner_mapping,
+            "partition": {
+                "cpu_x0": {"runner_label": "cpu-runner", "count": 1},
+                "a2_x1": {"runner_label": "a2-runner", "count": 1},
+                "a3_x2": {"runner_label": "a3-runner", "count": 1},
+                "310p_x1": {"runner_label": "310p-runner", "count": 1},
+            },
+        },
+    )
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(
@@ -424,6 +460,7 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
                 "cpu-runner": {"chip": "cpu", "npu_num": 0},
                 "a2-runner": {"chip": "a2", "npu_num": 1},
                 "a3-runner": {"chip": "a3", "npu_num": 2},
+                "310p-runner": {"chip": "310p", "npu_num": 1},
             }
         )
     )
@@ -561,7 +598,17 @@ def test_bisect_tool_scoped_change_skips_global_modules(tmp_path, monkeypatch, c
     ]
     config_path = tmp_path / "config.yaml"
     runner_mapping = {"tests/e2e/pull_request/one_card": {"default": "a2_x1"}}
-    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
+    _write_two_doc_config(
+        config_path,
+        config,
+        {
+            "runner_mapping": runner_mapping,
+            "partition": {
+                "cpu_x0": {"runner_label": "cpu-runner", "count": 1},
+                "a2_x1": {"runner_label": "a2-runner", "count": 1},
+            },
+        },
+    )
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(
@@ -662,7 +709,17 @@ def test_default_cpu_ut_always_runs(tmp_path, monkeypatch, capsys):
     ]
     config_path = tmp_path / "config.yaml"
     runner_mapping = {"tests/ut/.+/a2": {"default": "a2_x1"}}
-    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
+    _write_two_doc_config(
+        config_path,
+        config,
+        {
+            "runner_mapping": runner_mapping,
+            "partition": {
+                "cpu_x0": {"runner_label": "cpu-runner", "count": 1},
+                "a2_x1": {"runner_label": "a2-runner", "count": 1},
+            },
+        },
+    )
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(
@@ -730,18 +787,24 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     test_root = tmp_path / "tests"
     e2e_one_card = test_root / "e2e" / "pull_request" / "one_card"
     e2e_two_card = test_root / "e2e" / "pull_request" / "two_card"
+    e2e_two_card_acc = e2e_two_card / "acc"
     e2e_four_card = test_root / "e2e" / "pull_request" / "four_card"
+    e2e_four_card_acc = e2e_four_card / "features" / "deep" / "acc"
     e2e_eight_card = test_root / "e2e" / "pull_request" / "eight_card"
-    for path in (e2e_one_card, e2e_two_card, e2e_four_card, e2e_eight_card):
+    e2e_eight_card_acc = e2e_eight_card / "suite" / "acc"
+    for path in (e2e_one_card, e2e_two_card_acc, e2e_four_card_acc, e2e_eight_card_acc):
         path.mkdir(parents=True)
     one_a = e2e_one_card / "test_one_a.py"
     one_b = e2e_one_card / "test_one_b.py"
     one_310p = e2e_one_card / "test_one_310p.py"
     two_a = e2e_two_card / "test_two_a.py"
     two_b = e2e_two_card / "test_two_b.py"
+    two_acc = e2e_two_card_acc / "test_two_acc.py"
     four_a = e2e_four_card / "test_four_a.py"
+    four_acc = e2e_four_card_acc / "test_four_acc.py"
     eight_a = e2e_eight_card / "test_eight_a.py"
-    for path in (one_a, one_b, one_310p, two_a, two_b, four_a, eight_a):
+    eight_acc = e2e_eight_card_acc / "test_eight_acc.py"
+    for path in (one_a, one_b, one_310p, two_a, two_b, two_acc, four_a, four_acc, eight_a, eight_acc):
         path.write_text("")
 
     # Module with ``optional: false`` would normally pull in the entire e2e
@@ -761,12 +824,30 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     ]
     runner_mapping = {
         "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
+        "tests/e2e/pull_request/two_card(?:/[^/]+)*/acc(?:/|$)": {"default": "a3_acc_x2"},
         "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
+        "tests/e2e/pull_request/four_card(?:/[^/]+)*/acc(?:/|$)": {"default": "a3_acc_x4"},
         "tests/e2e/pull_request/four_card": {"default": "a3_x4", "310p": "310p_x4"},
+        "tests/e2e/pull_request/eight_card(?:/[^/]+)*/acc(?:/|$)": {"default": "a3_acc_x8"},
         "tests/e2e/pull_request/eight_card": {"default": "a3_x8"},
     }
     config_path = tmp_path / "config.yaml"
-    _write_two_doc_config(config_path, config_modules, {"runner_mapping": runner_mapping})
+    partition = {
+        "a2_x1": {"runner_label": "a2-runner", "count": 1},
+        "a3_acc_x2": {"runner_label": "a3-runner-2", "count": 1},
+        "a3_x2": {"runner_label": "a3-runner-2", "count": 1},
+        "a3_x4": {"runner_label": "a3-runner-4", "count": 1},
+        "a3_acc_x4": {"runner_label": "a3-runner-4", "count": 1},
+        "a3_acc_x8": {"runner_label": "a3-runner-8", "count": 1},
+        "a3_x8": {"runner_label": "a3-runner-8", "count": 1},
+        "310p_x1": {"runner_label": "310p-runner", "count": 1},
+        "310p_x4": {"runner_label": "310p-runner-4", "count": 1},
+    }
+    _write_two_doc_config(
+        config_path,
+        config_modules,
+        {"runner_mapping": runner_mapping, "partition": partition},
+    )
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(
@@ -776,6 +857,7 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
                 "a3-runner-4": {"chip": "a3", "npu_num": 4},
                 "a3-runner-8": {"chip": "a3", "npu_num": 8},
                 "310p-runner": {"chip": "310p", "npu_num": 1},
+                "310p-runner-4": {"chip": "310p", "npu_num": 4},
             }
         )
     )
@@ -789,9 +871,15 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     rel_one_310p = "tests/e2e/pull_request/one_card/test_one_310p.py"
     rel_two_a = "tests/e2e/pull_request/two_card/test_two_a.py"
     rel_two_b = "tests/e2e/pull_request/two_card/test_two_b.py"
+    rel_two_acc = "tests/e2e/pull_request/two_card/acc/test_two_acc.py"
     rel_four_a = "tests/e2e/pull_request/four_card/test_four_a.py"
+    rel_four_acc = "tests/e2e/pull_request/four_card/features/deep/acc/test_four_acc.py"
     rel_eight_a = "tests/e2e/pull_request/eight_card/test_eight_a.py"
+    rel_eight_acc = "tests/e2e/pull_request/eight_card/suite/acc/test_eight_acc.py"
     rel_e2e_one = "tests/e2e/pull_request/one_card"
+    rel_e2e_two = "tests/e2e/pull_request/two_card"
+    rel_e2e_four = "tests/e2e/pull_request/four_card"
+    rel_e2e_eight = "tests/e2e/pull_request/eight_card"
     rel_ut_file = "tests/ut/test_ut.py"
     rel_missing = "tests/e2e/pull_request/one_card/does_not_exist.py"
 
@@ -838,31 +926,61 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     npu_types = {g["npu_type"] for g in test_groups}
     assert npu_types == {"a2", "310p"}
 
-    # 5. ::nodeid suffix is preserved and routed by file path.
+    # 5. Parent scans keep normal and accuracy tests in separate logical
+    #    partitions for 2/4/8 cards, including deeply nested acc directories.
+    parent_cases = [
+        (
+            rel_e2e_two,
+            {rel_two_a, rel_two_b, rel_two_acc},
+            "a3-runner-2",
+            {"a3_x2(1-1)", "a3_acc_x2(1-1)"},
+        ),
+        (
+            rel_e2e_four,
+            {rel_four_a, rel_four_acc},
+            "a3-runner-4",
+            {"a3_x4(1-1)", "a3_acc_x4(1-1)"},
+        ),
+        (
+            rel_e2e_eight,
+            {rel_eight_a, rel_eight_acc},
+            "a3-runner-8",
+            {"a3_x8(1-1)", "a3_acc_x8(1-1)"},
+        ),
+    ]
+    for parent, expected_tests, expected_runner, expected_partitions in parent_cases:
+        test_groups, _, _ = run_explicit(parent)
+        assert len(test_groups) == 2
+        assert {group["runner"] for group in test_groups} == {expected_runner}
+        assert {group["partition"] for group in test_groups} == expected_partitions
+        selected = {test for group in test_groups for test in group["tests"].split()}
+        assert selected == expected_tests
+
+    # 6. ::nodeid suffix is preserved and routed by file path.
     nodeid = f"{rel_one_a}::TestClass::test_method"
     test_groups, _, _ = run_explicit(nodeid)
     assert test_groups[0]["tests"].split() == [nodeid]
     assert test_groups[0]["npu_type"] == "a2"
 
-    # 6. Non-e2e path is skipped with a warning.
+    # 7. Non-e2e path is skipped with a warning.
     test_groups, _, err = run_explicit(rel_ut_file)
     assert test_groups == []
     assert "Skipping non-e2e path" in err
 
-    # 7. Non-existent path is dropped with a warning; no test groups emitted.
+    # 8. Non-existent path is dropped with a warning; no test groups emitted.
     test_groups, out, err = run_explicit(rel_missing)
     assert test_groups == []
     assert "has_tests=false" in out
     assert "Path does not exist" in err
     assert rel_missing in err
 
-    # 8. Mix of valid and invalid paths: only valid ones are routed.
+    # 9. Mix of valid and invalid paths: only valid ones are routed.
     test_groups, _, err = run_explicit(rel_two_a, rel_ut_file, rel_missing)
     selected = {t for g in test_groups for t in g["tests"].split()}
     assert selected == {rel_two_a}
     assert "Skipping non-e2e path" in err
 
-    # 9. Optional modules are NOT triggered in explicit mode even if their
+    # 10. Optional modules are NOT triggered in explicit mode even if their
     #    source_file_dependencies happen to match the explicit path.
     config_with_match = [
         {
@@ -882,13 +1000,17 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
             "tests": [rel_e2e_one],
         },
     ]
-    _write_two_doc_config(config_path, config_with_match, {"runner_mapping": runner_mapping})
+    _write_two_doc_config(
+        config_path,
+        config_with_match,
+        {"runner_mapping": runner_mapping, "partition": partition},
+    )
     test_groups, _, _ = run_explicit(rel_two_b)
     selected = {t for g in test_groups for t in g["tests"].split()}
     assert selected == {rel_two_b}
     assert "test_two_a.py" not in selected
 
-    # 10. ::nodeid is filtered out when the underlying file is in skip_tests.
+    # 11. ::nodeid is filtered out when the underlying file is in skip_tests.
     config_with_skip = [
         {
             "name": "with_skip",
@@ -898,13 +1020,17 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
             "skip_tests": [rel_one_a],
         },
     ]
-    _write_two_doc_config(config_path, config_with_skip, {"runner_mapping": runner_mapping})
+    _write_two_doc_config(
+        config_path,
+        config_with_skip,
+        {"runner_mapping": runner_mapping, "partition": partition},
+    )
     test_groups, out, _ = run_explicit(f"{rel_one_a}::TestClass::test_method")
     selected = {t for g in test_groups for t in g["tests"].split()}
     assert selected == set()
     assert "has_tests=false" in out
 
-    # 11. Partition splits multiple same-runner tests; single test into a
+    # 12. Partition splits multiple same-runner tests; single test into a
     #     psize=5 runner yields 1 non-empty partition (others are dropped).
     config_with_partition = [
         {
@@ -917,14 +1043,17 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     _write_two_doc_config(
         config_path,
         config_with_partition,
-        {"runner_mapping": runner_mapping, "partition": {"a2_x1": 5}},
+        {
+            "runner_mapping": runner_mapping,
+            "partition": {**partition, "a2_x1": {"runner_label": "a2-runner", "count": 5}},
+        },
     )
     test_groups, _, _ = run_explicit(rel_one_a, rel_one_b)
     a2_groups = [g for g in test_groups if g["npu_type"] == "a2"]
     assert len(a2_groups) >= 1
     a2_tests = {t for g in a2_groups for t in g["tests"].split()}
     assert a2_tests == {rel_one_a, rel_one_b}
-    assert all(g["partition"].endswith("-5") for g in a2_groups)
+    assert all(g["partition"].startswith("a2_x1(") and g["partition"].endswith("-5)") for g in a2_groups)
 
 
 def test_load_test_list_file_ignores_comments_and_blank_lines(tmp_path):
@@ -969,7 +1098,14 @@ def test_test_list_file_routes_ut_and_e2e_targets(tmp_path, monkeypatch, capsys)
         "tests/ut/mod/a2": {"default": "a2_x1"},
     }
     config_path = tmp_path / "config.yaml"
-    _write_two_doc_config(config_path, config_modules, {"runner_mapping": runner_mapping})
+    _write_two_doc_config(
+        config_path,
+        config_modules,
+        {
+            "runner_mapping": runner_mapping,
+            "partition": {"a2_x1": {"runner_label": "a2-runner", "count": 1}},
+        },
+    )
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(json.dumps({"a2-runner": {"chip": "a2", "npu_num": 1}}))
     monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)

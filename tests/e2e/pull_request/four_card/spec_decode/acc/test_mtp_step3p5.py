@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py`.
+Run `pytest tests/e2e/pull_request/four_card/spec_decode/acc/test_mtp_step3p5.py`.
 """
 
 import os
@@ -30,12 +30,13 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["HF_HUB_OFFLINE"] = "0"
 
-MODELS = ["Qwen/Qwen3-Next-80B-A3B-Instruct"]
+MODELS = ["stepfun-ai/Step-3.5-Flash", "stepfun-ai/Step-3.7-Flash"]
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_qwen3_next_mtp_acceptance_tp4(model_name):
+def test_step3p5_mtp_acceptance_tp8(model_name):
     golden = [0.85, 0.46, 0.19]
 
     example_prompts = [
@@ -47,19 +48,26 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
 
     max_tokens = 1024
 
-    with VllmRunner(
-        model_name,
-        tensor_parallel_size=4,
-        max_model_len=4096,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-        disable_log_stats=False,
-        speculative_config={
-            "method": "qwen3_next_mtp",
-            "num_speculative_tokens": 3,
-        },
-        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[20]),
-    ) as spec_vllm_model:
+    try:
+        spec_vllm_model = VllmRunner(
+            model_name,
+            tensor_parallel_size=4,
+            max_model_len=8192,
+            gpu_memory_utilization=0.8,
+            distributed_executor_backend="mp",
+            disable_log_stats=False,
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+            },
+            compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[20]),
+        )
+    except ValueError as e:
+        if "outgoing traffic has been disabled" in str(e):
+            pytest.skip(f"Model {model_name} not cached and download disabled: {e}")
+        raise
+
+    with spec_vllm_model:
         _ = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
         metrics = spec_vllm_model.model.get_metrics()
 
@@ -77,5 +85,5 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
     acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
 
     match = all((a >= b) or (b - a < 0.06) for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden} (num_drafts={num_drafts})"
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
     cleanup_dist_env_and_memory()

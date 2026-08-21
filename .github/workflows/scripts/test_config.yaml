@@ -6,8 +6,8 @@
 # All test directories are resolved to individual files before routing.
 #
 # Runner routing is driven by ``runner_mapping:`` in the second YAML
-# document of this file (regex patterns mapping paths to runner types).
-# Partition sizing by ``partition:`` config block.
+# document of this file (regex patterns mapping paths to logical partitions).
+# Exact runner labels and partition counts are defined by ``partition:``.
 # Estimated times for load-balanced partitioning in ``estimated_times:``.
 #
 # Below are the conventional routing rules for reference (now config-driven):
@@ -122,7 +122,7 @@
   source_file_dependencies:
     - vllm_ascend/attention/dsa_v1.py
   tests:
-    - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+    - tests/e2e/pull_request/four_card/acc/test_deepseek_v4.py
 
 - name: attention_cp
   optional: false
@@ -146,11 +146,11 @@
     - tests/e2e/pull_request/one_card/aclgraph
     - tests/e2e/pull_request/two_card/aclgraph
     - tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py
-    - tests/e2e/pull_request/four_card/test_graph_mode.py
+    - tests/e2e/pull_request/four_card/acc/test_graph_mode.py
   # Temporarily skipped: the precision check in test_graph_mode.py is
   # unstable; re-enable once the graph mode precision issue is fixed.
   skip_tests:
-    - tests/e2e/pull_request/four_card/test_graph_mode.py
+    - tests/e2e/pull_request/four_card/acc/test_graph_mode.py
 
 - name: compilation_passes_base
   optional: false
@@ -228,7 +228,7 @@
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
-    - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
+    - tests/e2e/pull_request/two_card/acc/test_shared_expert_dp.py
     - tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py
     - tests/e2e/pull_request/two_card/test_disaggregated_encoder.py
 
@@ -306,7 +306,7 @@
     - tests/ut/models/test_deepseek_v4_compressor.py
     - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
-    - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+    - tests/e2e/pull_request/four_card/acc/test_deepseek_v4.py
 
 - name: models_minimax_m3
   optional: false
@@ -346,7 +346,7 @@
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
-    - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
+    - tests/e2e/pull_request/two_card/acc/test_shared_expert_dp.py
     - tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py
     - tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
@@ -374,7 +374,7 @@
     - vllm_ascend/ops/mhc.py
     - vllm_ascend/ops/rope_dsv4.py
   tests:
-    - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+    - tests/e2e/pull_request/four_card/acc/test_deepseek_v4.py
 
 - name: ops_distributed_inference
   optional: false
@@ -488,8 +488,8 @@
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_eagle.py
     - tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py
-    - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
-    - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
+    - tests/e2e/pull_request/two_card/spec_decode/acc/test_spec_decode.py
+    - tests/e2e/pull_request/four_card/spec_decode/acc/test_mtp_qwen3_next.py
     - tests/e2e/pull_request/eight_card/test_glm5_2.py
     - tests/ut/spec_decode/test_speculators_vwn_eagle3.py
 
@@ -500,7 +500,7 @@
     - vllm_ascend/spec_decode/dspark_proposer.py
     - vllm_ascend/models/deepseek_v4/dspark.py
   tests:
-    - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
+    - tests/e2e/pull_request/four_card/spec_decode/acc/test_dspark_deepseekv4.py
     - tests/e2e/pull_request/eight_card/test_glm5_2.py
 
 - name: spec_decode_ngram
@@ -583,7 +583,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/step3p5.py
   tests:
-    - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
+    - tests/e2e/pull_request/four_card/spec_decode/acc/test_mtp_step3p5.py
 
 # Worker
 - name: worker_v1
@@ -606,14 +606,14 @@
     - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py
     - tests/e2e/pull_request/two_card/test_prefix_caching.py
     - tests/e2e/pull_request/two_card/test_qwen3_performance.py
-    - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
+    - tests/e2e/pull_request/four_card/acc/test_pipeline_parallel.py
     - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
     - tests/e2e/pull_request/four_card/test_qwen3_5.py
-    - tests/e2e/pull_request/four_card/test_graph_mode.py
+    - tests/e2e/pull_request/four_card/acc/test_graph_mode.py
   # Temporarily skipped: the precision check in test_graph_mode.py is
   # unstable; re-enable once the graph mode precision issue is fixed.
   skip_tests:
-    - tests/e2e/pull_request/four_card/test_graph_mode.py
+    - tests/e2e/pull_request/four_card/acc/test_graph_mode.py
 
 
 - name: worker_v2
@@ -829,13 +829,13 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_xlite.py: 400
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 810
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
-  tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 190
-  tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
-  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 450
-  tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 1590
+  tests/e2e/pull_request/two_card/lora/acc/test_ilama_lora_tp2.py: 190
+  tests/e2e/pull_request/two_card/lora/acc/test_llama32_lora_tp2.py: 430
+  tests/e2e/pull_request/two_card/lora/acc/test_qwen3moe_lora.py: 450
+  tests/e2e/pull_request/two_card/lora/acc/test_qwen35_densemodel_lora_tp.py: 1590
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
+  tests/e2e/pull_request/two_card/spec_decode/acc/test_spec_decode.py: 690
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230
@@ -848,30 +848,30 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 470
   tests/e2e/pull_request/two_card/test_qwen3_performance.py: 20
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 290
-  tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 1060
+  tests/e2e/pull_request/two_card/acc/test_shared_expert_dp.py: 1060
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 130
   tests/e2e/pull_request/two_card/test_xlite.py: 740
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 500
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 800
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
-  tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 880
+  tests/e2e/pull_request/four_card/context_parallel/acc/test_accuracy.py: 880
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
-  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
+  tests/e2e/pull_request/four_card/model_runner_v2/acc/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
-  tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 730
-  tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1280
-  tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
+  tests/e2e/pull_request/four_card/spec_decode/acc/test_mtp_qwen3_next.py: 730
+  tests/e2e/pull_request/four_card/spec_decode/acc/test_dspark_deepseekv4.py: 1280
+  tests/e2e/pull_request/four_card/spec_decode/acc/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1360
   tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 930
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
-  tests/e2e/pull_request/four_card/test_deepseek_v4.py: 950
-  tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690
+  tests/e2e/pull_request/four_card/acc/test_deepseek_v4.py: 950
+  tests/e2e/pull_request/four_card/acc/test_pipeline_parallel.py: 690
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 190
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 670
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1160
-  tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/four_card/acc/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
   tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py: 1800
   tests/e2e/pull_request/four_card/test_qwen3_32b_bf16_ll_performance.py: 1200
@@ -916,16 +916,20 @@ estimated_times:
   tests/ut/worker/a2/test_worker_v2.py: 30
 
 # === Runner Mapping ===
-# Maps test paths to runner types using regex patterns.
-# Each entry has a ``default`` runner and an optional ``310p`` override
+# Maps test paths to logical partitions using regex patterns.
+# Each entry has a ``default`` partition and an optional ``310p`` override
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2_x1
     310p: 310p_x1
+  tests/e2e/pull_request/two_card(?:/[^/]+)*/acc(?:/|$):
+    default: a3_acc_x2
   tests/e2e/pull_request/two_card:
     default: a3_x2
+  tests/e2e/pull_request/four_card(?:/[^/]+)*/acc(?:/|$):
+    default: a3_acc_x4
   tests/e2e/pull_request/four_card:
     default: a3_x4
     310p: 310p_x4
@@ -937,16 +941,37 @@ runner_mapping:
     default: a2_x1
 
 # === Partition Configuration ===
-# Controls how tests are split across parallel runners of the same type.
-# Key format: <npu_type>_x<num_npus>
-# Only runner types that can appear in test routing need entries.
-# Unlisted types default to 1 (no partition).
+# Maps logical test buckets to exact labels from runner_label.json and controls
+# how many load-balanced groups are created for each bucket.
 partition:
-  310p_x1: 1
-  310p_x4: 1
-  a2_x1: 5
-  a3_x2: 3
-  a3_x4: 3
-  a3_x8: 1
-  cpu_x0: 1
-
+  310p_x1:
+    runner_label: linux-aarch64-310p-1
+    count: 1
+  310p_x4:
+    runner_label: linux-aarch64-310p-4
+    count: 1
+  a2_x1:
+    runner_label: linux-aarch64-a2b3-1
+    count: 5
+  a3_x2:
+    runner_label: linux-aarch64-a3-800i-2
+    count: 3
+  a3_acc_x2:
+    runner_label: linux-aarch64-a3-800i-2
+    count: 1
+  a3_x4:
+    runner_label: linux-aarch64-a3-800i-4
+    count: 3
+  a3_acc_x4:
+    runner_label: linux-aarch64-a3-800i-4
+    count: 1
+  a3_x8:
+    runner_label: linux-aarch64-a3-800i-8
+    count: 1
+  a5_x4:
+    runner_label: linux-aarch64-a5-4
+    count: 1
+    override_only: true
+  cpu_x0:
+    runner_label: linux-amd64-cpu-8-hk
+    count: 1

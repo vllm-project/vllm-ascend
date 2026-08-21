@@ -16,7 +16,7 @@
 #
 """DCP and DSA-CP long-sequence accuracy guards.
 
-Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py`.
+Run `pytest tests/e2e/pull_request/four_card/context_parallel/acc/test_accuracy.py`.
 """
 
 import os
