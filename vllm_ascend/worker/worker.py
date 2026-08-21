@@ -731,11 +731,26 @@ class NPUWorker(WorkerBase):
     def snapshot_process_unlock(self) -> None:
         self._call_aclrt_snapshot_api("aclrtSnapShotProcessUnlock")
 
+    def _run_timed_snapshot_steps(self, steps) -> None:
+        for step_name, step_fn in steps:
+            logger.info("[snapshot] [worker] rank %s: start %s", self.rank, step_name)
+            t0 = time.perf_counter()
+            step_fn()
+            logger.info(
+                "[snapshot] [worker] rank %s: %s cost %.2fs",
+                self.rank,
+                step_name,
+                time.perf_counter() - t0,
+            )
+
     def suspend(self, model_save_path: str | None = None) -> None:
-        self.dump_model(model_save_path)
-        gc.collect()
-        self.snapshot_process_lock()
-        self.snapshot_process_backup()
+        steps = (
+            ("dump_model", lambda: self.dump_model(model_save_path)),
+            ("gc.collect", lambda: gc.collect()),
+            ("snapshot_process_lock", lambda: self.snapshot_process_lock()),
+            ("snapshot_process_backup", lambda: self.snapshot_process_backup()),
+        )
+        self._run_timed_snapshot_steps(steps)
 
     def device_unlock(self) -> None:
         self.snapshot_process_unlock()
@@ -747,13 +762,25 @@ class NPUWorker(WorkerBase):
         model_path: str | None = None,
         new_engine_id: str | None = None,
     ) -> None:
-        self.snapshot_process_restore()
-        self.snapshot_process_unlock()
-        self.update_worker_info_after_resume(local_ip, data_parallel_master_ip)
-        self.rebuild_parallel_group_after_resume()
-        self.re_load_weights(model_path)
-        self.recapture_graph()
-        self.rebuild_kv_transfer_engine_after_resume(local_ip, new_engine_id)
+        steps = (
+            ("snapshot_process_restore", lambda: self.snapshot_process_restore()),
+            ("snapshot_process_unlock", lambda: self.snapshot_process_unlock()),
+            (
+                "update_worker_info_after_resume",
+                lambda: self.update_worker_info_after_resume(local_ip, data_parallel_master_ip),
+            ),
+            (
+                "rebuild_parallel_group_after_resume",
+                lambda: self.rebuild_parallel_group_after_resume(),
+            ),
+            ("re_load_weights", lambda: self.re_load_weights(model_path)),
+            ("recapture_graph", lambda: self.recapture_graph()),
+            (
+                "rebuild_kv_transfer_engine_after_resume",
+                lambda: self.rebuild_kv_transfer_engine_after_resume(local_ip, new_engine_id),
+            ),
+        )
+        self._run_timed_snapshot_steps(steps)
 
     def dump_model(self, model_save_path=None) -> None:
         self.model_runner.dump_model(path=model_save_path)
