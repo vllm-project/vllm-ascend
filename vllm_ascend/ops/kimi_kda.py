@@ -61,7 +61,7 @@ from vllm_ascend.quantization.methods.w4a8_mxfp4 import (
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import global_stream, is_vl_model, npu_stream_switch, parse_layer_idx
+from vllm_ascend.utils import is_vl_model, npu_stream_switch, parse_layer_idx
 
 apply_kda_rms_norm_sigmoid_gate: (
     Callable[
@@ -82,6 +82,14 @@ _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
 _FUSED_QKV_NAME = "fused_qkv"
 _FUSED_BFG_NAME = "fused_bfg_proj"
 _F_A_SHARD_ID = 1
+_KDA_QUANT_STREAM: torch.npu.Stream | None = None
+
+
+def _kda_quant_stream() -> torch.npu.Stream:
+    global _KDA_QUANT_STREAM
+    if _KDA_QUANT_STREAM is None:
+        _KDA_QUANT_STREAM = torch_npu.npu.Stream()
+    return _KDA_QUANT_STREAM
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -358,18 +366,30 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
 
         if self.use_full_rank_gate:
             main_stream = torch.npu.current_stream()
-            bfg_stream = global_stream()
+            quant_stream = _kda_quant_stream()
             hidden_states_ready = main_stream.record_event()
-            with npu_stream_switch(bfg_stream):
+            hidden_states.record_stream(quant_stream)
+            with npu_stream_switch(quant_stream):
                 torch.npu.current_stream().wait_event(hidden_states_ready)
-                raw_bfg = self._project_bfg(hidden_states)
+                quantized_qkv = self._quantize_fused_qkv(hidden_states)
+                quant_ready = torch.npu.current_stream().record_event()
 
-            quantized_qkv = self._quantize_fused_qkv(hidden_states)
-            with npu_stream_switch(bfg_stream):
+            raw_bfg = self._project_bfg(hidden_states)
+            bfg_projection_ready = main_stream.record_event()
+            for tensor in raw_bfg:
+                tensor.record_stream(quant_stream)
+            with npu_stream_switch(quant_stream):
+                torch.npu.current_stream().wait_event(bfg_projection_ready)
                 beta, raw_gate, output_gate = self._postprocess_bfg(*raw_bfg)
                 bfg_ready = torch.npu.current_stream().record_event()
 
+            main_stream.wait_event(quant_ready)
+            if isinstance(quantized_qkv, tuple):
+                for tensor in quantized_qkv:
+                    tensor.record_stream(main_stream)
             qkv = self._matmul_fused_qkv(quantized_qkv)
+            for tensor in (beta, raw_gate, output_gate):
+                tensor.record_stream(main_stream)
         else:
             qkv = self._matmul_fused_qkv(self._quantize_fused_qkv(hidden_states))
             beta, raw_gate, output_gate = self._postprocess_bfg(*self._project_bfg(hidden_states))
