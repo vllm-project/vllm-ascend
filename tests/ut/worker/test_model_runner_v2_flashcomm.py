@@ -10,6 +10,7 @@ from vllm_ascend.worker.v2.model_runner import (
 )
 from vllm_ascend.worker.v2.sp_utils import (
     _all_gather_hidden_states,
+    _all_gather_hidden_states_and_aux,
     _flashcomm_enabled,
 )
 
@@ -71,6 +72,39 @@ def test_all_gather_hidden_states_trims_flashcomm_padding():
         )
 
     torch.testing.assert_close(result, gathered_hidden_states[:5])
+
+
+def test_all_gather_hidden_states_and_aux_gathers_tuple_entries():
+    hidden_states = torch.arange(6).reshape(3, 2)
+    aux_hidden_states = [
+        torch.arange(6, 12).reshape(3, 2),
+        torch.arange(12, 18).reshape(3, 2),
+    ]
+    gathered_states = [
+        torch.arange(12).reshape(6, 2),
+        torch.arange(12, 24).reshape(6, 2),
+        torch.arange(24, 36).reshape(6, 2),
+    ]
+
+    with patch(
+        "vllm_ascend.worker.v2.sp_utils.tensor_model_parallel_all_gather",
+        side_effect=gathered_states,
+    ) as mock_all_gather:
+        result = _all_gather_hidden_states_and_aux(
+            (hidden_states, aux_hidden_states),
+            num_tokens=5,
+        )
+
+    torch.testing.assert_close(result[0], gathered_states[0][:5])
+    for actual, gathered in zip(result[1], gathered_states[1:]):
+        torch.testing.assert_close(actual, gathered[:5])
+    assert mock_all_gather.call_count == 3
+    for call_args, expected in zip(
+        mock_all_gather.call_args_list,
+        [hidden_states, *aux_hidden_states],
+    ):
+        assert call_args.args[0] is expected
+        assert call_args.args[1] == 0
 
 
 def test_flashcomm_dense_threshold_and_moe_behavior():
