@@ -131,6 +131,7 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
+          sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -241,6 +242,7 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
+          uv pip install tblib
 
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
@@ -294,6 +296,17 @@ jobs:
             "with-device" \
             ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
+      
+      - name: Run selected tests upstream with device
+        working-directory: ./vllm-empty
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 ../.github/workflows/scripts/run_suite.py \
+            --suite e2e-upstream_pr \
+            --auto-partition-id "${{ matrix.part }}" \
+            --auto-partition-size 1 \
+            --continue-on-error
 
       - name: Run selected tests without device
         if: ${{ matrix.group.npu_type == 'cpu' }}
