@@ -770,6 +770,15 @@ def test_ascendc_index_cache_converts_runtime_shape_to_bbnd() -> None:
     assert actual.data_ptr() == index_key_cache.data_ptr()
 
 
+def test_ascendc_index_cache_unwraps_runtime_tuple() -> None:
+    index_key_cache = torch.zeros(4, 128, 128)
+
+    actual = _as_ascendc_index_kv_cache((index_key_cache,))
+
+    assert actual.shape == (4, 128, 1, 128)
+    assert actual.data_ptr() == index_key_cache.data_ptr()
+
+
 def test_ascendc_index_cache_rejects_non_runtime_shape() -> None:
     index_key_cache = torch.zeros(4, 128, 1, 128)
 
