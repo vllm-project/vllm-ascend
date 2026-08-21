@@ -163,7 +163,8 @@ def test_optional_only_override_is_review_without_exact_upstream_call(
     assert overrides[0]["details"]["new_optional_parameters"] == ["optional"]
     assert overrides[0]["details"]["upstream_call_evidence"] == []
     assert overrides[0]["suggestion"] == (
-        "暂不判定为运行时不兼容。请确认实际调用路径；如果运行时会使用该下游实现，请同步方法签名并处理新增参数。"
+        "Review whether the new optional parameter can reach this downstream override at runtime. "
+        "If it can, update the override signature and handle the new argument."
     )
 
     outputs = write_reports(report, tmp_path / "upstream-report")
@@ -175,9 +176,10 @@ def test_optional_only_override_is_review_without_exact_upstream_call(
     markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
     assert "**Result: REVIEW**" in markdown
     assert (
-        "下游重写的方法未接收上游新增的可选参数 `optional`，但目前没有证据表明运行时会把该参数传给该下游实现。"
+        "The downstream override does not accept the new optional parameter `optional`, and the analyzer found no "
+        "upstream call in this range that passes it to that override."
     ) in markdown
-    assert "严格替换契约" not in markdown
+    assert "strict replacement contract" not in markdown
 
 
 def test_optional_constructor_override_is_review_when_dispatch_is_not_proven(
@@ -1409,6 +1411,41 @@ def test_vllm_interface_scenario_keeps_override_breaks(tmp_path: Path) -> None:
     assert {item["relation"] for item in introduced} == {"override"}
 
 
+def test_generator_uses_lazy_mro_without_emitting_inheritance_relations(
+    tmp_path: Path,
+) -> None:
+    roots = _call_repositories(
+        tmp_path,
+        old_source="class Base:\n    def run(self, value): return value\n",
+        new_source=("class Base:\n    def run(self, value): return value\n\nCURRENT_INTERFACE = True\n"),
+        consumer_source=(
+            "from vllm.api import Base\n\n"
+            "class Parent(Base):\n"
+            "    def run(self, value): return value\n\n"
+            "class GrandChild(Parent):\n"
+            "    def run(self, value): return value\n"
+        ),
+    )
+    vllm_root, ascend_root, _, new_sha, ascend_sha = roots
+    engine = InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha},
+    )
+
+    relations, findings = engine.generate()
+
+    assert relations
+    assert {relation.relation for relation in relations} == {"override"}
+    assert {relation.downstream_owner for relation in relations} == {
+        "Parent",
+        "GrandChild",
+    }
+    assert not [finding for finding in findings if finding.relation == "inheritance"]
+    assert engine.phase_timings["inheritance_mro"] is not None
+    assert engine.phase_timings["override"] is not None
+
+
 def test_vllm_interface_expands_transitive_override_impacts_under_one_root_cause(
     tmp_path: Path,
 ) -> None:
@@ -1524,7 +1561,10 @@ def test_vllm_interface_reports_masked_preexisting_delta_as_review(tmp_path: Pat
     assert payload["review_findings"][0]["details"]["new_delta_on_preexisting_break"] is True
     markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
     assert "historical incompatibilities are intentionally excluded" in markdown
-    assert "new exact delta masked by a preexisting incompatibility" in markdown
+    assert (
+        "This range adds another contract difference, but the downstream code was already incompatible at the "
+        "old revision."
+    ) in markdown
 
 
 def test_vllm_interface_cli_log_keeps_only_exact_masked_delta_review(

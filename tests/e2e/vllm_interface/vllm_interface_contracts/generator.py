@@ -4322,13 +4322,14 @@ class InterfaceBoundaryGenerator:
             tuple[str, str],
             tuple[tuple[str, tuple[str, ...]], ...],
         ] = {}
+        self._mro_resolution_seconds = 0.0
         self.phase_timings: dict[str, float | None] = {}
 
     def generate(
         self,
         plan: AnalysisPlan = VLLM_INTERFACE_PLAN,
     ) -> tuple[list[Relation], list[CandidateFinding]]:
-        """Generate verified overrides and their prerequisite inheritance graph."""
+        """Generate verified overrides using lazily resolved inheritance MROs."""
 
         if plan != VLLM_INTERFACE_PLAN:
             raise ValueError("only the vllm-interface analysis plan is supported")
@@ -4336,21 +4337,21 @@ class InterfaceBoundaryGenerator:
         self.findings = []
         self.historical_override_candidates = []
         self._override_root_path_cache = {}
+        self._mro_resolution_seconds = 0.0
         self.phase_timings = {
             "inheritance_mro": None,
             "override": None,
             "monkey_patch": None,
         }
         phase_started = time.perf_counter()
-        self._collect_inheritance()
+        self._collect_verified_overrides()
+        override_elapsed = time.perf_counter() - phase_started
         self.phase_timings["inheritance_mro"] = round(
-            time.perf_counter() - phase_started,
+            self._mro_resolution_seconds,
             6,
         )
-        phase_started = time.perf_counter()
-        self._collect_verified_overrides()
         self.phase_timings["override"] = round(
-            time.perf_counter() - phase_started,
+            max(0.0, override_elapsed - self._mro_resolution_seconds),
             6,
         )
         phase_started = time.perf_counter()
@@ -5395,71 +5396,21 @@ class InterfaceBoundaryGenerator:
         self._mro_cache[qualified_name] = complete_result
         return complete_result
 
-    def _collect_inheritance(self) -> None:
-        for class_info in self.downstream.classes.values():
-            for base_expression, resolved in zip(
-                class_info.bases,
-                class_info.resolved_bases,
-            ):
-                resolved = self._canonical_reference(resolved)
-                if not resolved.startswith("vllm."):
-                    continue
-                upstream_class = self.upstream.find_class(resolved)
-                if upstream_class is None:
-                    self.findings.append(
-                        CandidateFinding(
-                            relation="inheritance",
-                            downstream_file=class_info.file,
-                            downstream_owner=class_info.name,
-                            downstream_name=class_info.name,
-                            target_expression=resolved,
-                            evidence_line=self._class_line(class_info),
-                            reason="upstream base class was not found",
-                            status="risk",
-                            reason_code="missing_upstream_base",
-                            generator_issue=False,
-                        )
-                    )
-                    continue
-                upstream_kinds = self._final_binding_kinds(resolved)
-                if "class" in upstream_kinds and upstream_kinds != {"class"}:
-                    self.findings.append(
-                        CandidateFinding(
-                            relation="inheritance",
-                            downstream_file=class_info.file,
-                            downstream_owner=class_info.name,
-                            downstream_name=class_info.name,
-                            target_expression=resolved,
-                            evidence_line=self._class_line(class_info),
-                            reason=("upstream base is a class only on some normally completing module paths"),
-                            status="review",
-                            reason_code="conditional_class_presence",
-                            generator_issue=False,
-                        )
-                    )
-                    continue
-                self.relations.append(
-                    Relation(
-                        relation="inheritance",
-                        upstream_file=upstream_class.file,
-                        upstream_owner=None,
-                        upstream_name=upstream_class.name,
-                        upstream_signature=None,
-                        downstream_file=class_info.file,
-                        downstream_owner=class_info.name,
-                        downstream_name=base_expression.rsplit(".", 1)[-1],
-                        downstream_signature=None,
-                        evidence_file=class_info.file,
-                        evidence_line=self._class_line(class_info),
-                    )
-                )
+    def _timed_linearized_mro(self, qualified_name: str) -> MroResult:
+        """Resolve one relation MRO and account for only the lazy MRO work."""
+
+        started = time.perf_counter()
+        try:
+            return self._linearized_mro(qualified_name)
+        finally:
+            self._mro_resolution_seconds += time.perf_counter() - started
 
     def _collect_verified_overrides(self) -> None:
         """Collect downstream overrides with a statically proven upstream owner."""
         for class_info in self.downstream.classes.values():
             if self._conditional_class_dependency(class_info.qualified_name) is not None:
                 continue
-            mro_result = self._linearized_mro(class_info.qualified_name)
+            mro_result = self._timed_linearized_mro(class_info.qualified_name)
             mro = mro_result.owners
             if mro_result.complete and not any(owner.startswith("vllm.") for owner in mro[1:]):
                 continue
@@ -5655,7 +5606,7 @@ class InterfaceBoundaryGenerator:
         elif not effective_owner.startswith("vllm_ascend."):
             result = ()
         else:
-            mro_result = self._linearized_mro(effective_owner)
+            mro_result = self._timed_linearized_mro(effective_owner)
             resolution = self._effective_method_resolution(
                 mro_result.owners[1:],
                 method_name,
