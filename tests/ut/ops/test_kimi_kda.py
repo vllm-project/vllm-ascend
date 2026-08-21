@@ -189,7 +189,7 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.device == output.device
 
 
-def test_fused_bfg_linear_loads_and_composes_f_projection_weights():
+def test_fused_bfg_linear_loads_sharded_and_replicated_weights():
     with (
         patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=4),
         patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=2),
@@ -208,22 +208,16 @@ def test_fused_bfg_linear_loads_and_composes_f_projection_weights():
     linear.weight.data.zero_()
     b_weight = torch.arange(8 * 6, dtype=linear.weight.dtype).reshape(8, 6)
     f_a_weight = torch.arange(3 * 6, dtype=linear.weight.dtype).reshape(3, 6) + 100
-    f_b_weight = torch.arange(24 * 3, dtype=linear.weight.dtype).reshape(24, 3) + 150
     g_weight = torch.arange(24 * 6, dtype=linear.weight.dtype).reshape(24, 6) + 200
 
     linear.weight.weight_loader(linear.weight, b_weight, 0)
-    linear.f_a_weight.weight_loader(linear.f_a_weight, f_a_weight)
-    with patch("vllm_ascend.ops.kimi_kda.get_tensor_model_parallel_rank", return_value=2):
-        linear.f_b_weight.weight_loader(linear.f_b_weight, f_b_weight)
+    linear.weight.weight_loader(linear.weight, f_a_weight, 1)
     linear.weight.weight_loader(linear.weight, g_weight, 2)
 
-    expected_f_weight = (f_b_weight[12:18].float() @ f_a_weight.float()).to(
-        linear.weight.dtype,
-    )
-    assert tuple(linear.weight.shape) == (14, 6)
+    assert tuple(linear.weight.shape) == (11, 6)
     torch.testing.assert_close(linear.weight[:2], b_weight[4:6])
-    torch.testing.assert_close(linear.weight[2:8], expected_f_weight)
-    torch.testing.assert_close(linear.weight[8:], g_weight[12:18])
+    torch.testing.assert_close(linear.weight[2:5], f_a_weight)
+    torch.testing.assert_close(linear.weight[5:], g_weight[12:18])
 
 
 def test_fused_bfg_projection_splits_original_outputs():
@@ -231,17 +225,20 @@ def test_fused_bfg_projection_splits_original_outputs():
     nn.Module.__init__(attention)
     attention.use_full_rank_gate = True
     attention.head_dim = 3
-    attention._fused_bfg_output_sizes = (2, 6, 6)
+    attention._fused_bfg_output_sizes = (2, 3, 6)
 
     hidden_states = torch.randn(4, 5)
-    fused_output = torch.arange(56, dtype=torch.float32).reshape(4, 14)
+    fused_output = torch.arange(44, dtype=torch.float32).reshape(4, 11)
+    f_b_output = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     attention.fused_bfg_proj = _RecordingLinear(fused_output)
+    attention.f_b_proj = _RecordingLinear(f_b_output)
 
     beta, raw_gate, output_gate = attention._project_bfg(hidden_states)
 
     torch.testing.assert_close(beta, fused_output[:, :2])
-    torch.testing.assert_close(raw_gate, fused_output[:, 2:8])
-    torch.testing.assert_close(output_gate, fused_output[:, 8:])
+    torch.testing.assert_close(attention.f_b_proj.input, fused_output[:, 2:5])
+    torch.testing.assert_close(raw_gate, f_b_output)
+    torch.testing.assert_close(output_gate, fused_output[:, 5:])
 
     beta, raw_gate, output_gate = attention._postprocess_bfg(
         beta,
@@ -251,9 +248,9 @@ def test_fused_bfg_projection_splits_original_outputs():
     torch.testing.assert_close(beta, fused_output[:, :2].sigmoid().unsqueeze(0))
     torch.testing.assert_close(
         raw_gate,
-        fused_output[:, 2:8].reshape(4, 2, 3).unsqueeze(0),
+        f_b_output.reshape(4, 2, 3).unsqueeze(0),
     )
-    torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
+    torch.testing.assert_close(output_gate, fused_output[:, 5:].reshape(4, 2, 3))
 
 
 @pytest.mark.parametrize(
