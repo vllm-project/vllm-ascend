@@ -87,7 +87,7 @@ on:
       cann:
         description: 'CANN Quay URL and version (JSON array: ["url", "version"])'
         required: false
-        default: '["quay.io/atlas_inference/cann", "2026.08.03"]'
+        default: '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "2026.08.03"]'
         type: string
       triton_ascend:
         description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
@@ -105,6 +105,7 @@ jobs:
     if: ${{ !((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')))
         && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
+      max-parallel: 6
       matrix:
         build_meta:
           - name: A2 Ubuntu
@@ -167,6 +168,8 @@ jobs:
     secrets:
       quay_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_PASSWORD || secrets.QUAY_PASSWORD }}
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
   image_build_by_commit:
     name: ${{ matrix.build_meta.name }} (commit mode)
@@ -176,6 +179,7 @@ jobs:
         && inputs.tag == 'none'
         && inputs.branch == 'none' }}
     strategy:
+      max-parallel: 6
       matrix:
         build_meta:
           - name: A2 Ubuntu
@@ -233,3 +237,5 @@ jobs:
 
     secrets:
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
