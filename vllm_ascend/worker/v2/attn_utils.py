@@ -52,7 +52,13 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    calc_split_factor,
+    enable_sfa,
+    get_ascend_device_type,
+    is_hidden_state_cache_spec,
+)
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -634,6 +640,45 @@ def _allocate_kv_cache(
 
             continue
 
+        # extract_hidden_states uses a single-tensor HiddenStateCacheSpec
+        # (no K/V split). Allocate before the AttentionSpec K/V branch.
+        if is_hidden_state_cache_spec(example_spec) or any(
+            is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in kv_cache_tensor.shared_by
+        ):
+            has_mamba = any(isinstance(layer_kv_cache_spec[ln], MambaSpec) for ln in kv_cache_tensor.shared_by)
+            has_hidden = any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in kv_cache_tensor.shared_by)
+            if vllm_config.kv_transfer_config is None:
+                tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
+            else:
+                tensor = torch.zeros(
+                    kv_cache_tensor.size + alignment,
+                    dtype=torch.int8,
+                    device=device,
+                )
+                tensor = _align_memory(tensor, alignment)[: kv_cache_tensor.size]
+
+            if has_mamba and has_hidden:
+                # Keep Mamba and hidden-state dumps on separate physical buffers
+                # so float32 SSM writes cannot corrupt bfloat16 hidden states.
+                for layer_name in kv_cache_tensor.shared_by:
+                    if is_hidden_state_cache_spec(layer_kv_cache_spec[layer_name]):
+                        if vllm_config.kv_transfer_config is None:
+                            hidden_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
+                        else:
+                            hidden_tensor = torch.zeros(
+                                kv_cache_tensor.size + alignment,
+                                dtype=torch.int8,
+                                device=device,
+                            )
+                            hidden_tensor = _align_memory(hidden_tensor, alignment)[: kv_cache_tensor.size]
+                        kv_cache_raw_tensors[layer_name] = hidden_tensor
+                    else:
+                        kv_cache_raw_tensors[layer_name] = tensor
+            else:
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_cache_raw_tensors[layer_name] = tensor
+            continue
+
         # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
         if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
             k_size = kv_cache_tensor.size
@@ -765,6 +810,40 @@ def _reshape_kv_cache_v2(
                 continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
+            if is_hidden_state_cache_spec(kv_cache_spec) or "cache_only_layers" in layer_name:
+                # Single tensor for extract_hidden_states (no K/V split).
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"Hidden-state cache for {layer_name} must use one raw tensor.")
+                if raw_cache.numel() % kv_cache_spec.page_size_bytes:
+                    raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
+                num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
+                if num_blocks < kv_cache_config.num_blocks:
+                    raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
+                kv_cache_shape = group.backend.get_kv_cache_shape(
+                    num_blocks,
+                    kv_cache_spec.block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype,
+                )
+                typed_cache = raw_cache.view(kv_cache_spec.dtype)
+                page_size_padded = getattr(kv_cache_spec, "page_size_padded", None)
+                if page_size_padded is not None:
+                    dtype_size = get_dtype_size(kv_cache_spec.dtype)
+                    page_stride = page_size_padded // dtype_size
+                    strides = [1] * len(kv_cache_shape)
+                    for dim_idx in range(len(kv_cache_shape) - 2, -1, -1):
+                        strides[dim_idx] = strides[dim_idx + 1] * kv_cache_shape[dim_idx + 1]
+                    strides[0] = page_stride
+                    kv_caches[layer_name] = torch.as_strided(
+                        typed_cache,
+                        size=kv_cache_shape,
+                        stride=tuple(strides),
+                    )
+                else:
+                    kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
+                continue
+
             if is_dsv4_model and isinstance(
                 kv_cache_spec,
                 (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),

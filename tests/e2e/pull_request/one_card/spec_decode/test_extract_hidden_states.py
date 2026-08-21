@@ -23,6 +23,8 @@ states are correctly extracted and saved on the Ascend NPU. Parametrized over:
 * a hybrid attention model (Qwen3.5-0.8B, GatedDeltaNet + full_attention)
   loaded with dummy weights as a shape/round-trip smoke test. The hybrid case
   mirrors upstream vLLM PR #39949.
+* Model Runner V1 (default) and Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`),
+  covering the Ascend adaptation of upstream vLLM PR #49811.
 """
 
 from __future__ import annotations
@@ -62,6 +64,8 @@ class ExtractHiddenStatesCase:
     verify_nonzero: bool = True
     # Hybrid smoke test additionally checks the token_ids round-trip.
     verify_token_ids: bool = False
+    # When True, force Model Runner V2 via VLLM_USE_V2_MODEL_RUNNER.
+    use_v2_model_runner: bool = False
 
 
 CASES = [
@@ -110,6 +114,39 @@ CASES = [
         ),
         id="hybrid_dummy_eager",
     ),
+    pytest.param(
+        ExtractHiddenStatesCase(
+            model_name=DENSE_MODEL,
+            aux_hidden_state_layer_ids=DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
+            prompts=[
+                "Hello, how are you?",
+                "What is machine learning?",
+            ],
+            enforce_eager=True,
+            gpu_memory_utilization=0.8,
+            max_num_seqs=16,
+            use_v2_model_runner=True,
+        ),
+        id="dense_eager_mrv2",
+    ),
+    pytest.param(
+        ExtractHiddenStatesCase(
+            model_name=HYBRID_MODEL,
+            aux_hidden_state_layer_ids=HYBRID_AUX_HIDDEN_STATE_LAYER_IDS,
+            prompts=[
+                "Hello world",
+                "Test prompt with several tokens",
+            ],
+            enforce_eager=True,
+            gpu_memory_utilization=0.4,
+            max_model_len=256,
+            load_format="dummy",
+            verify_nonzero=False,
+            verify_token_ids=True,
+            use_v2_model_runner=True,
+        ),
+        id="hybrid_dummy_eager_mrv2",
+    ),
 ]
 
 
@@ -143,8 +180,13 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
+def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, monkeypatch):
     """Extract hidden states from the target model and validate the dump."""
+    if case.use_v2_model_runner:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    else:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
     with tempfile.TemporaryDirectory() as tmpdirname:
         llm_kwargs = dict(
             model=case.model_name,

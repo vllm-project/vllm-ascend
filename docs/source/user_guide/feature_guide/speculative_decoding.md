@@ -377,6 +377,12 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
 > [!NOTE]
 > This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
 
+Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+```
+
 - Offline inference
 
     ```python
