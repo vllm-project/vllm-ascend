@@ -262,8 +262,8 @@ index before installing the remaining Ascend dependencies:
 
 ```bash
 python -m pip install \
-    --index-url https://download.pytorch.org/whl/cpu/ \
-    torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
+    --extra-index-url https://download.pytorch.org/whl/cpu/ \
+    torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     torch-npu==2.10.0.post4 triton-ascend==3.2.2

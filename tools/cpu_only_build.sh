@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 PYTORCH_CPU_INDEX_URL="${PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu/}"
+PYPI_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 ASCEND_EXTRA_INDEX_URL="${ASCEND_EXTRA_INDEX_URL:-https://mirrors.huaweicloud.com/ascend/repos/pypi}"
 SOC_VERSION="${SOC_VERSION:-ascend910b1}"
 ARCTIC_INFERENCE_REQUIREMENT="arctic-inference==0.1.1"
@@ -36,12 +37,13 @@ install_deps() {
         pip "setuptools>=64" "setuptools-scm>=8" wheel \
         attrs googleapis-common-protos "cmake>=3.26" ninja tomli
 
-    # Install the CPU wheels before the Ascend packages.  The later
-    # requirements install then reuses these exact distributions instead of
-    # resolving a CUDA-enabled PyTorch wheel from the default index.
+    # Keep the main index available for generic PyTorch dependencies such as
+    # filelock, which are not hosted on the PyTorch CPU wheel index. The +cpu
+    # pins ensure the resolver cannot select CUDA-enabled wheels from PyPI.
     python3 -m pip install \
-        --index-url "${PYTORCH_CPU_INDEX_URL}" \
-        torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
+        --index-url "${PYPI_INDEX_URL}" \
+        --extra-index-url "${PYTORCH_CPU_INDEX_URL}" \
+        torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu
 
     # Resolve the complete build-system contract as well as the runtime
     # requirements.  The non-isolated build below intentionally reuses this

@@ -112,6 +112,8 @@ class DependencyDocumentationTest(unittest.TestCase):
         self.assertIn("write_cpu_only_requirements", cpu_only_script)
         self.assertIn('grep -Fvx "${ARCTIC_INFERENCE_REQUIREMENT}"', cpu_only_script)
         self.assertIn("trap restore_requirements EXIT", cpu_only_script)
+        self.assertIn('--extra-index-url "${PYTORCH_CPU_INDEX_URL}"', cpu_only_script)
+        self.assertIn("torch==2.10.0+cpu", cpu_only_script)
         self.assertIn("RUN bash tools/cpu_only_build.sh verify", cpu_only_dockerfile)
         self.assertIn('ARG CPU_BASE_IMAGE="openeuler/openeuler:24.03-lts"', cpu_only_dockerfile)
         self.assertIn("FROM ${CPU_BASE_IMAGE}", cpu_only_dockerfile)
