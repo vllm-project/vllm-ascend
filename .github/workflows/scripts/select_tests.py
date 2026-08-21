@@ -934,6 +934,8 @@ def main():
                 file=sys.stderr,
             )
         for target in explicit_targets:
+            if _is_gated_test_target(target, gated_test_targets):
+                continue
             _route_explicit_test_target(target, all_groups)
         _dedup_groups(all_groups)
     else:

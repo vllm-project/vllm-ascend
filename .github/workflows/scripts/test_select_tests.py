@@ -1172,3 +1172,57 @@ def test_test_list_file_routes_ut_and_e2e_targets(tmp_path, monkeypatch, capsys)
     selected = {t for g in test_groups for t in g["tests"].split()}
     assert selected == {rel_e2e, rel_ut}
     assert captured.out.split("matched_modules=")[1].strip() == ""
+
+
+def test_pr_labels_gate_test_list_file_targets(tmp_path, monkeypatch, capsys):
+    test_root = tmp_path / "tests"
+    e2e_dir = test_root / "e2e" / "pull_request" / "four_card"
+    e2e_dir.mkdir(parents=True)
+    gated_test = e2e_dir / "test_gated.py"
+    gated_test.write_text("")
+
+    config = [
+        {
+            "name": "gated",
+            "optional": False,
+            "required_pr_labels": ["mrv2"],
+            "source_file_dependencies": ["src/gated.py"],
+            "tests": ["tests/e2e/pull_request/four_card/test_gated.py"],
+        },
+    ]
+    config_path = tmp_path / "config.yaml"
+    runner_mapping = {"tests/e2e/pull_request/four_card": {"default": "a3_x4"}}
+    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
+    runner_file = tmp_path / "runner_label.json"
+    runner_file.write_text(json.dumps({"a3-runner-4": {"chip": "a3", "npu_num": 4}}))
+    monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)
+    monkeypatch.chdir(tmp_path)
+
+    list_file = tmp_path / "recommended.txt"
+    rel = "tests/e2e/pull_request/four_card/test_gated.py"
+    list_file.write_text(rel)
+
+    def run(labels):
+        capsys.readouterr()
+        argv = [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--test-list-file",
+            str(list_file),
+        ]
+        if labels is not None:
+            argv += ["--pr-labels", labels]
+        monkeypatch.setattr(sys, "argv", argv)
+        select_tests.main()
+        out = capsys.readouterr().out
+        groups_line = next(line for line in out.splitlines() if line.startswith("test_groups="))
+        test_groups = json.loads(groups_line.removeprefix("test_groups="))
+        return {t for group in test_groups for t in group["tests"].split()}
+
+    # Recommended target without mrv2 is filtered out.
+    assert not run(labels="ready-precise")
+    # With mrv2 the recommended target is selected.
+    assert run(labels="ready-precise,mrv2") == {rel}
+    # Without --pr-labels the gate is inert (nightly/schedule callers).
+    assert run(labels=None) == {rel}
