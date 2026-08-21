@@ -37,7 +37,7 @@ _server_cmd: &server_cmd
 _benchmarks_perf1: &benchmarks_perf1
   perf:
     case_type: accuracy
-    dataset_path: vllm-ascend/gpqa
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     max_out_len: 24000
