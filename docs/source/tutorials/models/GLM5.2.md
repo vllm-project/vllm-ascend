@@ -19,7 +19,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 16) node or 4 Atlas 800 A2 (64GB × 32) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
 - `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 16) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
 - `GLM-5.2-w8a8c8`: requires 2 Atlas 800 A3 (64GB × 16) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
-- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 16) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios; use `GLM-5.2-w8a8c8` for PD deployment instead. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 16) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios;
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -233,7 +233,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve <MODEL_PATH> \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
     --host 0.0.0.0 \
     --port 8077 \
     --api-server-count 1 \
@@ -289,7 +289,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve <MODEL_PATH> \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -470,7 +470,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-        vllm serve <MODEL_PATH> \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
             --host 0.0.0.0 \
             --port 9081 \
             --pipeline-parallel-size 2 \
@@ -543,7 +543,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-        vllm serve <MODEL_PATH> \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
             --host 0.0.0.0 \
             --port 9082 \
             --pipeline-parallel-size 2 \
@@ -583,7 +583,7 @@ Before you start, please
         }'
 ```
 
-**Decode nodes** (`run_dp_template.sh`): launch one instance per DP rank on each decode node. Positional parameters: `$1` = visible devices, `$2` = engine port, `$3` = data-parallel-size, `$4` = data-parallel-rank, `$5` = data-parallel-address, `$6` = data-parallel-rpc-port, `$7` = tensor-parallel-size. Decode node 0 hosts ranks 0–3, decode node 1 hosts ranks 4–7.
+**Decode node 0** (`run_dp_template.sh`): hosts DP ranks 0–3. The template launches one instance per DP rank on the node; positional parameters: `$1` = visible devices, `$2` = engine port, `$3` = data-parallel-size, `$4` = data-parallel-rank, `$5` = data-parallel-address, `$6` = data-parallel-rpc-port, `$7` = tensor-parallel-size. Prepare `run_dp_template.sh` on decode node 0 with the content below.
 
 ```shell
         nic_name="xxxx" # change to your own nic name
@@ -615,7 +615,77 @@ Before you start, please
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-        vllm serve <MODEL_PATH> \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --served-model-name glm-5 \
+            --max-model-len 202752 \
+            --max-num-batched-tokens 164 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}' \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
+            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}' \
+            --trust-remote-code \
+            --max-num-seqs 32 \
+            --gpu-memory-utilization 0.92 \
+            --async-scheduling \
+            --quantization ascend \
+            --enable-auto-tool-choice \
+            --tool-call-parser glm47 \
+            --reasoning-parser glm45 \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "30200",
+            "engine_id": "2",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "decode": {"dp_size": 8, "tp_size": 4}
+            }
+        }'
+```
+
+**Decode node 1** (`run_dp_template.sh`): hosts DP ranks 4–7. Prepare `run_dp_template.sh` on decode node 1 with the content below.
+
+```shell
+        nic_name="xxxx" # change to your own nic name
+        local_ip="xxxx" # change to your own ip
+
+        export HCCL_OP_EXPANSION_MODE="AIV"
+
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
+
+        #Mooncake
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export HCCL_BUFFSIZE=256
+
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_A3_ENABLE=1
+        export TASK_QUEUE_ENABLE=1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
+
+        export VLLM_ASCEND_ENABLE_MLAPO=1
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1218,7 +1288,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve <MODEL_PATH> \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
 --host 0.0.0.0 \
 --port 8077 \
 --api-server-count 1 \
@@ -1276,7 +1346,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve <MODEL_PATH> \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
 --host 0.0.0.0 \
 --port 8077 \
 --headless \
@@ -1350,7 +1420,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve <MODEL_PATH> \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
     --host 0.0.0.0 \
     --port 9081 \
     --data-parallel-size 2 \
@@ -1420,7 +1490,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve <MODEL_PATH> \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
     --host 0.0.0.0 \
     --port 9082 \
     --data-parallel-size 2 \
@@ -1460,7 +1530,7 @@ vllm serve <MODEL_PATH> \
 }'
 ```
 
-**Decode nodes** (`run_dp_template.sh`): prepare the script `launch_online_dp.py` on each node (see [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)) and launch one instance per DP rank. Decode node 0 hosts ranks 0–3, decode node 1 hosts ranks 4–7.
+**Decode node 0** (`run_dp_template.sh`): hosts DP ranks 0–3. Prepare `run_dp_template.sh` and `launch_online_dp.py` (see [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)) on decode node 0 with the content below.
 
 ```shell
 nic_name="xxxx" # change to your own nic name
@@ -1492,7 +1562,79 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-vllm serve <MODEL_PATH> \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --enable-expert-parallel \
+    --prefill-context-parallel-size 1 \
+    --decode-context-parallel-size 4 \
+    --cp-kv-cache-interleave-size 128 \
+    --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --max-model-len 1048576 \
+    --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}' \
+    --max-num-batched-tokens 192 \
+    --trust-remote-code \
+    --max-num-seqs 32 \
+    --quantization ascend \
+    --gpu-memory-utilization 0.92 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --async-scheduling \
+    --enable-auto-tool-choice \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --kv-transfer-config \
+    '{"kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_consumer",
+    "kv_port": "30200",
+    "engine_id": "2",
+    "kv_connector_extra_config": {
+        "use_ascend_direct": true,
+        "prefill": {"dp_size": 2, "tp_size": 16},
+        "decode": {"dp_size": 8, "tp_size": 4}
+    }
+}'
+```
+
+**Decode node 1** (`run_dp_template.sh`): hosts DP ranks 4–7. Prepare `run_dp_template.sh` and `launch_online_dp.py` (see [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)) on decode node 1 with the content below.
+
+```shell
+nic_name="xxxx" # change to your own nic name
+local_ip="xxxx" # change to your own ip
+
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
+
+#Mooncake
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=400
+
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
+export TASK_QUEUE_ENABLE=1
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808 \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
