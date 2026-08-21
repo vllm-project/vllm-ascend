@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.quantization.methods.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
@@ -144,3 +145,45 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             apply_router_weight_on_input=True,
         )
         mock_comm.fused_experts.assert_called_once()
+
+    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.select_experts")
+    def test_apply_uses_stacked_checkpoint_layout_for_mega_moe(self, mock_select, mock_ctx):
+        tokens = 4
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 512, 64), dtype=torch.uint8), requires_grad=False)
+        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 512, 4), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False
+        )
+        self.scheme.process_weights_after_loading(layer)
+        mock_select.return_value = (
+            torch.ones(tokens, 2),
+            torch.tensor([[0, 1], [1, 0], [0, 1], [1, 0]]),
+        )
+        mock_comm = Mock()
+        mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        mock_ctx.moe_comm_method = mock_comm
+
+        self.scheme.apply(
+            layer,
+            torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16),
+            torch.randn(tokens, self.num_experts),
+            top_k=2,
+            renormalize=True,
+            num_experts=self.num_experts,
+            enable_force_load_balance=False,
+        )
+
+        fused_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_input.weights.w1.shape, (8, 512, 64))
+        self.assertEqual(fused_input.weights.w2.shape, (8, 128, 128))
+        self.assertEqual(fused_input.weights.w1_scale.shape, (8, 512, 2, 2))
+        self.assertEqual(fused_input.weights.w2_scale.shape, (8, 128, 4, 2))
+        self.assertTrue(fused_input.weights.w1.is_contiguous())
+        self.assertTrue(fused_input.weights.w2.is_contiguous())
+        self.assertTrue(fused_input.weights.w1_scale.is_contiguous())
+        self.assertTrue(fused_input.weights.w2_scale.is_contiguous())

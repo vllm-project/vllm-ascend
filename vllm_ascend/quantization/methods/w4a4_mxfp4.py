@@ -23,7 +23,7 @@ import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp4_linear_available,
@@ -221,14 +221,26 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         if x.dtype not in [torch.uint8]:
             topk_weights = topk_weights.to(x.dtype)
 
+        if not self.dynamic_eplb and _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            # MegaMoE requires one stacked tensor in checkpoint orientation.
+            w1 = layer.w13_weight.transpose(1, 2)
+            w2 = layer.w2_weight.transpose(1, 2)
+            w1_scale = layer.w13_weight_scale.transpose(1, 2)
+            w2_scale = layer.w2_weight_scale.transpose(1, 2)
+        else:
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -243,8 +255,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.uint8]),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
             )
         )
 

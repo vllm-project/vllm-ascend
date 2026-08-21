@@ -438,6 +438,14 @@ def create_scheme_for_layer(
         err_msg = f"Could not determine quantization type for layer {prefix} (layer_type={layer_type})."
         logger.error(err_msg)
         raise ValueError(err_msg)
+    if layer_type == "moe":
+        logger.debug_once("ModelSlim MoE quant scheme detected: prefix=%s, quant_type=%s", prefix, quant_type)
+    logger.debug(
+        "ModelSlim quant scheme lookup: prefix=%s, layer_type=%s, quant_type=%s",
+        prefix,
+        layer_type,
+        quant_type,
+    )
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)

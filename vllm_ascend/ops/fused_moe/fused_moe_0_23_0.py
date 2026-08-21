@@ -36,6 +36,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     MoERunner,
     QuantType,
     VllmEplbAdaptor,
+    cache_a5_moe_quant_type,
     get_ascend_config,
     get_compressed_expert_map,
     get_current_vllm_config,
@@ -278,6 +279,7 @@ class AscendFusedMoE(FusedMoE):
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
+        cache_a5_moe_quant_type(getattr(self, "vllm_config", None), self.quant_type, self.layer_name)
 
         self.runner = AscendMoERunner(
             self.layer_name,
@@ -365,6 +367,13 @@ class AscendFusedMoE(FusedMoE):
         if method is not None:
             quant_type = getattr(method, "quant_type", QuantType.NONE)
 
+        logger.debug_once(
+            "MoE runner quant type resolved: runner=%s, quant_method=%s, inner_method=%s, quant_type=%s",
+            type(self).__name__,
+            type(self.quant_method).__name__,
+            type(method).__name__ if method is not None else None,
+            quant_type,
+        )
         return quant_type
 
     def update_expert_map(self, new_expert_map):
