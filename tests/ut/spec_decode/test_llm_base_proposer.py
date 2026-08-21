@@ -19,11 +19,18 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+import torch
+import torch.nn as nn
 from vllm.config import CUDAGraphMode
+from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import (
+    _HIDDEN_STATE_DRAFTER_TYPES,
+    AscendSpecDecodeBaseProposer,
+)
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
 # two composite modes that mix FULL with NONE / PIECEWISE.
@@ -74,16 +81,22 @@ class TestMultimodalImageTokenIndex:
 
         assert image_token_index == 789
 
-    def test_kimi_uses_media_placeholder_token_id(self):
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        ],
+    )
+    def test_kimi_uses_media_placeholder_token_id(self, model_name: str):
         config = SimpleNamespace(
             image_token_id=123,
             image_token_index=456,
             media_placeholder_token_id=789,
         )
 
-        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
-            "KimiK25ForConditionalGeneration", config
-        )
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(model_name, config)
 
         assert image_token_index == 789
 
@@ -95,6 +108,115 @@ class TestMultimodalImageTokenIndex:
         )
 
         assert image_token_index == 456
+
+
+def test_kimi_k3_dspark_is_supported_as_hidden_state_drafter():
+    assert K3DSparkForCausalLM in _HIDDEN_STATE_DRAFTER_TYPES
+
+
+class TestQuaRotDraftBoundaries:
+    @staticmethod
+    def _make_proposer() -> AscendSpecDecodeBaseProposer:
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "dspark"
+        proposer.device = torch.device("cpu")
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(model="target"),
+            quant_config=SimpleNamespace(),
+        )
+        return proposer
+
+    def test_loads_rotation_for_k3_shared_boundaries(self, monkeypatch):
+        class FakeK3DSpark:
+            pass
+
+        proposer = self._make_proposer()
+        rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        proposer.model = FakeK3DSpark()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.K3DSparkForCausalLM",
+            FakeK3DSpark,
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.get_rotation_path",
+            lambda _: "rotation.safetensors",
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.get_rotation_matrix",
+            lambda _: rotation,
+        )
+
+        proposer._maybe_load_quarot_rotation()
+
+        torch.testing.assert_close(proposer._quarot_rotation, rotation)
+
+    def test_does_not_apply_k3_boundary_rotation_to_other_drafts(self, monkeypatch):
+        proposer = self._make_proposer()
+        proposer.model = SimpleNamespace()
+        calls = []
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.get_rotation_path",
+            lambda config: calls.append(config),
+        )
+
+        proposer._maybe_load_quarot_rotation()
+
+        assert calls == []
+
+    def test_materializes_unrotated_shared_layer(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        target = nn.Linear(2, 3, bias=False)
+        target_weight = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        target.weight.data.copy_(target_weight)
+
+        prepared = proposer._prepare_unrotated_shared_layer(
+            None,
+            target,
+            "draft embed_tokens.weight",
+        )
+
+        assert prepared is not None
+        assert prepared is not target
+        torch.testing.assert_close(
+            prepared.weight,
+            target_weight @ proposer._quarot_rotation.T,
+        )
+        torch.testing.assert_close(target.weight, target_weight)
+
+    def test_materialized_layer_reuses_noncopyable_comm_group(self):
+        class NonCopyableCommGroup:
+            def __deepcopy__(self, memo):
+                del memo
+                raise TypeError("cannot pickle ProcessGroup")
+
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        target.comm_group = NonCopyableCommGroup()
+
+        prepared = proposer._prepare_unrotated_shared_layer(
+            None,
+            target,
+            "draft embed_tokens.weight",
+        )
+
+        assert prepared is not None
+        assert prepared.comm_group is target.comm_group
+        assert prepared.weight.data_ptr() != target.weight.data_ptr()
+
+    def test_incompatible_shared_layer_fails_instead_of_aliasing(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        draft = nn.Linear(3, 3, bias=False)
+
+        with pytest.raises(RuntimeError):
+            proposer._prepare_unrotated_shared_layer(
+                draft,
+                target,
+                "draft lm_head.weight",
+            )
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:
@@ -167,3 +289,83 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         )
 
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+class TestParallelDraftSeqLens:
+    @staticmethod
+    def _metadata():
+        return SimpleNamespace(
+            _seq_lens_cpu=torch.tensor([100, 200], dtype=torch.int32),
+            seq_lens_cpu=None,
+            seq_lens_cpu_upper_bound=None,
+            parallel_draft_seq_lens_cpu=None,
+            parallel_draft_num_reject_cpu=None,
+            parallel_draft_num_reject_event=None,
+            parallel_draft_num_reject_num_reqs=0,
+        )
+
+    @staticmethod
+    def _prepare(proposer, metadata, has_rejected_tokens):
+        AscendSpecDecodeBaseProposer._prepare_parallel_draft_seq_lens_cpu(
+            proposer,
+            metadata,
+            batch_size=2,
+            has_rejected_tokens=has_rejected_tokens,
+        )
+
+    def test_async_rejected_tokens_publish_deferred_finalize(self):
+        reject_event = object()
+        reject_cpu = torch.tensor([0, 2], dtype=torch.int32)
+        proposer = SimpleNamespace(
+            method="dspark",
+            parallel_drafting=True,
+            num_query_per_req=8,
+            runner=SimpleNamespace(
+                num_rejected_tokens_event=reject_event,
+                num_rejected_tokens_cpu=reject_cpu,
+            ),
+        )
+        metadata = self._metadata()
+
+        self._prepare(proposer, metadata, has_rejected_tokens=True)
+
+        torch.testing.assert_close(
+            metadata.parallel_draft_seq_lens_cpu,
+            torch.tensor([108, 208], dtype=torch.int32),
+        )
+        assert metadata.parallel_draft_num_reject_event is reject_event
+        assert metadata.parallel_draft_num_reject_cpu is reject_cpu
+        assert metadata.parallel_draft_num_reject_num_reqs == 2
+
+    def test_non_async_rejected_tokens_keep_device_fallback(self):
+        proposer = SimpleNamespace(
+            method="dspark",
+            parallel_drafting=True,
+            num_query_per_req=8,
+            runner=SimpleNamespace(
+                num_rejected_tokens_event=None,
+                num_rejected_tokens_cpu=None,
+            ),
+        )
+        metadata = self._metadata()
+
+        self._prepare(proposer, metadata, has_rejected_tokens=True)
+
+        assert metadata.parallel_draft_seq_lens_cpu is None
+
+    def test_first_parallel_draft_pass_extends_host_lengths(self):
+        proposer = SimpleNamespace(
+            method="dspark",
+            parallel_drafting=True,
+            num_query_per_req=8,
+            runner=SimpleNamespace(
+                num_rejected_tokens_event=None,
+                num_rejected_tokens_cpu=None,
+            ),
+        )
+        metadata = self._metadata()
+
+        self._prepare(proposer, metadata, has_rejected_tokens=False)
+
+        torch.testing.assert_close(
+            metadata.parallel_draft_seq_lens_cpu,
+            torch.tensor([108, 208], dtype=torch.int32),
+        )

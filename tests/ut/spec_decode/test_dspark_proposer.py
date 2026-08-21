@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -62,7 +63,10 @@ class _DSparkProposerTestBase:
         """Build the minimal config consumed by the DSpark initializer."""
         draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
         return SimpleNamespace(
-            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config)
+            speculative_config=SimpleNamespace(
+                draft_sample_method="greedy",
+                draft_model_config=draft_model_config,
+            )
         )
 
     @classmethod
@@ -100,7 +104,16 @@ class _DSparkProposerTestBase:
                 else SimpleNamespace()
             )
 
-        with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
+        dynamic_spec_config = SimpleNamespace(method="", method_params={})
+        with (
+            patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init),
+            patch(
+                "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+                return_value=SimpleNamespace(
+                    dynamic_spec_config=dynamic_spec_config,
+                ),
+            ),
+        ):
             proposer = AscendDSparkProposer(vllm_config, device)
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
@@ -131,6 +144,7 @@ class _DSparkProposerTestBase:
         proposer._per_group_block_table_buffers = {gid: block_table}
         slot = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer._per_group_slot_mappings = {gid: slot}
+        proposer._per_group_kernel_block_sizes = {gid: block_size}
         proposer._per_group_query_slot_mapping_buffers = {gid: slot.clone()}
         proposer._per_group_context_slot_mapping_buffers = {gid: slot.clone()}
         return proposer
@@ -406,11 +420,8 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
         assert proposer._per_group_block_tables[gid] is not old_block_table
 
 
-class TestDSparkInitValidation:
-    """``AscendDSparkProposer.__init__`` rejects probabilistic draft sampling
-    (unsupported on the v1 model runner) and, for the greedy path, allocates
-    the DSpark-specific draft/seed buffers and overrides the DFlash
-    query-token / cudagraph defaults."""
+class TestDSparkBufferInitialization:
+    """The DSpark initializer replaces DFlash buffers and graph defaults."""
 
     @staticmethod
     def _make_vllm_config(
@@ -451,31 +462,11 @@ class TestDSparkInitValidation:
             self.dtype = dtype
             self.device = device
             self.draft_model_config = vllm_config.speculative_config.draft_model_config
-            # present so the ``del`` in DSpark.__init__ succeeds
             self.hidden_size = 0
             self.hidden_states = None
             self._dflash_hidden_states = None
 
         monkeypatch.setattr(AscendDflashProposer, "__init__", _stub)
-
-    def test_probabilistic_rejected(self, monkeypatch):
-        device = torch.device("cpu")
-        self._stub_dflash_init(
-            monkeypatch,
-            num_speculative_tokens=5,
-            max_batch_size=16,
-            max_num_tokens=256,
-            dtype=torch.float32,
-            device=device,
-        )
-        vllm_config = self._make_vllm_config(
-            num_speculative_tokens=5,
-            max_batch_size=16,
-            max_num_tokens=256,
-            draft_sample_method="probabilistic",
-        )
-        with pytest.raises(ValueError, match="probabilistic"):
-            AscendDSparkProposer(vllm_config, device)
 
     def test_greedy_allocates_dspark_buffers(self, monkeypatch):
         device = torch.device("cpu")
@@ -495,7 +486,14 @@ class TestDSparkInitValidation:
             draft_sample_method="greedy",
             hidden_size=hidden,
         )
-        proposer = AscendDSparkProposer(vllm_config, device)
+        dynamic_spec_config = SimpleNamespace(method="", method_params={})
+        with patch(
+            "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+            return_value=SimpleNamespace(
+                dynamic_spec_config=dynamic_spec_config,
+            ),
+        ):
+            proposer = AscendDSparkProposer(vllm_config, device)
 
         blk = 1 + num_spec
         max_query_tokens = max_batch * num_spec
@@ -574,6 +572,33 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert proposer._dflash_num_context == num_reqs
         expected = torch.arange(num_reqs * 8, dtype=torch.float32).reshape(num_reqs, 8)
         assert torch.equal(proposer._dflash_hidden_states[:num_reqs], expected)
+
+    def test_query_slot_kernel_uses_logical_block_size(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer."
+            "copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        num_reqs, num_speculative_tokens, max_num_tokens = 1, 7, 32
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=num_speculative_tokens,
+        )
+        proposer.draft_attn_groups[0].kv_cache_spec.block_size = 384
+        proposer._per_group_kernel_block_sizes[0] = 128
+
+        self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=num_speculative_tokens,
+            seq_len=720,
+        )
+
+        kwargs = kernel[1,].call_args.kwargs
+        assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
+        assert kwargs["block_size"] == 128
 
     def test_cad_rewritten_to_cross_attention_shape(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -683,10 +708,8 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         assert kwargs["SAMPLE_FROM_ANCHOR"] is True
 
 
-class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
-    """``initialize_attn_backend`` raises clearly when the draft model does not
-    expose the DSpark layer-name API, or when no draft attention groups can be
-    built from the kv-cache groups."""
+class TestInitializeAttnBackend(_DSparkProposerTestBase):
+    """Initialization validates draft groups and preserves logical block sizes."""
 
     @staticmethod
     def _make_proposer_for_init():
@@ -723,4 +746,64 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         kv_cache_config = SimpleNamespace(kv_cache_groups=[non_overlapping_group])
         with pytest.raises(RuntimeError, match="registered draft attention groups"):
             proposer.initialize_attn_backend(kv_cache_config)
+
+    def test_initialization_tracks_logical_block_size_per_gid(self, monkeypatch):
+        manager_specs = [MagicMock(), MagicMock()]
+        for spec in manager_specs:
+            spec.block_size = 384
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layers = {}
+        for gid in range(2):
+            layer = MagicMock()
+            layer.get_attn_backend.return_value = backend
+            layers[f"L{gid}"] = layer
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *a, **k: layers,
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"L0", "L1"}
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[f"L{gid}"],
+                    kv_cache_spec=manager_specs[gid],
+                )
+                for gid in range(2)
+            ],
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders") as create_builders:
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128, 64],
+            )
+
+        assert [spec.block_size for spec in manager_specs] == [384, 384]
+        assert proposer._per_group_kernel_block_sizes == {0: 128, 1: 64}
+        assert [group.kv_cache_group_id for group in proposer.draft_attn_groups] == [0, 1]
+        assert proposer.kernel_block_size == 128
+        assert [
+            call.kwargs["kernel_block_size"]
+            for call in create_builders.call_args_list
+        ] == [128, 64]
+
+    def test_kernel_block_size_falls_back_to_cache_spec(self):
+        proposer = self._make_proposer_for_init()
+
+        assert (
+            proposer._resolve_kernel_block_size(
+                0,
+                SimpleNamespace(block_size=384),
+                None,
+            )
+            == 384
+        )
 # fmt: on
