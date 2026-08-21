@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+import os
 from types import NoneType
 from typing import Any
 
@@ -391,7 +392,21 @@ class NPUWorker(WorkerBase):
         if self.parallel_config.enable_fault_tolerance:
             import torch_npu
 
-            torch_npu.npu.set_op_timeout_ms(get_ascend_config().ft_communication_ops_abort_timeout_ms)
+            abort_timeout = get_ascend_config().ft_communication_abort_timeout
+            if abort_timeout > 0:
+                # User-provided HCCL timeouts win; otherwise derive them
+                # from the config value. HCCL_EVENT_TIMEOUT must be
+                # greater than HCCL_EXEC_TIMEOUT, hence EXEC defaults to
+                # abort_timeout - 1.
+                os.environ.setdefault("HCCL_EVENT_TIMEOUT", str(abort_timeout))
+                os.environ.setdefault("HCCL_EXEC_TIMEOUT", str(abort_timeout - 1))
+                if int(os.environ["HCCL_EVENT_TIMEOUT"]) <= int(os.environ["HCCL_EXEC_TIMEOUT"]):
+                    raise ValueError(
+                        f"HCCL_EVENT_TIMEOUT ({os.environ['HCCL_EVENT_TIMEOUT']}) "
+                        "must be greater than HCCL_EXEC_TIMEOUT "
+                        f"({os.environ['HCCL_EXEC_TIMEOUT']})"
+                    )
+                torch_npu.npu.set_op_timeout_ms(abort_timeout * 1000)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
