@@ -857,6 +857,15 @@ def test_pd_read_wait_propagates_read_failed():
         worker.wait_for_layer_send(0)
 
 
+def test_pd_read_wait_rejects_missing_layer_mapping():
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
+    worker.kv_send_layer_thread = MagicMock()
+    worker.layer_storage_slots = {0: (0,)}
+
+    with pytest.raises(RuntimeError, match="mapping is missing layer 1"):
+        worker.wait_for_layer_send(1)
+
+
 def test_save_kv_layer_requires_send_thread_without_marking_dispatched():
     worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
     worker._backend = BACKEND_MEMFABRIC
@@ -1175,6 +1184,15 @@ def test_connector_shutdown_delegates_to_active_components():
 
     connector.connector_worker.shutdown.assert_called_once_with()
     connector.connector_scheduler.shutdown.assert_called_once_with()
+
+
+def test_connector_layerwise_reuse_wait_delegates_to_existing_gate():
+    connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
+    connector.connector_worker = MagicMock()
+
+    connector.wait_for_layer_reuse(3)
+
+    connector.connector_worker.wait_for_layer_send.assert_called_once_with(3)
 
 
 # ---------------------------------------------------------------------------

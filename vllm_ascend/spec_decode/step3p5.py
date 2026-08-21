@@ -150,7 +150,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         if self.use_compress:
             extra_attn_metadata_args = dict(
                 common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
 
         for attn_group in self.draft_attn_groups:

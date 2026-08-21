@@ -89,7 +89,7 @@ class AscendDSAReqMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
     slot_mapping: torch.Tensor | None
-    block_size: int
+    storage_block_size: int
     query_start_loc: torch.Tensor
     cp_metadata: DSACPMetadata
     num_compressed_tokens: int | None = None
@@ -178,6 +178,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
+        self.logical_block_size = kv_cache_spec.block_size
+        self.storage_block_size = kv_cache_spec.storage_block_size
         scheduler_config = vllm_config.scheduler_config
 
         self.num_decodes = 0
@@ -189,8 +191,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.slot_mapping: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.seq_lens_cpu: torch.Tensor = None
-        self.block_size: int = 128
-
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         hf_config = self.model_config.hf_config
 
@@ -284,8 +284,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         num_reqs_actual = kwargs.get("num_reqs_actual")
-        self.block_size = kwargs.get("block_size", 128)
-
         common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert common_ratio_to_sas_metadata is not None
         self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
@@ -335,8 +333,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
             self.seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
 
-        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
+        # CommonAttentionMetadata uses logical raw-token slots. They directly
+        # describe only uncompressed SWA/state caches; C4/C128 physical slots
+        # are generated later from the logical block table by compressor_metadata.
+        if self.compressor_ratio <= 1:
+            slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+            self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
+                slot_mapping, self.storage_block_size
+            )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
 
@@ -395,8 +399,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
             self.seq_lens_cpu = self.seq_lens.cpu()
-        self.block_size = kwargs.get("block_size", 128)
-
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         # Draft steps update positions independently. Reusing the global RoPE
         # cache can let later draft steps overwrite step-0 metadata.
@@ -406,7 +408,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         assert self.spec_slot_mapping is not None
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.block_size
+            slot_mapping, self.storage_block_size
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
@@ -496,7 +498,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
-                self.block_size,
+                self.storage_block_size,
                 query_start_loc[: num_reqs + 1],
                 self.seq_lens[:num_reqs],
                 self.num_actual_tokens,
@@ -572,7 +574,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=input_positions,
             block_table=self.block_table[:num_reqs, ...],
             slot_mapping=slot_mapping,
-            block_size=self.block_size,
+            storage_block_size=self.storage_block_size,
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
@@ -788,7 +790,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=input_positions,
             block_table=self.block_table[:num_reqs, ...],
             slot_mapping=slot_mapping,
-            block_size=self.block_size,
+            storage_block_size=self.storage_block_size,
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
@@ -1191,7 +1193,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             metadata.query_start_loc,
             metadata.start_pos,
             metadata.block_table,
-            metadata.block_size,
+            metadata.storage_block_size,
             DeviceOperator.get_dsa_compressor_slot_mapping_format(),
             self.compress_ratio,
             metadata.num_compressed_tokens,
