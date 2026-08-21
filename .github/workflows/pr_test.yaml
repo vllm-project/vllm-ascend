@@ -42,7 +42,6 @@ concurrency:
 
 jobs:
   pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -189,17 +188,128 @@ jobs:
             echo "============================"
           done
 
-  select-tests:
+  recommend-tests-from-coverage:
+    name: Recommend tests from coverage
     needs: pre-commit
+    # Skip the coverage-based recommendation path when the PR opts into the
+    # full suite via the ready-all label; select-tests will produce the test
+    # groups in that case.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
+    runs-on: linux-amd64-cpu-8-hk
+    outputs:
+      coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout vllm-ascend scripts
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/workflows/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Download test case map and coverage package
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            --retry 3 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/test_case_map.json" \
+            -o test_case_map.json
+          echo "Downloaded test_case_map.json"
+          du -h test_case_map.json
+          curl -fsSL \
+            --retry 3 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
+            -o coverage.tar
+          echo "Downloaded coverage.tar"
+          du -h coverage.tar
+          tar xf coverage.tar vllm-ascend/covstub
+          test -d vllm-ascend/covstub
+          echo "Extracted vllm-ascend/covstub"
+          find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
+
+      - name: Recommend tests for current PR
+        run: |
+          set -euo pipefail
+          if ! python3 -c "import regex" >/dev/null 2>&1; then
+            echo "regex not found for $(python3 -V); bootstrapping pip and installing regex"
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+            python3 get-pip.py --break-system-packages
+            python3 -m pip install --break-system-packages regex
+          fi
+          python3 -c "import regex; print('regex ok:', regex.__file__)"
+          PR_SPEC="${{ github.repository }}#${{ github.event.pull_request.number }}"
+          echo "Selecting tests for PR: ${PR_SPEC}"
+          python3 .github/workflows/scripts/test_selector.py \
+            --github-pr "${PR_SPEC}" \
+            --source-dir ./vllm-ascend/covstub \
+            --map-file test_case_map.json
+
+      - name: Merge extra tests from YAML
+        run: |
+          set -euo pipefail
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            echo "yaml not found for $(python3 -V); bootstrapping pip and installing pyyaml"
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+            python3 get-pip.py --break-system-packages
+            python3 -m pip install --break-system-packages pyyaml
+          fi
+          OBS_EXTRA_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+          http_code=$(curl -sSL --retry 3 --retry-delay 5 -o extra_recommended_tests.obs.yaml -w "%{http_code}" "${OBS_EXTRA_URL}" || echo "000")
+          if [ "${http_code}" = "200" ] && [ -s extra_recommended_tests.obs.yaml ]; then
+            echo "Downloaded extra_recommended_tests.yaml from OBS"
+            python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
+              --list-file recommended_pytest_paths.txt \
+              --extra-yaml extra_recommended_tests.obs.yaml
+          else
+            echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skipped"
+            rm -f extra_recommended_tests.obs.yaml
+          fi
+
+      - name: Export coverage paths output
+        id: export-paths
+        if: ${{ !cancelled() }}
+        run: |
+          FILE="recommended_pytest_paths.txt"
+          if [ -f "$FILE" ]; then
+            {
+              echo "coverage_paths<<EOF"
+              cat "$FILE"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Exported $(wc -l < "$FILE") recommended paths"
+          else
+            echo "coverage_paths=" >> "$GITHUB_OUTPUT"
+            echo "::notice::recommended_pytest_paths.txt not found"
+          fi
+
+  select-tests:
+    needs:
+      - recommend-tests-from-coverage
+    # select-tests is the single producer of test_groups / base_sha / has_tests.
+    # always() is required so this job still runs when recommend-tests-from-coverage
+    # is skipped under ready-all. Modes:
+    #   recommended - recommend job succeeded with coverage paths
+    #   all         - ready-all forced (full selected suite)
+    #   none        - recommend job succeeded but produced no paths (no tests)
+    # Recommend job failure does not fall back to all; this job fails instead.
+    if: ${{ always() && !cancelled() }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
-      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      has_tests: ${{ steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: ${{ steps.scope-rec.outputs.matched_modules || steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
+      # source reports which path produced the tests: "recommended", "all", or "none".
+      source: ${{ steps.decide.outputs.mode }}
       has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
       test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
     steps:
@@ -277,9 +387,47 @@ jobs:
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
+      - name: Decide test selection mode
+        id: decide
+        env:
+          HAS_READY_ALL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
+          RECOMMEND_RESULT: ${{ needs.recommend-tests-from-coverage.result }}
+          COVERAGE_PATHS: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths }}
+        run: |
+          set -euo pipefail
+          if [ "${HAS_READY_ALL}" = "true" ]; then
+            MODE="all"
+          elif [ "${RECOMMEND_RESULT}" = "success" ]; then
+            if [ -n "${COVERAGE_PATHS// /}" ]; then
+              MODE="recommended"
+            else
+              MODE="none"
+            fi
+          else
+            echo "::error::Coverage test recommendation did not succeed (result: ${RECOMMEND_RESULT}); not falling back to all tests"
+            exit 1
+          fi
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "Selection mode: ${MODE}"
+
+      - name: Select tests from coverage recommendations
+        id: scope-rec
+        if: steps.decide.outputs.mode == 'recommended'
+        env:
+          COVERAGE_PATHS: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          pip install regex pyyaml -q
+          LIST_FILE="$RUNNER_TEMP/recommended_from_coverage.txt"
+          printf '%s\n' "${COVERAGE_PATHS}" > "$LIST_FILE"
+          echo "Recommended paths from coverage:"
+          cat "$LIST_FILE"
+          python3 .github/workflows/scripts/select_tests.py \
+            --test-list-file "$LIST_FILE"
+
       - name: Select tests based on changed files
-        id: scope
-        if: steps.filter.outputs.src == 'true'
+        id: scope-all
+        if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
@@ -287,9 +435,11 @@ jobs:
             --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
             --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}'
 
-      - name: Set no-tests output when source paths unchanged
+      - name: Set no-tests output when no tests selected
         id: noop
-        if: steps.filter.outputs.src != 'true'
+        if: >-
+          ${{ steps.decide.outputs.mode == 'none' ||
+              (steps.decide.outputs.mode == 'all' && steps.filter.outputs.src != 'true') }}
         run: |
           {
             echo "has_tests=false"
@@ -318,11 +468,11 @@ jobs:
             echo "has_tests=false"
             echo "test_groups=[]"
           } >> "$GITHUB_OUTPUT"
-          
+
       - name: Add upstream test cache target
         id: cache-targets
         env:
-          SELECTED_TARGET_IDS: ${{ steps.scope.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
+          SELECTED_TARGET_IDS: ${{ steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
         run: |
           python3 - <<'PY'
           import json
@@ -335,11 +485,20 @@ jobs:
           PY
 
   ensure-csrc-cache:
-    needs: select-tests
+    needs:
+      - select-tests
+    # always() is required: select-tests depends on recommend-tests-from-coverage,
+    # which is skipped under ready-all. Without always(), the skipped need
+    # propagates transitively and skips this job even when select-tests succeeded.
     if: >-
       ${{
+        always() &&
         needs.select-tests.result == 'success' &&
-        (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5'))
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        )
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
@@ -353,15 +512,21 @@ jobs:
       - pre-commit
       - select-tests
       - ensure-csrc-cache
+    # always() overrides transitive skip-propagation from recommend-tests-from-coverage
+    # (skipped under ready-all) through select-tests.
     if: >-
       ${{
+        always() &&
         needs.pre-commit.result == 'success' &&
-        needs.select-tests.result == 'success' &&
-        needs.select-tests.outputs.has_tests == 'true' &&
-        contains(github.event.pull_request.labels.*.name, 'ready') &&
-        needs.ensure-csrc-cache.result == 'success'
+        needs.ensure-csrc-cache.result == 'success' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        ) &&
+        needs.select-tests.outputs.has_tests == 'true'
       }}
     strategy:
+      fail-fast: false
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
@@ -379,12 +544,15 @@ jobs:
       - pre-commit
       - select-tests
       - ensure-csrc-cache
+    # always() overrides transitive skip-propagation from recommend-tests-from-coverage
+    # (skipped under ready-all) through select-tests.
     if: >-
       ${{
+        always() &&
         needs.pre-commit.result == 'success' &&
-        needs.select-tests.result == 'success' &&
-        contains(github.event.pull_request.labels.*.name, 'ready') &&
-        needs.ensure-csrc-cache.result == 'success'
+        needs.ensure-csrc-cache.result == 'success' &&
+        contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
+        needs.select-tests.outputs.has_tests == 'true'
       }}
     strategy:
       matrix:
@@ -399,97 +567,6 @@ jobs:
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
-  generate-hitest:
-    name: Generate hitest recommendations
-    needs: select-tests
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
-    uses: ./.github/workflows/_manual-hitest.yaml
-    secrets:
-      HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
-      HITEST_KEY: ${{ secrets.HITEST_KEY }}
-      HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
-
-  recommend-tests-from-coverage:
-    name: Recommend tests from coverage
-    runs-on: linux-amd64-cpu-8-hk
-    continue-on-error: true
-    outputs:
-      coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Checkout vllm-ascend scripts
-        uses: actions/checkout@v7
-        with:
-          sparse-checkout: |
-            .github/workflows/scripts
-          sparse-checkout-cone-mode: false
-
-      - name: Download test case map
-        run: |
-          set -euo pipefail
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/test_case_map.json" \
-            -o test_case_map.json
-          test -s test_case_map.json
-          echo "Downloaded test_case_map.json"
-          du -h test_case_map.json
-
-      - name: Download coverage package and extract covstub
-        run: |
-          set -euo pipefail
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
-            -o coverage.tar
-          test -s coverage.tar
-          echo "Downloaded coverage.tar"
-          du -h coverage.tar
-          tar xf coverage.tar vllm-ascend/covstub
-          test -d vllm-ascend/covstub
-          echo "Extracted vllm-ascend/covstub"
-          find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
-
-      - name: Recommend tests for current PR
-        run: |
-          set -euo pipefail
-          if ! python3 -c "import regex" >/dev/null 2>&1; then
-            echo "regex not found for $(python3 -V); bootstrapping pip and installing regex"
-            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-            python3 get-pip.py --break-system-packages
-            python3 -m pip install --break-system-packages regex
-          fi
-          python3 -c "import regex; print('regex ok:', regex.__file__)"
-          PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
-          echo "Selecting tests for PR: ${PR_SPEC}"
-          python3 .github/workflows/scripts/test_selector.py \
-            --github-pr "${PR_SPEC}" \
-            --source-dir ./vllm-ascend/covstub \
-            --map-file test_case_map.json
-
-      - name: Export coverage paths output
-        id: export-paths
-        if: ${{ !cancelled() }}
-        run: |
-          FILE="recommended_pytest_paths.txt"
-          if [ -f "$FILE" ]; then
-            {
-              echo "coverage_paths<<EOF"
-              cat "$FILE"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-            echo "Exported $(wc -l < "$FILE") recommended paths"
-          else
-            echo "coverage_paths=" >> "$GITHUB_OUTPUT"
-            echo "::notice::recommended_pytest_paths.txt not found"
-          fi 
-          
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
     if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
@@ -504,7 +581,7 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
-        
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
@@ -514,14 +591,15 @@ jobs:
     steps:
       - name: Check all required jobs
         env:
-          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
+          HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           set -euo pipefail
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
-          HAS_TESTS="${{ needs.select-tests.outputs.has_tests }}"
+          HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
 
           echo "=== CI Gate Summary ==="
@@ -553,13 +631,12 @@ jobs:
           fi
 
           if [ "${HAS_TESTS}" = "true" ]; then
-            if [ "${HAS_READY_LABEL}" != "true" ]; then
-              echo "::error::Selected tests are required; add the ready label"
-              exit 1
-            fi
-
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
+            if [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
+              echo "::error::Selected tests are required; add the ready-precise or ready-all label"
+              exit 1
+            fi
             if [ "${TESTS_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
               exit 1
@@ -581,7 +658,7 @@ jobs:
 
   # this job collects failure from uploaded logs
   # failure analyze & upload reports
-  
+
   analyze-failure-report:
     name: Analyze failure report
     needs: [run-selected-tests, recommend-tests-from-coverage]
