@@ -14,6 +14,7 @@ from tests.e2e.vllm_interface.vllm_interface_contracts.range_analysis import (
     GitSnapshot,
     analyze_range,
     discover_imports,
+    render_upstream_pr_summary,
     validate_current_contracts,
     write_reports,
 )
@@ -174,6 +175,7 @@ def test_optional_only_override_is_review_without_exact_upstream_call(
     assert payload["findings"] == []
     assert len(payload["review_findings"]) == 1
     markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
+    assert markdown == render_upstream_pr_summary(report)
     assert "**Result: REVIEW**" in markdown
     assert (
         "The downstream override does not accept the new optional parameter `optional`, and the analyzer found no "
@@ -1603,6 +1605,49 @@ def test_vllm_interface_cli_log_keeps_only_exact_masked_delta_review(
     assert '"preexisting":' not in console
     assert "new_delta_masked_by_preexisting_incompatibility" in console
     assert "analysis_unresolved" not in console
+
+
+def test_vllm_interface_cli_prints_markdown_without_report_files(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    roots = _call_repositories(
+        tmp_path,
+        old_source="def helper(value): return value\n",
+        new_source="OTHER = 1\n",
+        consumer_source=("from vllm.api import helper\n\ndef use():\n    return helper(1)\n"),
+    )
+    assert (
+        cli_main(
+            [
+                "analyze-range",
+                "--vllm-root",
+                str(roots[0]),
+                "--ascend-root",
+                str(roots[1]),
+                "--old",
+                roots[2],
+                "--new",
+                roots[3],
+                "--expect-ascend-sha",
+                roots[4],
+                "--stdout-summary",
+                "--fail-on",
+                "introduced",
+            ]
+        )
+        == 1
+    )
+    console = capsys.readouterr().out
+    assert console == render_upstream_pr_summary(_run(*roots)) + "\n"
+    assert console.startswith("# vLLM Interface Compatibility\n\n**Result: BREAKS FOUND**")
+    assert "## Introduced breaks" in console
+    assert "- Upstream: `vllm/api.py:helper`" in console
+    assert "## Review findings" in console
+    assert not list(tmp_path.rglob("vllm-interface-pr-report.json"))
+    assert not list(tmp_path.rglob("vllm-interface-pr-summary.md"))
+    assert not list(tmp_path.rglob("vllm-interface-introduced-breaks.csv"))
+    assert not list(tmp_path.rglob("vllm-interface-analysis-metadata.json"))
 
 
 def test_parallel_analysis_matches_serial_results(tmp_path: Path) -> None:

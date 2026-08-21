@@ -3143,6 +3143,12 @@ def _upstream_pr_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_upstream_pr_summary(report: dict[str, Any]) -> str:
+    """Render the upstream PR Markdown summary without writing report files."""
+
+    return _upstream_pr_markdown(_upstream_pr_payload(report))
+
+
 def _write_upstream_pr_reports(
     report: dict[str, Any],
     output_dir: Path,
@@ -3157,7 +3163,7 @@ def _write_upstream_pr_reports(
         encoding="utf-8",
     )
     _write_csv(introduced_csv, payload["findings"])
-    markdown_path.write_text(_upstream_pr_markdown(payload), encoding="utf-8")
+    markdown_path.write_text(render_upstream_pr_summary(report), encoding="utf-8")
     metadata_path.write_text(
         json.dumps(
             {

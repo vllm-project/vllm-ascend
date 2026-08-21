@@ -26,8 +26,8 @@ tests/e2e/vllm_interface/
 5. Reuse unchanged upstream file fragments by Git blob SHA, build misses with a process pool, and load the downstream
    source index cache. Then run relation comparison, direct-import analysis, and direct-call analysis concurrently
    inside the same job.
-6. Print the executed capability states, parallel execution state, index-cache state, phase timings, and generated
-   Markdown summary to the pytest job log.
+6. Render the compatibility summary in memory and print it directly to the pytest job log, together with the selected
+   revisions and phase timings. The CI path does not create report files.
 7. Fail the pytest case only when the analyzer reports an introduced break or cannot complete a valid analysis.
 
 ## Analysis phases
@@ -70,8 +70,8 @@ without turning a cache failure into an analysis failure.
 The cache directory contains Python pickle data and therefore must be writable only by the trusted CI identity. To
 reuse the index across otherwise ephemeral Buildkite jobs, mount a persistent trusted cache volume at this path or pass
 another trusted location with `--downstream-index-cache-dir`. Cache state (`miss`, `hit`, `bypassed`,
-`invalid_rebuilt`, or `write_error`) and split upstream/downstream indexing timings are recorded in analysis metadata
-and printed in the job log.
+`invalid_rebuilt`, or `write_error`) and split upstream/downstream indexing timings are recorded internally. Phase
+timings are printed in the job log.
 
 ### Upstream file-fragment cache and process indexing
 
@@ -97,18 +97,20 @@ introduced break fails this test while a valid report with no introduced break p
 
 ### Current CI presentation
 
-The existing upstream job renders the Markdown summary in its pytest log. It does not yet upload the JSON, CSV,
-Markdown, or metadata files as Buildkite artifacts and does not create a separate Buildkite annotation. The upstream
-Ascend NPU job is currently soft-fail, so this integration provides early awareness rather than a required merge gate.
-The analysis itself is CPU-only, but its first upstream run must also confirm that the combined image-build, analysis,
-and sampler duration fits the existing job timeout.
+The upstream CI entry uses `--stdout-summary`: it renders the same Markdown content previously written to
+`vllm-interface-pr-summary.md` and sends it directly to standard output. It does not create JSON, CSV, Markdown, or
+metadata report files, upload Buildkite artifacts, or create a separate Buildkite annotation. The selected revisions
+and phase timings appear before the summary in separate collapsible log sections. The upstream Ascend NPU job is
+currently soft-fail, so this integration provides early awareness rather than a required merge gate. The analysis
+itself is CPU-only, but its first upstream run must also confirm that the combined image-build, analysis, and sampler
+duration fits the existing job timeout.
 
 ## Local commands
 
 Run the source-only unit tests without NPU hardware:
 
 ```bash
-pytest -q --confcutdir=tests/e2e/vllm_interface tests/e2e/vllm_interface/unit_tests
+python -m pytest -q --confcutdir=tests/e2e/vllm_interface tests/e2e/vllm_interface/unit_tests
 ```
 
 Running the E2E entry outside the upstream vLLM NPU image skips it because `/workspace/vllm` is not present:
@@ -130,5 +132,5 @@ python -m tests.e2e.vllm_interface.vllm_interface_contracts analyze-range \
   --index-workers 4 \
   --upstream-file-index-cache-dir ~/.cache/vllm-interface/file-fragments \
   --downstream-index-cache-dir ~/.cache/vllm-interface/repository-index \
-  --output-dir /tmp/vllm-interface-report
+  --stdout-summary
 ```

@@ -67,7 +67,6 @@ def test_build_analysis_command_uses_fixed_upstream_pr_scope(tmp_path: Path) -> 
         old_sha="old",
         new_sha="new",
         ascend_sha="ascend",
-        output_dir=tmp_path / "reports",
         downstream_index_cache_dir=cache_dir,
         upstream_file_index_cache_dir=upstream_cache_dir,
         index_workers=4,
@@ -80,6 +79,8 @@ def test_build_analysis_command_uses_fixed_upstream_pr_scope(tmp_path: Path) -> 
     ]
     assert "--scenario" not in command
     assert command[command.index("--fail-on") + 1] == "introduced"
+    assert "--stdout-summary" in command
+    assert "--output-dir" not in command
     assert command[command.index("--analysis-workers") + 1] == "3"
     assert command[command.index("--index-workers") + 1] == "4"
     assert command[command.index("--downstream-index-cache-dir") + 1] == str(cache_dir)
