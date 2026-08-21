@@ -94,6 +94,18 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FLASHCOMM1",
             ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
         )
+        self.enable_vision_sp = self._get_config_value(
+            additional_config,
+            "enable_vision_sp",
+            "VLLM_ASCEND_ENABLE_VISION_SP",
+            ascend_envs.VLLM_ASCEND_ENABLE_VISION_SP,
+        )
+        self.enable_vision_sp_fused = self._get_config_value(
+            additional_config,
+            "enable_vision_sp_fused",
+            "VLLM_ASCEND_ENABLE_VISION_SP_FUSED",
+            ascend_envs.VLLM_ASCEND_ENABLE_VISION_SP_FUSED,
+        )
         if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
             raise ValueError(
                 "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
