@@ -21,7 +21,9 @@ import torch
 
 from vllm_ascend._310p.graph_input_contract import (
     GraphInputContractError,
+    GraphInputSource,
     capture_graph_input_contracts,
+    capture_graph_input_sources,
     validate_graph_input_contracts,
 )
 
@@ -75,6 +77,21 @@ def test_validate_graph_input_contracts_rejects_changed_contract(replacement) ->
         validate_graph_input_contracts(expected, actual)
 
 
+def test_tensor_count_error_identifies_unexpected_semantic_role() -> None:
+    tensor = torch.arange(4, dtype=torch.float32)
+    expected = capture_graph_input_contracts((tensor,), {})
+    actual = capture_graph_input_contracts(
+        (tensor,),
+        {"late_buffer": tensor.clone()},
+    )
+
+    with pytest.raises(
+        GraphInputContractError,
+        match=r"unexpected=\['kwargs\.late_buffer'\]",
+    ):
+        validate_graph_input_contracts(expected, actual)
+
+
 @pytest.mark.parametrize(
     ("field_name", "replacement_value"),
     [
@@ -109,3 +126,29 @@ def test_contract_collection_does_not_use_tensor_item() -> None:
     source = source_path.read_text(encoding="utf-8")
 
     assert ".item(" not in source
+
+
+def test_named_sources_preserve_semantic_role_and_declaration() -> None:
+    tensor = torch.arange(4, dtype=torch.int32)
+    contracts = capture_graph_input_sources(
+        (
+            GraphInputSource(
+                role="draft.proposer.token_indices_to_sample",
+                tensor=tensor,
+                ownership="proposer-persistent-buffer",
+                required_alignment=16,
+                alignment_source="npu-index-input-abi",
+                mutable=True,
+                bounded_view=True,
+            ),
+        )
+    )
+
+    assert len(contracts) == 1
+    contract = contracts[0]
+    assert contract.path == "draft.proposer.token_indices_to_sample"
+    assert contract.ownership == "proposer-persistent-buffer"
+    assert contract.required_alignment == 16
+    assert contract.alignment_source == "npu-index-input-abi"
+    assert contract.mutable is True
+    assert contract.bounded_view is True

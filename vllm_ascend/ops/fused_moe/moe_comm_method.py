@@ -31,6 +31,9 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     build_mlp_compute_input,
     build_token_dispatch_input,
 )
+from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
+    maybe_record_fused_moe_event,
+)
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
@@ -136,7 +139,7 @@ class MoECommMethod(ABC):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
-        before_dispatch_evt = torch.npu.current_stream().record_event()
+        before_dispatch_evt = maybe_record_fused_moe_event(fused_experts_input.record_events)
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
@@ -155,7 +158,7 @@ class MoECommMethod(ABC):
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
-        before_combine_evt = torch.npu.current_stream().record_event()
+        before_combine_evt = maybe_record_fused_moe_event(fused_experts_input.record_events)
         routed_out = self.token_dispatcher.token_combine(
             hidden_states=mlp_output,
             combine_metadata=token_dispatch_output.combine_metadata,

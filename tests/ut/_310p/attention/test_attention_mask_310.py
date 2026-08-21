@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
@@ -63,11 +65,13 @@ class TestAttentionMaskBuilder310(TestBase):
             attn_metadata,
             torch.device("cpu"),
             causal=True,
+            zero_descriptor_padding=True,
         )
         non_causal = AttentionMaskBuilder310._get_graph_safe_query_positions(
             attn_metadata,
             torch.device("cpu"),
             causal=False,
+            zero_descriptor_padding=True,
         )
 
         torch.testing.assert_close(
@@ -77,6 +81,111 @@ class TestAttentionMaskBuilder310(TestBase):
         torch.testing.assert_close(
             non_causal,
             torch.tensor([6, 6, 9, 9, 9], dtype=torch.int32),
+        )
+
+    def test_graph_safe_query_positions_preserve_piecewise_padding(self):
+        attn_metadata = MagicMock()
+        attn_metadata.num_actual_tokens = 32
+        attn_metadata.query_start_loc = torch.tensor([0, 15, 30], dtype=torch.int32)
+        attn_metadata.seq_lens = torch.tensor([20, 25], dtype=torch.int32)
+
+        causal = AttentionMaskBuilder310._get_graph_safe_query_positions(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=True,
+            zero_descriptor_padding=False,
+        )
+        non_causal = AttentionMaskBuilder310._get_graph_safe_query_positions(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=False,
+            zero_descriptor_padding=False,
+        )
+
+        assert causal[-2:].tolist() == [25, 26]
+        assert non_causal[-2:].tolist() == [24, 24]
+
+    def test_graph_safe_query_positions_zero_descriptor_padding(self):
+        attn_metadata = MagicMock()
+        attn_metadata.num_actual_tokens = 32
+        attn_metadata.query_start_loc = torch.tensor([0, 15, 30], dtype=torch.int32)
+        attn_metadata.seq_lens = torch.tensor([20, 25], dtype=torch.int32)
+
+        causal = AttentionMaskBuilder310._get_graph_safe_query_positions(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=True,
+            zero_descriptor_padding=True,
+        )
+        non_causal = AttentionMaskBuilder310._get_graph_safe_query_positions(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=False,
+            zero_descriptor_padding=True,
+        )
+
+        torch.testing.assert_close(
+            causal,
+            torch.cat(
+                (
+                    torch.arange(5, 20, dtype=torch.int32),
+                    torch.arange(10, 25, dtype=torch.int32),
+                    torch.zeros(2, dtype=torch.int32),
+                )
+            ),
+        )
+        torch.testing.assert_close(
+            non_causal,
+            torch.cat(
+                (
+                    torch.full((15,), 19, dtype=torch.int32),
+                    torch.full((15,), 24, dtype=torch.int32),
+                    torch.zeros(2, dtype=torch.int32),
+                )
+            ),
+        )
+
+    def test_exact_full_decode_only_routes_query_positions_to_device_math(self):
+        config = SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dflash"),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            ),
+        )
+        forward_context = SimpleNamespace(
+            vllm_config=config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        )
+        attn_metadata = MagicMock()
+        expected = torch.tensor([0], dtype=torch.int32)
+
+        with (
+            patch(
+                "vllm_ascend._310p.attention.attention_mask.get_forward_context",
+                return_value=forward_context,
+            ),
+            patch(
+                "vllm_ascend._310p.dflash_full_decode_only.is_310p",
+                return_value=True,
+            ),
+            patch.object(
+                AttentionMaskBuilder310,
+                "_get_graph_safe_query_positions",
+                return_value=expected,
+            ) as graph_safe_positions,
+        ):
+            actual = AttentionMaskBuilder310._get_query_positions(
+                attn_metadata,
+                torch.device("cpu"),
+                causal=True,
+            )
+
+        self.assertIs(actual, expected)
+        graph_safe_positions.assert_called_once_with(
+            attn_metadata,
+            torch.device("cpu"),
+            causal=True,
+            zero_descriptor_padding=True,
         )
 
     @patch("torch_npu.npu_format_cast", side_effect=lambda tensor, _: tensor)
@@ -109,6 +218,7 @@ class TestAttentionMaskBuilder310(TestBase):
             attn_metadata,
             torch.device("cpu"),
             causal=True,
+            zero_descriptor_padding=False,
         )
 
     def test_get_compressed_non_causal_splitfuse_mask_310(self):

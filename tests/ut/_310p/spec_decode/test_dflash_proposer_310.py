@@ -16,15 +16,71 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+from vllm.config import CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.spec_decode.dflash_proposer_310 import (
+    AscendDflashProposer310,
     _compute_slots_for_block_size_310,
     _copy_and_expand_inputs_ascendc,
     _validate_num_spec_tokens_310,
+    wrap_dummy_run_with_draft_flag,
 )
+
+
+class _RejectInt64Add(TorchDispatchMode):
+    """Model the 310P dynamic-int64 Add alignment restriction."""
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func == torch.ops.aten.add.Tensor and any(
+            isinstance(arg, torch.Tensor) and arg.dtype == torch.int64 for arg in args
+        ):
+            raise AssertionError("310P slot mapping must not launch int64 Add")
+        return func(*args, **kwargs)
+
+
+def test_dummy_capture_prepares_dual_rope_before_graph_capture():
+    prepare_rope = MagicMock(return_value="prepared")
+    finish_rope = MagicMock()
+    positions = torch.arange(160, dtype=torch.int32)
+    fake_self = SimpleNamespace(
+        vllm_config=None,
+        _get_positions=MagicMock(return_value=positions),
+        _prepare_full_decode_draft_rope=prepare_rope,
+        _finish_full_decode_draft_rope=finish_rope,
+    )
+
+    def original(
+        self,
+        num_tokens,
+        *,
+        aclgraph_runtime_mode=CUDAGraphMode.NONE,
+        is_profile=False,
+    ):
+        del self, num_tokens, aclgraph_runtime_mode, is_profile
+        return "captured"
+
+    wrapped = wrap_dummy_run_with_draft_flag(original)
+    assert (
+        wrapped(
+            fake_self,
+            160,
+            aclgraph_runtime_mode=CUDAGraphMode.FULL,
+        )
+        == "captured"
+    )
+    prepare_rope.assert_called_once_with(
+        query_positions=positions,
+        query_actual_tokens=160,
+        descriptor_tokens=160,
+        runtime_mode=CUDAGraphMode.FULL,
+    )
+    finish_rope.assert_called_once_with("prepared")
 
 
 def test_compute_slots_supports_mixed_physical_block_sizes():
@@ -37,6 +93,123 @@ def test_compute_slots_supports_mixed_physical_block_sizes():
 
     assert slots_64.tolist() == [703, 704, 767, 768]
     assert slots_128.tolist() == [1343, 1344, 1407, 1408]
+
+
+def test_compute_slots_avoids_dynamic_int64_add_on_310p():
+    positions = torch.tensor(
+        list(range(75, 91)) + list(range(86, 102)),
+        dtype=torch.int32,
+    )
+    request_ids = torch.tensor([0] * 16 + [1] * 16, dtype=torch.long)
+    block_table = torch.tensor(
+        [[1020], [350]],
+        dtype=torch.int32,
+    )
+
+    with _RejectInt64Add():
+        slots = _compute_slots_for_block_size_310(
+            positions,
+            request_ids,
+            block_table,
+            128,
+            use_int32_math=True,
+        )
+
+    assert slots.dtype == torch.int32
+    assert slots.tolist() == list(range(130635, 130651)) + list(range(44886, 44902))
+
+
+def test_dflash_seq_lens_update_avoids_dynamic_int64_add_on_310p():
+    batch_size = 2
+    num_query_per_req = 16
+    num_context = 32
+    fake_self = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        num_speculative_tokens=15,
+        _dflash_hidden_states=torch.zeros((num_context, 4)),
+        _slot_mapping_buffer=torch.zeros(
+            batch_size * num_query_per_req,
+            dtype=torch.int32,
+        ),
+        arange_dflash=torch.arange(64, dtype=torch.int32),
+        token_arange_np=np.arange(64, dtype=np.int32),
+    )
+    cad = SimpleNamespace(
+        num_reqs=batch_size,
+        seq_lens=torch.tensor([75, 70], dtype=torch.int64),
+        max_seq_len=75,
+    )
+
+    with (
+        patch(
+            "vllm_ascend._310p.spec_decode.dflash_proposer_310._copy_and_expand_inputs_ascendc",
+            return_value=torch.zeros(30, dtype=torch.int32),
+        ),
+        patch(
+            "vllm_ascend._310p.spec_decode.dflash_proposer_310.is_310p_dflash_full_decode_only",
+            return_value=True,
+        ),
+        _RejectInt64Add(),
+    ):
+        AscendDflashProposer310.set_inputs_first_pass(
+            fake_self,
+            target_token_ids=torch.zeros(num_context, dtype=torch.int32),
+            next_token_ids=torch.zeros(batch_size, dtype=torch.int32),
+            target_positions=torch.arange(num_context, dtype=torch.int32),
+            target_hidden_states=torch.zeros((num_context, 4)),
+            token_indices_to_sample=None,
+            cad=cad,
+            num_rejected_tokens_gpu=torch.tensor([0, 11], dtype=torch.int32),
+        )
+
+    assert cad.seq_lens.dtype == torch.int32
+    assert cad.seq_lens.tolist() == [91, 75]
+
+
+def test_dflash_seq_lens_preserve_legacy_dtype_outside_fdo():
+    batch_size = 2
+    num_query_per_req = 16
+    num_context = 32
+    fake_self = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        num_speculative_tokens=15,
+        _dflash_hidden_states=torch.zeros((num_context, 4)),
+        _slot_mapping_buffer=torch.zeros(
+            batch_size * num_query_per_req,
+            dtype=torch.int32,
+        ),
+        arange_dflash=torch.arange(64, dtype=torch.int32),
+        token_arange_np=np.arange(64, dtype=np.int32),
+    )
+    cad = SimpleNamespace(
+        num_reqs=batch_size,
+        seq_lens=torch.tensor([75, 70], dtype=torch.int64),
+        max_seq_len=75,
+    )
+
+    with (
+        patch(
+            "vllm_ascend._310p.spec_decode.dflash_proposer_310._copy_and_expand_inputs_ascendc",
+            return_value=torch.zeros(30, dtype=torch.int32),
+        ),
+        patch(
+            "vllm_ascend._310p.spec_decode.dflash_proposer_310.is_310p_dflash_full_decode_only",
+            return_value=False,
+        ),
+    ):
+        AscendDflashProposer310.set_inputs_first_pass(
+            fake_self,
+            target_token_ids=torch.zeros(num_context, dtype=torch.int32),
+            next_token_ids=torch.zeros(batch_size, dtype=torch.int32),
+            target_positions=torch.arange(num_context, dtype=torch.int32),
+            target_hidden_states=torch.zeros((num_context, 4)),
+            token_indices_to_sample=None,
+            cad=cad,
+            num_rejected_tokens_gpu=torch.tensor([0, 11], dtype=torch.int32),
+        )
+
+    assert cad.seq_lens.dtype == torch.int64
+    assert cad.seq_lens.tolist() == [91, 75]
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [6, 8, 15])

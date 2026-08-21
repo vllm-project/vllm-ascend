@@ -36,6 +36,12 @@ AscendSpecDecodeBaseProposer.set_inputs_first_pass = (  # type: ignore[method-as
 AscendSpecDecodeBaseProposer._run_merged_draft = (  # type: ignore[method-assign]
     AscendSpecDecodeBaseProposer310._run_merged_draft
 )
+AscendSpecDecodeBaseProposer._prepare_full_decode_draft_rope = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310._prepare_full_decode_draft_rope
+)
+AscendSpecDecodeBaseProposer._finish_full_decode_draft_rope = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310._finish_full_decode_draft_rope
+)
 
 # 310P has no Triton, so dflash/dspark build their draft-model inputs via the
 # AscendC npu_copy_and_expand_dflash_inputs custom op instead of the Triton

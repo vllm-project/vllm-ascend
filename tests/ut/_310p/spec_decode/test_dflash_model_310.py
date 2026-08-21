@@ -115,7 +115,9 @@ class TestPrecomputeContextKv310(TestBase):
         AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
         with patch("torch.nn.functional.linear", return_value=fused_out):
             precompute_and_store_context_kv_310(
-                model, torch.randn(num_ctx, 128), torch.tensor([0, 1], dtype=torch.int32),
+                model,
+                torch.randn(num_ctx, 128),
+                torch.tensor([0, 1], dtype=torch.int32),
                 torch.tensor([0, 1], dtype=torch.int32),
             )
         # Flag stays True during RoPE and is restored to True (not forced False).
@@ -148,3 +150,60 @@ class TestPrecomputeContextKv310(TestBase):
             )
 
         layer.self_attn.rotary_emb.assert_called_once()
+
+    def test_precompute_reports_context_probe_intermediates(self):
+        model = MagicMock()
+        model._num_attn_layers = 1
+        model._kv_size = 2
+        model._head_dim = 1
+        model._num_kv_heads = 2
+        model.hidden_norm = MagicMock(side_effect=lambda value: value + 10)
+
+        context_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float16)
+        context_positions = torch.tensor([7, 8], dtype=torch.int32)
+        slot_mapping = torch.tensor([11, 12], dtype=torch.int32)
+        fused_out = torch.tensor(
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+            dtype=torch.float16,
+        )
+        model._fused_kv_weight = torch.randn(4, 2)
+        model._fused_kv_bias = None
+
+        layer = MagicMock()
+        layer.self_attn.k_norm = MagicMock(side_effect=lambda value: value + 20)
+        layer.self_attn.rotary_emb = MagicMock(side_effect=lambda _pos, query, key: (query + 100, key + 200))
+        attn = MagicMock()
+        attn.kv_cache = (torch.randn(1), torch.randn(1))
+        attn.impl.do_kv_cache_update = MagicMock()
+        model.layers = [layer]
+        model._attn_layers = [attn]
+        context_probe = MagicMock()
+        model._fdo_context_probe = context_probe
+
+        with patch("torch.nn.functional.linear", return_value=fused_out):
+            precompute_and_store_context_kv_310(
+                model,
+                context_states,
+                context_positions,
+                slot_mapping,
+            )
+
+        context_probe.capture_context_inputs.assert_called_once()
+        input_call = context_probe.capture_context_inputs.call_args.kwargs
+        torch.testing.assert_close(input_call["context_states"], context_states)
+        torch.testing.assert_close(input_call["context_positions"], context_positions)
+        torch.testing.assert_close(input_call["normed_context_states"], context_states + 10)
+        torch.testing.assert_close(input_call["slot_mapping"], slot_mapping)
+
+        context_probe.capture_context_k_norm.assert_called_once()
+        norm_call = context_probe.capture_context_k_norm.call_args.kwargs
+        assert norm_call["layer_index"] == 0
+        expected_k = torch.tensor([[1.0, 2.0], [5.0, 6.0]], dtype=torch.float16)
+        expected_v = torch.tensor([[3.0, 4.0], [7.0, 8.0]], dtype=torch.float16)
+        torch.testing.assert_close(norm_call["k_norm_input"].reshape(2, 2), expected_k)
+        torch.testing.assert_close(norm_call["k_norm_output"], expected_k + 20)
+        context_probe.capture_context_rope.assert_called_once()
+        rope_call = context_probe.capture_context_rope.call_args.kwargs
+        assert rope_call["layer_index"] == 0
+        torch.testing.assert_close(rope_call["k_rope"], expected_k + 120)
+        torch.testing.assert_close(rope_call["value"].reshape(2, 2), expected_v)

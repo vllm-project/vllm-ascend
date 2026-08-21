@@ -12,6 +12,7 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendUnquantizedFusedMoEMethod310,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe import moe_stage_contracts
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -27,6 +28,19 @@ def _build_weight_layer():
         w13_weight=nn.Parameter(torch.randn(2, 3, 4)),
         w2_weight=nn.Parameter(torch.randn(2, 4, 3)),
     )
+
+
+def test_full_decode_eventless_moe_skips_capture_events(monkeypatch):
+    current_stream = MagicMock()
+    sentinel = object()
+    current_stream.record_event.return_value = sentinel
+    monkeypatch.setattr(moe_stage_contracts.torch.npu, "current_stream", lambda: current_stream)
+
+    assert moe_stage_contracts.maybe_record_fused_moe_event(False) is None
+    current_stream.record_event.assert_not_called()
+
+    assert moe_stage_contracts.maybe_record_fused_moe_event(True) is sentinel
+    current_stream.record_event.assert_called_once_with()
 
 
 def test_runner_310_installs_specialized_unquantized_method_and_comm():

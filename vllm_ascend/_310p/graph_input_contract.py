@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Host-only tensor contracts for 310P DFlash Piecewise graph inputs."""
+"""Host-only tensor contracts for retained 310P DFlash graph inputs."""
 
 from __future__ import annotations
 
@@ -27,6 +27,24 @@ import torch
 
 class GraphInputContractError(AssertionError):
     """Raised before replay when a retained graph input contract changed."""
+
+
+@dataclass(frozen=True)
+class GraphInputSource:
+    """One explicitly owned tensor retained by an ACL graph.
+
+    ``role`` is a stable semantic identifier, not an object traversal path.
+    Providers must also state who owns the storage and where the alignment
+    requirement came from so a pointer check cannot silently encode a guess.
+    """
+
+    role: str
+    tensor: torch.Tensor
+    ownership: str
+    required_alignment: int
+    alignment_source: str
+    mutable: bool
+    bounded_view: bool
 
 
 @dataclass(frozen=True)
@@ -43,8 +61,12 @@ class GraphInputTensorContract:
     stride: tuple[int, ...]
     contiguous: bool
     device: str
+    ownership: str
     required_alignment: int
+    alignment_source: str
     alignment_ok: bool
+    mutable: bool
+    bounded_view: bool
 
 
 def _mapping_path(parent: str, key: Any) -> str:
@@ -88,7 +110,16 @@ def _walk_tensors(
             )
 
 
-def _capture_tensor(path: str, tensor: torch.Tensor) -> GraphInputTensorContract:
+def _capture_tensor(
+    path: str,
+    tensor: torch.Tensor,
+    *,
+    ownership: str = "call-argument",
+    required_alignment: int | None = None,
+    alignment_source: str = "tensor-element-size",
+    mutable: bool = True,
+    bounded_view: bool = False,
+) -> GraphInputTensorContract:
     storage = tensor.untyped_storage()
     element_size = tensor.element_size()
     min_element = tensor.storage_offset()
@@ -110,6 +141,14 @@ def _capture_tensor(path: str, tensor: torch.Tensor) -> GraphInputTensorContract
         )
 
     data_ptr = tensor.data_ptr()
+    if required_alignment is None:
+        required_alignment = element_size
+    if required_alignment <= 0:
+        raise GraphInputContractError(f"{path}: required alignment must be positive, got {required_alignment}")
+    if not ownership:
+        raise GraphInputContractError(f"{path}: tensor ownership is required")
+    if not alignment_source:
+        raise GraphInputContractError(f"{path}: alignment source is required")
     return GraphInputTensorContract(
         path=path,
         data_ptr=data_ptr,
@@ -123,9 +162,39 @@ def _capture_tensor(path: str, tensor: torch.Tensor) -> GraphInputTensorContract
         stride=tuple(tensor.stride()),
         contiguous=tensor.is_contiguous(),
         device=str(tensor.device),
-        required_alignment=element_size,
-        alignment_ok=data_ptr % element_size == 0,
+        ownership=ownership,
+        required_alignment=required_alignment,
+        alignment_source=alignment_source,
+        alignment_ok=data_ptr % required_alignment == 0,
+        mutable=mutable,
+        bounded_view=bounded_view,
     )
+
+
+def capture_graph_input_sources(
+    sources: Sequence[GraphInputSource],
+) -> tuple[GraphInputTensorContract, ...]:
+    """Capture contracts for component-provided semantic tensor roles."""
+    roles: set[str] = set()
+    contracts: list[GraphInputTensorContract] = []
+    for source in sources:
+        if not source.role:
+            raise GraphInputContractError("graph input semantic role is required")
+        if source.role in roles:
+            raise GraphInputContractError(f"duplicate graph input semantic role: {source.role}")
+        roles.add(source.role)
+        contracts.append(
+            _capture_tensor(
+                source.role,
+                source.tensor,
+                ownership=source.ownership,
+                required_alignment=source.required_alignment,
+                alignment_source=source.alignment_source,
+                mutable=source.mutable,
+                bounded_view=source.bounded_view,
+            )
+        )
+    return tuple(contracts)
 
 
 def capture_graph_input_contracts(
@@ -145,7 +214,15 @@ def validate_graph_input_contracts(
 ) -> None:
     """Reject any changed tensor identity, view, layout, device, or alignment."""
     if len(expected) != len(actual):
-        raise GraphInputContractError(f"graph input tensor count changed: expected {len(expected)}, got {len(actual)}")
+        expected_paths = {contract.path for contract in expected}
+        actual_paths = {contract.path for contract in actual}
+        missing = sorted(expected_paths - actual_paths)
+        unexpected = sorted(actual_paths - expected_paths)
+        raise GraphInputContractError(
+            "graph input tensor count changed: "
+            f"expected {len(expected)}, got {len(actual)}, "
+            f"missing={missing}, unexpected={unexpected}"
+        )
 
     comparable_fields = tuple(field.name for field in fields(GraphInputTensorContract))
     for expected_contract, actual_contract in zip(expected, actual):

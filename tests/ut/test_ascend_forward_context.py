@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -73,6 +74,73 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
     monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
+
+
+def test_set_ascend_forward_context_exposes_vllm_config(monkeypatch):
+    config = _make_vllm_config()
+    context = SimpleNamespace(dp_metadata=None)
+    monkeypatch.setattr(afc, "set_forward_context", lambda **_: nullcontext())
+    monkeypatch.setattr(afc, "get_forward_context", lambda: context)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_: None)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: False)
+    monkeypatch.setattr(afc, "is_drafter_moe_model", lambda _: False)
+    monkeypatch.setattr(afc, "enable_sp", lambda _: False)
+    monkeypatch.setattr(afc, "flashcomm2_enable", lambda: False)
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _: False)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(
+        "vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method",
+        lambda _: None,
+    )
+
+    with afc.set_ascend_forward_context(
+        attn_metadata=None,
+        vllm_config=config,
+        num_tokens=16,
+    ):
+        assert context.vllm_config is config
+
+
+def test_set_ascend_forward_context_routes_exact_fdo_none_outside_compiled(
+    monkeypatch,
+):
+    config = _make_vllm_config()
+    context = SimpleNamespace(dp_metadata=None)
+    forward_context_kwargs = {}
+
+    def fake_set_forward_context(**kwargs):
+        forward_context_kwargs.update(kwargs)
+        return nullcontext()
+
+    monkeypatch.setattr(afc, "set_forward_context", fake_set_forward_context)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: context)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_: None)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: False)
+    monkeypatch.setattr(afc, "is_drafter_moe_model", lambda _: False)
+    monkeypatch.setattr(afc, "enable_sp", lambda _: False)
+    monkeypatch.setattr(afc, "flashcomm2_enable", lambda: False)
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _: False)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(
+        afc,
+        "should_skip_compiled_for_dflash_fdo_none",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method",
+        lambda _: None,
+    )
+
+    with afc.set_ascend_forward_context(
+        attn_metadata=None,
+        vllm_config=config,
+        num_tokens=16,
+    ):
+        pass
+
+    assert forward_context_kwargs["skip_compiled"] is True
 
 
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():

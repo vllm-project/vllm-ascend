@@ -27,6 +27,14 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import MoEQuantParams, MoERoutin
 TMoECombineMetadata = TypeVar("TMoECombineMetadata")
 
 
+def maybe_record_fused_moe_event(record_events: bool):
+    """Record a synchronization event only when the caller requires one."""
+
+    if not record_events:
+        return None
+    return torch.npu.current_stream().record_event()
+
+
 # prepare -> fused_experts
 @dataclass(frozen=True, slots=True)
 class MoEPrepareOutput:
@@ -68,6 +76,7 @@ class MoEFusedExpertsInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    record_events: bool = True
     swiglu_limit: float = 0.0
     # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
@@ -144,6 +153,7 @@ class MoEMlpComputeInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    record_events: bool = True
     swiglu_limit: float = 0.0
     expanded_row_idx: torch.Tensor | None = None
     topk_ids: torch.Tensor | None = None

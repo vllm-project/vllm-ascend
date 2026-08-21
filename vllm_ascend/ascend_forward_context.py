@@ -11,6 +11,9 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend._310p.dflash_full_decode_only import (
+    should_skip_compiled_for_dflash_fdo_none,
+)
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -76,6 +79,19 @@ def set_ascend_forward_context(
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
+    skip_fdo_none_compiled = should_skip_compiled_for_dflash_fdo_none(
+        vllm_config,
+        runtime_mode=aclgraph_runtime_mode,
+        in_profile_run=in_profile_run,
+    )
+    skip_compiled = skip_compiled or skip_fdo_none_compiled
+    if skip_fdo_none_compiled:
+        logger.debug(
+            "[310p-dflash-full-decode-only/compiled-route] "
+            "component=%s runtime=NONE execution=expected-none-uncompiled "
+            "graph_eligible=false",
+            "draft" if is_draft_model else "target",
+        )
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -87,6 +103,10 @@ def set_ascend_forward_context(
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
+        # Upstream ForwardContext intentionally does not retain VllmConfig.
+        # Ascend graph-safe helpers need the immutable per-forward config to
+        # apply exact plugin scopes without relying on process-global state.
+        forward_context.vllm_config = vllm_config
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         forward_context.input_ids = input_ids

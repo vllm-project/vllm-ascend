@@ -25,6 +25,9 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend._310p.dflash_full_decode_only import (
+    is_310p_dflash_full_decode_only,
+)
 from vllm_ascend._310p.ops.fla.cumpute_causal_conv1d_metadata_310 import (
     compute_causal_conv1d_metadata,
 )
@@ -112,6 +115,8 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
         self,
         attn_metadata: GDNAttentionMetadata,
         graph_batch_size: int,
+        graph_num_tokens: int,
+        pad_to_graph_descriptor: bool = False,
     ) -> None:
         num_spec_decodes = attn_metadata.num_spec_decodes
         spec_state_indices = attn_metadata.spec_state_indices_tensor
@@ -149,8 +154,27 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
             spec_tokens,
             non_blocking=True,
         )
+        num_spec_tokens = spec_tokens.size(0)
+        descriptor_tokens = graph_num_tokens if pad_to_graph_descriptor else num_spec_tokens
+        if not num_spec_tokens <= descriptor_tokens <= self.spec_token_indx.size(0):
+            raise RuntimeError(
+                "310P GDN FULL spec token descriptor is outside its "
+                "persistent buffer: "
+                f"actual={num_spec_tokens}, descriptor={descriptor_tokens}, "
+                f"capacity={self.spec_token_indx.size(0)}"
+            )
+        if num_spec_tokens < descriptor_tokens:
+            self.spec_token_indx[num_spec_tokens:descriptor_tokens].copy_(
+                torch.arange(
+                    num_spec_tokens,
+                    descriptor_tokens,
+                    dtype=self.spec_token_indx.dtype,
+                    device=self.spec_token_indx.device,
+                ),
+                non_blocking=True,
+            )
         attn_metadata.non_spec_token_indx = self.non_spec_token_indx[: non_spec_tokens.size(0)]
-        attn_metadata.spec_token_indx = self.spec_token_indx[: spec_tokens.size(0)]
+        attn_metadata.spec_token_indx = self.spec_token_indx[:descriptor_tokens]
 
         self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
             spec_query_start_loc,
@@ -237,7 +261,12 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
             and attn_metadata.num_spec_decodes <= self.decode_cudagraph_max_bs
             and attn_metadata.num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
-            self._pad_spec_decode_metadata(attn_metadata, graph_batch_size)
+            self._pad_spec_decode_metadata(
+                attn_metadata,
+                graph_batch_size,
+                common_attn_metadata.num_input_tokens,
+                pad_to_graph_descriptor=is_310p_dflash_full_decode_only(self.vllm_config),
+            )
         elif (
             attn_metadata.num_prefills == 0
             and attn_metadata.num_spec_decodes == 0

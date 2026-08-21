@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
@@ -47,12 +48,22 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
+from vllm_ascend._310p.dflash_full_decode_only import (
+    classify_dflash_full_decode_batch,
+    is_310p_dflash_full_decode_only,
+    resolve_dflash_full_decode_descriptor,
+    validate_dflash_full_decode_dispatch,
+)
 from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
-from vllm_ascend._310p.piecewise_size_nodes import install_piecewise_size_node_compat
+from vllm_ascend._310p.piecewise_size_nodes import (
+    install_full_decode_size_node_compat,
+    install_piecewise_size_node_compat,
+)
 from vllm_ascend._310p.quantization.methods.w8a8_dynamic import (
+    enable_dflash_full_decode_graph_safe_w8a8,
     enable_dflash_piecewise_graph_safe_w8a8,
 )
 from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
@@ -117,6 +128,62 @@ def _snapshot_num_computed_tokens_to_device(
     )
 
 
+def _copy_positions_via_int32_staging_310(
+    positions: torch.Tensor,
+    base_i32: torch.Tensor,
+    query_i32: torch.Tensor,
+    positions_i32: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    req_indices: torch.Tensor,
+    query_pos: torch.Tensor,
+) -> None:
+    """Build async positions without 310P's unaligned dynamic int64 Add."""
+    num_tokens = req_indices.numel()
+    base_view = base_i32[:num_tokens]
+    query_view = query_i32[:num_tokens]
+    positions_view = positions_i32[:num_tokens]
+    torch.index_select(
+        num_computed_tokens,
+        0,
+        req_indices,
+        out=base_view,
+    )
+    query_view.copy_(query_pos[:num_tokens])
+    torch.add(base_view, query_view, out=positions_view)
+    positions[:num_tokens].copy_(positions_view)
+
+
+def _apply_position_drift_via_int32_staging_310(
+    target: torch.Tensor,
+    rope_i32: torch.Tensor,
+    result_i32: torch.Tensor,
+    base_i32: torch.Tensor,
+    cpu_i32: torch.Tensor,
+    drift_i32: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    cpu_values: torch.Tensor,
+    req_indices: torch.Tensor,
+) -> None:
+    """Apply async RoPE drift without a broadcast int64 Add on 310P."""
+    num_tokens = req_indices.numel()
+    rows = target.shape[0]
+    base_view = base_i32[:num_tokens]
+    cpu_view = cpu_i32[:num_tokens]
+    drift_view = drift_i32[:num_tokens]
+    rope_view = rope_i32[:rows, :num_tokens]
+    result_view = result_i32[:rows, :num_tokens]
+    base_view.copy_(num_computed_tokens[req_indices])
+    cpu_view.copy_(cpu_values[req_indices])
+    torch.sub(base_view, cpu_view, out=drift_view)
+    rope_view.copy_(target[:rows, :num_tokens])
+    torch.add(
+        rope_view,
+        drift_view.view(1, num_tokens),
+        out=result_view,
+    )
+    target[:rows, :num_tokens].copy_(result_view)
+
+
 class NPUModelRunner310(NPUModelRunner):
     """
     310P model runner with a distinct ACL graph capture/replay contract from 910B:
@@ -132,12 +199,43 @@ class NPUModelRunner310(NPUModelRunner):
     # Inherited from parent runner; annotated here to satisfy strict type checks.
     uniform_decode_query_len: int
     _spec_dummy_capture: bool = False
+    _fdo_graph_capture_active: bool = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if is_310p_dflash_piecewise(self.vllm_config):
             install_piecewise_size_node_compat()
             enable_dflash_piecewise_graph_safe_w8a8()
+        elif is_310p_dflash_full_decode_only(self.vllm_config):
+            install_full_decode_size_node_compat()
+            enable_dflash_full_decode_graph_safe_w8a8()
+            self._fdo_position_base_i32 = torch.empty(
+                self.max_num_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._fdo_query_pos_i32 = torch.empty_like(
+                self._fdo_position_base_i32,
+            )
+            self._fdo_positions_i32 = torch.empty_like(
+                self._fdo_position_base_i32,
+            )
+            self._fdo_position_staging_logged = False
+            rope_positions = None
+            if self.uses_mrope:
+                rope_positions = self.mrope_positions.gpu
+            elif self.uses_xdrope_dim > 0:
+                rope_positions = self.xdrope_positions.gpu
+            self._fdo_rope_i32 = (
+                torch.empty_like(rope_positions, dtype=torch.int32) if rope_positions is not None else None
+            )
+            self._fdo_rope_result_i32 = (
+                torch.empty_like(rope_positions, dtype=torch.int32) if rope_positions is not None else None
+            )
+            self._fdo_rope_staging_logged = False
+            logger.debug(
+                "[310p-dflash-graph/compile] scope=full_decode_only MoE event policy is explicit and sequential"
+            )
         self.input_batch = NPUInputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
@@ -159,7 +257,10 @@ class NPUModelRunner310(NPUModelRunner):
         logger.info_once("Weight layout uses FRACTAL_NZ.")
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
-            self.rejection_sampler = AscendRejectionSampler310(self.sampler)
+            self.rejection_sampler = AscendRejectionSampler310(
+                self.sampler,
+                use_fdo_alignment_safe_greedy=(is_310p_dflash_full_decode_only(self.vllm_config)),
+            )
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
@@ -237,6 +338,23 @@ class NPUModelRunner310(NPUModelRunner):
     ):
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         dflash_piecewise_active = is_310p_dflash_piecewise(self.vllm_config)
+        dflash_full_decode_only_active = is_310p_dflash_full_decode_only(self.vllm_config)
+        forced_full_decode_capture = (
+            dflash_full_decode_only_active and self._fdo_graph_capture_active and force_uniform_decode is True
+        )
+
+        if dflash_full_decode_only_active:
+            self._dflash_full_decode_decision = classify_dflash_full_decode_batch(
+                attn_state=self.attn_state,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                max_num_scheduled_tokens=max_num_scheduled_tokens,
+                uniform_decode_query_len=self.uniform_decode_query_len,
+                all_decode=bool(is_all_decode),
+                forced_uniform_capture=forced_full_decode_capture,
+            )
+            if not self._dflash_full_decode_decision.graph_eligible:
+                force_eager = True
 
         if dflash_piecewise_active and force_uniform_decode is not None:
             logger.debug(
@@ -255,13 +373,17 @@ class NPUModelRunner310(NPUModelRunner):
                 force_uniform_decode,
             )
 
-        if self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit):
+        if (
+            self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit)
+            and not forced_full_decode_capture
+        ):
             force_eager = True
 
         # Spec decoding graph replay is only valid for uniform spec-decode batches (q_len = 1 + K).
         if (
             self.speculative_config is not None
             and not dflash_piecewise_active
+            and not forced_full_decode_capture
             and (
                 self.attn_state != AscendAttentionState.SpecDecoding
                 or max_num_scheduled_tokens != self.uniform_decode_query_len
@@ -280,7 +402,29 @@ class NPUModelRunner310(NPUModelRunner):
                 # Respect explicit caller override: only force when unset.
                 force_uniform_decode = True
 
-        return super()._determine_batch_execution_and_padding(
+        if dflash_full_decode_only_active:
+            dispatcher = getattr(self, "cudagraph_dispatcher", None)
+            dispatcher_mode = getattr(getattr(dispatcher, "cudagraph_mode", None), "name", None)
+            dispatcher_keys = getattr(dispatcher, "cudagraph_keys", {})
+            logger.debug(
+                "[310p-dflash-full-decode-only/dispatch-input] state=%s "
+                "num_tokens=%d num_reqs=%d max_query_len=%d uniform_query_len=%d "
+                "all_decode=%s force_eager=%s force_uniform_decode=%s "
+                "spec_dummy_capture=%s dispatcher_mode=%s full_keys=%s",
+                self._dflash_full_decode_decision.state.name,
+                num_tokens,
+                num_reqs,
+                max_num_scheduled_tokens,
+                self.uniform_decode_query_len,
+                bool(is_all_decode),
+                force_eager,
+                force_uniform_decode,
+                self._spec_dummy_capture,
+                dispatcher_mode,
+                sorted(map(str, dispatcher_keys.get(CUDAGraphMode.FULL, ()))),
+            )
+
+        result = super()._determine_batch_execution_and_padding(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_scheduled_tokens_np=num_scheduled_tokens_np,
@@ -293,6 +437,46 @@ class NPUModelRunner310(NPUModelRunner):
             force_num_active_loras=force_num_active_loras,
             num_encoder_reqs=num_encoder_reqs,
         )
+
+        if dflash_full_decode_only_active:
+            runtime_mode, batch_descriptor = result[:2]
+            logger.debug(
+                "[310p-dflash-full-decode-only/dispatch-output] selected=%s descriptor=%s",
+                runtime_mode.name,
+                batch_descriptor,
+            )
+            expected_descriptor = None
+            if self._dflash_full_decode_decision.graph_eligible:
+                expected_descriptor = resolve_dflash_full_decode_descriptor(
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                    uniform_decode_query_len=self.uniform_decode_query_len,
+                    capture_sizes=self.vllm_config.compilation_config.cudagraph_capture_sizes,
+                )
+            fallback_reason = validate_dflash_full_decode_dispatch(
+                decision=self._dflash_full_decode_decision,
+                runtime_mode=runtime_mode,
+                batch_descriptor=batch_descriptor,
+                expected_descriptor=expected_descriptor,
+                strict=envs.VLLM_LOGGING_LEVEL == "DEBUG",
+            )
+            logger.debug(
+                "[310p-dflash-full-decode-only/dispatch] state=%s expected=%s selected=%s descriptor=%s reason=%s",
+                self._dflash_full_decode_decision.state.name,
+                self._dflash_full_decode_decision.expected_runtime_mode.name,
+                runtime_mode.name,
+                batch_descriptor,
+                fallback_reason or self._dflash_full_decode_decision.reason,
+            )
+            if fallback_reason is not None:
+                logger.warning(
+                    "[310p-dflash-full-decode-only/fallback] state=%s reason=%s descriptor=%s",
+                    self._dflash_full_decode_decision.state.name,
+                    fallback_reason,
+                    batch_descriptor,
+                )
+
+        return result
 
     def _build_attention_metadata(self, *args: Any, **kwargs: Any):
         # Parent dummy_run assigns ChunkedPrefill for non-MLA MTP (910B FIA graph).
@@ -676,10 +860,37 @@ class NPUModelRunner310(NPUModelRunner):
         )
         if use_async_device_metadata:
             req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
-            self.positions[:total_num_scheduled_tokens] = (
-                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-                + self.query_pos.gpu[:total_num_scheduled_tokens]
-            )
+            if is_310p_dflash_full_decode_only(self.vllm_config):
+                _copy_positions_via_int32_staging_310(
+                    self.positions[:total_num_scheduled_tokens],
+                    self._fdo_position_base_i32,
+                    self._fdo_query_pos_i32,
+                    self._fdo_positions_i32,
+                    self.num_computed_tokens,
+                    req_indices_gpu,
+                    self.query_pos.gpu[:total_num_scheduled_tokens],
+                )
+                if not self._fdo_position_staging_logged:
+                    self._fdo_position_staging_logged = True
+                    logger.debug(
+                        "[310p-dflash-full-decode-only/metadata-staging] "
+                        "field=positions arithmetic_dtype=%s output_dtype=%s "
+                        "base_ptr=%d query_ptr=%d result_ptr=%d "
+                        "base_align64=%d query_align64=%d result_align64=%d",
+                        self._fdo_positions_i32.dtype,
+                        self.positions.dtype,
+                        self._fdo_position_base_i32.data_ptr(),
+                        self._fdo_query_pos_i32.data_ptr(),
+                        self._fdo_positions_i32.data_ptr(),
+                        self._fdo_position_base_i32.data_ptr() % 64,
+                        self._fdo_query_pos_i32.data_ptr() % 64,
+                        self._fdo_positions_i32.data_ptr() % 64,
+                    )
+            else:
+                self.positions[:total_num_scheduled_tokens] = (
+                    self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                    + self.query_pos.gpu[:total_num_scheduled_tokens]
+                )
             block_table.compute_slot_mapping_device(
                 req_indices_gpu,
                 self.positions[:total_num_scheduled_tokens],
@@ -707,9 +918,38 @@ class NPUModelRunner310(NPUModelRunner):
 
         if use_async_device_metadata and (self.uses_mrope or self.uses_xdrope_dim > 0):
             req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
-            drift = self.num_computed_tokens[req_indices_gpu].to(torch.int64) - cpu_values[req_indices_gpu]
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
-            target.gpu[:, :total_num_scheduled_tokens] += drift
+            if is_310p_dflash_full_decode_only(self.vllm_config):
+                assert self._fdo_rope_i32 is not None
+                assert self._fdo_rope_result_i32 is not None
+                _apply_position_drift_via_int32_staging_310(
+                    target.gpu[:, :total_num_scheduled_tokens],
+                    self._fdo_rope_i32,
+                    self._fdo_rope_result_i32,
+                    self._fdo_position_base_i32,
+                    self._fdo_query_pos_i32,
+                    self._fdo_positions_i32,
+                    self.num_computed_tokens,
+                    cpu_values,
+                    req_indices_gpu,
+                )
+                if not self._fdo_rope_staging_logged:
+                    self._fdo_rope_staging_logged = True
+                    logger.debug(
+                        "[310p-dflash-full-decode-only/metadata-staging] "
+                        "field=rope_drift arithmetic_dtype=%s output_dtype=%s "
+                        "rope_ptr=%d result_ptr=%d "
+                        "rope_align64=%d result_align64=%d",
+                        self._fdo_rope_i32.dtype,
+                        target.gpu.dtype,
+                        self._fdo_rope_i32.data_ptr(),
+                        self._fdo_rope_result_i32.data_ptr(),
+                        self._fdo_rope_i32.data_ptr() % 64,
+                        self._fdo_rope_result_i32.data_ptr() % 64,
+                    )
+            else:
+                drift = self.num_computed_tokens[req_indices_gpu].to(torch.int64) - cpu_values[req_indices_gpu]
+                target.gpu[:, :total_num_scheduled_tokens] += drift
 
         if (
             self._needs_seq_lens_cpu_sync
@@ -818,6 +1058,7 @@ class NPUModelRunner310(NPUModelRunner):
         )
         with temporary_context:
             self._spec_dummy_capture = is_spec_graph_capture
+            self._fdo_graph_capture_active = is_spec_graph_capture and is_graph_capturing
             try:
                 return super()._dummy_run(
                     num_tokens=num_tokens,
@@ -836,6 +1077,7 @@ class NPUModelRunner310(NPUModelRunner):
                 )
             finally:
                 self._spec_dummy_capture = False
+                self._fdo_graph_capture_active = False
 
     def _model_forward(
         self,
@@ -846,13 +1088,14 @@ class NPUModelRunner310(NPUModelRunner):
         inputs_embeds: torch.Tensor | None = None,
         **model_kwargs: dict[str, Any],
     ):
+        forward_context = get_forward_context()
+        assert forward_context is not None
+
         if self.uses_mrope:
             assert positions is not None
             prepare_mrope_cos_sin_slices_from_runner(self, positions)
 
         assert self.model is not None
-        forward_context = get_forward_context()
-        assert forward_context is not None
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,
             "positions": positions,

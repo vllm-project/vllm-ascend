@@ -19,7 +19,9 @@ import torch
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 
+from vllm_ascend._310p.dflash_full_decode_only import is_310p_dflash_full_decode_only
 from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
@@ -77,20 +79,45 @@ class AttentionMaskBuilder310:
     def _requires_graph_safe_query_positions() -> bool:
         try:
             forward_context = get_forward_context()
-        except (AssertionError, RuntimeError):
+        except (AssertionError, RuntimeError) as exc:
+            logger.debug(
+                "[310p-dflash-graph/mask-route] context=unavailable error=%s",
+                type(exc).__name__,
+            )
             return False
         vllm_config = getattr(forward_context, "vllm_config", None)
-        return (
-            vllm_config is not None
-            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-            and is_310p_dflash_piecewise(vllm_config)
+        if vllm_config is None:
+            logger.debug(
+                "[310p-dflash-graph/mask-route] context=missing-vllm-config runtime=%s",
+                getattr(
+                    getattr(forward_context, "cudagraph_runtime_mode", None),
+                    "name",
+                    None,
+                ),
+            )
+            return False
+        runtime_mode = forward_context.cudagraph_runtime_mode
+        piecewise_graph = runtime_mode == CUDAGraphMode.PIECEWISE and is_310p_dflash_piecewise(vllm_config)
+        full_decode_graph = runtime_mode == CUDAGraphMode.FULL and is_310p_dflash_full_decode_only(vllm_config)
+        logger.debug(
+            "[310p-dflash-graph/mask-route] runtime=%s configured=%s piecewise=%s full_decode_only=%s",
+            getattr(runtime_mode, "name", runtime_mode),
+            getattr(
+                vllm_config.compilation_config.cudagraph_mode,
+                "name",
+                vllm_config.compilation_config.cudagraph_mode,
+            ),
+            piecewise_graph,
+            full_decode_graph,
         )
+        return piecewise_graph or full_decode_graph
 
     @staticmethod
     def _get_graph_safe_query_positions(
         attn_metadata: AscendMetadata,
         device: torch.device,
         causal: bool,
+        zero_descriptor_padding: bool = False,
     ) -> torch.Tensor:
         """Build SplitFuse rows entirely on-device for capture and replay."""
         num_query_tokens = int(attn_metadata.num_actual_tokens)
@@ -111,12 +138,14 @@ class AttentionMaskBuilder310:
         request_mask = (token_indices.unsqueeze(0) >= row_starts.unsqueeze(1)) & (
             token_indices.unsqueeze(0) < row_ends.unsqueeze(1)
         )
+        valid_token_mask = request_mask.any(dim=0)
         request_indices = request_mask.to(torch.int32).argmax(dim=0)
-        request_indices = torch.where(
-            request_mask.any(dim=0),
-            request_indices,
-            torch.full_like(request_indices, num_reqs - 1),
-        )
+        if not zero_descriptor_padding:
+            request_indices = torch.where(
+                valid_token_mask,
+                request_indices,
+                torch.full_like(request_indices, num_reqs - 1),
+            )
 
         token_row_starts = row_starts.index_select(0, request_indices)
         query_lens = (row_ends - row_starts).index_select(0, request_indices)
@@ -125,7 +154,23 @@ class AttentionMaskBuilder310:
             positions = context_lens - query_lens + token_indices - token_row_starts
         else:
             positions = context_lens - 1
-        return positions.clamp_min_(0)
+        positions.clamp_min_(0)
+        if zero_descriptor_padding:
+            positions.mul_(valid_token_mask.to(dtype=positions.dtype))
+        return positions
+
+    @staticmethod
+    def _requires_zero_descriptor_padding() -> bool:
+        try:
+            forward_context = get_forward_context()
+        except (AssertionError, RuntimeError):
+            return False
+        vllm_config = getattr(forward_context, "vllm_config", None)
+        return (
+            vllm_config is not None
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and is_310p_dflash_full_decode_only(vllm_config)
+        )
 
     @classmethod
     def _get_query_positions(
@@ -139,6 +184,7 @@ class AttentionMaskBuilder310:
                 attn_metadata,
                 device,
                 causal=causal,
+                zero_descriptor_padding=cls._requires_zero_descriptor_padding(),
             )
 
         qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)

@@ -83,7 +83,11 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
         spec_token_indx=torch.arange(8, dtype=torch.int32),
     )
 
-    builder._pad_spec_decode_metadata(attn_metadata, graph_batch_size=4)
+    builder._pad_spec_decode_metadata(
+        attn_metadata,
+        graph_batch_size=4,
+        graph_num_tokens=8,
+    )
 
     assert attn_metadata.spec_state_indices_tensor.tolist() == [
         [3, 30],
@@ -99,3 +103,71 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
     assert spec_meta.cache_indices.data_ptr() == attn_metadata.spec_state_indices_tensor.data_ptr()
     assert spec_meta.num_accepted_tokens.data_ptr() == attn_metadata.num_accepted_tokens.data_ptr()
     assert attn_metadata.spec_decode_metadata.actual_seq_lengths.tolist() == [0, 4, 4, 0, 0]
+
+
+def test_builder310_keeps_spec_token_indices_at_graph_descriptor_extent():
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
+    builder.spec_state_indices_tensor = torch.full((4, 2), -1, dtype=torch.int32)
+    builder.spec_sequence_masks = torch.empty(4, dtype=torch.bool)
+    builder.non_spec_token_indx = torch.empty(0, dtype=torch.int32)
+    builder.spec_token_indx = torch.empty(8, dtype=torch.int32)
+    builder.spec_query_start_loc = torch.empty(5, dtype=torch.int32)
+    builder.num_accepted_tokens = torch.empty(4, dtype=torch.int32)
+    builder.spec_actual_seq_lengths = torch.empty(5, dtype=torch.int32)
+    builder.use_full_cuda_graph = True
+    attn_metadata = SimpleNamespace(
+        num_prefills=0,
+        num_decodes=0,
+        num_spec_decodes=3,
+        spec_state_indices_tensor=torch.tensor(
+            [[3, 30], [4, 40], [5, 50]],
+            dtype=torch.int32,
+        ),
+        spec_sequence_masks=torch.tensor([True, True, True]),
+        spec_query_start_loc=torch.tensor([0, 2, 4, 6], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([2, 2, 2], dtype=torch.int32),
+        non_spec_token_indx=torch.empty(0, dtype=torch.int32),
+        spec_token_indx=torch.arange(6, dtype=torch.int32),
+    )
+
+    builder._pad_spec_decode_metadata(
+        attn_metadata,
+        graph_batch_size=4,
+        graph_num_tokens=8,
+        pad_to_graph_descriptor=True,
+    )
+
+    assert attn_metadata.spec_token_indx.data_ptr() == (builder.spec_token_indx.data_ptr())
+    assert attn_metadata.spec_token_indx.tolist() == list(range(8))
+
+
+def test_builder310_keeps_legacy_spec_token_extent_outside_dflash_fdo():
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
+    builder.spec_state_indices_tensor = torch.full((4, 2), -1, dtype=torch.int32)
+    builder.spec_sequence_masks = torch.empty(4, dtype=torch.bool)
+    builder.non_spec_token_indx = torch.empty(0, dtype=torch.int32)
+    builder.spec_token_indx = torch.empty(8, dtype=torch.int32)
+    builder.spec_query_start_loc = torch.empty(5, dtype=torch.int32)
+    builder.num_accepted_tokens = torch.empty(4, dtype=torch.int32)
+    builder.spec_actual_seq_lengths = torch.empty(5, dtype=torch.int32)
+    builder.use_full_cuda_graph = True
+    attn_metadata = SimpleNamespace(
+        num_prefills=0,
+        num_decodes=0,
+        num_spec_decodes=3,
+        spec_state_indices_tensor=torch.tensor([[3, 30], [4, 40], [5, 50]], dtype=torch.int32),
+        spec_sequence_masks=torch.tensor([True, True, True]),
+        spec_query_start_loc=torch.tensor([0, 2, 4, 6], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([2, 2, 2], dtype=torch.int32),
+        non_spec_token_indx=torch.empty(0, dtype=torch.int32),
+        spec_token_indx=torch.arange(6, dtype=torch.int32),
+    )
+
+    builder._pad_spec_decode_metadata(
+        attn_metadata,
+        graph_batch_size=4,
+        graph_num_tokens=8,
+        pad_to_graph_descriptor=False,
+    )
+
+    assert attn_metadata.spec_token_indx.tolist() == list(range(6))

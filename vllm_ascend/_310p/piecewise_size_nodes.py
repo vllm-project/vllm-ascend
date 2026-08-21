@@ -1,4 +1,4 @@
-"""310P DFlash Piecewise compatibility for scalar ``Tensor.size(dim)`` nodes."""
+"""310P DFlash graph compatibility for scalar ``Tensor.size(dim)`` nodes."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def decompose_dim_size_nodes(graph: fx.GraphModule) -> None:
         graph.graph.erase_node(node)
 
 
-def install_piecewise_size_node_compat() -> None:
+def _install_size_node_compat(scope: str) -> None:
     """Install the vLLM 0.24 splitter guard once in the current worker."""
 
     from vllm.compilation import backends
@@ -94,4 +94,17 @@ def install_piecewise_size_node_compat() -> None:
 
     setattr(decompose_size_nodes_with_scalar_guard, _PATCH_MARKER, True)
     backends._decompose_size_nodes = decompose_size_nodes_with_scalar_guard
-    logger.debug("[310p-dflash-piecewise/compile] installed scalar size-node compatibility guard")
+    logger.debug(
+        "[310p-dflash-graph/compile] scope=%s installed scalar size-node compatibility guard",
+        scope,
+    )
+
+
+def install_piecewise_size_node_compat() -> None:
+    """Install the guard for the existing 310P DFlash Piecewise path."""
+    _install_size_node_compat("piecewise")
+
+
+def install_full_decode_size_node_compat() -> None:
+    """Install the same independently valid guard for FULL_DECODE_ONLY."""
+    _install_size_node_compat("full_decode_only")

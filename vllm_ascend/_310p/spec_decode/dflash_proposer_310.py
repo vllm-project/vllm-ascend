@@ -26,13 +26,18 @@ stay free of any 310P coupling.
 """
 
 import functools
+import inspect
 from dataclasses import replace
 from typing import Any
 
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend._310p.dflash_full_decode_only import (
+    is_310p_dflash_full_decode_only,
+)
 from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend._310p.ops.rotary_embedding import (
     AscendRotaryEmbedding310,
@@ -101,13 +106,39 @@ def _compute_slots_for_block_size_310(
     request_ids: torch.Tensor,
     block_table: torch.Tensor,
     block_size: int,
+    *,
+    use_int32_math: bool = False,
 ) -> torch.Tensor:
     """Map absolute token positions to physical cache slots for one layout."""
-    positions_long = positions.to(device=block_table.device, dtype=torch.long)
-    request_ids = request_ids.to(device=block_table.device, dtype=torch.long)
-    block_numbers = torch.div(positions_long, block_size, rounding_mode="floor")
-    block_ids = block_table[request_ids, block_numbers]
-    return (block_ids * block_size + positions_long.remainder(block_size)).to(torch.int32)
+    if not use_int32_math:
+        positions_long = positions.to(device=block_table.device, dtype=torch.long)
+        request_ids_long = request_ids.to(
+            device=block_table.device,
+            dtype=torch.long,
+        )
+        block_numbers = torch.div(
+            positions_long,
+            block_size,
+            rounding_mode="floor",
+        )
+        block_ids = block_table[request_ids_long, block_numbers]
+        return (block_ids * block_size + positions_long.remainder(block_size)).to(torch.int32)
+
+    positions_i32 = positions.to(device=block_table.device, dtype=torch.int32)
+    request_ids_long = request_ids.to(
+        device=block_table.device,
+        dtype=torch.long,
+    )
+    block_numbers_long = torch.div(
+        positions_i32,
+        block_size,
+        rounding_mode="floor",
+    ).to(torch.long)
+    block_ids_i32 = block_table[
+        request_ids_long,
+        block_numbers_long,
+    ].to(torch.int32)
+    return block_ids_i32 * block_size + positions_i32.remainder(block_size)
 
 
 def _recompute_context_slots_310(
@@ -118,6 +149,8 @@ def _recompute_context_slots_310(
     kbs: int,
     num_context: int,
     num_reqs: int,
+    *,
+    use_int32_math: bool = False,
 ) -> None:
     """Rebuild the context KV-cache slots with block_table + kernel_block_size.
 
@@ -141,6 +174,7 @@ def _recompute_context_slots_310(
         req_ids,
         block_table,
         kbs,
+        use_int32_math=use_int32_math,
     ).to(out_context_slot_mapping.dtype)
     out_context_slot_mapping[:num_context].copy_(slot)
 
@@ -168,18 +202,21 @@ def _prepare_per_layer_slot_mappings_310(
     query_req_ids = torch.arange(batch_size, device=proposer.device).repeat_interleave(num_query_per_req)
     context_slots_by_size: dict[int, torch.Tensor] = {}
     query_slots_by_size: dict[int, torch.Tensor] = {}
+    use_int32_math = is_310p_dflash_full_decode_only(proposer.vllm_config)
     for block_size in sorted(set(block_sizes_by_layer.values())):
         context_slots_by_size[block_size] = _compute_slots_for_block_size_310(
             out_context_positions[:num_context],
             context_req_ids,
             cad.block_table_tensor,
             block_size,
+            use_int32_math=use_int32_math,
         )
         query_slots_by_size[block_size] = _compute_slots_for_block_size_310(
             out_query_positions[:num_query_total],
             query_req_ids,
             cad.block_table_tensor,
             block_size,
+            use_int32_math=use_int32_math,
         )
 
     proposer._dflash_context_slot_mapping_by_layer_310 = [
@@ -235,6 +272,43 @@ def wrap_dummy_run_with_draft_flag(original):
 
     @functools.wraps(original)
     def dummy_run(self, *args, **kwargs):
+        num_tokens = kwargs.get("num_tokens", args[0] if args else None)
+        runtime_mode = kwargs.get(
+            "aclgraph_runtime_mode",
+            CUDAGraphMode.NONE,
+        )
+        is_profile = kwargs.get("is_profile", False)
+        try:
+            bound = inspect.signature(original).bind_partial(
+                self,
+                *args,
+                **kwargs,
+            )
+            num_tokens = bound.arguments.get("num_tokens", num_tokens)
+            runtime_mode = bound.arguments.get(
+                "aclgraph_runtime_mode",
+                runtime_mode,
+            )
+            is_profile = bound.arguments.get("is_profile", is_profile)
+        except (TypeError, ValueError):
+            pass
+
+        rope_num_tokens = num_tokens
+        if is_profile:
+            runtime_mode = CUDAGraphMode.FULL
+            max_query_tokens = getattr(self, "max_query_tokens", None)
+            if isinstance(rope_num_tokens, int) and isinstance(max_query_tokens, int):
+                rope_num_tokens = min(rope_num_tokens, max_query_tokens)
+        rope_prepared = None
+        prepare_rope = getattr(self, "_prepare_full_decode_draft_rope", None)
+        if callable(prepare_rope) and isinstance(rope_num_tokens, int):
+            rope_prepared = prepare_rope(
+                query_positions=self._get_positions(rope_num_tokens),
+                query_actual_tokens=rope_num_tokens,
+                descriptor_tokens=rope_num_tokens,
+                runtime_mode=runtime_mode,
+            )
+
         vllm_config = getattr(self, "vllm_config", None)
         if vllm_config is not None and is_310p_dflash_piecewise(vllm_config):
             runner = getattr(self, "runner", None)
@@ -247,6 +321,13 @@ def wrap_dummy_run_with_draft_flag(original):
             return original(self, *args, **kwargs)
         finally:
             AscendRotaryEmbedding310.set_rope_position_flag_310p(prev_flag)
+            finish_rope = getattr(
+                self,
+                "_finish_full_decode_draft_rope",
+                None,
+            )
+            if callable(finish_rope):
+                finish_rope(rope_prepared)
 
     return dummy_run
 
@@ -343,6 +424,7 @@ def _copy_and_expand_inputs_ascendc(
         int(self.kernel_block_size),
         num_context,
         batch_size,
+        use_int32_math=is_310p_dflash_full_decode_only(self.vllm_config),
     )
 
     # A hybrid DFlash cache group can use several physical cache block sizes.
@@ -411,9 +493,14 @@ class AscendDflashProposer310(AscendDflashProposer):
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
         new_query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
 
-        effective_seq_lens = cad.seq_lens
+        # 310P's dynamic int64 Add requires an internal workspace whose
+        # address is not guaranteed to be 64-byte aligned. Sequence lengths
+        # are bounded by max_model_len and the downstream draft buffers are
+        # int32, so keep this arithmetic in int32 as well.
+        use_int32_math = is_310p_dflash_full_decode_only(self.vllm_config)
+        effective_seq_lens = cad.seq_lens.to(torch.int32) if use_int32_math else cad.seq_lens
         if has_num_rejected:
-            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu.to(effective_seq_lens.dtype)
 
         cad.query_start_loc = new_query_start_loc
         cad.seq_lens = effective_seq_lens + num_query_per_req

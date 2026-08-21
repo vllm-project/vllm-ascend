@@ -23,6 +23,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
+import vllm_ascend._310p.model_runner_310p as model_runner_310p
 from tests.ut.base import TestBase
 from vllm_ascend._310p.model_runner_310p import (
     NPUModelRunner310,
@@ -157,10 +158,17 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
         capturing=False,
         flash_comm_v1_enabled=False,
     )
+    current_stream = MagicMock()
 
-    with patch(
-        "vllm_ascend._310p.model_runner_310p.get_forward_context",
-        return_value=forward_context,
+    with (
+        patch(
+            "vllm_ascend._310p.model_runner_310p.get_forward_context",
+            return_value=forward_context,
+        ),
+        patch(
+            "vllm_ascend._310p.model_runner_310p.torch.npu.current_stream",
+            return_value=current_stream,
+        ),
     ):
         hidden_states = runner._model_forward(
             8,
@@ -169,6 +177,8 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
         )
 
     assert calls == ["update", "model"]
+    current_stream.synchronize.assert_called_once_with()
+    current_stream.wait_stream.assert_called_once_with(runner.update_stream)
     torch.testing.assert_close(hidden_states, torch.ones(1))
 
 
@@ -269,6 +279,11 @@ def test_only_dflash_piecewise_mixed_capture_bypasses_uniform_spec_guard(
 
     with (
         patch.object(scope_module, "is_310p", return_value=is_310p_platform),
+        patch.object(
+            model_runner_310p,
+            "is_310p_dflash_full_decode_only",
+            return_value=False,
+        ),
         patch.object(
             NPUModelRunner,
             "_determine_batch_execution_and_padding",

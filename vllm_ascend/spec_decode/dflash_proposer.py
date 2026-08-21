@@ -4,7 +4,11 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
+from vllm_ascend._310p.dflash_full_decode_only import (
+    is_310p_dflash_full_decode_only,
+)
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -59,6 +63,30 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self.parallel_drafting_hidden_state_tensor = None
+
+    def _bind_full_decode_dummy_common_buffers(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        *,
+        num_reqs: int,
+        num_query_total: int,
+        runtime_mode: CUDAGraphMode,
+    ) -> None:
+        """Make DFlash dummy capture use the runtime proposer's owners."""
+        if runtime_mode != CUDAGraphMode.FULL or not is_310p_dflash_full_decode_only(self.vllm_config):
+            return
+
+        self.seq_lens_group[0][:num_reqs].copy_(common_attn_metadata.seq_lens)
+        self.seq_lens_group[0][num_reqs:].fill_(0)
+        common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs]
+
+        self.query_start_loc_group[0][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
+        self.query_start_loc_group[0][num_reqs + 1 :].fill_(0)
+        common_attn_metadata.query_start_loc = self.query_start_loc_group[0][: num_reqs + 1]
+
+        self.slot_mapping_group[0][:num_query_total].copy_(common_attn_metadata.slot_mapping)
+        self.slot_mapping_group[0][num_query_total:].fill_(PADDING_SLOT_ID)
+        common_attn_metadata.slot_mapping = self.slot_mapping_group[0][:num_query_total]
 
     def set_inputs_first_pass(
         self,
@@ -198,6 +226,12 @@ class AscendDflashProposer(AscendEagleProposer):
                     :num_reqs
                 ],
             )
+            self._bind_full_decode_dummy_common_buffers(
+                common_attn_metadata,
+                num_reqs=num_reqs,
+                num_query_total=num_query_total,
+                runtime_mode=aclgraph_runtime_mode,
+            )
 
             attn_metadata_dflash = builder.build_for_graph_capture(
                 common_attn_metadata,
@@ -206,6 +240,12 @@ class AscendDflashProposer(AscendEagleProposer):
 
             attn_metadata_dflash.attn_mask = None
             attn_metadata_dflash.attn_state = AscendAttentionState.ChunkedPrefill
+            self._bind_full_decode_draft_attention_buffers(
+                attn_metadata_dflash,
+                common_attn_metadata,
+                draft_index=0,
+                runtime_mode=aclgraph_runtime_mode,
+            )
 
             per_layer_attn_metadata = dict()
             for layer_name in self.attn_layer_names:

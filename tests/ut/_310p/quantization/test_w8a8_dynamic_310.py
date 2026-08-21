@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
@@ -22,6 +23,8 @@ from vllm_ascend._310p.quantization.methods.w8a8_dynamic import (
     _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE,
     AscendW8A8DynamicFusedMoEMethod310,
     AscendW8A8DynamicLinearMethod310,
+    enable_dflash_full_decode_graph_safe_w8a8,
+    enable_dflash_piecewise_graph_safe_w8a8,
 )
 
 
@@ -78,6 +81,32 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
         weight = self.method.get_weight(10, 20)
         self.assertEqual(weight["weight"].dtype, torch.int8)
         self.assertEqual(weight["weight"].shape, (20, 10))
+
+    def test_enable_full_decode_does_not_change_piecewise_strategy(self):
+        original_piecewise = AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe
+        original_full_decode = AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe
+        try:
+            AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe = False
+            AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe = False
+            enable_dflash_full_decode_graph_safe_w8a8()
+            self.assertFalse(AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe)
+            self.assertTrue(AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe)
+        finally:
+            AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe = original_piecewise
+            AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe = original_full_decode
+
+    def test_enable_piecewise_does_not_change_full_decode_strategy(self):
+        original_piecewise = AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe
+        original_full_decode = AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe
+        try:
+            AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe = False
+            AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe = False
+            enable_dflash_piecewise_graph_safe_w8a8()
+            self.assertTrue(AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe)
+            self.assertFalse(AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe)
+        finally:
+            AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe = original_piecewise
+            AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe = original_full_decode
 
     def test_get_perchannel_param_310(self):
         params = self.method.get_perchannel_param(10, torch.float32)
@@ -189,6 +218,69 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
         self.assertTrue(torch.equal(first_call.kwargs["pertoken_scale"], pertoken_scale[:640]))
         self.assertTrue(torch.equal(second_call.kwargs["pertoken_scale"], pertoken_scale[640:]))
         self.assertEqual(output.shape, (num_tokens, 256))
+
+    @patch("vllm_ascend._310p.quantization.methods.w8a8_dynamic.get_forward_context")
+    @patch("torch_npu.npu_dynamic_quant", create=True)
+    @patch("torch_npu.npu_quant_matmul")
+    def test_apply_full_decode_uses_two_way_chunks_only_in_profile_run(
+        self,
+        mock_npu_quant_matmul,
+        mock_npu_dynamic_quantize,
+        mock_get_forward_context,
+    ):
+        self.method._dflash_piecewise_graph_safe = False
+        self.method._dflash_full_decode_graph_safe = True
+        mock_get_forward_context.return_value = SimpleNamespace(in_profile_run=True)
+        layer = MagicMock()
+        layer.weight = torch.randint(-127, 128, (128, 256), dtype=torch.int8)
+        layer.weight_scale = torch.randn(256, dtype=torch.float32)
+
+        num_tokens = 1280
+        x = torch.randn(num_tokens, 128, dtype=torch.float16)
+        quantized_x = torch.randint(-128, 127, x.shape, dtype=torch.int8)
+        pertoken_scale = torch.randn(num_tokens, dtype=torch.float32)
+        mock_npu_dynamic_quantize.return_value = quantized_x, pertoken_scale
+        mock_npu_quant_matmul.side_effect = lambda input_, *_args, **_kwargs: torch.zeros(
+            input_.shape[0], 256, dtype=x.dtype
+        )
+
+        output = self.method.apply(layer, x)
+
+        self.assertEqual(
+            [call.args[0].shape[0] for call in mock_npu_quant_matmul.call_args_list],
+            [640, 640],
+        )
+        self.assertEqual(output.shape, (num_tokens, 256))
+
+    @patch("vllm_ascend._310p.quantization.methods.w8a8_dynamic.get_forward_context")
+    @patch("torch_npu.npu_dynamic_quant", create=True)
+    @patch("torch_npu.npu_quant_matmul")
+    def test_apply_full_decode_keeps_normal_forward_numerically_aligned(
+        self,
+        mock_npu_quant_matmul,
+        mock_npu_dynamic_quantize,
+        mock_get_forward_context,
+    ):
+        self.method._dflash_piecewise_graph_safe = False
+        self.method._dflash_full_decode_graph_safe = True
+        mock_get_forward_context.return_value = SimpleNamespace(in_profile_run=False)
+        layer = MagicMock()
+        layer.weight = torch.randint(-127, 128, (128, 256), dtype=torch.int8)
+        layer.weight_scale = torch.randn(256, dtype=torch.float32)
+
+        num_tokens = 95
+        x = torch.randn(num_tokens, 128, dtype=torch.float16)
+        quantized_x = torch.randint(-128, 127, x.shape, dtype=torch.int8)
+        pertoken_scale = torch.randn(num_tokens, dtype=torch.float32)
+        expected_output = torch.randn(num_tokens, 256, dtype=x.dtype)
+        mock_npu_dynamic_quantize.return_value = quantized_x, pertoken_scale
+        mock_npu_quant_matmul.return_value = expected_output
+
+        output = self.method.apply(layer, x)
+
+        mock_npu_quant_matmul.assert_called_once()
+        self.assertTrue(torch.equal(mock_npu_quant_matmul.call_args.args[0], quantized_x))
+        self.assertTrue(torch.equal(output, expected_output))
 
     @patch("vllm_ascend.utils.is_310p", return_value=True)
     @patch("torch_npu.npu_format_cast")

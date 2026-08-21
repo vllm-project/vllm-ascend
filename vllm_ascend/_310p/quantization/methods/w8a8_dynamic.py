@@ -22,6 +22,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
 from vllm_ascend._310p.fused_moe.experts_selector import select_experts
@@ -151,6 +152,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                record_events=getattr(layer, "_record_fused_moe_events", True),
             ),
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -175,6 +177,7 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
     """
 
     _dflash_piecewise_graph_safe = False
+    _dflash_full_decode_graph_safe = False
 
     def get_perchannel_param(
         self,
@@ -204,8 +207,11 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
 
         # NOTE(310P):
         # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
-        if self._dflash_piecewise_graph_safe:
-            # The Piecewise AOT graph keeps the token dimension dynamic. A
+        full_decode_profile_run = False
+        if self._dflash_full_decode_graph_safe:
+            full_decode_profile_run = bool(getattr(get_forward_context(), "in_profile_run", False))
+        if self._dflash_piecewise_graph_safe or full_decode_profile_run:
+            # DFlash graph compilation keeps the token dimension dynamic. A
             # Python range over quantized_x.shape[0] specializes that dimension
             # to the 1280-token profile input and violates Dynamo's dynamic
             # shape contract. Two tensor chunks keep the split in the graph;
@@ -272,8 +278,17 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
-def enable_dflash_piecewise_graph_safe_w8a8() -> None:
+def _enable_dflash_graph_safe_w8a8(scope: str) -> None:
     """Enable dynamic-shape-safe W8A8 chunks in an exact-scope worker."""
 
-    AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe = True
-    logger.debug("[310p-dflash-piecewise/compile] enabled graph-safe W8A8 dynamic chunks")
+    AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe = scope == "piecewise"
+    AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe = scope == "full_decode_only"
+    logger.debug("[310p-dflash-graph/compile] scope=%s enabled graph-safe W8A8 dynamic chunks", scope)
+
+
+def enable_dflash_piecewise_graph_safe_w8a8() -> None:
+    _enable_dflash_graph_safe_w8a8("piecewise")
+
+
+def enable_dflash_full_decode_graph_safe_w8a8() -> None:
+    _enable_dflash_graph_safe_w8a8("full_decode_only")

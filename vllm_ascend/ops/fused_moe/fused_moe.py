@@ -33,6 +33,9 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
+from vllm_ascend._310p.dflash_full_decode_only import (
+    is_310p_dflash_full_decode_only,
+)
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -41,6 +44,9 @@ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
+    maybe_record_fused_moe_event,
+)
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -73,7 +79,7 @@ class FusedMoEResult:
 
 @dataclass
 class FusedMoEEvents:
-    before_routed_experts: torch.npu.Event
+    before_routed_experts: torch.npu.Event | None
     after_routed_experts: torch.npu.Event | None = field(default=None)
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
@@ -277,6 +283,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
+                record_events=getattr(layer, "_record_fused_moe_events", True),
                 swiglu_limit=layer.swiglu_limit,
                 # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
                 # when an adapter wraps this layer; None for non-LoRA layers.
@@ -364,6 +371,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
 
         vllm_config = get_current_vllm_config()
+        self._record_fused_moe_events = not is_310p_dflash_full_decode_only(vllm_config)
+        routed_experts._record_fused_moe_events = self._record_fused_moe_events
 
         if (
             self.custom_routing_function is None
@@ -651,7 +660,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
@@ -694,7 +703,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                     hidden_states, dst_type=torch.float8_e4m3fn
                 )
@@ -718,7 +727,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
@@ -754,11 +763,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
             hidden_states_fp32 = hidden_states.float()
-            before_routed_experts = torch.npu.current_stream().record_event()
+            record_events = getattr(self, "_record_fused_moe_events", True)
+            before_routed_experts = maybe_record_fused_moe_event(record_events)
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
-            after_routed_experts = torch.npu.current_stream().record_event()
+            after_routed_experts = maybe_record_fused_moe_event(record_events)
         else:
-            before_routed_experts = torch.npu.current_stream().record_event()
+            before_routed_experts = maybe_record_fused_moe_event(getattr(self, "_record_fused_moe_events", True))
             after_routed_experts = None
 
         fused_moe_results = self.no_shared_forward_impl(

@@ -13,34 +13,100 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+
 import vllm_ascend.sample.rejection_sampler as rejection_sampler_module
 from tests.ut.base import TestBase
-from vllm_ascend._310p.sample.rejection_sampler import _force_pytorch_rejection_path
+from vllm_ascend._310p.sample.rejection_sampler import (
+    _force_pytorch_rejection_path,
+    _rejection_greedy_sample_pytorch_310,
+)
+
+
+class _RejectUnalignedGreedyCopyOps(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func in (
+            torch.ops.aten.index_put_.default,
+            torch.ops.aten._index_put_impl_.default,
+        ):
+            raise AssertionError("Advanced index writes can lower to an unaligned Add on 310P")
+        if func is torch.ops.aten.copy_.default:
+            destination = args[0]
+            byte_offset = destination.storage_offset() * destination.element_size()
+            if byte_offset % 64:
+                raise AssertionError("Sub-row copy destination is not 64-byte aligned on 310P")
+        if func is torch.ops.aten.add.Tensor:
+            lhs = args[0]
+            if isinstance(lhs, torch.Tensor) and lhs.numel() <= 4:
+                raise AssertionError("Add with a small leading tensor is unsafe on 310P")
+        return func(*args, **kwargs)
 
 
 class TestForcePytorchRejectionPath(TestBase):
     def test_disables_triton_and_binds_recovered_then_restores(self):
         orig_triton = rejection_sampler_module.HAS_TRITON
         orig_recovered = rejection_sampler_module.sample_recovered_tokens
+        orig_greedy = rejection_sampler_module.rejection_greedy_sample_pytorch
 
         def sentinel(*args, **kwargs):
             return None
 
-        with _force_pytorch_rejection_path(sentinel):
+        def sentinel_greedy(*args, **kwargs):
+            return None
+
+        with _force_pytorch_rejection_path(sentinel, greedy_fn=sentinel_greedy):
             # 310P has no working Triton; the base sampler must take PyTorch paths.
             self.assertFalse(rejection_sampler_module.HAS_TRITON)
             self.assertIs(rejection_sampler_module.sample_recovered_tokens, sentinel)
+            self.assertIs(
+                rejection_sampler_module.rejection_greedy_sample_pytorch,
+                sentinel_greedy,
+            )
 
         self.assertEqual(rejection_sampler_module.HAS_TRITON, orig_triton)
         self.assertIs(rejection_sampler_module.sample_recovered_tokens, orig_recovered)
+        self.assertIs(
+            rejection_sampler_module.rejection_greedy_sample_pytorch,
+            orig_greedy,
+        )
 
     def test_restores_on_exception(self):
         orig_triton = rejection_sampler_module.HAS_TRITON
         orig_recovered = rejection_sampler_module.sample_recovered_tokens
 
-        with self.assertRaises(RuntimeError):
-            with _force_pytorch_rejection_path(lambda *a, **k: None):
-                raise RuntimeError("boom")
+        with self.assertRaises(RuntimeError), _force_pytorch_rejection_path(lambda *a, **k: None):
+            raise RuntimeError("boom")
 
         self.assertEqual(rejection_sampler_module.HAS_TRITON, orig_triton)
         self.assertIs(rejection_sampler_module.sample_recovered_tokens, orig_recovered)
+
+    def test_alignment_safe_greedy_copy_avoids_small_tensor_scalar_add(self):
+        output_token_ids = torch.full((2, 4), -1, dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([3, 6], dtype=torch.int32)
+        draft_token_ids = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32)
+        target_argmax = torch.tensor([1, 9, 3, 4, 5, 6], dtype=torch.int32)
+        bonus_token_ids = torch.tensor([[7], [8]], dtype=torch.int32)
+
+        with _RejectUnalignedGreedyCopyOps():
+            _rejection_greedy_sample_pytorch_310(
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                [3, 3],
+                3,
+            )
+
+        torch.testing.assert_close(
+            output_token_ids,
+            torch.tensor(
+                [
+                    [1, 9, -1, -1],
+                    [4, 5, 6, 8],
+                ],
+                dtype=torch.int32,
+            ),
+        )

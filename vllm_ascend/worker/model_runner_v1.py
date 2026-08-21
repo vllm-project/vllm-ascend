@@ -101,6 +101,22 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
+from vllm_ascend._310p.dflash_fdo_numerical_probe import (
+    create_target_boundary_probe,
+    create_target_layer_probe,
+)
+from vllm_ascend._310p.dflash_full_decode_contract import (
+    build_target_full_decode_contract_sources,
+)
+from vllm_ascend._310p.dflash_full_decode_manifest import (
+    get_full_decode_local_rank,
+    reset_full_decode_capture_manifest,
+    validate_full_decode_capture_manifest,
+)
+from vllm_ascend._310p.dflash_full_decode_only import (
+    is_310p_dflash_full_decode_only,
+)
+
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -117,6 +133,7 @@ from vllm_ascend.attention.utils import (
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
+    get_graph_params,
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
@@ -361,6 +378,16 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self._fdo_target_numerical_probe = create_target_boundary_probe(
+            vllm_config
+        )
+        self._fdo_target_layer_probe = create_target_layer_probe(
+            vllm_config,
+            max_num_tokens=self.max_num_tokens,
+            hidden_size=self.model_config.get_hidden_size(),
+            dtype=self.model_config.dtype,
+            device=self.device,
+        )
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -2016,6 +2043,64 @@ class NPUModelRunner(GPUModelRunner):
             self.draft_token_ids_event.record()
 
     @torch.inference_mode()
+    def _record_target_numerical_probe(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        sample_indices: torch.Tensor,
+        selected_hidden: torch.Tensor,
+        logits: torch.Tensor,
+        descriptor: int,
+        actual_tokens: int,
+        runtime_mode: CUDAGraphMode,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> None:
+        boundary_probe = self._fdo_target_numerical_probe
+        layer_probe = getattr(self, "_fdo_target_layer_probe", None)
+        if (
+            (boundary_probe is None and layer_probe is None)
+            or spec_decode_metadata is None
+        ):
+            return
+        req_ids = self.input_batch.req_ids
+        if len(req_ids) == 1:
+            generated_prefix = tuple(
+                self.requests[req_ids[0]].output_token_ids
+            )
+        else:
+            generated_prefix = tuple(
+                token
+                for req_id in req_ids
+                for token in (
+                    *self.requests[req_id].output_token_ids,
+                    -1,
+                )
+            )
+        tp_rank = get_tp_group().rank_in_group
+        if boundary_probe is not None:
+            boundary_probe.record_after_model(
+                tp_rank=tp_rank,
+                generated_prefix=generated_prefix,
+                input_ids=input_ids,
+                positions=positions,
+                sample_indices=sample_indices,
+                selected_hidden=selected_hidden,
+                logits=logits,
+                descriptor=descriptor,
+                actual_tokens=actual_tokens,
+                runtime_mode=runtime_mode,
+            )
+        if layer_probe is not None:
+            layer_probe.record_after_model(
+                tp_rank=tp_rank,
+                generated_prefix=generated_prefix,
+                descriptor=descriptor,
+                actual_tokens=actual_tokens,
+                runtime_mode=runtime_mode,
+            )
+
+    @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2446,6 +2531,18 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
+
+            self._record_target_numerical_probe(
+                input_ids=input_ids,
+                positions=positions,
+                sample_indices=logits_indices,
+                selected_hidden=sample_hidden_states,
+                logits=logits,
+                descriptor=batch_desc.num_tokens,
+                actual_tokens=num_tokens_unpadded,
+                runtime_mode=cudagraph_mode,
+                spec_decode_metadata=spec_decode_metadata,
+            )
 
             # Apply structured output bitmasks if present
             self.execute_model_state = ExecuteModelState(
@@ -3798,6 +3895,38 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
+    @staticmethod
+    def _full_decode_buffer_tensor(buffer: Any) -> Any:
+        return getattr(buffer, "gpu", buffer)
+
+    def _full_decode_target_retained_inputs(
+        self,
+        forward_context: ForwardContext,
+        batch_descriptor: BatchDescriptor,
+    ):
+        """Expose target FULL inputs that are not model call arguments."""
+        runner_buffers = {
+            "input_ids": self._full_decode_buffer_tensor(self.input_ids),
+            "positions": self._full_decode_buffer_tensor(self.positions),
+            "query_start_loc": self._full_decode_buffer_tensor(
+                self.query_start_loc
+            ),
+            "seq_lens": self._full_decode_buffer_tensor(self.seq_lens),
+            "group_len": self._full_decode_buffer_tensor(self.group_len),
+            "group_key_idx": self._full_decode_buffer_tensor(
+                self.group_key_idx
+            ),
+            "group_key_cache_idx": self._full_decode_buffer_tensor(
+                self.group_key_cache_idx
+            ),
+        }
+        return build_target_full_decode_contract_sources(
+            forward_context=forward_context,
+            graph_params=get_graph_params(),
+            runner_buffers=runner_buffers,
+            descriptor_num_tokens=batch_descriptor.num_tokens,
+        )
+
     def load_model(self) -> None:
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -3817,6 +3946,8 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            if self._fdo_target_layer_probe is not None:
+                self._fdo_target_layer_probe.bind(self.model)
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -3897,6 +4028,10 @@ class NPUModelRunner(GPUModelRunner):
                 runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
+                component="target",
+                retained_input_provider=(
+                    self._full_decode_target_retained_inputs
+                ),
             )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
@@ -5127,9 +5262,17 @@ class NPUModelRunner(GPUModelRunner):
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        if is_310p_dflash_full_decode_only(self.vllm_config):
+            reset_full_decode_capture_manifest()
+
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
+
+        validate_full_decode_capture_manifest(
+            self.vllm_config,
+            local_rank=get_full_decode_local_rank(),
+        )
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):

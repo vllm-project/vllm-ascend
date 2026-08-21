@@ -129,6 +129,12 @@ _draft_cos: torch.Tensor | None = None
 _draft_sin: torch.Tensor | None = None
 _draft_rope_dim: int | None = None
 _draft_min_capacity_tokens = 0
+_full_decode_query_cos: torch.Tensor | None = None
+_full_decode_query_sin: torch.Tensor | None = None
+_full_decode_context_cos: torch.Tensor | None = None
+_full_decode_context_sin: torch.Tensor | None = None
+_full_decode_rope_precomputed = False
+_full_decode_rope_source = "query"
 
 
 def configure_draft_rope_capacity_310(capacity_tokens: int) -> None:
@@ -177,6 +183,8 @@ def _build_draft_cos_sin_slice(
     ``[:, :num_tokens]`` slice stays contiguous because the leading dim is 1.
     """
     global _draft_cos, _draft_sin, _draft_rope_dim
+    if positions.dtype not in (torch.int32, torch.int64):
+        raise TypeError(f"draft RoPE positions must use int32 or int64 indices, got {positions.dtype}")
     num_tokens = positions.size(0)
     rope_dim = cos_sin_cache.shape[-1]
     if (
@@ -198,10 +206,178 @@ def _build_draft_cos_sin_slice(
     draft_cos = _draft_cos
     draft_sin = _draft_sin
     assert draft_cos is not None and draft_sin is not None
+
     sel = cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2)
     draft_cos[:, :num_tokens] = sel.chunk(2, dim=-2)[0]
     draft_sin[:, :num_tokens] = sel.chunk(2, dim=-2)[1]
     return draft_cos[:, :num_tokens], draft_sin[:, :num_tokens]
+
+
+def _ensure_full_decode_rope_pair(
+    cos: torch.Tensor | None,
+    sin: torch.Tensor | None,
+    *,
+    cos_sin_cache: torch.Tensor,
+    capacity_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rope_dim = cos_sin_cache.shape[-1]
+    if (
+        cos is None
+        or sin is None
+        or cos.shape[1] < capacity_tokens
+        or cos.shape[-1] != rope_dim
+        or cos.device != cos_sin_cache.device
+        or cos.dtype != cos_sin_cache.dtype
+    ):
+        cos = torch.ones(
+            1,
+            capacity_tokens,
+            1,
+            rope_dim,
+            dtype=cos_sin_cache.dtype,
+            device=cos_sin_cache.device,
+        )
+        sin = torch.zeros_like(cos)
+    return cos, sin
+
+
+def _populate_full_decode_rope_pair(
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> None:
+    num_tokens = positions.shape[0]
+    cos[:, num_tokens:].fill_(1)
+    sin[:, num_tokens:].zero_()
+    selected = cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2)
+    cos[:, :num_tokens].copy_(selected.chunk(2, dim=-2)[0])
+    sin[:, :num_tokens].copy_(selected.chunk(2, dim=-2)[1])
+
+
+def prepare_full_decode_draft_rope_310(
+    cos_sin_cache: torch.Tensor,
+    *,
+    query_positions: torch.Tensor,
+    query_actual_tokens: int,
+    context_positions: torch.Tensor,
+    context_actual_tokens: int,
+    capacity_tokens: int,
+) -> None:
+    """Prepare distinct context/query RoPE inputs outside the FULL graph.
+
+    The 310P ACL graph replay fault is a GatherV2 over the draft RoPE cache.
+    Context KV insertion and query decoding use different position vectors, so
+    each source owns a separate persistent cos/sin pair. Sharing one pair makes
+    context K/V use query positions and silently cuts speculative acceptance.
+    """
+    global _full_decode_query_cos, _full_decode_query_sin
+    global _full_decode_context_cos, _full_decode_context_sin
+    global _full_decode_rope_precomputed
+
+    for name, positions, actual_tokens in (
+        ("query", query_positions, query_actual_tokens),
+        ("context", context_positions, context_actual_tokens),
+    ):
+        if positions.dtype not in (torch.int32, torch.int64):
+            raise TypeError(f"FULL draft {name} RoPE positions must use int32 or int64 indices, got {positions.dtype}")
+        if positions.ndim != 1:
+            raise ValueError(f"FULL draft {name} RoPE positions must be one-dimensional")
+        if not 0 <= actual_tokens <= positions.shape[0]:
+            raise ValueError(
+                f"FULL draft {name} RoPE active extent is invalid: "
+                f"actual={actual_tokens}, descriptor={positions.shape[0]}"
+            )
+        positions[actual_tokens:].zero_()
+
+    query_ptr = query_positions.data_ptr()
+    context_ptr = context_positions.data_ptr()
+    if query_ptr == context_ptr:
+        raise ValueError("FULL draft context/query position storage must differ")
+
+    capacity_tokens = max(
+        int(capacity_tokens),
+        query_positions.shape[0],
+        context_positions.shape[0],
+    )
+    _full_decode_query_cos, _full_decode_query_sin = _ensure_full_decode_rope_pair(
+        _full_decode_query_cos,
+        _full_decode_query_sin,
+        cos_sin_cache=cos_sin_cache,
+        capacity_tokens=capacity_tokens,
+    )
+    _full_decode_context_cos, _full_decode_context_sin = _ensure_full_decode_rope_pair(
+        _full_decode_context_cos,
+        _full_decode_context_sin,
+        cos_sin_cache=cos_sin_cache,
+        capacity_tokens=capacity_tokens,
+    )
+    _populate_full_decode_rope_pair(
+        cos_sin_cache,
+        query_positions,
+        _full_decode_query_cos,
+        _full_decode_query_sin,
+    )
+    _populate_full_decode_rope_pair(
+        cos_sin_cache,
+        context_positions,
+        _full_decode_context_cos,
+        _full_decode_context_sin,
+    )
+    _full_decode_rope_precomputed = True
+
+
+def clear_full_decode_draft_rope_310() -> None:
+    global _full_decode_rope_precomputed
+    global _full_decode_rope_source
+    _full_decode_rope_precomputed = False
+    _full_decode_rope_source = "query"
+
+
+def set_full_decode_draft_rope_source_310(source: str) -> str:
+    """Select which precomputed pair the next draft rotary calls consume."""
+    if source not in ("query", "context"):
+        raise ValueError(f"unsupported FULL draft RoPE source: {source}")
+    global _full_decode_rope_source
+    previous = _full_decode_rope_source
+    _full_decode_rope_source = source
+    return previous
+
+
+def get_full_decode_draft_rope_buffers_310() -> tuple[
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    return (
+        _full_decode_query_cos,
+        _full_decode_query_sin,
+        _full_decode_context_cos,
+        _full_decode_context_sin,
+    )
+
+
+def _select_draft_cos_sin_slice(
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not _full_decode_rope_precomputed:
+        return _build_draft_cos_sin_slice(cos_sin_cache, positions)
+    if _full_decode_rope_source == "context":
+        pair = (_full_decode_context_cos, _full_decode_context_sin)
+    else:
+        pair = (_full_decode_query_cos, _full_decode_query_sin)
+    cos, sin = pair
+    if cos is None or sin is None:
+        raise RuntimeError(f"FULL draft RoPE source has no persistent buffers: source={_full_decode_rope_source}")
+    num_tokens = positions.shape[0]
+    if cos.shape[1] < num_tokens or sin.shape[1] < num_tokens:
+        raise RuntimeError(
+            "FULL draft RoPE buffer is smaller than its position source: "
+            f"tokens={num_tokens}, cos={cos.shape[1]}, sin={sin.shape[1]}"
+        )
+    return cos[:, :num_tokens], sin[:, :num_tokens]
 
 
 def _rope_forward_oot(
@@ -226,7 +402,7 @@ def _rope_forward_oot(
         # (e.g. a VL main model using MRoPE + a text dflash draft), which would
         # otherwise corrupt cos/sin or raise a shape/index error in
         # update_cos_sin.
-        cos, sin = _build_draft_cos_sin_slice(self.cos_sin_cache, positions)
+        cos, sin = _select_draft_cos_sin_slice(self.cos_sin_cache, positions)
     else:
         cos, sin = get_cos_and_sin_slice()
     if offsets is not None:

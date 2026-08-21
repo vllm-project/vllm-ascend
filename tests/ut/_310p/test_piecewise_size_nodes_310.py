@@ -69,3 +69,28 @@ def test_install_piecewise_size_node_compat_is_idempotent(monkeypatch) -> None:
     installed(graph)
     assert calls == [graph]
     assert list(graph.graph.find_nodes(op="call_method", target="size")) == []
+
+
+def test_install_full_decode_size_node_compat_uses_same_scalar_guard(
+    monkeypatch,
+) -> None:
+    from vllm.compilation import backends
+
+    from vllm_ascend._310p.piecewise_size_nodes import (
+        install_full_decode_size_node_compat,
+    )
+
+    calls = []
+
+    def original(graph: fx.GraphModule) -> None:
+        calls.append(graph)
+
+    monkeypatch.setattr(backends, "_decompose_size_nodes", original)
+
+    install_full_decode_size_node_compat()
+    installed = backends._decompose_size_nodes
+    graph = _make_size_dim_graph()
+    installed(graph)
+
+    assert calls == [graph]
+    assert list(graph.graph.find_nodes(op="call_method", target="size")) == []

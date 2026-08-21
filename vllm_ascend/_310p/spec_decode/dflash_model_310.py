@@ -32,7 +32,10 @@ import torch.nn.functional as F
 from vllm.logger import logger
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 
-from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+from vllm_ascend._310p.ops.rotary_embedding import (
+    AscendRotaryEmbedding310,
+    set_full_decode_draft_rope_source_310,
+)
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -57,6 +60,14 @@ def precompute_and_store_context_kv_310(
     all_kv = all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
     all_k = all_kv[0]  # [L, num_ctx, nkv, hd]
     all_v = all_kv[1]  # [L, num_ctx, nkv, hd]
+    context_probe = self.__dict__.get("_fdo_context_probe")
+    if context_probe is not None:
+        context_probe.capture_context_inputs(
+            context_states=context_states,
+            context_positions=context_positions,
+            normed_context_states=normed_context_states,
+            slot_mapping=context_slot_mapping,
+        )
 
     # --- Per-layer RMSNorm K + RoPE (310P-safe) ---
     # Generic path fuses RoPE over [L * num_ctx, kv], which exceeds the 310P
@@ -74,16 +85,30 @@ def precompute_and_store_context_kv_310(
     #      value so we never disable it for the enclosing draft-model forward.
     all_k_normed = torch.empty_like(all_k)
     prev_flag = AscendRotaryEmbedding310._is_drafting_update_enabled
+    prev_rope_source = set_full_decode_draft_rope_source_310("context")
     AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
     try:
         for i in range(L):
             k_norm_layer = self.layers[i].self_attn.k_norm
             k_normed = k_norm_layer(all_k[i]).reshape(num_ctx, kv)
+            if context_probe is not None:
+                context_probe.capture_context_k_norm(
+                    layer_index=i,
+                    k_norm_input=all_k[i],
+                    k_norm_output=k_normed,
+                )
             tmpv = k_normed.clone()
             k_roped, _ = self.layers[i].self_attn.rotary_emb(context_positions, k_normed, tmpv)
             all_k_normed[i] = k_roped.reshape(num_ctx, nkv, hd)
+            if context_probe is not None:
+                context_probe.capture_context_rope(
+                    layer_index=i,
+                    k_rope=k_roped,
+                    value=all_v[i],
+                )
     finally:
         AscendRotaryEmbedding310.set_rope_position_flag_310p(prev_flag)
+        set_full_decode_draft_rope_source_310(prev_rope_source)
 
     if context_slot_mapping is None:
         return
@@ -107,9 +132,7 @@ def precompute_and_store_context_kv_310(
 
 def patch_dflash_read_mask_embedding_310() -> None:
     """Fallback when mask embedding weights are absent (same as generic patch)."""
-    if vllm_version_is("0.24.0") or not hasattr(
-        DFlashQwen3ForCausalLM, "_read_mask_embedding"
-    ):
+    if vllm_version_is("0.24.0") or not hasattr(DFlashQwen3ForCausalLM, "_read_mask_embedding"):
         return
 
     _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
