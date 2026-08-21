@@ -43,8 +43,11 @@ from vllm.v1.worker.gpu.model_runner import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
+    FirstLayerInputSource,
     MoECommType,
     get_mc2_tokens_capacity,
+    infer_mrv2_first_layer_input_source,
+    override_first_layer_input_source,
     override_mrv2_in_profile_run,
     select_moe_comm_method,
     set_mc2_mask,
@@ -217,6 +220,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
+    def get_first_layer_input_source(self) -> FirstLayerInputSource:
+        return infer_mrv2_first_layer_input_source(
+            is_first_pp_rank=self.is_first_pp_rank,
+            supports_mm_inputs=self.supports_mm_inputs,
+            is_encoder_decoder=self.model_config.is_encoder_decoder,
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -226,7 +236,10 @@ class NPUModelRunner(GPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ):
-        with flashcomm_dispatch_wrapper(self.vllm_config):
+        with (
+            override_first_layer_input_source(self.get_first_layer_input_source()),
+            flashcomm_dispatch_wrapper(self.vllm_config),
+        ):
             output = super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,

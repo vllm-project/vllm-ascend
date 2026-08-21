@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -208,6 +209,74 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNone(self._get_column_op("model.vision_model_proj.indexer_proj"))
         self.assertIsNone(self._get_column_op("model.vision_tower_encoder.qkv_proj"))
+
+
+class TestSequenceColumnParallelOp(unittest.TestCase):
+    def _apply_and_get_all_gather_label(
+        self,
+        *,
+        layer_idx: int,
+        is_vl_model: bool,
+        is_sp_sharded: bool,
+    ) -> bool:
+        from vllm_ascend.ops.linear_op import SequenceColumnParallelOp
+
+        layer = MagicMock()
+        layer.prefix = f"model.layers.{layer_idx}.self_attn.q_proj"
+        op = SequenceColumnParallelOp(layer)
+        op.prefix = layer.prefix
+        op.bias = None
+        op.skip_bias_add = False
+        op.gather_output = False
+        op.quant_method = MagicMock()
+        op.quant_method.apply.side_effect = lambda _layer, input_, _bias: input_
+        input_ = torch.randn(16, 8)
+        maybe_all_gather = MagicMock(side_effect=lambda x, *, label: x)
+        with (
+            patch("vllm_ascend.ops.linear_op.is_vl_model", return_value=is_vl_model),
+            patch(
+                "vllm_ascend.ops.linear_op._EXTRA_CTX",
+                SimpleNamespace(first_layer_input_is_sp_sharded=is_sp_sharded),
+            ),
+            patch.object(
+                torch.ops.vllm,
+                "maybe_all_gather_and_maybe_unpad",
+                maybe_all_gather,
+                create=True,
+            ),
+        ):
+            op.apply_impl(input_)
+
+        return maybe_all_gather.call_args.kwargs["label"]
+
+    def test_first_vl_attention_uses_layout_state_not_token_shape(self):
+        for is_sp_sharded, expected_label in ((True, True), (False, False)):
+            with self.subTest(is_sp_sharded=is_sp_sharded):
+                label = self._apply_and_get_all_gather_label(
+                    layer_idx=0,
+                    is_vl_model=True,
+                    is_sp_sharded=is_sp_sharded,
+                )
+
+                self.assertEqual(label, expected_label)
+
+    def test_first_non_vl_attention_keeps_all_gather(self):
+        label = self._apply_and_get_all_gather_label(
+            layer_idx=0,
+            is_vl_model=False,
+            is_sp_sharded=False,
+        )
+
+        self.assertTrue(label)
+
+    def test_non_first_vl_attention_keeps_all_gather(self):
+        label = self._apply_and_get_all_gather_label(
+            layer_idx=1,
+            is_vl_model=True,
+            is_sp_sharded=False,
+        )
+
+        self.assertTrue(label)
 
 
 class TestRowParallelOpDispatch(unittest.TestCase):

@@ -29,9 +29,17 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+class FirstLayerInputSource(Enum):
+    MODEL_EMBEDDING = "model_embedding"
+    PRECOMPUTED_EMBEDDING = "precomputed_embedding"
+    NOT_APPLICABLE = "not_applicable"
+
+
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
-
-
+_FIRST_LAYER_INPUT_SOURCE: ContextVar[FirstLayerInputSource] = ContextVar(
+    "_FIRST_LAYER_INPUT_SOURCE",
+    default=FirstLayerInputSource.NOT_APPLICABLE,
+)
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -58,6 +66,56 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 @contextmanager
+def override_first_layer_input_source(source: FirstLayerInputSource):
+    token = _FIRST_LAYER_INPUT_SOURCE.set(source)
+    try:
+        yield
+    finally:
+        _FIRST_LAYER_INPUT_SOURCE.reset(token)
+
+
+def get_first_layer_input_source() -> FirstLayerInputSource:
+    return _FIRST_LAYER_INPUT_SOURCE.get()
+
+
+def infer_first_layer_input_source(
+    *,
+    is_first_pp_rank: bool,
+    input_ids: torch.Tensor | None,
+    inputs_embeds: torch.Tensor | None,
+) -> FirstLayerInputSource:
+    if not is_first_pp_rank:
+        return FirstLayerInputSource.NOT_APPLICABLE
+    if inputs_embeds is not None:
+        return FirstLayerInputSource.PRECOMPUTED_EMBEDDING
+    if input_ids is not None:
+        return FirstLayerInputSource.MODEL_EMBEDDING
+    return FirstLayerInputSource.NOT_APPLICABLE
+
+
+def infer_mrv2_first_layer_input_source(
+    *,
+    is_first_pp_rank: bool,
+    supports_mm_inputs: bool,
+    is_encoder_decoder: bool,
+) -> FirstLayerInputSource:
+    if not is_first_pp_rank:
+        return FirstLayerInputSource.NOT_APPLICABLE
+    if supports_mm_inputs and not is_encoder_decoder:
+        return FirstLayerInputSource.PRECOMPUTED_EMBEDDING
+    return FirstLayerInputSource.MODEL_EMBEDDING
+
+
+def derive_first_layer_input_is_sp_sharded(
+    source: FirstLayerInputSource,
+    *,
+    flash_comm_v1_enabled: bool,
+    is_draft_model: bool,
+) -> bool:
+    return source == FirstLayerInputSource.MODEL_EMBEDDING and flash_comm_v1_enabled and not is_draft_model
+
+
+@contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
@@ -74,6 +132,7 @@ def set_ascend_forward_context(
     draft_attn_metadatas=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
+    first_layer_input_source: FirstLayerInputSource = FirstLayerInputSource.NOT_APPLICABLE,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -158,6 +217,11 @@ def set_ascend_forward_context(
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
         forward_context.is_draft_model_prefill = False
+        forward_context.first_layer_input_is_sp_sharded = derive_first_layer_input_is_sp_sharded(
+            first_layer_input_source,
+            flash_comm_v1_enabled=flash_comm_v1_enabled,
+            is_draft_model=is_draft_model,
+        )
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
@@ -397,6 +461,7 @@ class _ExtraForwardContextProxy:
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",
+        "first_layer_input_is_sp_sharded",
     )
 
     def check_extra_attr(self, name: str):
