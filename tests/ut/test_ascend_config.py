@@ -157,9 +157,11 @@ class TestAscendConfig(TestBase):
             test_vllm_config = VllmConfig()
             test_vllm_config.additional_config = {"mega_moe_max_tokens": invalid_value}
 
-            with self.subTest(invalid_value=invalid_value):
-                with self.assertRaisesRegex(ValueError, "mega_moe_max_tokens must be"):
-                    init_ascend_config(test_vllm_config)
+            with (
+                self.subTest(invalid_value=invalid_value),
+                self.assertRaisesRegex(ValueError, "mega_moe_max_tokens must be"),
+            ):
+                init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
