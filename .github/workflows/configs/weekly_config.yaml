@@ -347,6 +347,10 @@ a3:
       - name: Minimax_M2.7_w8a8_A3
         os: linux-aarch64-a3-16
         config_file_path: Minimax_M2.7_w8a8_A3.yaml
+      - name: Qwen3.8-27B-w8a8-A3
+        os: linux-aarch64-a3-2
+        config_file_path: Qwen3.8-27B-w8a8-A3.yaml
+
 310p:
   single_node:
     test_config:
