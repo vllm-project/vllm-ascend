@@ -1462,6 +1462,8 @@ class NPUModelRunner(GPUModelRunner):
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
         self._log_propose_draft_token_ids_entry(spec_decode_metadata, num_scheduled_tokens)
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
 
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1660,9 +1662,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
-            if get_pp_group().world_size > 1 and hasattr(
-                self.drafter, "take_last_draft_probs"
-            ):
+            if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:
                     self._draft_probs = draft_probs
@@ -2253,7 +2253,20 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            # A newly transferred PD request can enter verification with only
+            # scheduler-inserted -1 drafts and no cached probability row.
+            fully_padded_draft_req_ids = {
+                req_id
+                for req_id, token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()
+                )
+                if token_ids and all(token_id == -1 for token_id in token_ids)
+            }
+            sampler_output = self._sample(
+                logits,
+                spec_decode_metadata,
+                fully_padded_draft_req_ids,
+            )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2438,8 +2451,53 @@ class NPUModelRunner(GPUModelRunner):
         )
         return async_output
 
+    def _get_spec_decode_draft_probs(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata,
+        fully_padded_draft_req_ids: set[str] | None = None,
+    ) -> torch.Tensor | None:
+        if not fully_padded_draft_req_ids:
+            return super()._get_spec_decode_draft_probs(spec_decode_metadata)
+        if self._draft_probs is None or self._draft_prob_req_ids is None:
+            return None
+
+        row_by_req_id = {
+            req_id: idx for idx, req_id in enumerate(self._draft_prob_req_ids)
+        }
+        draft_probs_rows: list[torch.Tensor] = []
+        for req_id, num_draft in zip(
+            self.input_batch.req_ids, spec_decode_metadata.num_draft_tokens
+        ):
+            if num_draft == 0:
+                continue
+            row_idx = row_by_req_id.get(req_id)
+            if row_idx is None:
+                if req_id in fully_padded_draft_req_ids:
+                    draft_probs_rows.append(
+                        self._draft_probs.new_zeros(
+                            (num_draft, self._draft_probs.shape[-1])
+                        )
+                    )
+                    continue
+                logger.warning(
+                    "Missing cached draft probabilities for request %s; "
+                    "falling back to legacy speculative rejection behavior.",
+                    req_id,
+                )
+                return None
+            draft_probs_rows.append(self._draft_probs[row_idx, :num_draft])
+
+        if not draft_probs_rows:
+            return None
+        return torch.cat(draft_probs_rows, dim=0).contiguous()
+
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
-    def _sample(self, logits, spec_decode_metadata):
+    def _sample(
+        self,
+        logits,
+        spec_decode_metadata,
+        fully_padded_draft_req_ids: set[str] | None = None,
+    ):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
         sampling_metadata = self.input_batch.sampling_metadata
@@ -2459,10 +2517,9 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
-        draft_probs = (
-            self._get_spec_decode_draft_probs(spec_decode_metadata)
-            if get_pp_group().world_size > 1
-            else None
+        draft_probs = self._get_spec_decode_draft_probs(
+            spec_decode_metadata,
+            fully_padded_draft_req_ids,
         )
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
