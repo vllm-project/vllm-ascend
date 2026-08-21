@@ -31,7 +31,7 @@ class TestCompressorMetadata:
             query_start_loc=query_start_loc,
             start_pos=start_pos,
             block_table=block_table,
-            block_size=128,
+            storage_block_size=128,
             num_compressed_tokens=3,
             num_reqs_actual=2,
         )

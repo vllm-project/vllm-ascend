@@ -32,6 +32,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass
 
 
@@ -50,6 +51,7 @@ class PrepareAndFinalize(ABC):
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
         self.lora_context = None
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg()
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
@@ -376,6 +378,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch.float8_e4m3fn,
+                scale_alg=self.dynamic_mx_quant_scale_alg,
             )
         elif quant_type == QuantType.W4A4MXFP:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
