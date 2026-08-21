@@ -91,7 +91,7 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
         ),
         patch(
             "vllm_ascend.ops.fused_moe.mega_moe.get_a5_mega_moe_buffer_tokens_per_rank",
-            return_value=4,
+            return_value=8,
         ) as get_capacity,
         patch("vllm_ascend.ops.fused_moe.mega_moe.logger.debug") as mock_debug,
     ):
@@ -101,7 +101,7 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     get_symm_buffer.assert_called_once()
     assert get_symm_buffer.call_args.args[0] is mega_moe_device_group
     assert get_symm_buffer.call_args.kwargs["intermediate_hidden"] == 16
-    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 4
+    assert get_symm_buffer.call_args.kwargs["num_max_tokens_per_rank"] == 8
     assert get_symm_buffer.call_args.kwargs["dispatch_quant_mode"] == 4
     assert sym_buffer.num_max_tokens_per_rank is None
     get_capacity.assert_called_once()
@@ -122,7 +122,7 @@ def test_mega_moe_backend_builds_buffer_and_operator_args():
     assert any(message.startswith("A5 MegaMoE output") for message in messages)
 
 
-def test_mega_moe_prepare_pads_to_common_token_count_and_crops_output():
+def test_mega_moe_prepare_pads_to_common_token_count_without_filling_buffer():
     prepare_finalize = object.__new__(PrepareAndFinalizeWithMegaMoE)
     hidden_states = torch.randn(4, 8)
     router_logits = torch.randn(4, 2)
@@ -142,7 +142,7 @@ def test_mega_moe_prepare_pads_to_common_token_count_and_crops_output():
         ),
         patch(
             "vllm_ascend.ops.fused_moe.prepare_finalize.get_a5_mega_moe_buffer_tokens_per_rank",
-            return_value=6,
+            return_value=8,
         ) as get_capacity,
     ):
         prepare_output = prepare_finalize.prepare(hidden_states, router_logits)
@@ -174,7 +174,7 @@ def test_mega_moe_prepare_rejects_target_smaller_than_local_tokens():
     with (
         patch(
             "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
-            SimpleNamespace(max_tokens_across_dp=5),
+            SimpleNamespace(max_tokens_across_dp=3),
         ),
         patch(
             "vllm_ascend.ops.fused_moe.prepare_finalize.get_ascend_config",
@@ -182,7 +182,28 @@ def test_mega_moe_prepare_rejects_target_smaller_than_local_tokens():
         ),
         patch(
             "vllm_ascend.ops.fused_moe.prepare_finalize.get_a5_mega_moe_buffer_tokens_per_rank",
-            return_value=4,
+            return_value=8,
+        ),
+        pytest.raises(ValueError, match="cannot be smaller than the local token count"),
+    ):
+        prepare_finalize.prepare(torch.randn(4, 8), torch.randn(4, 2))
+
+
+def test_mega_moe_prepare_rejects_common_token_count_over_buffer_capacity():
+    prepare_finalize = object.__new__(PrepareAndFinalizeWithMegaMoE)
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+            SimpleNamespace(max_tokens_across_dp=9),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize.get_ascend_config",
+            return_value=_make_ascend_config(),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize.get_a5_mega_moe_buffer_tokens_per_rank",
+            return_value=8,
         ),
         pytest.raises(ValueError, match="exceeds the symmetric buffer token capacity"),
     ):
@@ -360,10 +381,19 @@ def test_mega_moe_backend_validates_fp4_packed_dimensions():
     assert key.intermediate_hidden == 128
 
 
-def test_mega_moe_backend_rejects_input_not_matching_configured_capacity():
+def test_mega_moe_backend_accepts_input_smaller_than_configured_capacity():
     fused_input = _make_fused_input()
     backend = MegaMoEBackend(_make_moe_config())
-    with pytest.raises(ValueError, match="must match the symmetric buffer token capacity"):
+
+    key = backend._make_buffer_key(fused_input, buffer_tokens_per_rank=8)
+
+    assert key.buffer_tokens_per_rank == 8
+
+
+def test_mega_moe_backend_rejects_input_over_configured_capacity():
+    fused_input = _make_fused_input()
+    backend = MegaMoEBackend(_make_moe_config())
+    with pytest.raises(ValueError, match="exceeds the symmetric buffer token capacity"):
         backend._make_buffer_key(fused_input, buffer_tokens_per_rank=3)
 
 
