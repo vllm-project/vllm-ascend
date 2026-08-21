@@ -15,6 +15,8 @@
 
 import json
 import os
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest import skip
 from unittest.mock import patch
@@ -26,6 +28,7 @@ from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    DyntraLBConfig,
     EplbConfig,
     FinegrainedTPConfig,
     ProfilingChunkConfig,
@@ -38,6 +41,12 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
 )
 from vllm_ascend.utils import clear_enable_sp, enable_sp
+
+
+def test_ascend_config_import_does_not_load_vllm_config():
+    """Keep platform discovery from recursing into a partial vllm.config."""
+    code = "import sys; import vllm_ascend.ascend_config; assert 'vllm.config' not in sys.modules"
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 class TestAscendConfig(TestBase):
@@ -776,6 +785,20 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):
             ShortRequestFirstConfig(foo=1)
+
+    def test_dyntra_lb_config_lax_types_and_forbid(self):
+        cfg = DyntraLBConfig(  # type: ignore[call-arg]
+            enabled="true", start_step="10", bubble_threshold="2.5"
+        )
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.start_step, 10)
+        self.assertEqual(cfg.bubble_threshold, 2.5)
+        with self.assertRaises(ValueError):
+            DyntraLBConfig(unknown_key=True)  # type: ignore[call-arg]
+
+    def test_dyntra_lb_config_range_checks_preserved(self):
+        with self.assertRaisesRegex(ValueError, "end_step must be greater than start_step"):
+            DyntraLBConfig(start_step=10, end_step=10)  # type: ignore[call-arg]
 
     def test_rejection_sampler_config_range_check_preserved(self):
         with self.assertRaises(ValueError):

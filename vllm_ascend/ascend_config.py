@@ -16,18 +16,62 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import json
 import os
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, overload
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
+from pydantic.dataclasses import dataclass as pydantic_dataclass
+from pydantic.fields import Field as PydanticField
 from pydantic_core import ArgsKwargs
-from vllm.config.utils import config
+from typing_extensions import dataclass_transform
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+
+ConfigT = TypeVar("ConfigT")
+
+
+@overload
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(cls: type[ConfigT]) -> type[ConfigT]: ...
+
+
+@overload
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(*, config: ConfigDict | None = None, **kwargs: Any) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
+
+
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(
+    cls: type[ConfigT] | None = None,
+    *,
+    config: ConfigDict | None = None,
+    **kwargs: Any,
+) -> type[ConfigT] | Callable[[type[ConfigT]], type[ConfigT]]:
+    """Create a vLLM-compatible config dataclass without importing vllm.config.
+
+    Importing ``vllm.config.utils`` here would first execute
+    ``vllm.config.__init__``. During vLLM platform discovery that package is
+    still initializing, so the import creates a cycle through
+    ``torch_utils -> platforms -> vllm_ascend.platform -> ascend_config``.
+    Keep this wrapper aligned with vLLM's ``config`` decorator while avoiding
+    the package-level import.
+    """
+    merged_config = ConfigDict(extra="forbid")
+    if config is not None:
+        merged_config.update(config)
+
+    def decorator(config_cls: type[ConfigT]) -> type[ConfigT]:
+        return pydantic_dataclass(config_cls, config=merged_config, **kwargs)  # type: ignore[return-value]
+
+    return decorator if cls is None else decorator(cls)
 
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
@@ -848,6 +892,45 @@ class ShortRequestFirstConfig:
 
 
 @config
+class DyntraLBConfig:
+    """Configuration object for ``scheduler_config.dyntra_lb_config``."""
+
+    enabled: bool = False
+    enable_diagnostics: bool = False
+    mode: str = "dynamic"
+    start_step: int = 250
+    end_step: int = -1
+    bubble_threshold: float = 5.0
+    long_req_block_threshold: int = 700
+    dynamic_max_step: int = 256
+
+    _valid_modes: ClassVar[set[str]] = {"static", "dynamic"}
+
+    @model_validator(mode="after")
+    def _validate_config(self) -> DyntraLBConfig:
+        if self.mode not in self._valid_modes:
+            raise ValueError(f"dyntra_lb_config.mode must be one of {sorted(self._valid_modes)}, got {self.mode!r}.")
+        if self.start_step < 0:
+            raise ValueError(f"dyntra_lb_config.start_step must be >= 0, got {self.start_step}.")
+        if self.end_step < -1:
+            raise ValueError(f"dyntra_lb_config.end_step must be -1 or >= 0, got {self.end_step}.")
+        if self.end_step != -1 and self.end_step <= self.start_step:
+            raise ValueError(
+                "dyntra_lb_config.end_step must be greater than start_step when it is set, "
+                f"got start_step={self.start_step}, end_step={self.end_step}."
+            )
+        if self.bubble_threshold <= 0:
+            raise ValueError(f"dyntra_lb_config.bubble_threshold must be > 0, got {self.bubble_threshold}.")
+        if self.long_req_block_threshold <= 0:
+            raise ValueError(
+                f"dyntra_lb_config.long_req_block_threshold must be > 0, got {self.long_req_block_threshold}."
+            )
+        if self.dynamic_max_step <= 0:
+            raise ValueError(f"dyntra_lb_config.dynamic_max_step must be > 0, got {self.dynamic_max_step}.")
+        return self
+
+
+@config
 class SchedulerConfig:
     """Configuration object for ``additional_config["scheduler_config"]``.
 
@@ -864,6 +947,7 @@ class SchedulerConfig:
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
     profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
+    dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)
 
     @classmethod
     def from_additional_config(cls, additional_config: dict[str, Any]) -> SchedulerConfig:
@@ -904,6 +988,7 @@ class SchedulerConfig:
             "short_request_first_config": _resolve("short_request_first_config", {}),
             "profiling_chunk_config": _resolve("profiling_chunk_config", {}),
             "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
+            "dyntra_lb_config": scheduler_config.get("dyntra_lb_config", {}),
         }
         # Forward nested unknown keys to pydantic so extra="forbid" reports
         # typos instead of the resolver silently dropping them.
