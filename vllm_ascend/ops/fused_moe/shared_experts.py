@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import wraps
@@ -23,6 +24,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -55,38 +57,34 @@ class SharedExpertParallelMode(Enum):
     FLASHCOMM_ON_SHARED_EXPERT_DP_ON = auto()  # Sharded activations, replicated weights.
 
 
-class AscendSharedExperts:
+class AscendSharedExperts(SharedExperts):
     """Ascend-owned shared expert executor.
 
-    Keep the original shared expert module registered on ``AscendMoERunner``
-    for checkpoint compatibility while moving split/overlap execution details
-    out of the runner.
+    Reuse the upstream module/config/output lifecycle while preserving the
+    Ascend event-driven split/overlap execution path.
     """
 
     def __init__(
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
+        enable_dbo: bool,
+        mk_can_overlap_shared_experts: Callable[[], bool],
         quant_type: QuantType,
         quant_method: FusedMoEMethodBase,
     ):
-        self.layer = layer
-        self.moe_config = moe_config
-        self.hidden_size = moe_config.hidden_dim
-        self.in_dtype = moe_config.in_dtype
-        self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
-        self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
-        self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
+        super().__init__(
+            layer=layer,
+            moe_config=moe_config,
+            enable_dbo=enable_dbo,
+            mk_can_overlap_shared_experts=mk_can_overlap_shared_experts,
+        )
+        self._update_moe_config_derived_state(moe_config)
         self.quant_type = quant_type
         self.lora_context = None
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
-        # Native MoE sequence parallelism and the SP compiler pass also build
-        # shared-expert linears with replicated weights. Keep this weight-layout
-        # state independent from the runtime FlashComm decision.
-        self.weights_replicated = (
-            ascend_config.enable_shared_expert_dp or moe_config.is_sequence_parallel or enable_sp_by_pass()
-        )
+        self._update_weights_replicated(moe_config)
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -103,6 +101,27 @@ class AscendSharedExperts:
 
             quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
+    def _update_moe_config_derived_state(self, moe_config: FusedMoEConfig) -> None:
+        self.hidden_size = moe_config.hidden_dim
+        self.in_dtype = moe_config.in_dtype
+        self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
+        self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
+        self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
+
+    def _update_weights_replicated(self, moe_config: FusedMoEConfig) -> None:
+        ascend_config = get_ascend_config()
+        # Native MoE sequence parallelism and the SP compiler pass also build
+        # shared-expert linears with replicated weights. Keep this weight-layout
+        # state independent from the runtime FlashComm decision.
+        self.weights_replicated = (
+            ascend_config.enable_shared_expert_dp or moe_config.is_sequence_parallel or enable_sp_by_pass()
+        )
+
+    def _set_moe_config(self, new_moe_config: FusedMoEConfig) -> None:
+        self._moe_config = new_moe_config
+        self._update_moe_config_derived_state(new_moe_config)
+        self._update_weights_replicated(new_moe_config)
+
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
 
@@ -112,7 +131,7 @@ class AscendSharedExperts:
             torch.rand(10, self.hidden_size, device="npu", dtype=self.in_dtype) * 2 - 1
         )  # Random input for testing, scoped to [-1, 1]
 
-        integrated_out = self.layer(test_input)
+        integrated_out = self._layer(test_input)
         part1_out = self.part1(test_input)
         split_out = self.part2(test_input, part1_out)
 
@@ -138,16 +157,16 @@ class AscendSharedExperts:
         )
 
     def part1(self, hidden_states: torch.Tensor):
-        shared_gate_up, _ = self.layer.gate_up_proj(hidden_states)  # type: ignore
+        shared_gate_up, _ = self._layer.gate_up_proj(hidden_states)  # type: ignore
         return shared_gate_up
 
     def part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
-        shared_act = self.layer.act_fn(shared_gate_up)  # type: ignore
-        shared_out, _ = self.layer.down_proj(shared_act)  # type: ignore
+        shared_act = self._layer.act_fn(shared_gate_up)  # type: ignore
+        shared_out, _ = self._layer.down_proj(shared_act)  # type: ignore
 
         # Qwen3-Next specific gating mechanism
-        if hasattr(self.layer, "expert_gate") and self.layer.expert_gate is not None:
-            gate_out, _ = self.layer.expert_gate(hidden_states)  # type: ignore
+        if hasattr(self._layer, "expert_gate") and self._layer.expert_gate is not None:
+            gate_out, _ = self._layer.expert_gate(hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 
@@ -156,12 +175,12 @@ class AscendSharedExperts:
         # EP rewrites FusedMoEParallelConfig.tp_size to 1 because each routed
         # expert is local. Shared-expert linears still span the physical TP
         # group, so their layout must be derived from that group instead.
-        tp_size = self.moe_config.tp_group.world_size
+        tp_size = self._moe_config.tp_group.world_size
         if tp_size <= 1:
             return SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF
 
         activations_sharded = (
-            _EXTRA_CTX.flash_comm_v1_enabled or self.moe_config.is_sequence_parallel or enable_sp_by_pass()
+            _EXTRA_CTX.flash_comm_v1_enabled or self._moe_config.is_sequence_parallel or enable_sp_by_pass()
         )
         if activations_sharded and self.weights_replicated:
             return SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON
@@ -178,7 +197,7 @@ class AscendSharedExperts:
         original_num_tokens = hidden_states.shape[0]
         # See parallel_mode(): moe_config.tp_size describes routed experts in
         # EP, while this token split follows the shared-expert TP group.
-        tp_group = self.moe_config.tp_group
+        tp_group = self._moe_config.tp_group
         tp_size = tp_group.world_size
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
         if pad_size > 0:
@@ -196,7 +215,7 @@ class AscendSharedExperts:
         metadata: tuple[int, int],
     ) -> torch.Tensor:
         original_num_tokens, pad_size = metadata
-        shared_out = self.moe_config.tp_group.all_gather(shared_out, dim=0)
+        shared_out = self._moe_config.tp_group.all_gather(shared_out, dim=0)
         if pad_size > 0:
             shared_out = shared_out[:original_num_tokens]
         return shared_out
@@ -213,9 +232,23 @@ class AscendSharedExperts:
         pad_size = _EXTRA_CTX.pad_size
         if pad_size > 0:
             shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
-        return self.moe_config.tp_group.reduce_scatter(shared_out, dim=0)
+        return self._moe_config.tp_group.reduce_scatter(shared_out, dim=0)
 
-    def forward(self, hidden_states: torch.Tensor, fused_moe_evts: FusedMoEEvents):
+    def forward_with_events(
+        self,
+        hidden_states: torch.Tensor,
+        fused_moe_evts: FusedMoEEvents,
+    ) -> None:
+        output_idx = self._output_idx
+        assert self._output[output_idx] is None
+        self._output[output_idx] = self._run_with_events(hidden_states, fused_moe_evts)
+        assert self._output[output_idx] is not None
+
+    def _run_with_events(
+        self,
+        hidden_states: torch.Tensor,
+        fused_moe_evts: FusedMoEEvents,
+    ) -> torch.Tensor:
         mode = self.parallel_mode()
         local_dp_metadata = None
 
@@ -243,8 +276,8 @@ class AscendSharedExperts:
             # Only used for int quantization
             has_quantized_shared_without_lora = (
                 not has_lora(self.lora_context)
-                and hasattr(self.layer.gate_up_proj, "weight_scale")
-                and hasattr(self.layer.down_proj, "weight_scale")
+                and hasattr(self._layer.gate_up_proj, "weight_scale")
+                and hasattr(self._layer.down_proj, "weight_scale")
             )
             if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
@@ -256,8 +289,8 @@ class AscendSharedExperts:
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
                 hidden_states = torch_npu.npu_quant_matmul(
                     quantized_x,
-                    self.layer.gate_up_proj.weight,
-                    self.layer.gate_up_proj.weight_scale,
+                    self._layer.gate_up_proj.weight,
+                    self._layer.gate_up_proj.weight_scale,
                     pertoken_scale=None,
                     bias=None,
                     output_dtype=torch.int32,
@@ -267,7 +300,7 @@ class AscendSharedExperts:
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                     x=hidden_states,
-                    weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
+                    weight_scale=self._layer.gate_up_proj.weight_scale_fp32,
                     activation_scale=pertoken_scale,
                     bias=None,
                     quant_scale=None,
@@ -288,8 +321,8 @@ class AscendSharedExperts:
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = torch_npu.npu_quant_matmul(
                     quantized_x,
-                    self.layer.down_proj.weight,
-                    self.layer.down_proj.weight_scale,
+                    self._layer.down_proj.weight,
+                    self._layer.down_proj.weight_scale,
                     pertoken_scale=swiglu_out_scale,
                     bias=None,
                     output_dtype=original_dtype,
@@ -304,7 +337,7 @@ class AscendSharedExperts:
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
-                hidden_states = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+                hidden_states = self._layer.gate_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
@@ -318,7 +351,7 @@ class AscendSharedExperts:
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)
-                shared_out = self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+                shared_out = self._layer.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)

@@ -7,6 +7,10 @@ import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
+from vllm.model_executor.layers.fused_moe.runner import (
+    shared_experts as vllm_shared_experts_module,
+)
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
@@ -358,7 +362,7 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
 )
 def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_enabled, expected):
     runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.ascend_shared_experts = SimpleNamespace(
+    runner._shared_experts = SimpleNamespace(
         parallel_mode=MagicMock(return_value=SharedExpertParallelMode.FLASHCOMM_ON_SHARED_EXPERT_DP_ON)
     )
     shared_output = object()
@@ -390,7 +394,7 @@ def test_shared_output_reduction_depends_on_weight_layout(
     reduce_shared,
 ):
     runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
+    runner._shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
     shared_output = torch.ones(2, 4)
     reduced_output = shared_output + 1
     all_reduce = MagicMock(return_value=reduced_output)
@@ -428,7 +432,7 @@ def test_local_shared_expert_dp_reduces_partial_routed_output(
     reduce_routed,
 ):
     runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
+    runner._shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
     runner.routed_output_transform = None
     runner.moe_config = SimpleNamespace(
         is_sequence_parallel=False,
@@ -740,6 +744,137 @@ class _Gate(nn.Module):
         return torch.zeros((*hidden_states.shape[:-1], 1), dtype=hidden_states.dtype), None
 
 
+def _build_shared_experts_wrapper(monkeypatch, *, enable_dbo=False):
+    monkeypatch.setattr(
+        shared_experts_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            multistream_overlap_shared_expert=False,
+            enable_shared_expert_dp=False,
+        ),
+    )
+    monkeypatch.setattr(shared_experts_module, "enable_sp_by_pass", lambda: False)
+    monkeypatch.setattr(
+        vllm_shared_experts_module.envs,
+        "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
+        True,
+    )
+    layer = nn.Linear(4, 4)
+    moe_config = SimpleNamespace(
+        hidden_dim=4,
+        in_dtype=torch.float16,
+        swiglu_limit=None,
+        swiglu_alpha=None,
+        swiglu_beta=None,
+        is_sequence_parallel=False,
+        tp_group=SimpleNamespace(world_size=1, rank_in_group=0),
+    )
+    wrapper = AscendSharedExperts(
+        layer=layer,
+        moe_config=moe_config,
+        enable_dbo=enable_dbo,
+        mk_can_overlap_shared_experts=lambda: False,
+        quant_type=QuantType.NONE,
+        quant_method=SimpleNamespace(process_weights_after_loading=MagicMock()),
+    )
+    return wrapper, layer
+
+
+def test_shared_experts_inherits_upstream_and_registers_layer_once(monkeypatch):
+    shared_experts, layer = _build_shared_experts_wrapper(monkeypatch)
+    runner = nn.Module()
+    runner._shared_experts = shared_experts
+
+    assert issubclass(AscendSharedExperts, SharedExperts)
+    assert isinstance(shared_experts, nn.Module)
+    assert AscendSharedExperts.forward is SharedExperts.forward
+    assert shared_experts._layer is layer
+    assert not hasattr(shared_experts, "layer")
+    assert set(shared_experts.state_dict()) == {
+        "_layer.weight",
+        "_layer.bias",
+    }
+    assert sum(module is layer for _, module in shared_experts.named_modules()) == 1
+    assert set(runner.state_dict()) == {
+        "_shared_experts._layer.weight",
+        "_shared_experts._layer.bias",
+    }
+    assert "ascend_shared_experts" not in runner._modules
+    assert all(not name.startswith("ascend_shared_experts") for name, _ in runner.named_modules())
+
+
+def test_shared_experts_without_dbo_always_uses_slot_zero(monkeypatch):
+    shared_experts, _ = _build_shared_experts_wrapper(monkeypatch)
+    monkeypatch.setattr(
+        vllm_shared_experts_module,
+        "dbo_current_ubatch_id",
+        lambda: 1,
+    )
+    output = torch.randn(2, 4)
+    shared_experts._run_with_events = MagicMock(return_value=output)
+
+    shared_experts.forward_with_events(torch.randn(2, 4), MagicMock())
+
+    assert shared_experts._output[0] is output
+    assert shared_experts._output[1] is None
+    assert shared_experts.output is output
+    assert shared_experts._output == [None, None]
+
+
+def test_shared_experts_dbo_output_slots_are_isolated_and_cleared(
+    monkeypatch,
+):
+    shared_experts, _ = _build_shared_experts_wrapper(
+        monkeypatch,
+        enable_dbo=True,
+    )
+    current_ubatch_id = 0
+    monkeypatch.setattr(
+        vllm_shared_experts_module,
+        "dbo_current_ubatch_id",
+        lambda: current_ubatch_id,
+    )
+    outputs = [torch.randn(2, 4), torch.randn(2, 4)]
+    shared_experts._run_with_events = MagicMock(side_effect=outputs)
+    hidden_states = torch.randn(2, 4)
+    events = MagicMock()
+
+    shared_experts.forward_with_events(hidden_states, events)
+    current_ubatch_id = 1
+    shared_experts.forward_with_events(hidden_states, events)
+
+    current_ubatch_id = 0
+    assert shared_experts.output is outputs[0]
+    assert shared_experts._output[0] is None
+    assert shared_experts._output[1] is outputs[1]
+    current_ubatch_id = 1
+    assert shared_experts.output is outputs[1]
+    assert shared_experts._output == [None, None]
+
+
+def test_shared_experts_set_moe_config_updates_derived_state(monkeypatch):
+    shared_experts, _ = _build_shared_experts_wrapper(monkeypatch)
+    new_moe_config = SimpleNamespace(
+        hidden_dim=8,
+        in_dtype=torch.bfloat16,
+        swiglu_limit=2.0,
+        swiglu_alpha=1.5,
+        swiglu_beta=0.25,
+        is_sequence_parallel=True,
+        tp_group=SimpleNamespace(world_size=2, rank_in_group=1),
+    )
+
+    shared_experts._set_moe_config(new_moe_config)
+
+    assert shared_experts._moe_config is new_moe_config
+    assert shared_experts.hidden_size == 8
+    assert shared_experts.in_dtype is torch.bfloat16
+    assert shared_experts.swiglu_limit == 2.0
+    assert shared_experts.swiglu_alpha == 1.5
+    assert shared_experts.swiglu_beta == 0.25
+    assert shared_experts.weights_replicated is True
+
+
 @pytest.mark.parametrize("with_gate", [False, True])
 def test_shared_experts_part2_applies_optional_gate(with_gate):
     shared_experts_layer = SimpleNamespace(
@@ -748,7 +883,7 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
         expert_gate=_Gate() if with_gate else None,
     )
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
-    shared_experts.layer = shared_experts_layer
+    shared_experts._layer = shared_experts_layer
     hidden_states = torch.randn(3, 4)
     shared_gate_up = torch.randn(3, 4)
 
@@ -787,7 +922,7 @@ def test_shared_expert_parallel_mode_matches_activation_and_weight_layout(
 ):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.weights_replicated = weights_replicated
-    shared_experts.moe_config = SimpleNamespace(
+    shared_experts._moe_config = SimpleNamespace(
         is_sequence_parallel=native_sequence_parallel,
         tp_size=1,
         tp_rank=0,
@@ -812,7 +947,7 @@ def test_shared_expert_parallel_mode_matches_activation_and_weight_layout(
 def test_local_shared_expert_dp_pads_splits_gathers_and_unpads(num_tokens):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     tp_group = MagicMock(world_size=2, rank_in_group=1)
-    shared_experts.moe_config = SimpleNamespace(
+    shared_experts._moe_config = SimpleNamespace(
         tp_size=1,
         tp_rank=0,
         ep_size=2,
@@ -850,7 +985,7 @@ def test_flashcomm_tp_shared_expert_gathers_input_and_reduce_scatters_output(
 ):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     tp_group = MagicMock(world_size=2, rank_in_group=0)
-    shared_experts.moe_config = SimpleNamespace(tp_group=tp_group)
+    shared_experts._moe_config = SimpleNamespace(tp_group=tp_group)
     hidden_states = torch.ones(2, 4)
     gathered_states = torch.ones(4, 4)
     shared_out = torch.ones(num_shared_tokens, 4)
@@ -884,7 +1019,7 @@ def test_flashcomm_tp_shared_expert_gathers_input_and_reduce_scatters_output(
 
 def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
-    shared_experts.layer = SimpleNamespace(
+    shared_experts._layer = SimpleNamespace(
         gate_up_proj=SimpleNamespace(weight_scale=torch.ones(1)),
         down_proj=SimpleNamespace(weight_scale=torch.ones(1)),
     )
@@ -917,7 +1052,7 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     shared_experts.set_lora_context(lora_context)
 
     with patch.object(shared_experts_module.torch_npu, "npu_dynamic_quant", create=True) as dynamic_quant:
-        output = shared_experts.forward(hidden_states, events)
+        output = shared_experts._run_with_events(hidden_states, events)
 
     assert output is shared_out
     dynamic_quant.assert_not_called()
@@ -931,7 +1066,7 @@ def test_set_lora_context_updates_experts(has_shared_experts):
     nn.Module.__init__(runner)
     runner.routed_experts = SimpleNamespace()
     shared_experts = MagicMock() if has_shared_experts else None
-    runner.ascend_shared_experts = shared_experts
+    runner._shared_experts = shared_experts
     lora_context = object()
 
     runner.set_lora_context(lora_context)
@@ -950,7 +1085,10 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
     input_ids = torch.tensor([11, 22])
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
-    ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
+    shared_experts = SimpleNamespace(
+        forward_with_events=MagicMock(),
+        output=shared_out,
+    )
     routed_events = FusedMoEEvents(
         before_routed_experts=None,
         after_routed_experts=None,
@@ -961,7 +1099,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
     runner.routed_experts = SimpleNamespace(
         forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
     )
-    runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
+    runner._shared_experts = shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     current_stream = MagicMock()
 
@@ -983,7 +1121,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
-        ascend_shared_experts.forward.assert_called_once()
+        shared_experts.forward_with_events.assert_called_once()
     else:
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
@@ -991,4 +1129,4 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
             input_ids=input_ids,
         )
         assert result is routed_out
-        ascend_shared_experts.forward.assert_not_called()
+        shared_experts.forward_with_events.assert_not_called()
