@@ -114,23 +114,17 @@ class KVPoolWorker:
         if self.compress_ratios is None:
             self.compress_ratios = getattr(hf_config, "compress_ratios", None)
         self.use_compress = self.compress_ratios is not None
-        self.dp_rank = parallel_config.data_parallel_rank
-
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self._init_key_head_config(model_config, parallel_config)
         self._init_metadata(model_config, vllm_config, extra_config)
-        self._init_backend(parallel_config, extra_config)
+        self._init_backend(parallel_config)
         self._init_kv_events(vllm_config)
         self._init_state_vars()
         self._init_layerwise_config()
 
     def _init_parallelism_info(self, model_config, parallel_config) -> None:
-        self.local_rank = envs.LOCAL_RANK
-
-        self.use_mla = False
-        if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
-            self.use_mla = True
+        self.use_mla = getattr(model_config, "use_mla", False) is True
         self.use_sparse = hasattr(model_config.hf_text_config, "index_topk")
 
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -152,8 +146,7 @@ class KVPoolWorker:
         self._invalid_block_ids: set[int] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
-        self.backend = extra_config.get("backend", "mooncake")
-        self.backend_name = self.backend.lower()
+        self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
@@ -308,23 +301,19 @@ class KVPoolWorker:
         self.cache_coordinator = self._build_cache_coordinator(vllm_config)
         self.token_database.cache_coordinator = self.cache_coordinator
 
-    def _init_backend(self, parallel_config, extra_config) -> None:
-        backend = backend_map.get(self.backend.lower())
-        assert backend is not None
-        backend_path = backend.get("path")
-        backend_name = backend.get("name")
-        assert backend_path is not None and backend_name is not None
-        backend_module = importlib.import_module(backend_path)
-        real_backend = getattr(backend_module, backend_name)
+    def _init_backend(self, parallel_config) -> None:
+        backend = backend_map.get(self.backend_name)
+        if backend is None:
+            raise ValueError(f"Unsupported KV pool backend: {self.backend_name}")
+        backend_module = importlib.import_module(backend["path"])
+        real_backend = getattr(backend_module, backend["name"])
 
-        backend_kwargs = {}
         # lazy_init is enabled only for DSV4 compress models. The backend further
         # gates this based on hardware: Mooncake requires ASCEND_ENABLE_FABRIC_MEM=1
         # (A3 fabric memory), and Memcache requires device_sdma protocol.
-        backend_kwargs["lazy_init"] = self.use_compress
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config,
-            **backend_kwargs,
+            lazy_init=self.use_compress,
         )
 
     def _init_kv_events(self, vllm_config) -> None:

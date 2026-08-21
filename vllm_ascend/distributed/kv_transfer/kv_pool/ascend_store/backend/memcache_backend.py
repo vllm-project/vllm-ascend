@@ -104,14 +104,6 @@ class MemcacheBackend(Backend):
         # keep the old device_id=0/init_bm=False behavior here.
         return cls(parallel_config, local_rank=0, init_bm=False)
 
-    def init_store(self, init_bm: bool = True):
-        if self.store is not None:
-            return
-        self._init_bm = init_bm
-        self.store = self._setup_store()
-        self._store_initialized = True
-        self._register_buffers_if_needed()
-
     def set_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
