@@ -118,6 +118,13 @@ class TestACLGraphWrapper(TestBase):
         """Set up test fixtures"""
         super().setUp()
 
+        self.forward_context_available_patcher = patch(
+            "vllm_ascend.compilation.acl_graph.is_forward_context_available",
+            return_value=True,
+        )
+        self.forward_context_available_patcher.start()
+        self.addCleanup(self.forward_context_available_patcher.stop)
+
         # Mock VllmConfig
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
         self.mock_vllm_config.compilation_config = MagicMock()
@@ -197,6 +204,34 @@ class TestACLGraphWrapper(TestBase):
             ACLGraphWrapper(
                 runnable=self.mock_runnable, vllm_config=self.mock_vllm_config, runtime_mode=CUDAGraphMode.NONE
             )
+
+    @patch("vllm_ascend.compilation.acl_graph.is_forward_context_available", return_value=False)
+    @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_call_without_forward_context(
+        self,
+        mock_envs,
+        mock_current_platform,
+        mock_get_forward_context,
+        mock_is_forward_context_available,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+
+        result = wrapper("arg1", "arg2")
+
+        mock_is_forward_context_available.assert_called_once_with()
+        mock_get_forward_context.assert_not_called()
+        self.mock_runnable.assert_called_once_with("arg1", "arg2")
+        self.assertEqual(result, "test_output")
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")

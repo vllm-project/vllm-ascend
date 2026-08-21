@@ -55,6 +55,60 @@ def test_dflash2_composes_upstream_and_ascend_speculators():
     assert issubclass(dflash2.AscendDFlash2Speculator, dflash2.AscendDFlashSpeculator)
 
 
+@pytest.mark.parametrize(
+    ("enforce_eager", "expected_mode"),
+    [(True, "NONE"), (False, "FULL")],
+)
+def test_dflash2_honors_draft_enforce_eager(
+    monkeypatch,
+    enforce_eager,
+    expected_mode,
+):
+    dflash2 = pytest.importorskip("vllm_ascend.worker.v2.spec_decode.dflash2.speculator")
+    modes = []
+
+    def fake_init_cudagraph_manager(self, cudagraph_mode):
+        modes.append(cudagraph_mode.name)
+
+    monkeypatch.setattr(
+        dflash2.AscendDFlashSpeculator,
+        "init_cudagraph_manager",
+        fake_init_cudagraph_manager,
+    )
+    speculator = object.__new__(dflash2.AscendDFlash2Speculator)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+
+    dflash2.AscendDFlash2Speculator.init_cudagraph_manager(
+        speculator,
+        dflash2.CUDAGraphMode.FULL,
+    )
+
+    assert modes == [expected_mode]
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_dflash2_disables_compile_on_draft_instance_only(monkeypatch, enforce_eager):
+    dflash2 = pytest.importorskip("vllm_ascend.worker.v2.spec_decode.dflash2.speculator")
+    compile_module = SimpleNamespace(do_not_compile=False)
+    ordinary_module = SimpleNamespace()
+    draft_model = SimpleNamespace(modules=lambda: [compile_module, ordinary_module])
+
+    monkeypatch.setattr(
+        dflash2.AscendDFlashSpeculator,
+        "load_draft_model",
+        lambda *_args: draft_model,
+        raising=False,
+    )
+    speculator = object.__new__(dflash2.AscendDFlash2Speculator)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+
+    result = dflash2.AscendDFlash2Speculator.load_draft_model(speculator, object(), set())
+
+    assert result is draft_model
+    assert compile_module.do_not_compile is enforce_eager
+    assert not hasattr(ordinary_module, "do_not_compile")
+
+
 def test_dflash2_rejects_unsupported_fp64_sampling():
     dflash2 = pytest.importorskip("vllm_ascend.worker.v2.spec_decode.dflash2.speculator")
     speculator = SimpleNamespace(use_fp64_gumbel=True)

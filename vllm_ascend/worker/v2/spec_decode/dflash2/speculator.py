@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 import torch
-from vllm.config import VllmConfig
+from torch import nn
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
@@ -82,6 +83,32 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # The V2 runner passes the target model's graph mode here without
+        # consulting the draft-specific eager override.  Honor that override
+        # without disabling graphs for the target model.
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
+        super().init_cudagraph_manager(cudagraph_mode)
+
+    def load_draft_model(
+        self,
+        target_model: nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> nn.Module:
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        if self.speculative_config.enforce_eager:
+            # The draft ModelConfig currently inherits the target's compile
+            # setting, so speculative_config.enforce_eager alone does not stop
+            # independently decorated modules (notably CandidateSelector) from
+            # invoking torch.compile.  Disable compilation on this draft model
+            # instance only; changing the model classes globally would also
+            # affect unrelated DFlash and MRV1 instances in the same process.
+            for module in model.modules():
+                if hasattr(module, "do_not_compile"):
+                    module.do_not_compile = True
+        return model
 
     def _sample_path(
         self,
