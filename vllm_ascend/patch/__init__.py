@@ -191,35 +191,6 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 10. File: platform/patch_mamba_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
-#    Why:
-#       block size is set to 16 in vLLM which is not supported by Ascend.
-#    How：
-#       Set block size to 128 on npu.
-#    Related PR (if no, explain why):
-#       we'll fix this in vLLM soon.
-#    Future Plan:
-#       Remove this patch when vLLM merges the PR.
-#
-# ** 11. File: platform/patch_mamba_config_310.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
-#    Why:
-#       310P requires attention page size to be >= mamba page size and aligned to
-#       the kernel block alignment (128). The upstream verify_and_update_config
-#       default (block size 16) is not supported on 310P.
-#    How：
-#       On 310P, override verify_and_update_config to align mamba_block_size and
-#       attention block size to the 128-token kernel alignment, ensuring the
-#       attention page size is >= mamba page size. This is the 310P counterpart
-#       of patch_mamba_config.py (loaded only when `is_310p()` is True).
-#    Related PR (if no, explain why):
-#       No, 310P-specific kernel alignment requirement.
-#    Future Plan:
-#       Remove this patch once upstream supports 310P-aligned mamba block sizing.
-#
 # ** 12. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
