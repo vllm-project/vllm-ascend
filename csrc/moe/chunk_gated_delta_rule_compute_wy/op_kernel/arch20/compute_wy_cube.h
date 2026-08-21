@@ -22,6 +22,11 @@ using WyMmBiasType = MatmulType<TPosition::VECCALC, CubeFormat::ND, float>;
 
 using WyMatmulNoTrans = matmul::MatmulImpl<WyMmAType, WyMmBType, WyMmCType, WyMmBiasType>;
 using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, WyMmBiasType>;
+// Apply matmuls read A/B straight from UB — no UB->GM->L1 staging round-trip.
+using WyMmAUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
+using WyMmBUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
+using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType>;
+// (half-C UB output wedges the 310P cube — aicore timeout; keep C fp32)
 
 // GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
 // Doubling applies U/W separately so N <= MAX_HEAD (no stacked 2N-wide staging).
@@ -59,6 +64,7 @@ class WyCubeGemm {
     mmApplyW_.SetSubBlockIdx(0);
     mmApplyW_.Init(applyWTiling, pipe_);
 
+
     localWs_ = localWs;
     (void)localWsBytes;
 
@@ -79,6 +85,7 @@ class WyCubeGemm {
     mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetLocalWorkspace(localWs_);
+
 
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
     const uint64_t coreBase =
@@ -102,7 +109,6 @@ class WyCubeGemm {
       CopyHalfRowsToGm(aGm_, aUb[k0], WY_CUBE_CHUNK, kCur, aLda);
       CopyHalfRowsToGm(bGm_, bUb[k0], WY_CUBE_CHUNK, kCur, bLda);
       WaitMte3ToMte2();
-      PipeBarrier<PIPE_ALL>();
 
       // Re-configuring shapes between IterateAll calls wedges the 310P matmul;
       // full 64-slices keep Init's 64^3 config untouched.
@@ -134,7 +140,6 @@ class WyCubeGemm {
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     WaitMte3ToMte2();
-    PipeBarrier<PIPE_ALL>();
 
     mmSquare_.SetTensorA(aGm_, false);
     mmSquare_.SetTensorB(bGm_, false);
@@ -155,76 +160,116 @@ class WyCubeGemm {
     WaitMte3ToMte2();
   }
 
-  // Park/restore the fp32 A block in the per-core GM snapshot slot.
-  __aicore__ inline void SaveSnap(const LocalTensor<float> pUb)
+  // Generic UB-fed matmul C[m,n] = A[m,k] @ B[k,n] on mmApplyU_ (shapes re-set
+  // per call and restored to 64^3). Caller provides half operands in UB and a
+  // fp32 C target in UB; caller owns pre-call V->MTE3 ordering.
+  __aicore__ inline void ApplyGeneric(LocalTensor<float> cUb, LocalTensor<half> aUb, LocalTensor<half> bUb,
+                                      uint32_t m, uint32_t n, uint32_t k)
   {
-    WaitVToMte3();
-    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
-    DataCopy(snapGm_, pUb, params);
-    WaitMte3ToMte2();
-  }
-  __aicore__ inline void LoadSnap(LocalTensor<float> pUb)
-  {
-    // pUb (A) was last read/written by V or Cube; order that before the MTE2 write.
-    event_t evtV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-    SetFlag<HardEvent::V_MTE2>(evtV);
-    WaitFlag<HardEvent::V_MTE2>(evtV);
-    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
-    DataCopy(pUb, snapGm_, params);
-    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-    SetFlag<HardEvent::MTE2_V>(evt);
-    WaitFlag<HardEvent::MTE2_V>(evt);
+    mmApplyU_.SetOrgShape(static_cast<int>(m), static_cast<int>(n), static_cast<int>(k));
+    mmApplyU_.SetSingleShape(static_cast<int>(m), static_cast<int>(n), static_cast<int>(k));
+    mmApplyU_.SetTensorA(aUb, false);
+    mmApplyU_.SetTensorB(bUb, false);
+    mmApplyU_.IterateAll(cUb);
+    PipeBarrier<PIPE_ALL>();
+    mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
   }
 
-  // R = R + P @ R for one RHS block (U or W). Assumes P already on aGm_ (UploadP).
-  // halfScratch holds contiguous R half only (>= 64*min(nDim,64)) — do not reuse the
-  // UploadP buffer. floatScratch (>= 64*min(nDim,64) floats) holds C for Add.
-  // nDim > 64 is processed in <=64-wide column slices: a single matmul call with
-  // N=128 hangs the 310P aicore even with FixSplit-64 tiling, so no cube call may
-  // ever see a dimension above 64.
-  __aicore__ inline void GemmApplyAdd(LocalTensor<float> rUb, LocalTensor<half> halfScratch,
-                                      LocalTensor<float> floatScratch, uint32_t nDim, uint32_t rLda, bool useU)
+  // R[:, n0:n0+nCur] = T @ R_slice per <=64-wide column slice; tUbHalf is the
+  // resident half(T) in UB, bScratch receives the slice half-cast. REPLACES the
+  // slice (T includes the identity) — one matmul per slice finishes the solve.
+  __aicore__ inline void GemmApplyReplace(LocalTensor<float> rUb, LocalTensor<half> tUbHalf,
+                                          LocalTensor<half> bScratch, LocalTensor<float> floatScratch,
+                                          uint32_t nDim, uint32_t rLda, bool useU)
   {
+    // DESLICE: one full-width call per RHS — C is written straight into rUb
+    // (B was cast out to bScratch first, so no aliasing), removing both the
+    // second matmul call and the writeback pass. floatScratch unused here.
+    // Sliced solve: C goes to floatScratch (64x64 fp32, fits tmpBuf) and is
+    // written back into the rUb slice. Writing C straight into rUb (the
+    // "deslice" experiment) silently emits NaN on the m200 VECCALC-C path —
+    // discovered 2026-08-21 after the harness NaN-masking bug was fixed.
+    (void)useU;
     for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
       const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
-      CastFloatRowsToHalfContiguous(halfScratch, rUb[n0], WY_CUBE_CHUNK, nCur, rLda);
+      CastFloatRowsToHalfContiguous(bScratch, rUb[n0], WY_CUBE_CHUNK, nCur, rLda);
       WaitVToMte3();
-      CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nCur, nCur);
-      WaitMte3ToMte2();
-      PipeBarrier<PIPE_ALL>();
-
-      if (useU) {
-        if (nCur != WY_CUBE_CHUNK) {
-          mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
-          mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
-        }
-        mmApplyU_.SetTensorA(aGm_, false);
-        mmApplyU_.SetTensorB(bGm_, false);
-        mmApplyU_.IterateAll(floatScratch);
-      } else {
-        if (nCur != WY_CUBE_CHUNK) {
-          mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
-          mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
-        }
-        mmApplyW_.SetTensorA(aGm_, false);
-        mmApplyW_.SetTensorB(bGm_, false);
-        mmApplyW_.IterateAll(floatScratch);
+      if (nCur != applyShapeN_) {
+        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        applyShapeN_ = nCur;
       }
+      mmApplyW_.SetTensorA(tUbHalf, false);
+      mmApplyW_.SetTensorB(bScratch, false);
+      mmApplyW_.IterateAll(floatScratch);
       PipeBarrier<PIPE_ALL>();
-
-      // Cube wrote C[64,nCur] directly to floatScratch; now R[:, n0:n0+nCur] += C.
-      if (rLda == nCur && n0 == 0) {
-        Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nCur);
-      } else {
-        for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
-          Add(rUb[row * rLda + n0], rUb[row * rLda + n0], floatScratch[row * nCur], nCur);
-        }
-      }
+      Adds(rUb[n0], floatScratch, 0.0f, static_cast<uint64_t>(nCur), WY_CUBE_CHUNK,
+           {1, 1, static_cast<uint8_t>(rLda * sizeof(float) / 32),
+            static_cast<uint8_t>(nCur * sizeof(float) / 32)});
       PipeBarrier<PIPE_V>();
     }
   }
 
+
+  // C[64,nDim] (fp32) = T @ B; B is the ready-half beta*V the caller built in
+  // UB — skips the cast-out that GemmApplyReplace performs.
+  __aicore__ inline void GemmApplyPreCastB(LocalTensor<float> rUb, LocalTensor<half> tUbHalf, LocalTensor<half> bUb,
+                                           LocalTensor<half> bCompact, LocalTensor<float> floatScratch, uint32_t nDim,
+                                           uint32_t bLda)
+  {
+    // Same sliced C-scratch discipline as GemmApplyReplace (direct C into rUb
+    // NaNs); B is already half so each slice is a compact-copy, not a cast.
+    // The compaction is required: the lib reads B as a contiguous [64,nCur]
+    // block, and a column slice of a bLda-strided buffer is not contiguous
+    // (this exact miss broke every Dv=128 shape at cos~0.01).
+    for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
+      const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
+      if (n0 == 0 && bLda == nCur) {
+        // already contiguous
+      } else {
+        Muls(bCompact, bUb[n0], static_cast<half>(1), static_cast<uint64_t>(nCur), WY_CUBE_CHUNK,
+             {1, 1, static_cast<uint8_t>(nCur * sizeof(half) / 32),
+              static_cast<uint8_t>(bLda * sizeof(half) / 32)});
+        PipeBarrier<PIPE_V>();
+      }
+      const LocalTensor<half> bFeed = (n0 == 0 && bLda == nCur) ? bUb : bCompact;
+      WaitVToMte3();
+      if (nCur != applyShapeN_) {
+        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        applyShapeN_ = nCur;
+      }
+      mmApplyW_.SetTensorA(tUbHalf, false);
+      mmApplyW_.SetTensorB(bFeed, false);
+      mmApplyW_.IterateAll(floatScratch);
+      PipeBarrier<PIPE_ALL>();
+      Adds(rUb[n0], floatScratch, 0.0f, static_cast<uint64_t>(nCur), WY_CUBE_CHUNK,
+           {1, 1, static_cast<uint8_t>(bLda * sizeof(float) / 32),
+            static_cast<uint8_t>(nCur * sizeof(float) / 32)});
+      PipeBarrier<PIPE_V>();
+    }
+  }
+
+  // T = T + P @ T (64x64), operands fed straight from UB: aUb holds half(P),
+  // bScratch receives half(T) cast fresh each call. floatScratch holds C.
+  __aicore__ inline void GemmApplyAdd(LocalTensor<float> tUb, LocalTensor<half> aUb, LocalTensor<half> bScratch,
+                                      LocalTensor<float> floatScratch)
+  {
+    Cast(bScratch, tUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
+    PipeBarrier<PIPE_V>();
+    WaitVToMte3();
+    mmApplyU_.SetTensorA(aUb, false);
+    mmApplyU_.SetTensorB(bScratch, false);
+    mmApplyU_.IterateAll(floatScratch);
+    PipeBarrier<PIPE_ALL>();
+    Add(tUb, tUb, floatScratch, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
+    PipeBarrier<PIPE_V>();
+  }
+
  private:
+  uint32_t applyShapeN_{WY_CUBE_CHUNK};
+
   __aicore__ inline void WaitVToMte3() const
   {
     event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
@@ -245,9 +290,10 @@ class WyCubeGemm {
     if (srcLda == cols) {
       Cast(dst, src, RoundMode::CAST_NONE, rows * cols);
     } else {
-      for (uint32_t row = 0; row < rows; ++row) {
-        Cast(dst[row * cols], src[row * srcLda], RoundMode::CAST_NONE, cols);
-      }
+      // One strided Cast per call instead of a per-row scalar-issued loop.
+      Cast(dst, src, RoundMode::CAST_NONE, static_cast<uint64_t>(cols), static_cast<uint8_t>(rows),
+           {1, 1, static_cast<uint8_t>(cols * sizeof(half) / 32),
+            static_cast<uint8_t>(srcLda * sizeof(float) / 32)});
     }
     PipeBarrier<PIPE_V>();
   }
@@ -272,8 +318,8 @@ class WyCubeGemm {
   LocalTensor<uint8_t> localWs_;
   WyMatmulBTrans mmAttn_;
   WyMatmulNoTrans mmSquare_;
-  WyMatmulNoTrans mmApplyU_;
-  WyMatmulNoTrans mmApplyW_;
+  WyMatmulApplyUb mmApplyU_;
+  WyMatmulApplyUb mmApplyW_;
   GlobalTensor<half> aGm_;
   GlobalTensor<half> bGm_;
   GlobalTensor<float> snapGm_;

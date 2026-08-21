@@ -18,6 +18,10 @@ static constexpr int64_t FIXED_CHUNK = 64;
 // 310P dav_m200 UB is 192KB. K=V=128 fits since the kernel solves W and U in two
 // passes with a single fp32 RHS resident (~178KB peak); see compute_wy_kernel.h.
 static constexpr int64_t MAX_HEAD_DIM = 128;
+// 32KB: the matmul lib stages VECCALC operands through this workspace; a
+// 128-wide apply needs 16KB for B alone. 8KB (a prior shrink) silently
+// overruns at head dim 128 and emits NaN — K=64 fit exactly and stayed green,
+// which hid the breakage for a day.
 static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
 // Per-core GM staging for Cube inputs: A_half(64*MAX_HEAD_DIM) + B_half(64*MAX_HEAD_DIM).
 static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);
@@ -27,13 +31,14 @@ static constexpr uint32_t SNAP_BYTES = FIXED_CHUNK * FIXED_CHUNK * sizeof(float)
 static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES + SNAP_BYTES;
 
 static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, int64_t n, int64_t k, bool bTranspose,
-                                      TCubeTiling &out)
+                                      TCubeTiling &out, bool abFromUb = false)
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     matmul_tiling::MatmulApiTiling mm(ascendcPlatform);
-    mm.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
+    const auto abPos = abFromUb ? matmul_tiling::TPosition::VECCALC : matmul_tiling::TPosition::GM;
+    mm.SetAType(abPos, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
                 false);
-    mm.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
+    mm.SetBType(abPos, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
                 bTranspose);
     mm.SetCType(matmul_tiling::TPosition::VECCALC, matmul_tiling::CubeFormat::ND,
                 matmul_tiling::DataType::DT_FLOAT);
@@ -116,13 +121,14 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    // mmApplyU / mmApplyW: P[64,64] @ R[64,<=64] column slices.
-    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyU) !=
-        ge::GRAPH_SUCCESS) {
+    // mmApplyU / mmApplyW: P/T[64,64] @ R[64,<=64] column slices, operands fed
+    // straight from UB (no GM staging round-trip).
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyU,
+                       /*abFromUb=*/true) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW) !=
-        ge::GRAPH_SUCCESS) {
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW,
+                       /*abFromUb=*/true) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
 
