@@ -254,7 +254,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
 ::::{tab-item} A3 series
 :sync: A3
 
-- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
+- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (128GB × 8) .
 
 Run the following script to execute online inference.
 
@@ -381,7 +381,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 **High-Throughput Scenario (DP8 TP4)**
 
-- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for high-throughput scenarios.
+- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (128GB × 8) for high-throughput scenarios.
 
 Run the following scripts on two nodes respectively.
 
@@ -1053,7 +1053,7 @@ Once the preparation is done, you can start the server with the following comman
 
 #### 5.3.2 Prefill-Decode Disaggregation (A3 series)
 
-The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB × 16): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
+The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
 
 1. prepare the script `run_dp_template.sh` on each node.
 
