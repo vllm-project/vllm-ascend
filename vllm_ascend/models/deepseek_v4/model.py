@@ -823,8 +823,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
-            if spec_config is not None
-            and (spec_config.use_eagle() or spec_config.uses_draft_model())
+            if spec_config is not None and (spec_config.use_eagle() or spec_config.uses_draft_model())
             else None
         )
 
