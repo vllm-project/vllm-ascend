@@ -66,9 +66,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
-    # DEPRECATED: use additional_config.msmonitor_use_daemon instead.
-    "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.
     # This option is enabled by default. MLAPO can improve performance, but
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
