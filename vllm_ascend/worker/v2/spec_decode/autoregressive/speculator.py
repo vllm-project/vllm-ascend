@@ -22,7 +22,6 @@ from copy import copy
 from typing import Any, cast
 
 import torch
-import vllm.v1.worker.gpu.spec_decode.speculator as vllm_speculator
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -40,32 +39,13 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata_wrapper,
+    build_draft_attn_metadata_factory,
+)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward MLA rotary positions for the block.
-
-    MLA reads positions inside build_decode_metadata for cos/sin; the flat
-    super() path doesn't forward them. Must run inside build_attn_metadata_wrapper().
-    TODO:This field is removed when the external cos/sin solution is removed from the MLA.
-    """
-    raw = vllm_speculator.build_attn_metadata  # cache
-
-    def build_attn_metadata(*args, **kwargs):
-        kwargs["positions"] = positions[:pad]
-        kwargs["is_prefilling"] = is_prefilling
-        return raw(*args, **kwargs)
-
-    try:
-        vllm_speculator.build_attn_metadata = build_attn_metadata
-        yield
-    finally:
-        vllm_speculator.build_attn_metadata = raw  # restore
 
 
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):

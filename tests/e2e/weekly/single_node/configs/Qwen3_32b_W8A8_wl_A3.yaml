@@ -110,7 +110,7 @@ test_cases:
       OMP_PROC_BIND: "false"
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
       TASK_QUEUE_ENABLE: "1"
-    server_cmd: *server_perf_cmd
+    server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"
       - "36784"
@@ -129,7 +129,7 @@ test_cases:
       OMP_PROC_BIND: "false"
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
       TASK_QUEUE_ENABLE: "1"
-    server_cmd: *server_perf_cmd
+    server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"
       - "36784"
@@ -140,5 +140,3 @@ test_cases:
       - "--additional-config"
       - '{"enable_weight_nz_layout":true}'
       - "--enforce-eager"
-    benchmarks:
-      <<: *benchmarks_perf1

@@ -807,7 +807,6 @@ class TestAscendSFAImpl(TestBase):
         mock_tp,
     ):
         mock_tp.world_size = 1
-        mock_tp.rank_in_group = 0
         mock_tp.device_group = MagicMock()
 
         mock_enable_sp.return_value = False
