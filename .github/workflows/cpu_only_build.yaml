@@ -43,6 +43,8 @@ jobs:
   build:
     name: Build and smoke-test CPU image
     runs-on: linux-amd64-cpu-4
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
     timeout-minutes: 90
     steps:
       - name: Checkout vllm-ascend
