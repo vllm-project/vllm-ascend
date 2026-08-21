@@ -3809,7 +3809,24 @@ class NPUModelRunner(GPUModelRunner):
             if name in buffer_dict:
                 buffer_dict[name].data.copy_(cpu_tensor)
                 cnt += 1
+        unmatched_ckpt_keys = [n for n in sd if n not in param_dict and n not in buffer_dict]
+        model_keys = list(param_dict) + list(buffer_dict)
+        uncovered_model_keys = [n for n in model_keys if n not in sd]
         logger.info("[restore model] [%s] replace success %s / %s", label, cnt, len(sd.items()))
+        if unmatched_ckpt_keys:
+            logger.warning(
+                "[restore model] [%s] unmatched ckpt keys (%d): %s",
+                label,
+                len(unmatched_ckpt_keys),
+                unmatched_ckpt_keys,
+            )
+        if uncovered_model_keys:
+            logger.warning(
+                "[restore model] [%s] model keys not in ckpt (%d): %s",
+                label,
+                len(uncovered_model_keys),
+                uncovered_model_keys[:50] + (["..."] if len(uncovered_model_keys) > 50 else []),
+            )
         logger.info(
             "[restore model] [%s] restore model ckpt from %s, elapse %.4f s",
             label,
