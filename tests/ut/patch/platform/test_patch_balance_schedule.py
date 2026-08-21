@@ -20,11 +20,11 @@ What is guarded here (everything reachable from CPU UT):
 * the module-level class swaps actually took effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
-* the 4 platform deltas remain present in ``schedule()`` (intent lock);
+* the 5 platform deltas remain present in ``schedule()`` (intent lock);
 * the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
   at vllm-ascend's pinned vLLM release tag (read from
   ``.github/vllm-release-tag.commit`` -- the same file CI uses), modulo exactly
-  those 4 deltas. Reading the tag from the pin file means a pin advance
+  those 5 deltas. Reading the tag from the pin file means a pin advance
   auto-flips this guard to the new tag until the copy is re-synced.
 
 What is NOT guarded here (structurally unreachable without a real engine):
@@ -249,13 +249,13 @@ def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
 
 
 def _schedule_body_ast(source: str) -> str:
-    """Canonical AST dump of a ``schedule`` method body with the 4 platform
+    """Canonical AST dump of a ``schedule`` method body with the 5 platform
     deltas stripped, so the remainder can be compared verbatim against the
     pinned release tag's ``schedule()``. AST-based on purpose: it is blind to
     comments and whitespace, so the only differences that surface are real code
     drift (not the escape-quoting of a comment or reformatting).
 
-    The 3 deltas removed:
+    The 5 deltas removed:
       * delta 1 -- the disabled-path early return (``if not
         self._balance_enabled: ... super().schedule(...)``);
       * delta 2 -- the ``balance_flag`` gate (``max(t.item() for t in
@@ -265,6 +265,8 @@ def _schedule_body_ast(source: str) -> str:
         ``assert request_queue is not None``. Both are stripped so the two
         bodies align.
       * delta 4 -- the consumer-only partial-group cache lookup gate.
+      * delta 5 -- the #48245/#50297 stale-output admission gate and
+        reliable-delivery preemption flag.
     """
     tree = ast.parse(textwrap.dedent(source))
     func = next(
@@ -274,6 +276,12 @@ def _schedule_body_ast(source: str) -> str:
     assert func is not None, "no schedule() in source"
 
     class _BalanceDeltaStripper(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call):  # noqa: N802
+            self.generic_visit(node)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "_preempt_request":
+                node.keywords = [kw for kw in node.keywords if kw.arg != "drop_stale_output"]
+            return node
+
         def visit_BoolOp(self, node: ast.BoolOp):  # noqa: N802
             self.generic_visit(node)
             node.values = [value for value in node.values if "_use_consumer_partial_group_hits" not in ast.dump(value)]
@@ -289,6 +297,9 @@ def _schedule_body_ast(source: str) -> str:
                 return None
             # delta 3 (ours): if request_queue is None: break.
             if "request_queue" in test and "None" in test and "Is" in test:
+                return None
+            # delta 5: wait for deliverable stale output before resuming.
+            if "num_stale_output_tokens" in test and "drop_stale_output" in test:
                 return None
             return self.generic_visit(node)
 
@@ -366,13 +377,13 @@ def test_schedule_signature_matches_installed_vllm():
 
 
 # ---------------------------------------------------------------------------
-# 1b. the 3 balance deltas remain present in schedule() (intent lock)
+# 1b. the platform deltas remain present in schedule() (intent lock)
 # ---------------------------------------------------------------------------
 
 
 def test_balance_deltas_present_in_schedule():
     """The whole point of copying schedule() is to inject the balance logic.
-    If a future re-sync against the pinned tag drops any of the 3 deltas,
+    If a future re-sync against the pinned tag drops any of the 5 deltas,
     balance silently stops working -- this locks their presence in the source."""
     src = inspect.getsource(BalanceScheduler.schedule)
 
@@ -390,6 +401,10 @@ def test_balance_deltas_present_in_schedule():
     # delta 4: producer schedulers never use the consumer-only per-group lookup.
     assert "self._use_consumer_partial_group_hits" in src
 
+    # delta 5: stale output is drained or dropped according to connector need.
+    assert "request.num_stale_output_tokens" in src
+    assert "drop_stale_output=self.requires_kv_delivery" in src
+
 
 # ---------------------------------------------------------------------------
 # 1c. copied schedule() body stays verbatim with the pinned release tag
@@ -399,7 +414,7 @@ def test_balance_deltas_present_in_schedule():
 def test_schedule_body_matches_pinned_release_tag():
     """The copied ``schedule()`` body must stay a verbatim copy of the
     ``schedule()`` at vllm-ascend's pinned vLLM release tag, modulo exactly the
-    3 balance deltas.
+    5 platform deltas.
 
     The tag is read dynamically from ``.github/vllm-release-tag.commit`` -- the
     same file CI uses to pick the tag, NOT a hardcoded string or a design doc
@@ -422,9 +437,10 @@ def test_schedule_body_matches_pinned_release_tag():
     theirs = _schedule_body_ast(pinned_src)
     assert ours == theirs, (
         f"BalanceScheduler.schedule body drifted from the pinned release tag "
-        f"({tag}) beyond the 3 balance deltas. Re-sync the copy against "
+        f"({tag}) beyond the 5 platform deltas. Re-sync the copy against "
         f"{tag} and re-apply only: (1) disabled-path early return, "
-        f"(2) balance_flag gate, (3) if request_queue is None: break."
+        f"(2) balance_flag gate, (3) if request_queue is None: break, "
+        f"(4) producer partial-group lookup gate, (5) stale-output handling."
     )
 
 
@@ -513,6 +529,8 @@ def test_module_level_swaps_take_effect():
 _SCHEDULER_METHOD_SEAMS = [
     "schedule",  # super().schedule() on the disabled path
     "_preempt_request",
+    "update_from_output",
+    "reset_prefix_cache",
     "_try_schedule_encoder_inputs",
     "_mamba_block_aligned_split",
     "_select_waiting_queue_for_scheduling",
