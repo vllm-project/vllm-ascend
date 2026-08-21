@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shlex
@@ -171,7 +172,6 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
 
     feature_envs = {
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
         "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
@@ -180,6 +180,15 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
         values = [str(command.env.get(env_key, "0")) for command in commands]
         if any(value not in ("0", "", "false", "False") for value in values):
             features.append(feature_name)
+    for command in commands:
+        for flag in ("--additional-config", "--additional_config"):
+            try:
+                config = json.loads(command.cmd[command.cmd.index(flag) + 1])
+            except (ValueError, IndexError, json.JSONDecodeError):
+                continue
+            if config.get("enable_flashcomm1"):
+                features.append("flashcomm1")
+                return features
     return features
 
 

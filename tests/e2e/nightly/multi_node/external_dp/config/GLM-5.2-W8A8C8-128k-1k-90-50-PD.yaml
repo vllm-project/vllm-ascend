@@ -63,7 +63,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       HCCL_BUFFSIZE: "400"
     server_cmd_template:
       - --host
@@ -90,7 +89,7 @@ templates:
       - --max-model-len
       - "202752"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}'
+      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true,"enable_flashcomm1":true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -127,7 +126,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       HCCL_BUFFSIZE: "400"
     server_cmd_template:
       - --host
@@ -154,7 +152,7 @@ templates:
       - --max-model-len
       - "202752"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}'
+      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true,"enable_flashcomm1":true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code

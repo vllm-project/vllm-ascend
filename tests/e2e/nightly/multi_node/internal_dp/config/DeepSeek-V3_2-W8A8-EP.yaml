@@ -30,7 +30,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -52,8 +51,8 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true}'
-          --tokenizer-mode deepseek_v32 
+          --additional-config '{"enable_cpu_binding":false,"enable_dsa_cp":true,"enable_flashcomm1":true}'
+          --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -75,7 +74,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -98,8 +96,8 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":false}'
-          --tokenizer-mode deepseek_v32 
+          --additional-config '{"enable_cpu_binding":false,"enable_dsa_cp":false,"enable_flashcomm1":true}'
+          --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",

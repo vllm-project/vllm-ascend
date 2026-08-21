@@ -149,7 +149,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
@@ -167,7 +166,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true,"enable_flashcomm1":true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -184,7 +183,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
     --host 0.0.0.0 \
@@ -202,7 +200,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true,"enable_flashcomm1":true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -222,7 +220,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
@@ -241,7 +238,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true,"enable_flashcomm1":true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -261,9 +258,9 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **Key environment variables:**
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm optimization to reduce communication overhead (mainly benefits the prefill path). With FlashComm enabled, `layer_sharding` cannot include `o_proj`.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables the MLA preprocess fusion operator (MlaPreprocessOperation). Enabled by default for w8a8 models — significantly improves Decode performance but consumes more NPU memory; set `VLLM_ASCEND_ENABLE_MLAPO=0` if memory is a priority. Recommended for w8a8; w4a8 may not benefit.
 - `VLLM_ASCEND_BALANCE_SCHEDULING=1`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler.
+- `additional_config.enable_flashcomm1=true`: Enables FlashComm optimization to reduce communication overhead (mainly benefits the prefill path). With FlashComm enabled, `layer_sharding` cannot include `o_proj`.
 
 **Performance tuning notes for single-node:**
 
@@ -305,9 +302,8 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_BUFFSIZE=200
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 --additional-config '{"enable_flashcomm1":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -348,9 +344,8 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_BUFFSIZE=200
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 --additional-config '{"enable_flashcomm1":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -397,7 +392,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_BUFFSIZE=200
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
@@ -417,7 +411,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true,"enable_flashcomm1":true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -442,7 +436,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_BUFFSIZE=200
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
@@ -464,7 +457,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true,"enable_flashcomm1":true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -553,7 +546,6 @@ export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --host 0.0.0.0 \
@@ -575,7 +567,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"multistream_overlap_shared_expert": true}' \
+--additional-config '{"multistream_overlap_shared_expert": true,"enable_flashcomm1":true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -602,7 +594,6 @@ export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --host 0.0.0.0 \
@@ -626,7 +617,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"multistream_overlap_shared_expert": true}' \
+--additional-config '{"multistream_overlap_shared_expert": true,"enable_flashcomm1":true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -783,7 +774,6 @@ Before you start, please
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -800,7 +790,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true,"enable_flashcomm1":true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -853,7 +843,6 @@ Before you start, please
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -870,7 +859,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true,"enable_flashcomm1":true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -1388,7 +1377,7 @@ The tables below provide recommended parameter configurations for different depl
 |`--enable-prefix-caching`|Optional|Enable|Optional|Reuses KV cache for shared prefixes (e.g., system prompts). Improves throughput when cache hit rate is high but may reduce available KV cache memory.|
 |`num_speculative_tokens`|3|3|3|MTP speculation count. Higher values improve decode throughput at the cost of memory for draft model KV cache. Use `1` on prefill nodes in PD mode.|
 |`VLLM_ASCEND_ENABLE_MLAPO`|1 (w8a8)|1 (w8a8)|0 or 1|Enables MLA fusion on w8a8 models. Improves decode performance but consumes more NPU memory. Disable for long-context if memory is insufficient.|
-|`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1|1|Communication optimization. Recommended in all scenarios unless layer_sharding includes o_proj.|
+|`additional_config.enable_flashcomm1`|1|1|1|Communication optimization. Recommended in all scenarios unless layer_sharding includes o_proj.|
 
 ### 9.2 Tuning Guidelines
 

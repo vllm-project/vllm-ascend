@@ -59,7 +59,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "2048"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0
@@ -151,7 +150,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false},"enable_flashcomm1":false}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -205,7 +204,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false},"enable_flashcomm1":false}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",

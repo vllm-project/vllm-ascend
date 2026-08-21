@@ -16,8 +16,6 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-import os
-from unittest.mock import patch
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner
 
@@ -39,7 +37,6 @@ def test_qwen3_5_27b_distributed_mp_tp4():
         del vllm_model
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
     example_prompts = [
         "Hello, my name is",
@@ -57,6 +54,7 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
         max_model_len=4096,
         gpu_memory_utilization=0.90,
         distributed_executor_backend="mp",
+        additional_config={"enable_flashcomm1": True},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": [4, 8, 12, 16],

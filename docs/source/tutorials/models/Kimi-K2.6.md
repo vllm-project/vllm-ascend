@@ -146,7 +146,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=600
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -170,7 +169,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --additional-config '{"enable_balance_scheduling": true}' \
+    --additional-config '{"enable_balance_scheduling": true,"enable_flashcomm1":true}' \
     --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
@@ -322,7 +321,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -347,7 +345,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -404,7 +402,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -429,7 +426,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -613,8 +610,8 @@ Parameter descriptions:
 
     Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `additional_config.enable_flashcomm1=true`: enables the communication optimization function on the prefill nodes.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 

@@ -11,7 +11,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "800"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
@@ -47,7 +46,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"eplb_config": {"dynamic_eplb": true},"ascend_compilation_config": {"enable_static_kernel": false}}'
+      - '{"eplb_config": {"dynamic_eplb": true},"ascend_compilation_config": {"enable_static_kernel": false},"enable_flashcomm1":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
@@ -77,7 +76,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1300"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
@@ -113,7 +111,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"eplb_config": {"dynamic_eplb": true},"ascend_compilation_config": {"enable_static_kernel": false}}'
+      - '{"eplb_config": {"dynamic_eplb": true},"ascend_compilation_config": {"enable_static_kernel": false},"enable_flashcomm1":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
@@ -144,7 +142,6 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       HCCL_BUFFSIZE: "1500"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM_ASCEND_BALANCE_SCHEDULING: "0"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
@@ -182,6 +179,8 @@ test_cases:
       - "data"
       - "--speculative-config"
       - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
+      - --additional-config
+      - '{"enable_flashcomm1":true}'
     benchmarks:
       acc:
         case_type: accuracy

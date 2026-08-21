@@ -54,7 +54,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -92,7 +91,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true}'
+      - '{"enable_cpu_binding": true,"enable_flashcomm1":true}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -123,7 +122,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -161,7 +159,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true}'
+      - '{"enable_cpu_binding": true,"enable_flashcomm1":true}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb

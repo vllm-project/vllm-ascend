@@ -159,7 +159,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
@@ -235,7 +234,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
@@ -273,6 +271,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
          "enforce_eager": true
       }' \
       --additional-config '{
+         "enable_flashcomm1":true,
          "ascend_compilation_config":{
             "enable_npugraph_ex":true,
             "enable_static_kernel":false
@@ -314,7 +313,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --safetensors-load-strategy 'prefetch' \
@@ -341,7 +339,8 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --reasoning-parser deepseek_v4 \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
       --additional-config '
-        {"ascend_compilation_config":{
+        {"enable_flashcomm1":true,
+        "ascend_compilation_config":{
             "enable_npugraph_ex":true,
             "enable_static_kernel":false
             },
@@ -371,7 +370,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --safetensors-load-strategy 'prefetch' \
@@ -399,7 +397,8 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --reasoning-parser deepseek_v4 \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
       --additional-config '
-        {"ascend_compilation_config":{
+        {"enable_flashcomm1":true,
+        "ascend_compilation_config":{
             "enable_npugraph_ex":true,
             "enable_static_kernel":false
             },
@@ -425,7 +424,7 @@ Key Parameter Descriptions:
 - `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
+- `additional_config.enable_flashcomm1=true` enables the FlashComm communication optimization.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -604,7 +603,6 @@ Before you start, please:
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -633,7 +631,7 @@ Before you start, please:
             --block-size 128 \
             --enforce-eager \
             --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_flashcomm1":true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -675,7 +673,6 @@ Before you start, please:
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -704,7 +701,7 @@ Before you start, please:
             --block-size 128 \
             --enforce-eager \
             --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_flashcomm1":true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -972,7 +969,6 @@ Before you start, please:
         sysctl -w kernel.numa_balancing=0
         sysctl kernel.sched_migration_cost_ns=50000
 
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
@@ -1002,7 +998,7 @@ Before you start, please:
             --enforce-eager \
             --no-enable-prefix-caching \
             --speculative-config '{"num_speculative_tokens": 1, "method":"mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_dsa_cp":true,"enable_flashcomm1":true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -1166,8 +1162,8 @@ Key Parameter Descriptions:
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
 - `enable_dsa_cp: true` enables DSA context parallelism on prefill nodes. DSA-CP and FlashComm1 must be enabled separately when both are required.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: enables the Fused MC2 fusion operator to accelerate communication on prefill nodes (A3 series).
+- `additional_config.enable_flashcomm1=true`: enables the communication optimization function on the prefill nodes.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
