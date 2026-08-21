@@ -1149,8 +1149,14 @@
 #       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
 #       The patch is guarded with contextlib.suppress(ImportError) so it does
 #       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
+#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
+#       removing running_mean/running_var. That commit is included in the target
+#       16cfe728, so the patch is gated to v0.27.1 only via vllm_version_is;
+#       on newer versions FusedInputNorm.forward is used as-is (multiply-add).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50411
+#       https://github.com/vllm-project/vllm/pull/51734
 #    Future Plan:
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
