@@ -98,7 +98,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
         return replace(
-            self.attn_vllm_config,
+            self.vllm_config,
             model_config=self.draft_model_config,
         )
 
