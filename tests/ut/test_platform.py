@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,12 +10,37 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.platform import NPUPlatform, _refresh_hybrid_mamba_cache_config
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
 )
+
+
+@pytest.mark.parametrize("is_hybrid", [False, True])
+def test_refresh_hybrid_mamba_cache_config_after_quantization(
+    monkeypatch,
+    is_hybrid,
+):
+    from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
+
+    refresh_config = MagicMock()
+    monkeypatch.setattr(
+        HybridAttentionMambaModelConfig,
+        "verify_and_update_config",
+        refresh_config,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(is_hybrid=is_hybrid),
+    )
+
+    _refresh_hybrid_mamba_cache_config(vllm_config)
+
+    if is_hybrid:
+        refresh_config.assert_called_once_with(vllm_config)
+    else:
+        refresh_config.assert_not_called()
 
 
 class TestNPUPlatform(TestBase):
