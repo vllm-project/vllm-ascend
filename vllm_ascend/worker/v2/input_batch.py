@@ -71,6 +71,7 @@ class AscendInputBatch(InputBatch):
     seq_lens_np: np.ndarray
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
+    is_dummy: bool = False
 
     @classmethod
     def make_dummy(
@@ -109,4 +110,5 @@ class AscendInputBatch(InputBatch):
             **asdict(input_batch),
             seq_lens_np=seq_lens_np,
             attn_state=AscendAttentionState.DecodeOnly,
+            is_dummy=True,
         )

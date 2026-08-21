@@ -17,6 +17,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from dataclasses import dataclass
+
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -25,6 +27,18 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+
+
+@dataclass(frozen=True)
+class AscendPCPAttentionContext:
+    """Canonical global PCP view for one attention step."""
+
+    # The global batch and its associated metadata, used to build DSA attention metadata.
+    global_batch: AscendInputBatch
+    global_block_tables: tuple[torch.Tensor, ...]
+    global_slot_mappings: torch.Tensor
+    hidden_restore_idx: torch.Tensor
+    local_num_tokens_after_padding: int
 
 
 class AscendPCPManager(PCPManager):
@@ -97,3 +111,41 @@ class AscendPCPManager(PCPManager):
             - (local_batch.num_draft_tokens_per_req if local_batch.num_draft_tokens_per_req is not None else 0),
         )
         return local_batch
+
+    def build_attention_context(
+        self,
+        input_batch: AscendInputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+    ) -> AscendPCPAttentionContext:
+        """Build the PCP context consumed by attention metadata builders."""
+        if input_batch.is_dummy:
+            local_num_tokens_after_padding = input_batch.num_tokens
+            restore_start = self.pcp_rank * local_num_tokens_after_padding
+            return AscendPCPAttentionContext(
+                global_batch=input_batch,
+                global_block_tables=block_tables,
+                global_slot_mappings=slot_mappings.view(
+                    slot_mappings.shape[0],
+                    self.pcp_world_size,
+                    local_num_tokens_after_padding,
+                )[:, self.pcp_rank],
+                hidden_restore_idx=torch.arange(
+                    restore_start,
+                    restore_start + local_num_tokens_after_padding,
+                    device=self.device,
+                ),
+                local_num_tokens_after_padding=local_num_tokens_after_padding,
+            )
+
+        global_batch = self._global_batch
+        return AscendPCPAttentionContext(
+            global_batch=global_batch,
+            global_block_tables=self._block_tables.gather_block_tables(
+                global_batch.idx_mapping,
+                global_batch.num_reqs_after_padding,
+            ),
+            global_slot_mappings=self._global_batch_slot_mappings[:, : global_batch.num_tokens],
+            hidden_restore_idx=self._hidden_restore_idx,
+            local_num_tokens_after_padding=input_batch.num_tokens_after_padding,
+        )
