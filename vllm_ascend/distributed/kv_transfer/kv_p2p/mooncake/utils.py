@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -28,19 +28,19 @@ if TYPE_CHECKING:
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[Any]:
     """Create a Mooncake ROUTER or REQ socket and clean up its context."""
-    if socket_type not in (zmq.ROUTER, zmq.REQ):
+    if socket_type not in (zmq.ROUTER, zmq.REQ):  # type: ignore[attr-defined]
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    context: zmq.Context | None = None
+    context: Any | None = None
     try:
         context = zmq.Context()  # type: ignore[attr-defined]
         yield make_zmq_socket(
             ctx=context,
             path=addr,
             socket_type=socket_type,
-            bind=socket_type == zmq.ROUTER,
+            bind=socket_type == zmq.ROUTER,  # type: ignore[attr-defined]
         )
     finally:
         if context is not None:
@@ -141,24 +141,28 @@ def collect_configured_register_regions(
     )
 
 
+_KT = TypeVar("_KT")
+_VT = TypeVar("_VT")
+
+
 @dataclass
-class SizedDict(OrderedDict):
+class SizedDict(OrderedDict[_KT, _VT]):
     """Insertion-ordered mapping with a bounded number of entries."""
 
-    def __init__(self, max_size=16000, *args, **kwargs):
+    def __init__(self, max_size: int = 16000, *args: Any, **kwargs: Any) -> None:
         self.max_size = max_size
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: _KT, value: _VT) -> None:
         super().__setitem__(key, value)
         if len(self) > self.max_size:
             self.popitem(last=False)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: _KT) -> _VT:
         try:
             return super().__getitem__(key)
         except KeyError:
-            value: dict[int, list[int]] = {}
+            value = cast(_VT, {})
             self[key] = value
             return value
 

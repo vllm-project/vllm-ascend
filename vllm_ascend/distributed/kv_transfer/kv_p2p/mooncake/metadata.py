@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Metadata types for Mooncake KV transfer connectors."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,30 +40,31 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
 
     def __post_init__(self) -> None:
         num_layers = len(self.layer_names)
-        per_layer_fields = {
-            "group_indices": self.group_indices,
-            "spec_indices": self.spec_indices,
-            "kv_caches_base_addr": self.kv_caches_base_addr,
-            "block_strides": self.block_strides,
-            "block_lens": self.block_lens,
-            "block_shapes": self.block_shapes,
-            "block_size_scales": self.block_size_scales,
-        }
-        for field_name, values in per_layer_fields.items():
+        per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
+            ("group_indices", self.group_indices),
+            ("spec_indices", self.spec_indices),
+            ("kv_caches_base_addr", self.kv_caches_base_addr),
+            ("block_strides", self.block_strides),
+            ("block_lens", self.block_lens),
+            ("block_shapes", self.block_shapes),
+            ("block_size_scales", self.block_size_scales),
+        )
+        for field_name, values in per_layer_fields:
             if len(values) != num_layers:
                 raise ValueError(
                     f"Mooncake transfer metadata field {field_name!r} has {len(values)} layers, expected {num_layers}."
                 )
 
+        nested_per_layer_fields: tuple[tuple[str, Sequence[Sequence[object]]], ...] = (
+            ("block_strides", self.block_strides),
+            ("block_lens", self.block_lens),
+            ("block_shapes", self.block_shapes),
+            ("block_size_scales", self.block_size_scales),
+        )
         for layer_index, layer_name in enumerate(self.layer_names):
             num_addrs = len(self.kv_caches_base_addr[layer_index])
-            for field_name in (
-                "block_strides",
-                "block_lens",
-                "block_shapes",
-                "block_size_scales",
-            ):
-                values = per_layer_fields[field_name][layer_index]
+            for field_name, per_layer_values in nested_per_layer_fields:
+                values = per_layer_values[layer_index]
                 if len(values) != num_addrs:
                     raise ValueError(
                         f"Mooncake transfer metadata for layer {layer_name!r} "
