@@ -241,6 +241,57 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
         self.assertIs(fused_experts_input.lora_context, lora_context)
 
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")
+    def test_fused_placeholders_follow_activation_device(self, mock_select_experts, mock_extra_ctx, mock_ascend):
+        tokens = 4
+        device = torch.device("meta")
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.empty(
+            self.num_experts,
+            2 * self.intermediate_size,
+            self.hidden_size,
+            dtype=torch.int8,
+            device=device,
+        )
+        layer.w2_weight = torch.empty(
+            self.num_experts,
+            self.hidden_size,
+            self.intermediate_size,
+            dtype=torch.int8,
+            device=device,
+        )
+        layer.fused_w1_scale = torch.empty(1, dtype=torch.int64, device=device)
+        layer.fused_w2_scale = torch.empty(1, dtype=torch.int64, device=device)
+        layer.swiglu_limit = 0.0
+
+        x = torch.empty(tokens, self.hidden_size, dtype=torch.bfloat16, device=device)
+        router_logits = torch.empty(tokens, self.num_experts, dtype=torch.float32, device=device)
+        topk_weights = torch.empty(tokens, 2, dtype=torch.float32, device=device)
+        topk_ids = torch.empty(tokens, 2, dtype=torch.int64, device=device)
+
+        mock_select_experts.return_value = (topk_weights, topk_ids)
+        mock_comm = Mock()
+        mock_comm.fused_experts.return_value = x
+        mock_extra_ctx.moe_comm_method = mock_comm
+        mock_extra_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        mock_ascend.return_value = MagicMock(enable_fused_mc2=1)
+        self.quant_method.multistream_overlap_gate = False
+
+        self.quant_method.apply(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=2,
+            renormalize=True,
+            num_experts=self.num_experts,
+        )
+
+        weights = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"].weights
+        self.assertEqual(weights.w1_scale_bias[0].device, device)
+        self.assertEqual(weights.w2_scale_bias[0].device, device)
+
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
     def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):

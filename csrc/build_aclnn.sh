@@ -122,6 +122,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
+        "dispatch_ffn_combine"
         "recurrent_gated_delta_rule"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"

@@ -71,6 +71,7 @@ private:
     GM_ADDR outGM_;
     GM_ADDR gmExpertTokenNums_;
     GM_ADDR workspaceGM_;
+    GM_ADDR mc2InitTiling_;
 
     GM_ADDR moeInitRoutingQuantV2Scale = nullptr;
     GM_ADDR moeInitRoutingQuantV2Offset = nullptr;
@@ -161,6 +162,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     initRoutingQuantTilingKey = tilingData.cocTiling.initRoutingQuantTilingKey;
 
     auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+    mc2InitTiling_ = reinterpret_cast<GM_ADDR>(&(tiling->mc2InitTiling));
     __gm__ HcclOpResParamCustom *WinContext_{nullptr};
     WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
 
@@ -281,7 +283,8 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData,
+        mc2InitTiling_, swigluLimit};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);
