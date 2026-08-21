@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 MLA DSpark draft model for Ascend."""
 
+from collections.abc import Iterable
+
 import torch
 from torch import nn
 from vllm.config import VllmConfig
@@ -11,6 +13,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     _merge_multimodal_embeddings,
     get_draft_quant_config,
     maybe_prefix,
@@ -237,6 +240,23 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
+
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
+        """Load the per-layer KV projections used by the Ascend draft model.
+
+        Upstream additionally duplicates these weights into a CUDA-specific
+        cross-layer ``context_kv_proj``.  Ascend deliberately retains the
+        quantization-aware per-layer projections, so use vLLM's public loader
+        interface without creating that extra packed parameter.
+        """
+        loader = AutoWeightsLoader(
+            self,
+            skip_substrs=list(self.checkpoint_skip_substrs),
+        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def embed_input_ids(
         self,

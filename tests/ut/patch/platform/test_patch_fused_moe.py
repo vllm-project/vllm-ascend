@@ -138,3 +138,62 @@ def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
     kwargs = original_factory.call_args.kwargs
     assert kwargs["hash_indices_table"] is hash_indices_table
     assert kwargs["routed_experts_args"]["tid2eid"] is hash_indices_table
+
+
+def test_factory_dispatches_kimi_vendor_latent_runner_to_ascend():
+    class ROCmLatentMoERunner:
+        pass
+
+    ROCmLatentMoERunner.__module__ = "vllm.models.kimi_k3.amd.latent_moe_runner"
+    router = _Router()
+    runner = SimpleNamespace(router=router)
+    original_factory = MagicMock(return_value=runner)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(
+            dynamic_eplb=False,
+            expert_map_path=None,
+            num_redundant_experts=0,
+        )
+    )
+
+    with (
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+    ):
+        patch_fused_moe._ascend_FusedMoE(
+            num_experts=8,
+            top_k=2,
+            router=router,
+            runner_cls=ROCmLatentMoERunner,
+        )
+
+    assert original_factory.call_args.kwargs["runner_cls"] is None
+
+
+def test_factory_preserves_other_custom_runners():
+    class CustomRunner:
+        pass
+
+    router = _Router()
+    runner = SimpleNamespace(router=router)
+    original_factory = MagicMock(return_value=runner)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(
+            dynamic_eplb=False,
+            expert_map_path=None,
+            num_redundant_experts=0,
+        )
+    )
+
+    with (
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+    ):
+        patch_fused_moe._ascend_FusedMoE(
+            num_experts=8,
+            top_k=2,
+            router=router,
+            runner_cls=CustomRunner,
+        )
+
+    assert original_factory.call_args.kwargs["runner_cls"] is CustomRunner

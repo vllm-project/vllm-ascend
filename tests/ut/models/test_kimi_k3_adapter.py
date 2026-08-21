@@ -443,6 +443,38 @@ def _make_k3_dspark_for_embedding_test() -> AscendK3DSparkForCausalLM:
     return model
 
 
+def test_k3_dspark_load_weights_keeps_per_layer_context_kv(monkeypatch):
+    model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
+    nn.Module.__init__(model)
+    source_weights = [
+        (
+            "layers.0.self_attn.kv_a_proj_with_mqa.weight",
+            torch.ones(1, 1),
+        )
+    ]
+    seen_names = []
+
+    class CapturingLoader:
+        def __init__(self, loaded_model, *, skip_substrs):
+            assert loaded_model is model
+            assert skip_substrs == list(model.checkpoint_skip_substrs)
+
+        def load_weights(self, weights, *, mapper):
+            assert mapper is model.hf_to_vllm_mapper
+            seen_names.extend(name for name, _ in weights)
+            return {"model.layers.0.self_attn.fused_qkv_a_proj.weight"}
+
+    monkeypatch.setattr(
+        "vllm_ascend.models.kimi_k3_dspark.AutoWeightsLoader",
+        CapturingLoader,
+    )
+
+    loaded = model.load_weights(iter(source_weights))
+
+    assert seen_names == [source_weights[0][0]]
+    assert loaded == {"model.layers.0.self_attn.fused_qkv_a_proj.weight"}
+
+
 def test_k3_dspark_embed_input_ids_keeps_text_only_path():
     model = _make_k3_dspark_for_embedding_test()
 
