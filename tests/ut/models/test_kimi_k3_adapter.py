@@ -64,6 +64,37 @@ def test_ascend_attn_res_matches_canonical_k3_math(monkeypatch):
     torch.testing.assert_close(output, expected)
 
 
+def test_ascend_attn_res_avoids_broadcast_score_product(monkeypatch):
+    prefix_sum = torch.ones(2, 4)
+    block_residual = torch.ones(2, 3, 4)
+    norm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-5)
+    proj = SimpleNamespace(weight=torch.ones(1, 4))
+    original_matmul = torch.matmul
+    score_matmul_shapes = []
+
+    def record_matmul(left, right, *args, **kwargs):
+        if left.shape == (2, 3, 4) and right.shape == (4,):
+            score_matmul_shapes.append((left.shape, right.shape))
+        return original_matmul(left, right, *args, **kwargs)
+
+    monkeypatch.setattr(
+        kimi_k3,
+        "_EXTRA_CTX",
+        SimpleNamespace(flash_comm_v1_enabled=False),
+    )
+    monkeypatch.setattr(torch, "matmul", record_matmul)
+
+    kimi_k3._apply_ascend_attn_res(
+        prefix_sum,
+        block_residual,
+        proj,
+        norm,
+        num_valid_blocks=2,
+    )
+
+    assert score_matmul_shapes == [((2, 3, 4), (4,))]
+
+
 def test_ascend_kimi_moe_delegates_padding_to_routed_experts(monkeypatch):
     config = SimpleNamespace(min_moe_intermediate_per_partition=256)
     delegated = {}

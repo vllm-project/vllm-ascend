@@ -103,7 +103,9 @@ def _apply_ascend_attn_res(
     inverse_rms = torch.rsqrt(values_fp32.square().mean(-1, keepdim=True) + norm.variance_epsilon)
     normalized_without_gamma = values_fp32 * inverse_rms
     score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
-    scores = (normalized_without_gamma * score_weight).sum(-1)
+    # Avoid materializing a broadcasted FP32 tensor as large as the entire
+    # normalized residual stack.
+    scores = torch.matmul(normalized_without_gamma, score_weight)
     probabilities = scores.softmax(-1).unsqueeze(1)
     mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
     if _EXTRA_CTX.flash_comm_v1_enabled:
