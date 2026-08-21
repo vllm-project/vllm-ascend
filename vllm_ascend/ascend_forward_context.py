@@ -82,6 +82,16 @@ def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
     if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
         return False
 
+    # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
+    # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
+    # range [1024, 3072] and a multiple of 512. This constraint may be removed
+    # in CANN 9.2.0
+    moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+    if moe_intermediate_size is None:
+        return False
+    if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+        return False
+
     quant_type = getattr(
         vllm_config.model_config.hf_text_config,
         "moe_quantize",
@@ -91,6 +101,20 @@ def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
         return True
     quant_name = str(getattr(quant_type, "name", quant_type)).lower()
     return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
+
+
+def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
+    return (
+        _MEGA_MOE_SUPPORTED
+        and get_ascend_device_type() == AscendDeviceType.A3
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_moe_model(vllm_config)
+        and vllm_config.parallel_config.enable_expert_parallel
+        and 1 < get_ep_group().world_size <= 64
+        and getattr(vllm_config, "lora_config", None) is None
+        and _cann_megamoe_supported_by_config(vllm_config)
+    )
 
 
 @contextmanager
@@ -141,6 +165,7 @@ def set_ascend_forward_context(
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -243,7 +268,11 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if get_ascend_config().enable_prefill_mc2:
+
+    ascend_config = get_ascend_config()
+    use_mega_moe = use_cann_megamoe(vllm_config)
+
+    if ascend_config.enable_prefill_mc2 or use_mega_moe:
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -254,8 +283,8 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
-    if get_ascend_config().enable_fused_mc2:
-        if _MEGA_MOE_SUPPORTED:
+    if ascend_config.enable_fused_mc2:
+        if use_mega_moe:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
@@ -308,12 +337,10 @@ def _select_a3_moe_comm_method(
     mc2_tokens_capacity: int,
     vllm_config: VllmConfig,
 ) -> MoECommType:
-    if get_ascend_config().enable_fused_mc2 == 1:
-        # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
-        mega_moe_enable = get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
-        if (_MEGA_MOE_SUPPORTED and mega_moe_enable) or dispatch_ffn_combine_enable:
-            return MoECommType.FUSED_MC2
+    if use_cann_megamoe(vllm_config):
+        return MoECommType.FUSED_MC2
+    if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        return MoECommType.FUSED_MC2
 
     if num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
@@ -412,6 +439,7 @@ class _ExtraForwardContextProxy:
         "capturing",
         "moe_comm_type",
         "moe_comm_method",
+        "use_mega_moe",
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",
