@@ -433,7 +433,8 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}'
+            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}' \
+            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
 
       - name: Set no-tests output when no tests selected
         id: noop
@@ -458,7 +459,8 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
             --modules a5 \
-            --runner-override a5_x4
+            --runner-override a5_x4 \
+            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
 
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
