@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -34,6 +34,12 @@ from vllm_ascend.ops.kimi_kda import (
     _KDAFusedBFGLinear,
     _load_a_log,
     _zero_padded_spec_output,
+)
+from vllm_ascend.quantization.methods.w4a8_mxfp4 import (
+    AscendW4A8MXFPDynamicLinearMethod,
+)
+from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DynamicLinearMethod,
 )
 
 
@@ -183,25 +189,7 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.device == output.device
 
 
-@pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
-def test_fused_bfg_loader_replicates_f_a_checkpoint_shard(loader_name: str):
-    linear = _KDAFusedBFGLinear.__new__(_KDAFusedBFGLinear)
-    nn.Module.__init__(linear)
-    linear.output_sizes = [8, 12, 16]
-    linear.tp_size = 4
-
-    param = nn.Parameter(torch.zeros(9, 2))
-    param.output_dim = 0
-    loaded_weight = torch.arange(6, dtype=param.dtype).reshape(3, 2)
-
-    getattr(linear, loader_name)(param, loaded_weight, 1)
-
-    torch.testing.assert_close(param[:2], torch.zeros_like(param[:2]))
-    torch.testing.assert_close(param[2:5], loaded_weight)
-    torch.testing.assert_close(param[5:], torch.zeros_like(param[5:]))
-
-
-def test_fused_bfg_linear_loads_sharded_and_replicated_weights():
+def test_fused_bfg_linear_loads_and_composes_f_projection_weights():
     with (
         patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=4),
         patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=2),
@@ -220,16 +208,22 @@ def test_fused_bfg_linear_loads_sharded_and_replicated_weights():
     linear.weight.data.zero_()
     b_weight = torch.arange(8 * 6, dtype=linear.weight.dtype).reshape(8, 6)
     f_a_weight = torch.arange(3 * 6, dtype=linear.weight.dtype).reshape(3, 6) + 100
+    f_b_weight = torch.arange(24 * 3, dtype=linear.weight.dtype).reshape(24, 3) + 150
     g_weight = torch.arange(24 * 6, dtype=linear.weight.dtype).reshape(24, 6) + 200
 
     linear.weight.weight_loader(linear.weight, b_weight, 0)
-    linear.weight.weight_loader(linear.weight, f_a_weight, 1)
+    linear.f_a_weight.weight_loader(linear.f_a_weight, f_a_weight)
+    with patch("vllm_ascend.ops.kimi_kda.get_tensor_model_parallel_rank", return_value=2):
+        linear.f_b_weight.weight_loader(linear.f_b_weight, f_b_weight)
     linear.weight.weight_loader(linear.weight, g_weight, 2)
 
-    assert tuple(linear.weight.shape) == (11, 6)
+    expected_f_weight = (f_b_weight[12:18].float() @ f_a_weight.float()).to(
+        linear.weight.dtype,
+    )
+    assert tuple(linear.weight.shape) == (14, 6)
     torch.testing.assert_close(linear.weight[:2], b_weight[4:6])
-    torch.testing.assert_close(linear.weight[2:5], f_a_weight)
-    torch.testing.assert_close(linear.weight[5:], g_weight[12:18])
+    torch.testing.assert_close(linear.weight[2:8], expected_f_weight)
+    torch.testing.assert_close(linear.weight[8:], g_weight[12:18])
 
 
 def test_fused_bfg_projection_splits_original_outputs():
@@ -237,20 +231,98 @@ def test_fused_bfg_projection_splits_original_outputs():
     nn.Module.__init__(attention)
     attention.use_full_rank_gate = True
     attention.head_dim = 3
-    attention._fused_bfg_output_sizes = (2, 3, 6)
+    attention._fused_bfg_output_sizes = (2, 6, 6)
 
     hidden_states = torch.randn(4, 5)
-    fused_output = torch.arange(44, dtype=torch.float32).reshape(4, 11)
-    f_b_output = torch.arange(24, dtype=torch.float32).reshape(4, 6)
+    fused_output = torch.arange(56, dtype=torch.float32).reshape(4, 14)
     attention.fused_bfg_proj = _RecordingLinear(fused_output)
-    attention.f_b_proj = _RecordingLinear(f_b_output)
 
     beta, raw_gate, output_gate = attention._project_bfg(hidden_states)
 
+    torch.testing.assert_close(beta, fused_output[:, :2])
+    torch.testing.assert_close(raw_gate, fused_output[:, 2:8])
+    torch.testing.assert_close(output_gate, fused_output[:, 8:])
+
+    beta, raw_gate, output_gate = attention._postprocess_bfg(
+        beta,
+        raw_gate,
+        output_gate,
+    )
     torch.testing.assert_close(beta, fused_output[:, :2].sigmoid().unsqueeze(0))
-    torch.testing.assert_close(attention.f_b_proj.input, fused_output[:, 2:5])
-    torch.testing.assert_close(raw_gate, f_b_output.reshape(4, 2, 3).unsqueeze(0))
-    torch.testing.assert_close(output_gate, fused_output[:, 5:].reshape(4, 2, 3))
+    torch.testing.assert_close(
+        raw_gate,
+        fused_output[:, 2:8].reshape(4, 2, 3).unsqueeze(0),
+    )
+    torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
+
+
+@pytest.mark.parametrize(
+    "quant_method_type",
+    [
+        AscendW4A8MXFPDynamicLinearMethod,
+        AscendW8A8MXFP8DynamicLinearMethod,
+    ],
+)
+def test_fused_qkv_splits_mxfp_dynamic_quant_from_matmul(quant_method_type):
+    attention = AscendKimiGatedDeltaNetAttention.__new__(
+        AscendKimiGatedDeltaNetAttention,
+    )
+    nn.Module.__init__(attention)
+    inner_quant_method = quant_method_type.__new__(quant_method_type)
+    adapter = SimpleNamespace(
+        quant_method=inner_quant_method,
+        apply=MagicMock(return_value=torch.randn(4, 18)),
+    )
+    attention.fused_qkv = SimpleNamespace(quant_method=adapter)
+    hidden_states = torch.randn(4, 6, dtype=torch.bfloat16)
+    quantized = torch.empty(4, 6, dtype=torch.float8_e4m3fn)
+    dynamic_scale = torch.empty(4, 1, dtype=torch.uint8)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.torch_npu.npu_dynamic_mx_quant",
+        return_value=(quantized, dynamic_scale),
+    ) as dynamic_quant:
+        qkv_input = attention._quantize_fused_qkv(hidden_states)
+
+    assert isinstance(qkv_input, tuple)
+    assert qkv_input[0] is quantized
+    assert qkv_input[1] is dynamic_scale
+    dynamic_quant.assert_called_once_with(hidden_states, dst_type=torch.float8_e4m3fn)
+
+    output = attention._matmul_fused_qkv(qkv_input)
+
+    assert output is adapter.apply.return_value
+    adapter.apply.assert_called_once_with(attention.fused_qkv, qkv_input, bias=None)
+
+
+def test_fused_qkv_keeps_non_mxfp_quantization_in_linear_apply():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(
+        AscendKimiGatedDeltaNetAttention,
+    )
+    nn.Module.__init__(attention)
+    adapter = SimpleNamespace(
+        quant_method=object(),
+        apply=MagicMock(return_value=torch.randn(4, 18)),
+    )
+    attention.fused_qkv = SimpleNamespace(quant_method=adapter)
+    hidden_states = torch.randn(4, 6)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.torch_npu.npu_dynamic_mx_quant",
+    ) as dynamic_quant:
+        qkv_input = attention._quantize_fused_qkv(hidden_states)
+
+    assert qkv_input is hidden_states
+    dynamic_quant.assert_not_called()
+
+    output = attention._matmul_fused_qkv(qkv_input)
+
+    assert output is adapter.apply.return_value
+    adapter.apply.assert_called_once_with(
+        attention.fused_qkv,
+        hidden_states,
+        bias=None,
+    )
 
 
 def test_output_norm_gate_uses_kda_fused_triton_kernel():

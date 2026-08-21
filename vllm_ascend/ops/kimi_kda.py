@@ -26,6 +26,7 @@ from collections.abc import Callable
 from functools import partial, wraps
 
 import torch
+import torch_npu
 from einops import rearrange
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_rank
@@ -54,6 +55,12 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
+from vllm_ascend.quantization.methods.w4a8_mxfp4 import (
+    AscendW4A8MXFPDynamicLinearMethod,
+)
+from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 from vllm_ascend.utils import global_stream, is_vl_model, npu_stream_switch, parse_layer_idx
 
 apply_kda_rms_norm_sigmoid_gate: (
@@ -296,6 +303,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.{_FUSED_QKV_NAME}",
         )
+        if getattr(fused_qkv, "custom_op", None) is not None:
+            raise ValueError("KDA fused QKV split requires a communication-free linear")
         del self.q_proj
         del self.k_proj
         del self.v_proj
@@ -392,14 +401,20 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             hidden_states_ready = main_stream.record_event()
             with npu_stream_switch(bfg_stream):
                 torch.npu.current_stream().wait_event(hidden_states_ready)
-                beta, raw_gate, output_gate = self._project_bfg(hidden_states)
+                raw_bfg = self._project_bfg(hidden_states)
+
+            quantized_qkv = self._quantize_fused_qkv(hidden_states)
+            with npu_stream_switch(bfg_stream):
+                beta, raw_gate, output_gate = self._postprocess_bfg(*raw_bfg)
                 bfg_ready = torch.npu.current_stream().record_event()
 
-        qkv = self.fused_qkv(hidden_states)[0]
+            qkv = self._matmul_fused_qkv(quantized_qkv)
+        else:
+            qkv = self._matmul_fused_qkv(self._quantize_fused_qkv(hidden_states))
+            beta, raw_gate, output_gate = self._postprocess_bfg(*self._project_bfg(hidden_states))
+
         if self.use_full_rank_gate:
             main_stream.wait_event(bfg_ready)
-        else:
-            beta, raw_gate, output_gate = self._project_bfg(hidden_states)
 
         projection_size = self.local_num_heads * self.head_dim
         q, k, v = qkv.split([projection_size] * 3, dim=-1)
@@ -438,10 +453,56 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             raw_gate = self.f_b_proj(f_a)[0]
             output_gate = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
 
+        return beta, raw_gate, output_gate
+
+    def _postprocess_bfg(
+        self,
+        beta: torch.Tensor,
+        raw_gate: torch.Tensor,
+        output_gate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         beta = beta.float().sigmoid().unsqueeze(0)
         raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
         output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
         return beta, raw_gate, output_gate
+
+    def _quantize_fused_qkv(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        quant_method = self.fused_qkv.quant_method
+        inner_quant_method = getattr(quant_method, "quant_method", quant_method)
+        # Both MXFP tuple paths preserve this model's two-dimensional BF16
+        # contract and skip their internal dynamic quantization.
+        if (
+            isinstance(
+                inner_quant_method,
+                (
+                    AscendW4A8MXFPDynamicLinearMethod,
+                    AscendW8A8MXFP8DynamicLinearMethod,
+                ),
+            )
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim == 2
+        ):
+            return torch_npu.npu_dynamic_mx_quant(
+                hidden_states,
+                dst_type=torch.float8_e4m3fn,
+            )
+        return hidden_states
+
+    def _matmul_fused_qkv(
+        self,
+        qkv_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        quant_method = self.fused_qkv.quant_method
+        if quant_method is None:
+            raise RuntimeError("KDA fused QKV quantization method is not initialized")
+        return quant_method.apply(
+            self.fused_qkv,
+            qkv_input,
+            bias=None,
+        )
 
     def _apply_output_norm_gate(
         self,
