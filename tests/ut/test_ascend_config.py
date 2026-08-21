@@ -976,7 +976,7 @@ class TestDyntraLBConfig(TestBase):
 
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
-        config = SchedulerConfig({}, balance_env_value=False)
+        config = SchedulerConfig({})
 
         self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
@@ -991,7 +991,6 @@ class TestSchedulerConfig(TestBase):
                 "scheduler_config": None,
                 "recompute_scheduler_enable": True,
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
@@ -999,7 +998,7 @@ class TestSchedulerConfig(TestBase):
 
     def test_non_dict_config_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "scheduler_config must be a dict, got list"):
-            SchedulerConfig({"scheduler_config": []}, balance_env_value=False)
+            SchedulerConfig({"scheduler_config": []})
 
     def test_nested_config_overrides_all_scheduler_settings(self):
         config = SchedulerConfig(
@@ -1022,7 +1021,6 @@ class TestSchedulerConfig(TestBase):
                     },
                 }
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -1047,7 +1045,6 @@ class TestSchedulerConfig(TestBase):
                 "short_request_first_config": {"enabled": True},
                 "profiling_chunk_config": {"enabled": True},
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -1068,7 +1065,6 @@ class TestSchedulerConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "short_request_first_config": {"enabled": False},
             },
-            balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
@@ -1076,10 +1072,8 @@ class TestSchedulerConfig(TestBase):
         self.assertTrue(config.enable_balance_scheduling)
         self.assertEqual(mock_warning_once.call_count, 3)
 
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    def test_balance_falls_back_to_environment_default(self, mock_info_once):
+    def test_removed_balance_environment_variable_is_ignored(self):
         with patch.dict(os.environ, {"VLLM_ASCEND_BALANCE_SCHEDULING": "1"}):
-            config = SchedulerConfig({}, balance_env_value=True)
+            config = SchedulerConfig({})
 
-        self.assertTrue(config.enable_balance_scheduling)
-        mock_info_once.assert_called_once()
+        self.assertFalse(config.enable_balance_scheduling)

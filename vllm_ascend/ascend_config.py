@@ -62,10 +62,7 @@ class AscendConfig:
 
         from vllm_ascend import envs as ascend_envs
 
-        self.scheduler_config = SchedulerConfig(
-            additional_config,
-            balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
-        )
+        self.scheduler_config = SchedulerConfig(additional_config)
         if self.scheduler_config.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
@@ -1177,7 +1174,7 @@ class DyntraLBConfig:
 class SchedulerConfig:
     """Configuration object for ``additional_config[\"scheduler_config\"]``."""
 
-    def __init__(self, additional_config: dict[str, Any], balance_env_value: Any):
+    def __init__(self, additional_config: dict[str, Any]):
         scheduler_config = additional_config.get("scheduler_config")
         if scheduler_config is None:
             scheduler_config = {}
@@ -1189,8 +1186,7 @@ class SchedulerConfig:
             scheduler_config,
             additional_config,
             "enable_balance_scheduling",
-            balance_env_value,
-            "VLLM_ASCEND_BALANCE_SCHEDULING",
+            False,
         )
         self.recompute_scheduler_enable = self._get_config_value(
             scheduler_config,
@@ -1215,7 +1211,6 @@ class SchedulerConfig:
         additional_config: dict[str, Any],
         config_key: str,
         default: Any,
-        env_key: str | None = None,
     ) -> Any:
         if config_key in scheduler_config:
             if config_key in additional_config:
@@ -1235,17 +1230,6 @@ class SchedulerConfig:
             )
             return additional_config[config_key]
 
-        if env_key is not None and env_key in os.environ:
-            logger.info_once(
-                "AscendConfig.scheduler_config.%s falls back to environment variable %s with value %s. "
-                "Please use additional_config.scheduler_config.%s instead, because %s will be removed in the "
-                "next release.",
-                config_key,
-                env_key,
-                default,
-                config_key,
-                env_key,
-            )
         return default
 
 
