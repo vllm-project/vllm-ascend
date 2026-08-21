@@ -33,6 +33,7 @@ from vllm_ascend.ascend_config import (
     FinegrainedTPConfig,
     ProfilingChunkConfig,
     RejectionSamplerConfig,
+    RlConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
@@ -47,6 +48,34 @@ def test_ascend_config_import_does_not_load_vllm_config():
     """Keep platform discovery from recursing into a partial vllm.config."""
     code = "import sys; import vllm_ascend.ascend_config; assert 'vllm.config' not in sys.modules"
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+class TestRlConfig(TestBase):
+    def test_defaults_and_explicit_values(self):
+        defaults = RlConfig()
+        enabled = RlConfig(
+            enabled=True,
+            sleep_mode_extra_cleanup=True,
+            enable_training_consistency=True,
+            enable_batch_invariant=True,
+        )
+
+        self.assertFalse(defaults.enabled)
+        self.assertFalse(defaults.sleep_mode_extra_cleanup)
+        self.assertTrue(enabled.enabled)
+        self.assertTrue(enabled.sleep_mode_extra_cleanup)
+        self.assertTrue(enabled.enable_training_consistency)
+        self.assertTrue(enabled.enable_batch_invariant)
+
+    def test_lax_bool_and_unknown_key(self):
+        config = RlConfig(  # type: ignore[arg-type]
+            enabled="true", sleep_mode_extra_cleanup="false"
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertFalse(config.sleep_mode_extra_cleanup)
+        with self.assertRaises(ValueError):
+            RlConfig(refresh=False)  # type: ignore[call-arg]
 
 
 class TestAscendConfig(TestBase):
@@ -126,6 +155,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(config.xlite_graph_config.enabled)
         self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
         self.assertFalse(config.scheduler_config.short_request_first_config.enabled)
+        self.assertFalse(config.rl_config.enabled)
 
     def test_eplb_load_collection_phase_defaults_to_all(self):
         self.assertEqual(EplbConfig().load_collection_phase, "all")
@@ -156,6 +186,28 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
+        self.assertFalse(ascend_config.rl_config.enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_enabled_applies_runtime_defaults(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
+        with patch.dict(os.environ, {}, clear=True):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+            self.assertTrue(ascend_config.rl_config.enabled)
+            self.assertEqual(ascend_config.weight_nz_mode, 0)
+            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
+            self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "1")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_enabled_refreshes_cached_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
+
+        self.assertIsNot(init_ascend_config(test_vllm_config), init_ascend_config(test_vllm_config))
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

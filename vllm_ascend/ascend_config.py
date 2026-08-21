@@ -214,6 +214,41 @@ class RejectionSamplerConfig:
 
 
 @config
+class RlConfig:
+    """Unified defaults for reinforcement-learning workloads.
+
+    Migrated to ``@config`` so bool values use the same pydantic lax coercion
+    and unknown-key rejection as other vLLM-independent sub-configs.
+    """
+
+    enabled: bool = False
+    sleep_mode_extra_cleanup: bool = False
+    enable_training_consistency: bool = False
+    enable_batch_invariant: bool = False
+
+    def apply(self, ascend_config: AscendConfig) -> None:
+        if not self.enabled:
+            return
+
+        if ascend_config.weight_nz_mode != 0:
+            logger.warning(
+                "RL config requires weight_nz_mode=0; overriding AscendConfig.weight_nz_mode from %s to 0.",
+                ascend_config.weight_nz_mode,
+            )
+        ascend_config.weight_nz_mode = 0
+        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+
+        from vllm_ascend.platform import _disable_expandable_segments
+
+        _disable_expandable_segments()
+
+        if self.enable_batch_invariant:
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
+        os.environ["VLLM_SERVER_DEV_MODE"] = "1"
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -240,7 +275,6 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
-    enable_sleep_mode_extra_cleanup: bool = False
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -271,6 +305,7 @@ class AscendConfig:
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
+    rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
@@ -1088,6 +1123,15 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
+    raw_rl_config = additional_config.get("rl_config", {})
+    if isinstance(raw_rl_config, dict):
+        refresh = refresh or validate_additional_config_bool(
+            raw_rl_config.get("enabled", False), "additional_config.rl_config.enabled"
+        )
+    elif "rl_config" in additional_config:
+        # Do not reuse a cached config: let AscendConfig's normal nested
+        # pydantic validation report the invalid sub-config input below.
+        refresh = True
     global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
     if (
         _ASCEND_CONFIG is not None
@@ -1154,6 +1198,7 @@ def init_ascend_config(vllm_config):
     # the single legitimate entry point — bypassing the factory leaves derived
     # fields at their sentinel defaults.
     new_config.derive_and_validate(vllm_config)
+    new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
     if _is_ascend_config_initialized(new_config):
