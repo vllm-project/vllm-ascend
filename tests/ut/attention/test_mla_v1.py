@@ -584,7 +584,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         model_config = MagicMock()
         model_config.max_model_len = 1024
         model_config.dtype = torch.float16
-        model_config.get_head_size.return_value = 128
+        model_config.get_head_size.return_value = 64
         model_config.hf_text_config.head_dim = 128
         model_config.hf_text_config.qk_rope_head_dim = 32
         self.mock_vllm_config.model_config = model_config
@@ -598,7 +598,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
-    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
     @patch("torch.npu.is_available")
     def test_build_prefix_no_cache_metadata(self, mock_npu_available, mock_zeros, mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
@@ -652,7 +652,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
-    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
     @patch("torch.npu.is_available")
     def test_build_chunked_prefix_metadata(self, mock_npu_available, mock_zeros, mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
