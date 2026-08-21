@@ -61,3 +61,54 @@ def test_dflash2_rejects_unsupported_fp64_sampling():
 
     with pytest.raises(NotImplementedError, match="FP64 DFlash2"):
         dflash2.AscendDFlash2Speculator._sample_path(speculator, None, None, 1)
+
+
+@pytest.mark.parametrize(
+    ("draft_logits", "sample_probabilistic"),
+    [(None, False), (object(), True)],
+)
+def test_dflash2_sample_path_matches_upstream_contract(
+    monkeypatch,
+    draft_logits,
+    sample_probabilistic,
+):
+    dflash2 = pytest.importorskip("vllm_ascend.worker.v2.spec_decode.dflash2.speculator")
+    launch = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            launch["grid"] = grid
+
+            def run(*args, **kwargs):
+                launch["args"] = args
+                launch["kwargs"] = kwargs
+
+            return run
+
+    monkeypatch.setattr(dflash2, "_selector_walk_kernel_ascend", FakeKernel())
+    draft_tokens = object()
+    speculator = SimpleNamespace(
+        use_fp64_gumbel=False,
+        selector_top_k=3,
+        sample_pos=object(),
+        sample_idx_mapping=object(),
+        temperature=object(),
+        seeds=object(),
+        draft_tokens=draft_tokens,
+        _selector_scores=object(),
+        num_speculative_steps=4,
+        draft_logits=draft_logits,
+    )
+    candidate_ids = torch.empty(2, 4, 3, dtype=torch.int64)
+    scores = torch.empty(2, 4, 3, 3)
+
+    dflash2.AscendDFlash2Speculator._sample_path(
+        speculator,
+        candidate_ids,
+        scores,
+        num_reqs=2,
+    )
+
+    assert launch["grid"] == (2,)
+    assert launch["args"][6] is draft_tokens
+    assert launch["kwargs"]["SAMPLE_PROBABILISTIC"] is sample_probabilistic

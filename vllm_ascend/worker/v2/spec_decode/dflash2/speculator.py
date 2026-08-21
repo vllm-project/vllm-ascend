@@ -24,6 +24,7 @@ def _selector_walk_kernel_ascend(
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    SAMPLE_PROBABILISTIC: tl.constexpr,
 ):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_K)
@@ -49,7 +50,7 @@ def _selector_walk_kernel_ascend(
             other=0,
         )
 
-        if temperature == 0.0:
+        if not SAMPLE_PROBABILISTIC or temperature == 0.0:
             best = tl.max(scores, axis=0)
             index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
         else:
@@ -58,6 +59,8 @@ def _selector_walk_kernel_ascend(
             # FP32 proposal logits are retained for lossless verification.
             position = (tl.load(sample_pos_ptr + flat) - 1).to(tl.int32)
             gumbel_seed = tl.randint(seed, position)
+            # Token ids key the noise so the draft and target sample the same
+            # candidate from the same request seed and position.
             uniform = tl.rand(gumbel_seed, candidates.to(tl.int32)).to(tl.float32)
             noise = -tl.log(-tl.log(uniform + 1e-20) + 1e-20)
             sampled_scores = tl.where(mask, scores / temperature + noise, float("-inf"))
@@ -97,10 +100,11 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
             self.sample_idx_mapping,
             self.temperature,
             self.seeds,
-            self._selector_tokens,
+            self.draft_tokens,
             self._selector_scores,
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
+            SAMPLE_PROBABILISTIC=self.draft_logits is not None,
             num_warps=1,
         )
