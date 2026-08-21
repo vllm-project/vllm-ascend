@@ -255,9 +255,8 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
     export OMP_NUM_THREADS=1
     export OMP_PROC_BIND=false
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct --additional-config '{"enable_fused_mc2":1}' \
       --host 0.0.0.0 \
       --port 8000 \
       --served-model-name qwen3-vl-30b \
