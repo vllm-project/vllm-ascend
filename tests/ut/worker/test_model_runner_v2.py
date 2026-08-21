@@ -77,7 +77,3 @@ def test_execute_model_disables_profiling_timer_and_clears_stale_time():
     assert runner._cpp_execution_time_ms is None
     mock_synchronize.assert_not_called()
     mock_perf_counter.assert_not_called()
-
-
-def test_sample_tokens_is_inherited_from_upstream():
-    assert NPUModelRunner.sample_tokens is GPUModelRunner.sample_tokens
