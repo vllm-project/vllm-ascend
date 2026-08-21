@@ -1,12 +1,16 @@
 # mypy: ignore-errors
 import math
 
+import torch
 import vllm.model_executor.models.config
 from vllm.logger import logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+
+from vllm_ascend.quantization.utils import enable_fa_quant
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 def _using_kv_store(vllm_config) -> bool:
@@ -82,7 +86,15 @@ def verify_and_update_config(cls, vllm_config) -> None:
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         kv_lora_rank = model_config.hf_text_config.kv_lora_rank
         qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
-        attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        # A5 C8 stores the MLA latent-K in FP8 while retaining the positional
+        # cache in the configured KV-cache dtype. Use the actual latent-K
+        # storage dtype when deriving the hybrid MLA/Mamba manager block size.
+        latent_k_dtype = kv_cache_dtype
+        if get_ascend_device_type() == AscendDeviceType.A5 and enable_fa_quant(vllm_config):
+            latent_k_dtype = torch.float8_e4m3fn
+        attn_single_token_k_page_size = (
+            kv_lora_rank * attn_num_kv_heads * get_dtype_size(latent_k_dtype)
+        )
         attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_token_page_size = attn_single_token_k_page_size + attn_rope_token_page_size
     else:
