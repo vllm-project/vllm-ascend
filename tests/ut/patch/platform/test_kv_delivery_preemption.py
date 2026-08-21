@@ -23,7 +23,10 @@ class _Queue:
 
 
 class _Request(SimpleNamespace):
-    __hash__ = object.__hash__
+    # Request instances are identity-hashable and are stored in scheduler sets.
+    # typeshed marks SimpleNamespace.__hash__ as None, so this intentional test
+    # double override needs a narrow assignment suppression.
+    __hash__ = object.__hash__  # type: ignore[assignment]
 
 
 def _request(
