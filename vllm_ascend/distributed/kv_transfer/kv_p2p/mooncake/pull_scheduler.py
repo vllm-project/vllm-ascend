@@ -5,7 +5,7 @@
 import queue
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.logger import logger
-from vllm.utils.network_utils import make_zmq_path
+from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -291,6 +291,9 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
         self.ready_event = ready_event
         self.request_queue: queue.Queue[tuple[str, int, str]] = queue.Queue()
         self.encoder = msgspec.msgpack.Encoder()
+        self.remote_sockets: dict[str, deque[Any]] = defaultdict(deque)
+        self.remote_sockets_lock = threading.Lock()
+        self.zmq_context: Any | None = None
 
     def add_request(self, remote_host: str, remote_port: int, request_id: str) -> None:
         self.request_queue.put((remote_host, remote_port, request_id))
@@ -313,9 +316,8 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
 
     def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str) -> None:
         path = make_zmq_path("tcp", remote_host, remote_port)
-        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
-            sock.setsockopt(zmq.SNDTIMEO, 1000)  # type: ignore[attr-defined]
-            sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
+        sock = self._get_remote_socket(path)
+        try:
             ensure_zmq_send(
                 sock,
                 self.encoder.encode((DONE_RECVING_MSG, request_id)),
@@ -324,6 +326,34 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
             response = ensure_zmq_recv(sock, path)
             if response != ACK_MSG:
                 raise RuntimeError(f"Unexpected Mooncake scheduler completion response: {response!r}")
+        except Exception:
+            sock.close(linger=0)
+            raise
+        self._return_remote_socket(path, sock)
+
+    def _get_remote_socket(self, path: str) -> Any:
+        """Borrow a persistent REQ socket for one producer scheduler."""
+        with self.remote_sockets_lock:
+            sockets = self.remote_sockets[path]
+            if sockets:
+                return sockets.popleft()
+
+            if self.zmq_context is None:
+                self.zmq_context = zmq.Context()  # type: ignore[attr-defined]
+            sock = make_zmq_socket(
+                ctx=self.zmq_context,
+                path=path,
+                socket_type=zmq.REQ,  # type: ignore[attr-defined]
+                bind=False,
+            )
+            sock.setsockopt(zmq.SNDTIMEO, 1000)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
+            return sock
+
+    def _return_remote_socket(self, path: str, sock: Any) -> None:
+        """Return a healthy REQ socket to its endpoint pool."""
+        with self.remote_sockets_lock:
+            self.remote_sockets[path].append(sock)
 
 
 class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
