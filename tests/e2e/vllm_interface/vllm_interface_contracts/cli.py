@@ -29,6 +29,7 @@ from .range_analysis import (
     GitSnapshot,
     analyze_range,
     git_head,
+    render_upstream_pr_summary,
     validate_current_contracts,
     verify_head,
     write_reports,
@@ -63,7 +64,9 @@ def _range_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     _add_sources(parser)
     parser.add_argument("--old", required=True)
     parser.add_argument("--new", required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    output = parser.add_mutually_exclusive_group(required=True)
+    output.add_argument("--stdout-summary", action="store_true")
+    output.add_argument("--output-dir", type=Path)
     parser.add_argument("--fail-on", choices=("never", "introduced", "unresolved"), default="never")
     parser.add_argument("--analysis-workers", type=int, default=3)
 
@@ -154,15 +157,18 @@ def _analyze(args: argparse.Namespace) -> int:
         upstream_file_index_cache_dir=args.upstream_file_index_cache_dir,
         index_workers=args.index_workers,
     )
-    outputs = write_reports(report, args.output_dir)
-    pr_payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    console_summary = pr_payload["summary"]
-    console = {
-        "metadata": report["metadata"],
-        "summary": console_summary,
-        "outputs": outputs,
-    }
-    print(json.dumps(console, ensure_ascii=False, indent=2))
+    if args.stdout_summary:
+        print(render_upstream_pr_summary(report))
+    else:
+        outputs = write_reports(report, args.output_dir)
+        pr_payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
+        console_summary = pr_payload["summary"]
+        console = {
+            "metadata": report["metadata"],
+            "summary": console_summary,
+            "outputs": outputs,
+        }
+        print(json.dumps(console, ensure_ascii=False, indent=2))
     actionable_introduced = report["summary"]["actionable_introduced_break"]
     if args.fail_on == "introduced" and actionable_introduced:
         return 1

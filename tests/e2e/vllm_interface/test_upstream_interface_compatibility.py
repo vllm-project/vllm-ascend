@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -29,13 +28,11 @@ from tests.e2e.vllm_interface.vllm_interface_contracts.upstream_ci import (
 )
 
 VLLM_UPSTREAM_CHECKOUT = Path("/workspace/vllm")
-PR_SUMMARY_NAME = "vllm-interface-pr-summary.md"
-METADATA_NAME = "vllm-interface-analysis-metadata.json"
 DOWNSTREAM_INDEX_CACHE_DIR = Path.home() / ".cache" / "vllm-interface" / "repository-index"
 UPSTREAM_FILE_INDEX_CACHE_DIR = Path.home() / ".cache" / "vllm-interface" / "file-fragments"
 
 
-def test_upstream_interface_compatibility(tmp_path: Path) -> None:
+def test_upstream_interface_compatibility() -> None:
     """Report interface breaks introduced by the checked-out upstream PR."""
     if not VLLM_UPSTREAM_CHECKOUT.exists():
         pytest.skip("the upstream vLLM checkout is available only in the vLLM NPU job")
@@ -45,14 +42,12 @@ def test_upstream_interface_compatibility(tmp_path: Path) -> None:
     ascend_root = Path(__file__).resolve().parents[3]
     old_sha, new_sha = resolve_vllm_range(VLLM_UPSTREAM_CHECKOUT)
     ascend_sha = git_head(ascend_root)
-    output_dir = tmp_path / "vllm-interface-report"
     command = build_analysis_command(
         vllm_root=VLLM_UPSTREAM_CHECKOUT,
         ascend_root=ascend_root,
         old_sha=old_sha,
         new_sha=new_sha,
         ascend_sha=ascend_sha,
-        output_dir=output_dir,
         analysis_workers=3,
         downstream_index_cache_dir=DOWNSTREAM_INDEX_CACHE_DIR,
         upstream_file_index_cache_dir=UPSTREAM_FILE_INDEX_CACHE_DIR,
@@ -68,32 +63,9 @@ def test_upstream_interface_compatibility(tmp_path: Path) -> None:
         print("\n+++ vLLM interface compatibility timings")
         print(result.stderr.rstrip())
 
-    summary_path = output_dir / PR_SUMMARY_NAME
-    metadata_path = output_dir / METADATA_NAME
-    if not summary_path.is_file() or not metadata_path.is_file():
-        if result.stdout:
-            print(result.stdout.rstrip())
-        pytest.fail(f"interface analysis did not create complete reports (exit code {result.returncode})")
-
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    capabilities = metadata["metadata"]["analysis_plan"]["capabilities"]
-    print("\n+++ vLLM interface compatibility capabilities")
-    for name, capability in capabilities.items():
-        print(f"{name}={capability['state']}")
-
-    execution = metadata["metadata"]["execution"]
-    downstream_cache = metadata["metadata"]["repository_index_cache"]["downstream"]
-    upstream_cache = metadata["metadata"]["repository_index_cache"]["upstream_file_fragments"]
-    print("\n+++ vLLM interface compatibility execution")
-    print(f"analysis_workers={execution['analysis_workers_used']}")
-    print(f"parallel_branches={execution['parallel_branches']}")
-    print(f"downstream_index_cache={downstream_cache['status']}")
-    print(f"upstream_file_index_cache={upstream_cache['status']}")
-    print(f"upstream_file_cache_hits={upstream_cache['cache_hits']}")
-
-    summary = summary_path.read_text(encoding="utf-8")
     print("\n+++ vLLM interface compatibility result")
-    print(summary.rstrip())
+    if result.stdout:
+        print(result.stdout.rstrip())
 
     if result.returncode == 1:
         pytest.fail("the upstream PR introduces a vllm-ascend interface break")
