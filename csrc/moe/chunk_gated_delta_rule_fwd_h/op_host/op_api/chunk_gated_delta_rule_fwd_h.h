@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -18,12 +18,12 @@ const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
     const aclTensor *w,
     const aclTensor *u,
     const aclTensor *g,
+    const aclTensor *gkOptional,
     const aclTensor *initalStateOptional,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
     bool outputFinalState,
     int64_t chunkSize,
-    int64_t initialStateStridesValue,
     const aclTensor *hOut,
     const aclTensor *vNewOut,
     const aclTensor *finalStateOut,
