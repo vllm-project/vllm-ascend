@@ -101,7 +101,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps the
             # three gates in floating point, so form one fused GEMM per
             # precision group instead of falling back to four projections.
-            del self.in_proj_qkvgfab
             self.in_proj_qkvgfab = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.projection_size] * 3,
