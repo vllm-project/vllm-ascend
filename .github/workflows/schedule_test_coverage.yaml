@@ -88,7 +88,6 @@ jobs:
           pip install regex pyyaml
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 .github/workflows/scripts/select_tests.py \
-            --changed-files vllm_ascend/dummy.py \
             --run-all-modules
 
   ensure-csrc-cache:
@@ -118,6 +117,221 @@ jobs:
       test_groups: ${{ needs.select-full-tests.outputs.test_groups }}
       enable-coverage: true
       timeout-minutes: 180
-    secrets:
-      OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-      OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+
+  upload-coverage-to-obs:
+    needs: [select-full-tests, run-full-tests]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+    steps:
+      - name: Checkout vllm-ascend source code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
+
+      - name: Download all coverage artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: all-coverage
+          pattern: selected-test-coverage-*
+          merge-multiple: true
+
+      - name: Check full coverage data completeness
+        id: coverage-completeness
+        env:
+          SELECTED_TEST_GROUPS: ${{ needs.select-full-tests.outputs.test_groups }}
+        run: |
+          python3 .github/workflows/scripts/assemble_coverage.py check \
+            --test-groups-json "${SELECTED_TEST_GROUPS}" \
+            --current-root all-coverage
+
+      - name: Download previous coverage data from OBS
+        if: steps.coverage-completeness.outputs.has_missing == 'true'
+        run: |
+          mkdir -p previous-coverage
+          # The historical coverage package is exposed as a public-read
+          # object in OBS, so download it directly via its public URL with
+          # curl (no SDK or credentials needed). On the very first run there
+          # is no history yet (HTTP 404); tolerate that so the downstream
+          # backfill/assemble steps still proceed with the current data.
+          if curl -fSL --retry 3 -o previous-coverage.tar \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar"; then
+            tar xf previous-coverage.tar -C previous-coverage
+          else
+            echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
+          fi
+
+      - name: Backfill missing coverage data
+        if: steps.coverage-completeness.outputs.has_missing == 'true'
+        env:
+          SELECTED_TEST_GROUPS: ${{ needs.select-full-tests.outputs.test_groups }}
+        run: |
+          python3 .github/workflows/scripts/assemble_coverage.py backfill \
+            --test-groups-json "${SELECTED_TEST_GROUPS}" \
+            --current-root all-coverage \
+            --previous-root previous-coverage
+
+      - name: Debug - List downloaded coverage files
+        run: |
+          echo "=== all-coverage top level ==="
+          find all-coverage -maxdepth 1 2>/dev/null | head -20 || echo "all-coverage directory not exist"
+          echo ""
+          echo "=== all-coverage total file count ==="
+          find all-coverage -type f 2>/dev/null | wc -l
+          echo "=== sample covdata dirs ==="
+          find all-coverage -type d -name covdata 2>/dev/null | head -10
+          echo "=== sample files ==="
+          find all-coverage -path '*/covdata/*' -type f 2>/dev/null | head -10
+
+      - name: Assemble and compress coverage files
+        run: |
+          set -euo pipefail
+          TASK_DATE=$(date +%Y%m%d%H)
+          TASK_NAME="VLLM-ASCEND@task_${TASK_DATE}"
+          COVERAGE_PKG_DIR="coverage/vllm-ascend"
+          TASK_DIR="${COVERAGE_PKG_DIR}/${TASK_NAME}"
+          mkdir -p "${TASK_DIR}" "${COVERAGE_PKG_DIR}/covstub/vllm_ascend"
+
+          COVERAGE_FILE_COUNT=0
+          while IFS= read -r f; do
+            rel="${f#all-coverage/}"
+            case "${rel}" in
+              selected-test-coverage-*/*) rel="${rel#*/}" ;;
+            esac
+            dest="${TASK_DIR}/${rel}"
+            mkdir -p "$(dirname "${dest}")"
+            cp "${f}" "${dest}"
+            COVERAGE_FILE_COUNT=$((COVERAGE_FILE_COUNT + 1))
+          done < <(find all-coverage -path '*/covdata/*' -type f 2>/dev/null)
+
+          echo "Copied ${COVERAGE_FILE_COUNT} coverage files to ${TASK_DIR}"
+          if [ "${COVERAGE_FILE_COUNT}" -eq 0 ]; then
+            echo "::error::No coverage files found under all-coverage/*/covdata/"
+            exit 1
+          fi
+
+          cp -r vllm_ascend/. "${COVERAGE_PKG_DIR}/covstub/vllm_ascend/"
+          cp tests/coverage_settingInfo.xml "${COVERAGE_PKG_DIR}/settingInfo.xml"
+          echo "${TASK_NAME}" > coverage_version.txt
+
+          echo "=== package top level ==="
+          find "${COVERAGE_PKG_DIR}" -maxdepth 1 2>/dev/null | head -20 || true
+          echo "=== task dir file count ==="
+          find "${TASK_DIR}" -type f | wc -l
+
+          echo "=== building test_case_map.json ==="
+          pip install regex
+          python3 .github/workflows/scripts/map_builder.py \
+            --coverage-dir "${TASK_DIR}" \
+            --map-file test_case_map.json
+          test -s test_case_map.json
+          du -h test_case_map.json
+
+          tar cf coverage.tar -C coverage vllm-ascend
+          echo "Packed coverage/vllm-ascend into coverage.tar"
+          du -h coverage.tar
+          echo "=== tar contents (sample) ==="
+          tar tf coverage.tar | head -20 || true
+          echo "=== tar task file count ==="
+          tar tf coverage.tar | grep -c "vllm-ascend/${TASK_NAME}/" || true
+
+          {
+            echo "TASK_DATE=${TASK_DATE}"
+            echo "TASK_NAME=${TASK_NAME}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Upload coverage to OBS
+        run: |
+          pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os
+          from obs import ObsClient
+
+          OBS_BUCKET = 'vllm-ascend'
+          OBS_PREFIX = 'ci/precision-test'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com'
+          )
+
+          uploads = [
+              ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
+              ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
+              ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
+          ]
+          for local_path, obs_path in uploads:
+              resp = client.putFile(OBS_BUCKET, obs_path, local_path)
+              if resp.status < 300:
+                  print(f'Uploaded: {local_path} -> {obs_path}')
+              else:
+                  raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
+          EOF
+
+      - name: Prune extra tests already present in coverage
+        id: prune-extra
+        continue-on-error: true
+        run: |
+          set +e
+          echo "pruned=false" >> "$GITHUB_OUTPUT"
+          OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+          if ! pip install pyyaml --quiet; then
+            echo "::warning::Failed to install pyyaml; skip prune"
+            exit 0
+          fi
+          http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
+          if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
+            echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skip prune"
+            exit 0
+          fi
+          python3 .github/workflows/scripts/prune_extra_recommended_tests.py \
+            --extra-yaml extra_recommended_tests.yaml \
+            --map-file test_case_map.json \
+            --coverage-dir "coverage/vllm-ascend/${TASK_NAME}" \
+            --output-yaml extra_recommended_tests.yaml \
+            | tee prune.out
+          prune_status=${PIPESTATUS[0]}
+          if [ "${prune_status}" -ne 0 ]; then
+            echo "::warning::Prune extra tests failed"
+            exit 0
+          fi
+          if [ -f prune.out ] && grep -q "^Removed " prune.out; then
+            echo "pruned=true" >> "$GITHUB_OUTPUT"
+            echo "Pruned extra yaml:"
+            cat extra_recommended_tests.yaml
+          fi
+          exit 0
+
+      - name: Upload pruned extra_recommended_tests.yaml to OBS
+        if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
+            echo "::warning::OBS credentials are missing; skip extra yaml upload"
+            exit 0
+          fi
+          if [ ! -s extra_recommended_tests.yaml ]; then
+            echo "No pruned extra_recommended_tests.yaml to upload"
+            exit 0
+          fi
+          pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os
+          from obs import ObsClient
+
+          obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com',
+          )
+          resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
+          if resp.status >= 300:
+              raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
+          print(f'Uploaded extra_recommended_tests.yaml -> {obs_path}')
+          print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
+          EOF

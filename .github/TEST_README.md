@@ -175,28 +175,26 @@ If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and 
    - 4-card: `tests/e2e/pull_request/four_card/test_new_feature.py`
    - 8-card: `tests/e2e/pull_request/eight_card/test_new_feature.py`
 
-2. Register it in `.github/workflows/scripts/test_config.yaml` for PR selective testing.
+2. Ensure it is routed to the correct runner via `runner_mapping` in
+   `.github/workflows/scripts/test_config.yaml` (a card-dir path is routed
+   automatically). If the test file is long-running, add an entry to
+   `estimated_times` so partitioning can balance it. To exclude it from the
+   suite, add it to `skip_tests`.
 
-Example:
-
-```yaml
-- name: e2e_my_feature
-  optional: true
-  source_file_dependencies:
-    - vllm_ascend/my_feature
-  tests:
-    - tests/e2e/pull_request/one_card/test_my_feature.py
-    - tests/e2e/pull_request/two_card/test_my_feature_distributed.py
-```
+No per-module registration is needed: the full suite and the PR
+recommendation stream are resolved by directory scan.
 
 ## Running Selective Tests Locally
 
 ```bash
-# Route based on git diff
-python3 .github/workflows/scripts/select_tests.py --diff-base origin/main
+# Run the full suite (directory scan of tests/ut + e2e pull_request card dirs)
+python3 .github/workflows/scripts/select_tests.py --run-all-modules
 
-# Route based on explicit changed files
-python3 .github/workflows/scripts/select_tests.py --changed-files vllm_ascend/ops/foo.py
+# Run the curated A5 suite on the A5 x4 runner
+python3 .github/workflows/scripts/select_tests.py --run-a5
+
+# Route a list of pytest targets from a file (one per line)
+python3 .github/workflows/scripts/select_tests.py --test-list-file paths.txt
 
 # Run a specific subset of e2e tests (mirrors the /e2e slash command)
 python3 .github/workflows/scripts/select_tests.py \
@@ -212,7 +210,6 @@ python3 .github/workflows/scripts/select_tests.py \
 ## Testing Changes to `select_tests.py`
 
 ```bash
-PYTHONPATH=.github/workflows/scripts pytest -sv .github/workflows/scripts/test_select_tests.py
-ruff check .github/workflows/scripts/select_tests.py .github/workflows/scripts/test_select_tests.py
+ruff check .github/workflows/scripts/select_tests.py
 bash format.sh ci
 ```

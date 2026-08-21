@@ -106,7 +106,7 @@ jobs:
             echo "::error::Failed to download extra_recommended_tests.yaml from OBS (HTTP ${http_code})"
             exit 1
           fi
-          python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
+          python3 .github/workflows/scripts/merge_extra_recommended_tests_files.py \
             --extra-yaml extra_recommended_tests.yaml \
             --incoming-yaml merged_new_tests.yaml \
             --output-yaml extra_recommended_tests.yaml \

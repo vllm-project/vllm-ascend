@@ -76,8 +76,9 @@ def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
 
     docs = list(yaml.safe_load_all(text))
     existing: dict[str, int] = {}
-    if len(docs) >= 2 and isinstance(docs[1], dict):
-        existing = docs[1].get("estimated_times", {}) or {}
+    # test_config.yaml is a single-document config (estimated_times at top level).
+    meta = docs[0] if docs and isinstance(docs[0], dict) else {}
+    existing = meta.get("estimated_times", {}) or {}
 
     # --- compute new entries (preserve existing, update from timing data) ---
     new_entries = dict(existing)

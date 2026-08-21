@@ -92,8 +92,7 @@ jobs:
         id: scope
         run: |
           python3 .github/workflows/scripts/select_tests.py \
-            --run-all-modules \
-            --changed-files vllm_ascend/__init__.py
+            --run-all-modules
           # Re-read outputs and strip cpu-only groups (timing data from CPU UTs
           # is batch-level and skipped by update_estimated_times.py anyway).
           groups_json="$(grep '^test_groups=' "$GITHUB_OUTPUT" | cut -d= -f2-)"

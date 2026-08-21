@@ -191,85 +191,62 @@ jobs:
   recommend-tests-from-coverage:
     name: Recommend tests from coverage
     needs: pre-commit
-    # Skip the coverage-based recommendation path when the PR opts into the
-    # full suite via the ready-all label; select-tests will produce the test
-    # groups in that case.
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
-    runs-on: linux-amd64-cpu-8-hk
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout vllm-ascend scripts
+      - name: Checkout vllm-ascend repository
         uses: actions/checkout@v7
         with:
-          sparse-checkout: |
-            .github/workflows/scripts
-          sparse-checkout-cone-mode: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
 
-      - name: Download test case map and coverage package
+      - name: Install pre-requirements
+        run: |
+          pip install regex pyyaml
+
+      - name: Download test case map and extra tests
+        env:
+          OBS_BASE: "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test"
         run: |
           set -euo pipefail
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/test_case_map.json" \
-            -o test_case_map.json
-          echo "Downloaded test_case_map.json"
-          du -h test_case_map.json
-          curl -fsSL \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
-            -o coverage.tar
-          echo "Downloaded coverage.tar"
-          du -h coverage.tar
-          tar xf coverage.tar vllm-ascend/covstub
-          test -d vllm-ascend/covstub
-          echo "Extracted vllm-ascend/covstub"
-          find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
 
-      - name: Recommend tests for current PR
-        run: |
-          set -euo pipefail
-          if ! python3 -c "import regex" >/dev/null 2>&1; then
-            echo "regex not found for $(python3 -V); bootstrapping pip and installing regex"
-            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-            python3 get-pip.py --break-system-packages
-            python3 -m pip install --break-system-packages regex
-          fi
-          python3 -c "import regex; print('regex ok:', regex.__file__)"
-          PR_SPEC="${{ github.repository }}#${{ github.event.pull_request.number }}"
-          echo "Selecting tests for PR: ${PR_SPEC}"
-          python3 .github/workflows/scripts/test_selector.py \
-            --github-pr "${PR_SPEC}" \
-            --source-dir ./vllm-ascend/covstub \
-            --map-file test_case_map.json
+          download() {
+            local url="$1" out="$2"
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "${url}" -o "${out}"
+          }
 
-      - name: Merge extra tests from YAML
-        run: |
-          set -euo pipefail
-          if ! python3 -c "import yaml" >/dev/null 2>&1; then
-            echo "yaml not found for $(python3 -V); bootstrapping pip and installing pyyaml"
-            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-            python3 get-pip.py --break-system-packages
-            python3 -m pip install --break-system-packages pyyaml
-          fi
-          OBS_EXTRA_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
-          http_code=$(curl -sSL --retry 3 --retry-delay 5 -o extra_recommended_tests.obs.yaml -w "%{http_code}" "${OBS_EXTRA_URL}" || echo "000")
-          if [ "${http_code}" = "200" ] && [ -s extra_recommended_tests.obs.yaml ]; then
-            echo "Downloaded extra_recommended_tests.yaml from OBS"
-            python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
-              --list-file recommended_pytest_paths.txt \
-              --extra-yaml extra_recommended_tests.obs.yaml
+          echo "=== Downloading test_case_map.json ==="
+          download "${OBS_BASE}/test_case_map.json" test_case_map.json
+
+          echo "=== Downloading extra_recommended_tests.yaml ==="
+          if http_code=$(curl -sSL --retry 3 --retry-delay 5 -o /dev/null -w "%{http_code}" "${OBS_BASE}/extra_recommended_tests.yaml" || echo "000") \
+            && [ "${http_code}" = "200" ]; then
+            download "${OBS_BASE}/extra_recommended_tests.yaml" extra_recommended_tests.yaml
           else
             echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skipped"
-            rm -f extra_recommended_tests.obs.yaml
           fi
+
+      - name: Recommend tests for current PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          echo "Selecting tests between ${BASE_SHA} and ${HEAD_SHA}"
+          EXTRA_YAML_ARGS=()
+          if [ -f extra_recommended_tests.yaml ]; then
+            EXTRA_YAML_ARGS=(--extra-yaml extra_recommended_tests.yaml)
+          fi
+          python3 .github/workflows/scripts/coverage_recommender.py \
+            --base-sha "${BASE_SHA}" \
+            --head-sha "${HEAD_SHA}" \
+            --repo-root "$(pwd)" \
+            --map-file test_case_map.json \
+            "${EXTRA_YAML_ARGS[@]}"
 
       - name: Export coverage paths output
         id: export-paths
@@ -289,8 +266,7 @@ jobs:
           fi
 
   select-tests:
-    needs:
-      - recommend-tests-from-coverage
+    needs: recommend-tests-from-coverage
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # always() is required so this job still runs when recommend-tests-from-coverage
     # is skipped under ready-all. Modes:
@@ -299,7 +275,7 @@ jobs:
     #   none        - recommend job succeeded but produced no paths (no tests)
     # Recommend job failure does not fall back to all; this job fails instead.
     if: ${{ always() && !cancelled() }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
@@ -318,6 +294,10 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+
+      - name: Install pre-requirements
+        run: |
+          pip install regex pyyaml
 
       - name: Resolve source snapshot
         id: source-snapshot
@@ -384,7 +364,6 @@ jobs:
 
       - name: Validate test coverage config
         run: |
-          pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
       - name: Decide test selection mode
@@ -417,7 +396,6 @@ jobs:
           COVERAGE_PATHS: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install regex pyyaml -q
           LIST_FILE="$RUNNER_TEMP/recommended_from_coverage.txt"
           printf '%s\n' "${COVERAGE_PATHS}" > "$LIST_FILE"
           echo "Recommended paths from coverage:"
@@ -425,15 +403,13 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE"
 
-      - name: Select tests based on changed files
+      - name: Select all tests
         id: scope-all
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}'
+            --run-all-modules
 
       - name: Set no-tests output when no tests selected
         id: noop
@@ -452,13 +428,9 @@ jobs:
         id: scope-a5
         if: steps.filter.outputs.src == 'true'
         run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git fetch origin ${{ github.base_ref }}
-          pip install regex
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }} \
-            --modules a5 \
-            --runner-override a5_x4
+            --run-a5
 
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
@@ -485,8 +457,7 @@ jobs:
           PY
 
   ensure-csrc-cache:
-    needs:
-      - select-tests
+    needs: select-tests
     # always() is required: select-tests depends on recommend-tests-from-coverage,
     # which is skipped under ready-all. Without always(), the skipped need
     # propagates transitively and skips this job even when select-tests succeeded.
@@ -655,19 +626,3 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
-
-  # this job collects failure from uploaded logs
-  # failure analyze & upload reports
-
-  analyze-failure-report:
-    name: Analyze failure report
-    needs: [run-selected-tests, recommend-tests-from-coverage]
-    if: ${{ !cancelled() }}
-    uses: ./.github/workflows/_analyze_failure.yaml
-    with:
-      log_artifact_pattern: selected-test-logs-*
-      recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
-      recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}
-    secrets:
-      OBS_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
