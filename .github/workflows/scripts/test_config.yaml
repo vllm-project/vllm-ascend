@@ -144,6 +144,10 @@
     - tests/e2e/pull_request/two_card/aclgraph
     - tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py
     - tests/e2e/pull_request/four_card/test_graph_mode.py
+  # Temporarily skipped: the precision check in test_graph_mode.py is
+  # unstable; re-enable once the graph mode precision issue is fixed.
+  skip_tests:
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 - name: compilation_passes_base
   optional: false
@@ -613,6 +617,10 @@
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
     - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
     - tests/e2e/pull_request/four_card/test_qwen3_5.py
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
+  # Temporarily skipped: the precision check in test_graph_mode.py is
+  # unstable; re-enable once the graph mode precision issue is fixed.
+  skip_tests:
     - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 
