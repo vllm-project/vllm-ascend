@@ -452,7 +452,7 @@ def test_k3_dspark_load_weights_keeps_per_layer_context_kv(monkeypatch):
             torch.ones(1, 1),
         )
     ]
-    seen_names = []
+    seen_names: list[str] = []
 
     class CapturingLoader:
         def __init__(self, loaded_model, *, skip_substrs):
