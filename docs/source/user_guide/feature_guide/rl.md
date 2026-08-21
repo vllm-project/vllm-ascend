@@ -22,6 +22,31 @@ RL workloads commonly need the following capabilities:
 This page describes how these features fit together on Ascend. Follow the
 linked feature guides and examples for complete configuration details.
 
+## Enable RL mode
+
+vLLM-Ascend provides a unified RL configuration under
+`additional_config.rl_config`. Set its `enabled` field to `true` for both
+same-NPU and cross-NPU deployments:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+The master switch applies the common RL defaults: it disables FRACTAL_NZ,
+enables the development endpoints, and removes `expandable_segments` from
+`PYTORCH_NPU_ALLOC_CONF`. The optional fields are:
+
+| Field | When to enable it |
+| --- | --- |
+| `sleep_mode_extra_cleanup` | Release HCCL process groups and ACL graph workspaces during sleep in a same-NPU deployment |
+| `enable_training_consistency` | Select the FA3 attention backend for training-inference consistency |
+| `enable_batch_invariant` | Enable batch-invariant kernels and deterministic communication settings |
+
+All optional fields default to `false` and are ignored unless `enabled` is
+`true`. See [Additional Configuration](../configuration/additional_config.md#rl_config)
+for field definitions, prerequisites, and migration from legacy settings.
+
 ## Choose a deployment mode
 
 | Deployment mode | Memory management | Weight transfer backend |
@@ -47,10 +72,10 @@ For online control, enable the development endpoints and start the server with
 sleep mode enabled:
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
-VLLM_ASCEND_ENABLE_NZ=0 \
-vllm serve Qwen/Qwen3-0.6B --enable-sleep-mode
+vllm serve Qwen/Qwen3-0.6B \
+    --enable-sleep-mode \
+    --additional-config '{"rl_config": {"enabled": true}}'
 ```
 
 The sleep level is a query parameter; a JSON request body is ignored:
@@ -78,18 +103,17 @@ To release HCCL process groups and ACL graph workspaces as well, enable extra
 cleanup:
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
-VLLM_ASCEND_ENABLE_NZ=0 \
 vllm serve Qwen/Qwen3-0.6B \
     --enable-sleep-mode \
-    --additional-config '{"enable_sleep_mode_extra_cleanup": true}'
+    --additional-config '{"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}}'
 ```
 
 Extra cleanup reduces sleep-time NPU memory use, but HCCL groups must be
-restored and ACL graphs must be recaptured during wake-up. Also ensure
-`PYTORCH_NPU_ALLOC_CONF` does not contain `expandable_segments:True`, which is
-incompatible with the sleep-mode memory pool.
+restored and ACL graphs must be recaptured during wake-up. RL mode removes
+`expandable_segments` from `PYTORCH_NPU_ALLOC_CONF` because it is incompatible
+with the sleep-mode memory pool. The former top-level
+`enable_sleep_mode_extra_cleanup` option has been removed.
 
 ### Weight transfer
 
@@ -103,21 +127,19 @@ vLLM-Ascend exposes two Ascend-specific weight-transfer backends:
 Start an HCCL-enabled server with:
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 \
-VLLM_ASCEND_ENABLE_NZ=0 \
 vllm serve Qwen/Qwen3-0.6B \
-    --weight-transfer-config '{"backend": "hccl"}'
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
 ```
 
 For same-NPU transfer, use the `ipc` backend. On Ascend, vLLM-Ascend maps this
 user-facing backend name to `NPUIPCWeightTransferEngine`:
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 \
-VLLM_ASCEND_ENABLE_NZ=0 \
 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
 vllm serve Qwen/Qwen3-0.6B \
-    --weight-transfer-config '{"backend": "ipc"}'
+    --weight-transfer-config '{"backend": "ipc"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
 ```
 
 `VLLM_ALLOW_INSECURE_SERIALIZATION=1` is required by the HTTP NPU IPC example
@@ -138,15 +160,15 @@ The repository contains runnable examples for both backends:
 - [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
 
-FRACTAL_NZ must be disabled for weight updates. Set
-`VLLM_ASCEND_ENABLE_NZ=0`; the weight-transfer start path validates this
-environment variable directly. For sleep without weight transfer,
-`weight_nz_mode=0` in `--additional-config` is also supported.
+FRACTAL_NZ must be disabled for weight updates. RL mode forces
+`weight_nz_mode=0` and synchronizes `VLLM_ASCEND_ENABLE_NZ=0`; the
+weight-transfer start path validates the effective Ascend configuration.
 
 ### Pause and resume generation
 
-With `VLLM_SERVER_DEV_MODE=1`, the server exposes `/pause` and `/resume`.
-Pause parameters are query parameters:
+With `rl_config.enabled=true`, the server exposes `/pause` and `/resume`.
+These are development endpoints and must not be exposed to untrusted
+networks. Pause parameters are query parameters:
 
 ```bash
 # Drain in-flight requests and clear caches before the update.
@@ -221,15 +243,18 @@ for decoding and replay logic.
 
 Batch invariance reduces output differences caused by changes in batch shape
 or request order. On Atlas A2 and A3, build vLLM-Ascend with
-`VLLM_BATCH_INVARIANT=1`, then set the variable when serving:
+`COMPILE_CUSTOM_KERNELS=1`, then enable batch invariance through the unified
+RL configuration:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+vllm serve Qwen/Qwen3-8B \
+    --additional-config '{"rl_config": {"enabled": true, "enable_batch_invariant": true}}' \
     --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
-When batch invariance is enabled, vLLM-Ascend disables FRACTAL_NZ and sets
-`HCCL_DETERMINISTIC=strict` and `LCCL_DETERMINISTIC=1`. See
+RL mode disables FRACTAL_NZ. When batch invariance is enabled, worker
+initialization also sets `HCCL_DETERMINISTIC=strict` and
+`LCCL_DETERMINISTIC=1`. See
 [Batch Invariance](./batch_invariance.md) for supported hardware, models, and
 limitations.
 
@@ -327,14 +352,14 @@ for the supported load-balancing modes.
 
 | Setting | When to use it | Purpose |
 | --- | --- | --- |
-| `VLLM_ASCEND_ENABLE_NZ=0` | Sleep mode or weight transfer | Prevent precision problems when weights are restored or updated; required by the weight-transfer start path |
+| `rl_config.enabled=true` | All RL deployments | Apply RL defaults: disable NZ, enable development endpoints, and remove `expandable_segments` |
 | `--enable-sleep-mode` | Trainer and rollout engine share NPUs | Enable the CaMemAllocator memory pool |
 | `VLLM_WORKER_MULTIPROC_METHOD=spawn` | Sleep mode | Use the supported worker start method |
-| `enable_sleep_mode_extra_cleanup=true` | Optional for sleep mode | Release HCCL and ACL graph resources at the cost of slower wake-up |
-| `VLLM_SERVER_DEV_MODE=1` | Online sleep, pause, or weight-transfer control | Expose development-only control endpoints; do not expose them to untrusted networks |
+| `rl_config.sleep_mode_extra_cleanup=true` | Optional for sleep mode | Release HCCL and ACL graph resources at the cost of slower wake-up |
+| `rl_config.enable_training_consistency=true` | Training-inference consistency | Select FA3; requires the `flash_attn_npu_v3` package |
+| `rl_config.enable_batch_invariant=true` | Reproducible rollouts | Enable batch-invariant kernels and deterministic communication settings |
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
-| `VLLM_BATCH_INVARIANT=1` | Reproducible rollouts | Enable batch-invariant kernels and deterministic communication settings |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 
 For the Ascend-specific option definitions, see
