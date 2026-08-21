@@ -1,6 +1,6 @@
 # Dynamic Chunked Pipeline Parallel (CPP)
 
-TL;DR CPP uses profiling-based dynamic chunking to equalize per-chunk latency and eliminate pipeline bubbles in PP scenarios.
+CPP uses profiling-based dynamic chunking to equalize per-chunk latency and eliminate pipeline bubbles in PP scenarios.
 
 ## Background
 

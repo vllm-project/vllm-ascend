@@ -167,7 +167,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --additional-config '{"enable_balance_scheduling":true,"enable_mlapo":true,"enable_flashcomm1":true,"scheduler_config":{"enable_balance_scheduling":false}}' \
+    --additional-config '{"enable_mlapo":true,"enable_flashcomm1":true,"scheduler_config":{"enable_balance_scheduling":false}}' \
     --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
