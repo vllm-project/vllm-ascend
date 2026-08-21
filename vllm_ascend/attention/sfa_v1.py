@@ -1500,7 +1500,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
-        slot_mapping = attn_metadata.slot_mapping
+        slot_mapping_li = attn_metadata.slot_mapping
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
 
         # Inputs and outputs may be padded for CUDA graphs
@@ -1551,7 +1551,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=slot_mapping,
+                    slot_mapping=slot_mapping_sfa,
                     num_input_tokens=num_input_tokens,
                 )
         # native
@@ -1642,7 +1642,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             else:
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
-                    slot_mapping.view(-1, 1),
+                    slot_mapping_li.view(-1, 1),
                     k_li.view(-1, k_li.shape[-1]),
                 )  # b, s, n, d
             if self.enable_sparse_li_c8:
@@ -1660,7 +1660,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     torch_npu.npu_scatter_nd_update_(
                         kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                        slot_mapping.view(-1, 1),
+                        slot_mapping_li.view(-1, 1),
                         k_li_scale.view(-1, k_li_scale.shape[-1]),
                     )
         # Notify for every layer that wrote the cache, not just indexer layers:
