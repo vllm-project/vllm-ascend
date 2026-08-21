@@ -19,7 +19,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 32) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
 - `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 16) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
 - `GLM-5.2-w8a8c8`: requires 2 Atlas 800 A3 (64GB × 16) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
-- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 16) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios;
+- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 16) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -203,7 +203,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **GLM-5.2-w8a8c8 (198K context, dual-node co-located):**
 
-`GLM-5.2-w8a8c8` can be deployed on 2 Atlas 800 A3 (64GB × 16) for the 198K high-throughput scenario (`DP8 TP4`, 4 DP ranks per node).
+`GLM-5.2-w8a8c8` can be deployed on 2 Atlas 800 A3 (64GB × 16) for the 198K high-throughput scenario (`DP8 TP4`, 4 DP ranks per node). [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
 
 Run the following scripts on two nodes respectively.
 
@@ -435,7 +435,7 @@ Before you start, please
 
 **GLM-5.2-w8a8c8 (198K context, PD disaggregation with PP2):**
 
-`GLM-5.2-w8a8c8` PD disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 16): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node).
+`GLM-5.2-w8a8c8` PD disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 16): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
 
 **Prefill node 0** (`run_dp_template.sh`): `node_rank=0`, engine port `9081`. The value of `node_p0_ip` must be consistent with the `local_ip` set on prefill node 0 (PP master node).
 
@@ -1259,7 +1259,7 @@ DCP and Sparse Flash Attention C8 (`enable_sparse_sfa_c8`, also referred to as `
 
 **GLM-5.2-w8a8c8 (1M context, dual-node co-located):**
 
-`GLM-5.2-w8a8c8` 1M co-located deployment on 2 Atlas 800 A3 (64GB × 16) (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4):
+`GLM-5.2-w8a8c8` 1M co-located deployment on 2 Atlas 800 A3 (64GB × 16) (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4). [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
 
 Run the following scripts on two nodes respectively.
 
@@ -1388,7 +1388,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8-A3-0808
 
 **GLM-5.2-w8a8c8 (1M context, PD disaggregation):**
 
-`GLM-5.2-w8a8c8` 1M PD disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 16): 2 prefill nodes (`DP2 TP16`, 1 DP rank per node, decode context parallelism 16) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4).
+`GLM-5.2-w8a8c8` 1M PD disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 16): 2 prefill nodes (`DP2 TP16`, 1 DP rank per node, decode context parallelism 16) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4). [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
 
 **Prefill node 0** (`run_dp_template.sh`): DP rank 0, engine port `9081`. The value of `node_p0_ip` must be consistent with the `local_ip` set on prefill node 0 (DP master node).
 
