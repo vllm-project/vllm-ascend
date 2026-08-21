@@ -228,6 +228,12 @@ a3:
       - name: Minimax_m2.7_w8a8_A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Minimax_m2.7_w8a8_A3.yaml
+      - name: Qwen3_32b_w8a8_ml_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
+      - name: Deepseek_R1_W8A8_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Deepseek_R1_W8A8_A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
