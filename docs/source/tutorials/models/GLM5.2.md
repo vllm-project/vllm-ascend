@@ -183,7 +183,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `"enable_dsa_cp": true`: Enables DSA context parallelism to accelerate long-context prefill. With DSA-CP enabled, `layer_sharding` cannot include `o_proj`.
 - `"enable_sparse_li_c8": true`: Sparse attention optimizations of the C8 quantized model. `enable_sparse_li_c8` accelerates the layer-index (LI) sparse attention and is recommended to keep `true`; If the GPU memory is insufficient due to a long sequence length, you are advised to enable `enable_sparse_sfa_c8`.
-- `"enable_balance_scheduling": true`: Balance scheduling improves output throughput and reduces TPOT in the v1 scheduler. It replaces the deprecated environment variable `VLLM_ASCEND_BALANCE_SCHEDULING`; TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
+- `"enable_balance_scheduling": true`: Balance scheduling improves output throughput and reduces TPOT in the v1 scheduler. This config field replaces the removed environment setting; TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
 - `"multistream_overlap_shared_expert": true`: Overlaps shared-expert computation on an additional stream, improving decode efficiency.
 
 ##### 5.1.1.2 Multi-Node Co-Located Deployment
