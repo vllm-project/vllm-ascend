@@ -306,7 +306,6 @@ class AscendConfig:
 
         _A_FAMILY = {
             "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
-            "enable_transpose_kv_cache_by_block": "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
             "weight_nz_mode": "VLLM_ASCEND_ENABLE_NZ",
         }
         for key, env_name in _A_FAMILY.items():
