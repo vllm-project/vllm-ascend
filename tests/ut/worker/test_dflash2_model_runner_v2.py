@@ -109,6 +109,29 @@ def test_dflash2_disables_compile_on_draft_instance_only(monkeypatch, enforce_ea
     assert not hasattr(ordinary_module, "do_not_compile")
 
 
+def test_hybrid_metadata_without_seq_lens_is_not_updated():
+    autoregressive = pytest.importorskip("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator")
+    full_attn_metadata = SimpleNamespace(
+        seq_lens=torch.tensor([3, 5]),
+        seq_len_list=[3, 5],
+    )
+    gdn_metadata = SimpleNamespace(recurrent_state_indices=torch.tensor([0, 1]))
+    speculator = SimpleNamespace(attn_architecture="HYBRID")
+
+    autoregressive.AscendAutoRegressiveSpeculator._ascend_update_seq_lens(
+        speculator,
+        {
+            "full_attn.0": full_attn_metadata,
+            "full_attn.1": full_attn_metadata,
+            "linear_attn": gdn_metadata,
+        },
+    )
+
+    assert torch.equal(full_attn_metadata.seq_lens, torch.tensor([4, 6]))
+    assert full_attn_metadata.seq_len_list == [4, 6]
+    assert not hasattr(gdn_metadata, "seq_lens")
+
+
 def test_dflash2_rejects_unsupported_fp64_sampling():
     dflash2 = pytest.importorskip("vllm_ascend.worker.v2.spec_decode.dflash2.speculator")
     speculator = SimpleNamespace(use_fp64_gumbel=True)

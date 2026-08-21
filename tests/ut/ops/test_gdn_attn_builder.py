@@ -9,11 +9,15 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import (
+    AscendGatedDeltaNetAttention,
+    _resolve_gdn_attn_metadata,
+)
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
@@ -290,6 +294,31 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+def _empty_gdn_metadata():
+    return GDNAttentionMetadata(0, 0, 0, 0, 0, 0, 0)
+
+
+def test_resolve_gdn_metadata_for_wrapped_language_model_prefix():
+    metadata = _empty_gdn_metadata()
+
+    resolved = _resolve_gdn_attn_metadata(
+        {"model.layers.0.linear_attn": metadata},
+        "language_model.model.layers.0.linear_attn",
+    )
+
+    assert resolved is metadata
+
+
+def test_resolve_gdn_metadata_rejects_unrelated_group():
+    with pytest.raises(KeyError, match="No GDN attention metadata"):
+        _resolve_gdn_attn_metadata(
+            {
+                "other_model.layers.0.linear_attn": _empty_gdn_metadata(),
+            },
+            "language_model.model.layers.0.linear_attn",
+        )
 
 
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
