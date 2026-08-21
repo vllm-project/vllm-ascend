@@ -77,8 +77,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.activation import AscendSituAndMul
-from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+from vllm_ascend.ops.activation import AscendSituAndMul  # type: ignore[attr-defined]
+from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 
 
 def _apply_ascend_attn_res(
