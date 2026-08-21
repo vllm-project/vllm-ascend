@@ -75,13 +75,11 @@ def msa_index_score_golden(
             blocks = (kv + block_size - 1) // block_size
             if blocks > max_blocks:
                 max_blocks = blocks
-        num_kv_heads = key.shape[1]
         k = key.astype(np.float32)[:, 0, :]
     else:
         batch = len(actual_seq_klen)
         max_blocks = block_table.shape[1]
         is_bnbd = key.shape[2] == block_size and key.shape[1] != block_size
-        num_kv_heads = key.shape[1] if is_bnbd else key.shape[2]
         if is_bnbd:
             k = key.astype(np.float32)[:, 0, :, :]
         else:
