@@ -137,15 +137,11 @@ def test_parse_kv_pool_types(pool_type: str) -> None:
 
 def test_parse_kv_pool_rejects_unknown_type() -> None:
     with pytest.raises(ValueError, match="Unsupported kv_pool.type"):
-        ExternalDPConfigLoader._parse_kv_pool(
-            {"kv_pool": {"type": "unknown", "config": {}}}
-        )
+        ExternalDPConfigLoader._parse_kv_pool({"kv_pool": {"type": "unknown", "config": {}}})
 
 
 def test_validate_kv_pool_rejects_invalid_ports() -> None:
-    config = _make_config(
-        _make_mooncake_pool(master_port=50088, metrics_port=50088)
-    )
+    config = _make_config(_make_mooncake_pool(master_port=50088, metrics_port=50088))
 
     with pytest.raises(ValueError, match="must be different"):
         ExternalDPConfigLoader._validate_kv_pool(config)
@@ -158,9 +154,7 @@ def test_validate_memcache_requires_meta_and_local_sections() -> None:
         ExternalDPConfigLoader._validate_kv_pool(config)
 
 
-def test_mooncake_manager_uses_configured_ports_and_starts_master(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_mooncake_manager_uses_configured_ports_and_starts_master(tmp_path: Path, monkeypatch) -> None:
     config = _make_config(_make_mooncake_pool())
     launched: dict[str, object] = {}
     terminated: list[int] = []
@@ -193,9 +187,7 @@ def test_mooncake_manager_uses_configured_ports_and_starts_master(
     assert terminated == [123]
 
 
-def test_memcache_manager_uses_configured_ports_and_starts_meta_service(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_memcache_manager_uses_configured_ports_and_starts_meta_service(tmp_path: Path, monkeypatch) -> None:
     config = _make_config(_make_memcache_pool())
     launched: dict[str, object] = {}
     monkeypatch.setattr(runtime.socket, "create_connection", lambda *args, **kwargs: nullcontext())
@@ -223,9 +215,7 @@ def test_memcache_manager_uses_configured_ports_and_starts_meta_service(
         assert launched["env"] == {"MMC_META_CONFIG_PATH": str(manager.meta_config_path)}
 
 
-def test_non_primary_node_uses_configured_ports_without_starting_service(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_non_primary_node_uses_configured_ports_without_starting_service(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runtime.socket, "create_connection", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr(
         runtime,
@@ -234,9 +224,7 @@ def test_non_primary_node_uses_configured_ports_without_starting_service(
     )
 
     manager = runtime.create_kv_pool_manager(
-        config=_make_config(
-            _make_mooncake_pool(master_port=43001, metrics_port=43002)
-        ),
+        config=_make_config(_make_mooncake_pool(master_port=43001, metrics_port=43002)),
         current_node_index=1,
         log_root=tmp_path,
     )

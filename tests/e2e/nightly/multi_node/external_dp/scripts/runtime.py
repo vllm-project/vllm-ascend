@@ -161,9 +161,7 @@ class ExternalDPMooncakeManager(ExternalDPKVPoolManager):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.config_path = (
-            self.log_root / f"node-{self.current_node_index}" / "runtime" / "mooncake.json"
-        ).resolve()
+        self.config_path = (self.log_root / f"node-{self.current_node_index}" / "runtime" / "mooncake.json").resolve()
 
     @property
     def mooncake_config(self) -> MooncakeKVPoolConfig:
@@ -261,12 +259,8 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         )
         meta_config = dict(rendered_config["meta"])
         local_config = dict(rendered_config["local"])
-        meta_service_url = (
-            f"tcp://{self.service_host}:{self.memcache_config.meta_service_port}"
-        )
-        config_store_url = (
-            f"tcp://{self.service_host}:{self.memcache_config.config_store_port}"
-        )
+        meta_service_url = f"tcp://{self.service_host}:{self.memcache_config.meta_service_port}"
+        config_store_url = f"tcp://{self.service_host}:{self.memcache_config.config_store_port}"
         meta_config["ock.mmc.meta_service_url"] = meta_service_url
         meta_config["ock.mmc.meta_service.config_store_url"] = config_store_url
         local_config["ock.mmc.meta_service_url"] = meta_service_url

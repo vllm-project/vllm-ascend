@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
 
-
 SUPPORTED_KV_POOL_TYPES = {"memcache", "mooncake"}
 
 
@@ -87,13 +86,9 @@ def validate_kv_pool_config(kv_pool: KVPoolConfig) -> None:
         if port < 1 or port > 65535:
             raise ValueError(f"kv_pool.{field_name} must be between 1 and 65535")
     if ports[0][1] == ports[1][1]:
-        raise ValueError(
-            f"kv_pool.{ports[0][0]} and kv_pool.{ports[1][0]} must be different"
-        )
+        raise ValueError(f"kv_pool.{ports[0][0]} and kv_pool.{ports[1][0]} must be different")
 
     if isinstance(kv_pool, MemcacheKVPoolConfig):
         for section in ("meta", "local"):
             if not isinstance(kv_pool.config.get(section), dict):
-                raise TypeError(
-                    f"kv_pool.config.{section} must be a mapping for memcache"
-                )
+                raise TypeError(f"kv_pool.config.{section} must be a mapping for memcache")

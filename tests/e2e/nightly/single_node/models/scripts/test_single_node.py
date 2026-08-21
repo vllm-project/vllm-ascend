@@ -13,10 +13,10 @@ import pytest
 import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import (
     create_single_node_kv_pool_manager,
 )
-from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,

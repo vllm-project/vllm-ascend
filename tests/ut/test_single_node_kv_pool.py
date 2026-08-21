@@ -45,9 +45,7 @@ def _mock_runtime(monkeypatch, launched: dict[str, object]) -> None:
         lambda *args, **kwargs: nullcontext(),
     )
     monkeypatch.setattr(kv_pool_runtime.os, "getpgid", lambda pid: pid, raising=False)
-    monkeypatch.setattr(
-        kv_pool_runtime.os, "killpg", lambda pgid, sig: None, raising=False
-    )
+    monkeypatch.setattr(kv_pool_runtime.os, "killpg", lambda pgid, sig: None, raising=False)
 
 
 def test_single_node_without_kv_pool_uses_noop_manager() -> None:
@@ -139,9 +137,5 @@ def test_single_node_memcache_manager(tmp_path: Path, monkeypatch) -> None:
         assert "ock.mmc.meta_service_url = tcp://127.0.0.1:5000" in meta_config
         assert "ock.mmc.meta_service.config_store_url = tcp://127.0.0.1:6000" in meta_config
         assert "ock.mmc.local_service.config_store_url = tcp://127.0.0.1:6000" in local_config
-        assert manager.server_envs == {
-            "MMC_LOCAL_CONFIG_PATH": str(manager.local_config_path)
-        }
-        assert launched["env"]["MMC_META_CONFIG_PATH"] == str(
-            manager.meta_config_path
-        )
+        assert manager.server_envs == {"MMC_LOCAL_CONFIG_PATH": str(manager.local_config_path)}
+        assert launched["env"]["MMC_META_CONFIG_PATH"] == str(manager.meta_config_path)

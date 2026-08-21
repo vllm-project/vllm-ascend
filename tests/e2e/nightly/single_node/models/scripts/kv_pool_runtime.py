@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import signal
 import socket
 import subprocess
@@ -9,6 +8,8 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 from tests.e2e.common.kv_pool.config import (
     KVPoolConfig,
@@ -44,11 +45,7 @@ class SingleNodeKVPoolManager:
     def __init__(self, config: KVPoolConfig, case_name: str):
         self.config = config
         safe_case_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", case_name)
-        self.runtime_dir = (
-            Path(tempfile.gettempdir())
-            / "vllm_ascend_single_node_kv_pool"
-            / safe_case_name
-        ).resolve()
+        self.runtime_dir = (Path(tempfile.gettempdir()) / "vllm_ascend_single_node_kv_pool" / safe_case_name).resolve()
         self.process: subprocess.Popen | None = None
         self.server_envs: dict[str, str] = {}
 
@@ -77,14 +74,11 @@ class SingleNodeKVPoolManager:
         while time.monotonic() < deadline:
             if self.process is not None and self.process.poll() is not None:
                 raise RuntimeError(
-                    f"{self.config.type} service exited before becoming ready "
-                    f"with code {self.process.returncode}"
+                    f"{self.config.type} service exited before becoming ready with code {self.process.returncode}"
                 )
             for port in tuple(pending_ports):
                 try:
-                    with socket.create_connection(
-                        (SINGLE_NODE_POOL_HOST, port), timeout=2
-                    ):
+                    with socket.create_connection((SINGLE_NODE_POOL_HOST, port), timeout=2):
                         pending_ports.remove(port)
                 except OSError:
                     pass
@@ -92,10 +86,7 @@ class SingleNodeKVPoolManager:
                 print(f"{self.config.type} KV pool is ready")
                 return
             time.sleep(1)
-        raise TimeoutError(
-            f"Timed out waiting for {self.config.type} KV pool; "
-            f"ports={sorted(pending_ports)}"
-        )
+        raise TimeoutError(f"Timed out waiting for {self.config.type} KV pool; ports={sorted(pending_ports)}")
 
     @staticmethod
     def _write_text_atomic(path: Path, content: str) -> None:
@@ -201,30 +192,20 @@ class SingleNodeMemcacheManager(SingleNodeKVPoolManager):
         def format_value(value: Any) -> str:
             return str(value).lower() if isinstance(value, bool) else str(value)
 
-        return "".join(
-            f"{key} = {format_value(value)}\n" for key, value in config.items()
-        )
+        return "".join(f"{key} = {format_value(value)}\n" for key, value in config.items())
 
     def _write_config(self) -> None:
         rendered_config = _replace_localhost(self.config.config)
         meta_config = dict(rendered_config["meta"])
         local_config = dict(rendered_config["local"])
-        meta_service_url = (
-            f"tcp://{SINGLE_NODE_POOL_HOST}:{self.config.meta_service_port}"
-        )
-        config_store_url = (
-            f"tcp://{SINGLE_NODE_POOL_HOST}:{self.config.config_store_port}"
-        )
+        meta_service_url = f"tcp://{SINGLE_NODE_POOL_HOST}:{self.config.meta_service_port}"
+        config_store_url = f"tcp://{SINGLE_NODE_POOL_HOST}:{self.config.config_store_port}"
         meta_config["ock.mmc.meta_service_url"] = meta_service_url
         meta_config["ock.mmc.meta_service.config_store_url"] = config_store_url
         local_config["ock.mmc.meta_service_url"] = meta_service_url
         local_config["ock.mmc.local_service.config_store_url"] = config_store_url
-        self._write_text_atomic(
-            self.meta_config_path, self._format_config(meta_config)
-        )
-        self._write_text_atomic(
-            self.local_config_path, self._format_config(local_config)
-        )
+        self._write_text_atomic(self.meta_config_path, self._format_config(meta_config))
+        self._write_text_atomic(self.local_config_path, self._format_config(local_config))
         self.server_envs = {"MMC_LOCAL_CONFIG_PATH": str(self.local_config_path)}
 
     def _start_service(self) -> None:
