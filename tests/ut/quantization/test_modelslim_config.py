@@ -611,6 +611,8 @@ class TestQuantPrefixMapper(TestBase):
                 "f_a_proj",
                 "b_proj",
             ],
+            "in_proj_qkv": ["q_proj", "k_proj", "v_proj"],
+            "in_proj_gfab": ["g_proj", "f_a_proj", "b_proj"],
             "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
             "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         }
@@ -649,6 +651,36 @@ class TestQuantPrefixMapper(TestBase):
             ),
             "W4A8_DYNAMIC",
         )
+
+    def test_kimi_k3_quarot_splits_mixed_kda_projection(self):
+        attention_prefix = "language_model.model.layers.0.self_attn"
+        quant_description = {
+            **{f"{attention_prefix}.{name}.weight": "W8A8_DYNAMIC" for name in ("q_proj", "k_proj", "v_proj")},
+            **{f"{attention_prefix}.{name}.weight": "FLOAT" for name in ("g_proj", "f_a_proj", "b_proj")},
+        }
+        config = AscendModelSlimConfig(quant_description)
+        fused_prefix = f"{attention_prefix}.in_proj_qkvgfab"
+
+        self.assertTrue(config.uses_kimi_k3_mixed_kda_projection(fused_prefix))
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                f"{attention_prefix}.in_proj_qkv",
+                get_packed_modules_mapping("kimi_k3"),
+            ),
+            "W8A8_DYNAMIC",
+        )
+
+        layer = MagicMock(spec=LinearBase)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = "kimi_linear"
+        with patch(
+            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+            return_value=mock_vllm_config,
+        ):
+            method = config.get_quant_method(layer, fused_prefix)
+
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
     def test_gemma4_moe_experts_float_shards_are_skipped_together(self):
         quant_description = {

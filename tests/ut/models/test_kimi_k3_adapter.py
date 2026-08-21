@@ -249,6 +249,50 @@ def test_kimi_text_model_retains_upstream_checkpoint_packing():
     }
 
 
+def test_kimi_mixed_kda_gate_weights_load_into_float_packed_projection(monkeypatch):
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    layer = nn.Module()
+    layer.self_attn = nn.Module()
+    layer.self_attn.in_proj_gfab = nn.Module()
+    layer.self_attn.in_proj_gfab.load_shard_weight = MagicMock()
+    packed_weight = nn.Parameter(torch.empty(6, 4))
+    layer.self_attn.in_proj_gfab.register_parameter("weight", packed_weight)
+    layer.router = nn.Linear(4, 1, bias=False)
+    model.layers = nn.ModuleList([layer])
+
+    remaining = []
+
+    def fake_upstream_load_weights(_self, weights):
+        remaining.extend(weights)
+        return {name for name, *_ in remaining}
+
+    monkeypatch.setattr(
+        kimi_k3.UpstreamKimiLinearModel,
+        "load_weights",
+        fake_upstream_load_weights,
+    )
+    source_weights = [
+        ("layers.0.router.weight", torch.full((1, 4), 0.5)),
+        ("layers.0.self_attn.g_proj.weight", torch.full((1,), 1.0)),
+        ("layers.0.self_attn.f_a_proj.weight", torch.full((1,), 2.0)),
+        ("layers.0.self_attn.b_proj.weight", torch.full((1,), 3.0)),
+        ("layers.0.self_attn.o_proj.weight", torch.full((1,), 4.0)),
+    ]
+
+    loaded = model.load_weights(iter(source_weights))
+
+    weight_loader = layer.self_attn.in_proj_gfab.load_shard_weight
+    assert [call.args[2] for call in weight_loader.call_args_list] == [0, 1, 2]
+    assert [call.args[1].item() for call in weight_loader.call_args_list] == [1.0, 2.0, 3.0]
+    assert remaining == [source_weights[0], source_weights[-1]]
+    assert loaded == {
+        "layers.0.self_attn.in_proj_gfab.weight",
+        "layers.0.router.weight",
+        "layers.0.self_attn.o_proj.weight",
+    }
+
+
 def test_kimi_text_model_layer_factory_accepts_prefix_keyword(monkeypatch):
     config = SimpleNamespace(
         vocab_size=64,

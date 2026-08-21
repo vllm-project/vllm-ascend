@@ -15,8 +15,14 @@ from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+)
 from vllm.model_executor.utils import replace_parameter
-from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+from vllm.models.kimi_k3.nvidia.kda import (
+    KimiK3DeltaAttention,
+    _KimiGDNMergedColumnParallelLinear,
+)
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -60,11 +66,67 @@ def _prepare_beta(
     return raw_beta[:, :num_actual_tokens].float().sigmoid()
 
 
+class AscendKimiK3MergedGateProjection(
+    _KimiGDNMergedColumnParallelLinear,
+):
+    """FLOAT KDA gates packed with vLLM's merged-linear loading API."""
+
+    def load_shard_weight(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        shard_id: int,
+    ) -> None:
+        """Load one checkpoint projection into the packed gate weight."""
+        super().weight_loader(param, loaded_weight, shard_id)
+
+
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
+        quant_config = getattr(vllm_config, "quant_config", None)
+        uses_mixed_projection = bool(
+            quant_config is not None
+            and getattr(
+                quant_config,
+                "uses_kimi_k3_mixed_kda_projection",
+                lambda _prefix: False,
+            )(f"{prefix}.in_proj_qkvgfab")
+        )
         super().__init__(config, vllm_config, prefix)
+        self.uses_mixed_projection = uses_mixed_projection
+        if uses_mixed_projection:
+            # vLLM 0.27 packs all KDA input projections into one linear.  A
+            # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps the
+            # three gates in floating point, so form one fused GEMM per
+            # precision group instead of falling back to four projections.
+            del self.in_proj_qkvgfab
+            self.in_proj_qkvgfab = MergedColumnParallelLinear(
+                self.hidden_size,
+                [self.projection_size] * 3,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkv",
+            )
+            gate_output_sizes = [
+                self.projection_size,
+                self.head_dim,
+                self.num_heads,
+            ]
+            if self.in_proj_padding:
+                gate_output_sizes.append(self.in_proj_padding * self.tp_size)
+            self.in_proj_gfab = AscendKimiK3MergedGateProjection(
+                self.hidden_size,
+                gate_output_sizes,
+                replicated_shard_id=1,
+                tp_size=self.tp_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_gfab",
+            )
+            if self.in_proj_padding:
+                self.in_proj_gfab.weight.data[-self.in_proj_padding :].zero_()
         # Upstream's FusedRMSNormGated constructor defaults to 1e-5, while
         # Kimi K3 checkpoints use the model-configured RMS epsilon (1e-6 for
         # the production checkpoint). Preserve the checkpoint contract used
@@ -119,6 +181,37 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             hidden_states.contiguous(),
             not self.is_vl_first_layer,
         )
+        if self.uses_mixed_projection:
+            num_tokens = hidden_states.size(0)
+            mixed_qkv = self.in_proj_qkvgfab(hidden_states)[0]
+            projected_gfab = self.in_proj_gfab(hidden_states)[0]
+            split_sizes = [
+                self.local_projection_size,
+                self.head_dim,
+                self.local_num_heads,
+            ]
+            if self.in_proj_padding:
+                split_sizes.append(self.in_proj_padding)
+            g_proj_states, f_a, beta = projected_gfab.split(split_sizes, dim=-1)[:3]
+            beta = beta.unsqueeze(0)
+
+            g1 = self.f_b_proj(f_a)[0]
+            g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
+            g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
+            core_attn_out = torch.empty(
+                (1, num_tokens, self.local_num_heads, self.head_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            self._forward(
+                mixed_qkv=mixed_qkv,
+                g1=g1,
+                g2=g2,
+                beta=beta,
+                core_attn_out=core_attn_out,
+            )
+            core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
+            return self.o_proj(core_attn_out)[0]
         return super().forward(hidden_states, positions)
 
     @staticmethod

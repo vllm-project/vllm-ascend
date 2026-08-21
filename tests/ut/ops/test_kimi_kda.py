@@ -10,6 +10,7 @@ from torch import nn
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
+    AscendKimiK3MergedGateProjection,
     _prepare_beta,
     _zero_padded_output,
     _zero_padded_recurrent_output,
@@ -114,6 +115,28 @@ def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
     assert beta.shape == (1, 3, 1)
     torch.testing.assert_close(beta, raw_beta[:, :3].float().sigmoid())
     assert torch.all((beta >= 0.0) & (beta <= 1.0))
+
+
+def test_merged_gate_projection_uses_vllm_shard_loader():
+    projection = AscendKimiK3MergedGateProjection.__new__(
+        AscendKimiK3MergedGateProjection,
+    )
+    nn.Module.__init__(projection)
+    param = nn.Parameter(torch.empty(4, 3))
+    loaded_weight = torch.empty(2, 3)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda._KimiGDNMergedColumnParallelLinear.weight_loader",
+        autospec=True,
+    ) as weight_loader:
+        projection.load_shard_weight(param, loaded_weight, shard_id=2)
+
+    weight_loader.assert_called_once_with(
+        projection,
+        param,
+        loaded_weight,
+        2,
+    )
 
 
 def test_kda_output_norm_gate_uses_platform_custom_op_dispatch():

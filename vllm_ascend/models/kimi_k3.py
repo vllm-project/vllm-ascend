@@ -633,6 +633,35 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
 
+    def load_weights(self, weights):
+        """Load mixed-precision KDA gates into the FLOAT packed module."""
+        params_dict = dict(self.named_parameters())
+        gate_mapping = (
+            (".g_proj", ".in_proj_gfab", 0),
+            (".f_a_proj", ".in_proj_gfab", 1),
+            (".b_proj", ".in_proj_gfab", 2),
+        )
+        loaded_gate_params = set()
+
+        def load_non_gate_weights():
+            for args in weights:
+                name, loaded_weight = args[:2]
+                for source, target, shard_id in gate_mapping:
+                    if source not in name:
+                        continue
+                    mapped_name = name.replace(source, target)
+                    if mapped_name in params_dict:
+                        param = params_dict[mapped_name]
+                        module_name = mapped_name.rsplit(".", 1)[0]
+                        module = self.get_submodule(module_name)
+                        module.load_shard_weight(param, loaded_weight, shard_id)
+                        loaded_gate_params.add(mapped_name)
+                        break
+                else:
+                    yield args
+
+        return super().load_weights(load_non_gate_weights()) | loaded_gate_params
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
