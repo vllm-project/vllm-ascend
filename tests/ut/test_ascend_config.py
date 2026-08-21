@@ -186,6 +186,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -204,7 +205,7 @@ class TestAscendConfig(TestBase):
 
             self.assertTrue(ascend_config.rl_config.enabled)
             self.assertEqual(ascend_config.weight_nz_mode, 0)
-            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
+            self.assertNotIn("VLLM_ASCEND_ENABLE_NZ", os.environ)
             self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "1")
 
     @_clean_up_ascend_config
@@ -433,7 +434,6 @@ class TestAscendConfig(TestBase):
             os.environ,
             {
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
-                "VLLM_ASCEND_ENABLE_NZ": "2",
             },
         ):
             ascend_config = init_ascend_config(test_vllm_config)
@@ -441,16 +441,11 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertFalse(ascend_config.enable_mlapo)
         self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
-        self.assertEqual(ascend_config.weight_nz_mode, 2)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
         mock_info_once.assert_any_call(
             "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
             "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be "
             "removed in the next release."
-        )
-        mock_info_once.assert_any_call(
-            "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2. "
-            "Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed "
-            "in the next release."
         )
 
     @_clean_up_ascend_config
@@ -484,7 +479,6 @@ class TestAscendConfig(TestBase):
             os.environ,
             {
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
-                "VLLM_ASCEND_ENABLE_NZ": "2",
             },
         ):
             ascend_config = init_ascend_config(test_vllm_config)
@@ -506,6 +500,16 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
 
         self.assertTrue(ascend_config.msmonitor_use_daemon)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_weight_nz_mode_ignores_removed_env(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"weight_nz_mode": 2}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.weight_nz_mode, 2)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
