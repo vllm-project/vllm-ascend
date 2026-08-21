@@ -95,14 +95,7 @@ def _as_ascendc_index_kv_cache(
     ``[num_blocks, 128, 1, head_dim]`` instead.
     """
     if isinstance(index_kv_cache, tuple):
-        if len(index_kv_cache) != 1:
-            raise ValueError("M3 index cache tuple must contain only the K tensor")
-        (index_kv_cache,) = index_kv_cache
-    if index_kv_cache.ndim != 3 or index_kv_cache.shape[1] != _MSA_INDEX_BLOCK_SIZE:
-        raise ValueError(
-            "M3 index K cache must have shape "
-            f"[num_blocks, {_MSA_INDEX_BLOCK_SIZE}, head_dim], got {tuple(index_kv_cache.shape)}"
-        )
+        index_kv_cache = index_kv_cache[0]
     return index_kv_cache.unsqueeze(2)
 
 
@@ -243,17 +236,12 @@ def _index_score_topk_candidates(
         device=context_lens.device,
     ).repeat(context_lens.shape[0])
     visible_tokens = context_lens.repeat_interleave(decode_query_len) + query_offsets + 1
-    valid_block_count = torch.div(
-        visible_tokens + _MSA_INDEX_BLOCK_SIZE - 1,
-        _MSA_INDEX_BLOCK_SIZE,
-        rounding_mode="floor",
-    ).clamp(min=0, max=block_count)
-
     global_valid_block_count = torch.div(
         visible_tokens + block_offset * _MSA_INDEX_BLOCK_SIZE + _MSA_INDEX_BLOCK_SIZE - 1,
         _MSA_INDEX_BLOCK_SIZE,
         rounding_mode="floor",
     ).clamp(min=0)
+    valid_block_count = (global_valid_block_count - block_offset).clamp(min=0, max=block_count)
     local_block_ids = torch.arange(block_count, device=score.device)
     global_block_ids = local_block_ids + block_offset
     valid_blocks = global_block_ids[None, :] < global_valid_block_count[:, None]
@@ -262,24 +250,22 @@ def _index_score_topk_candidates(
     # valid candidate and only then be discarded by output validation.
     score = torch.where(valid_blocks[None, :, :], score, float("-inf"))
 
-    if init_blocks > 0 or local_blocks > 0:
-        # Apply forced-block scores here per token, before the one and only
-        # TopK. This is shared by single-token and speculative decode.
-        if init_blocks > 0:
-            init_mask = valid_blocks & (global_block_ids[None, :] < init_blocks)
-            score = torch.where(init_mask[None, :, :], 1.0e30, score)
-        if local_blocks > 0:
-            local_start = (global_valid_block_count - local_blocks).clamp(min=0)
-            local_mask = valid_blocks & (global_block_ids[None, :] >= local_start[:, None])
-            score = torch.where(local_mask[None, :, :], 1.0e29, score)
+    # Apply forced-block scores per token before the one and only TopK.
+    if init_blocks > 0:
+        init_mask = valid_blocks & (global_block_ids[None, :] < init_blocks)
+        score = torch.where(init_mask[None, :, :], 1.0e30, score)
+    if local_blocks > 0:
+        local_start = (global_valid_block_count - local_blocks).clamp(min=0)
+        local_mask = valid_blocks & (global_block_ids[None, :] >= local_start[:, None])
+        score = torch.where(local_mask[None, :, :], 1.0e29, score)
 
-    selected_count = min(topk, block_count)
+    actual_topk_count = min(topk, block_count)
     raw_scores, raw_topk = torch.topk(
         score,
-        k=selected_count,
+        k=actual_topk_count,
         dim=-1,
     )
-    if selected_count == topk:
+    if actual_topk_count == topk:
         topk_indices = raw_topk.to(dtype=torch.int32)
         topk_scores = raw_scores
     else:
@@ -295,8 +281,8 @@ def _index_score_topk_candidates(
             dtype=raw_scores.dtype,
             device=raw_scores.device,
         )
-        topk_indices[..., :selected_count].copy_(raw_topk)
-        topk_scores[..., :selected_count].copy_(raw_scores)
+        topk_indices[..., :actual_topk_count].copy_(raw_topk)
+        topk_scores[..., :actual_topk_count].copy_(raw_scores)
 
     valid_candidate = (topk_indices >= 0) & (topk_indices < valid_block_count[None, :, None])
     topk_indices = torch.where(
@@ -342,7 +328,7 @@ def _minimax_m3_index_decode(
     )
     if block_count is None:
         block_count = block_table.shape[-1]
-    topk_indices, topk_scores = _index_score_topk_candidates(
+    return _index_score_topk_candidates(
         score[..., :block_count],
         context_lens,
         decode_query_len,
@@ -351,7 +337,6 @@ def _minimax_m3_index_decode(
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
-    return topk_indices, topk_scores
 
 
 @torch.no_grad()

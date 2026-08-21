@@ -407,8 +407,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 start_loc=decode_start_loc,
             )
             if _USE_ASCENDC_INDEX_SCORE and self.tp_size > 1 and active_prefills == 0:
-                assert decode_cu_seqlens_q is not None
-                assert decode_context_lens is not None
                 decode_metadata.tp_score = self._build_tp_score_metadata(
                     decode_metadata.block_table,
                     decode_cu_seqlens_q,
@@ -518,9 +516,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             dim=-1,
         )
         local_gathered_topk = gathered_topk.narrow(0, local_head_start, local_head_count)
-        merged_topk = torch.gather(local_gathered_topk, dim=-1, index=merged_pos)
-
-        return merged_topk
+        return torch.gather(local_gathered_topk, dim=-1, index=merged_pos)
 
     def forward(
         self,
@@ -544,12 +540,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE:
-                assert d.cu_seqlens_q is not None
-                assert d.context_lens is not None
-                assert d.start_loc is not None
-                assert index_md.causal_mask is not None
-                if tp_group is not None and tp_group.world_size > 1 and index_md.num_prefills == 0:
-                    assert d.tp_score is not None
+                if tp_group.world_size > 1 and index_md.num_prefills == 0:
                     decode_topk = minimax_m3_index_tp_block_parallel_decode(
                         decode_iq,
                         kv,
@@ -608,8 +599,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             p = index_md.prefill
             assert p is not None
             if _USE_ASCENDC_INDEX_SCORE:
-                assert p.start_loc is not None
-                assert index_md.causal_mask is not None
                 prefill_topk = minimax_m3_index_prefill_ascendc(
                     iq[num_decode_tokens:],
                     kv,
