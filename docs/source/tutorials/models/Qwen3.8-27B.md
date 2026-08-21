@@ -432,39 +432,6 @@ vllm bench serve --model Eco-Tech/Qwen3.8-27B-w8a8 --dataset-name random --rando
 
 After about several minutes, you can get the performance evaluation result.
 
-### 8.5 Reference Results on Ascend950PR
-
-Measured on a single Ascend950PR NPU, TP1, vLLM Ascend 0.23.0, using the
-deployment command in Section 5.1 (`FULL_DECODE_ONLY`, MTP
-`num_speculative_tokens=3`, `enable_cpu_binding=true`).
-
-#### W8A8 (`Eco-Tech/Qwen3.8-27B-w8a8`)
-
-| Scenario | Metric | Value |
-| --- | --- | --- |
-| Single request, 2048 output tokens | Output token throughput | 63 tok/s |
-| Single request, 2048 output tokens | TPOT | 15.9 ms |
-| 10 requests, 64K input / 3K output | Total token throughput | 2062 tok/s |
-| 10 requests, 64K input / 3K output | Output token throughput | 92 tok/s |
-| 10 requests, 64K input / 3K output | Mean TPOT | 66 ms |
-| 10 requests, 64K input / 3K output | MTP acceptance rate | 64.21% |
-| 10 requests, 64K input / 3K output | MTP acceptance length | 2.93 |
-
-#### MXFP8 (`Eco-Tech/Qwen3.8-27B-w8a8-mxfp8`)
-
-| Scenario | Metric | Value |
-| --- | --- | --- |
-| Single request | Output token throughput | 63 tok/s |
-| Single request | TPOT | 15.9 ms |
-| 10 requests, 64K input / 3K output | Total token throughput | 1520 tok/s |
-| 10 requests, 64K input / 3K output | Output token throughput | 68 tok/s |
-| 10 requests, 64K input / 3K output | Mean TPOT | 93 ms |
-| 10 requests, 64K input / 3K output | MTP acceptance rate | 63.24% |
-| 10 requests, 64K input / 3K output | MTP acceptance length | 2.90 |
-
-Results are for reference only and vary with prompt distribution and concurrency.
-On this 64K/3K concurrency-10 run, MXFP8 did not outperform W8A8.
-
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
