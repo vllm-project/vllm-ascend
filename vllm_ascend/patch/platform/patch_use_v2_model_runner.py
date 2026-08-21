@@ -16,11 +16,10 @@
 #
 import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.utils import is_310p
 
-logger = init_logger(__name__)
 _ORIGINAL_VALIDATE_V2_MODEL_RUNNER = VllmConfig._validate_v2_model_runner
 
 
