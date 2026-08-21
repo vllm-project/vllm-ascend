@@ -420,6 +420,20 @@ jobs:
           pip install regex pyyaml -q
           LIST_FILE="$RUNNER_TEMP/recommended_from_coverage.txt"
           printf '%s\n' "${COVERAGE_PATHS}" > "$LIST_FILE"
+          {
+            echo "tests/ut/worker/test_block_table.py"
+            echo "tests/ut/worker/test_model_runner_v1.py"
+            echo "tests/ut/worker/test_worker_multi_instance.py"
+            echo "tests/ut/worker/test_worker_v1.py"
+            echo "tests/ut/ops/test_gdn_chunk_meta.py"
+            echo "tests/ut/ops/test_token_dispatcher.py"
+            echo "tests/ut/compilation/test_acl_graph.py"
+            echo "tests/ut/device_allocator/test_find_loaded_library.py"
+            echo "tests/ut/eplb/core/test_eplb_utils.py"
+            echo "tests/ut/spec_decode/test_eagle_proposer.py"
+            echo "tests/ut/kv_offload/test_remote_decode_lifecycle.py"
+            echo "tests/ut/kv_offload/test_remote_prefill_lifecycle.py"
+          } >> "$LIST_FILE"
           echo "Recommended paths from coverage:"
           cat "$LIST_FILE"
           python3 .github/workflows/scripts/select_tests.py \

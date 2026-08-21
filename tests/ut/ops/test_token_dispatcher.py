@@ -574,7 +574,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.dispatcher = TokenDispatcherWithAllGather(**kwargs)
 
         # Mock NPU functions
-        self.patcher_npu_moe_init_routing_v2 = patch("torch_npu.npu_moe_init_routing_v2")
+        self.patcher_npu_moe_init_routing_v2 = patch("torch_npu.npu_moe_init_routing_v2", create=True)
         self.mock_npu_moe_init_routing_v2 = self.patcher_npu_moe_init_routing_v2.start()
         self.mock_npu_moe_init_routing_v2.return_value = (
             torch.randn(6, 128),  # sorted_hidden_states
@@ -582,7 +582,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
             torch.tensor([0, 1, 0, 1, 0, 1]),  # expanded_expert_idx
             torch.tensor([0, 1, 0, 1, 0, 1]),
         )
-        self.patcher_npu_moe_token_unpermute = patch("torch_npu.npu_moe_token_unpermute")
+        self.patcher_npu_moe_token_unpermute = patch("torch_npu.npu_moe_token_unpermute", create=True)
         self.mock_npu_moe_token_unpermute = self.patcher_npu_moe_token_unpermute.start()
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(6, 128)
 
@@ -749,13 +749,13 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher_rank.stop)
 
         # Mock torch_npu.npu_moe_token_permute
-        patcher4 = patch("torch_npu.npu_moe_token_permute")
+        patcher4 = patch("torch_npu.npu_moe_token_permute", create=True)
         self.mock_npu_moe_token_permute = patcher4.start()
         self.addCleanup(patcher4.stop)
         self.mock_npu_moe_token_permute.return_value = (torch.randn(16, 16), torch.arange(16))
 
         # Mock torch_npu.npu_moe_token_unpermute
-        patcher5 = patch("torch_npu.npu_moe_token_unpermute")
+        patcher5 = patch("torch_npu.npu_moe_token_unpermute", create=True)
         self.mock_npu_moe_token_unpermute = patcher5.start()
         self.addCleanup(patcher5.stop)
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
@@ -793,7 +793,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_dynamic_quant.return_value = (torch.randn(16, 16), torch.randn(16))
 
         # Mock torch.ops._C_ascend.npu_moe_init_routing_v2
-        patcher11 = patch("torch_npu.npu_moe_init_routing_v2")
+        patcher11 = patch("torch_npu.npu_moe_init_routing_v2", create=True)
         self.mock_npu_moe_init_routing_v2 = patcher11.start()
         self.addCleanup(patcher11.stop)
         self.mock_npu_moe_init_routing_v2.return_value = (

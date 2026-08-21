@@ -1,8 +1,7 @@
-import os
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -580,11 +579,12 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.scheduler_config = mock_scheduler_config
         self.mock_vllm_config.speculative_config = None
         self.mock_device = torch.device("cpu")
-        fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "..", "_fake_weight")
-        model_config = ModelConfig(
-            model=fake_weight_path,
-            skip_tokenizer_init=True,
-        )
+        # Avoid real ModelConfig: it inspects architectures via a subprocess
+        # that requires NPU tooling on CPU CI.
+        model_config = MagicMock()
+        model_config.max_model_len = 1024
+        model_config.dtype = torch.float16
+        model_config.get_head_size.return_value = 64
         model_config.hf_text_config.head_dim = 128
         model_config.hf_text_config.qk_rope_head_dim = 32
         self.mock_vllm_config.model_config = model_config
@@ -598,7 +598,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
-    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
     @patch("torch.npu.is_available")
     def test_build_prefix_no_cache_metadata(self, mock_npu_available, mock_zeros, mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
@@ -652,7 +652,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
-    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
     @patch("torch.npu.is_available")
     def test_build_chunked_prefix_metadata(self, mock_npu_available, mock_zeros, mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
@@ -1989,7 +1989,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
 
-    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
     def test_exec_kv_prefill(self, mock_kv_rmsnorm_rope_cache):
         B = 2
         N = self.impl.num_kv_heads
@@ -2015,15 +2015,20 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
-    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
-    def test_exec_kv_prefill_with_fa_quant(self, mock_kv_rmsnorm_rope_cache):
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    def test_exec_kv_prefill_with_fa_quant(self, mock_get_ascend_device_type, mock_kv_rmsnorm_rope_cache):
         # if fa_quant_layer is True
+        from vllm_ascend.attention.mla_v1 import AscendDeviceType
+
         B = 2
         N = self.impl.num_kv_heads
         D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
         kv_no_split = torch.randn(B, N, D)
         self.impl.enable_kv_nz = None
         self.impl.fa_quant_layer = True
+        self.impl.fak_descale_reciprocal = MagicMock()
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
         self.impl.kv_a_layernorm.weight = MagicMock()
         self.impl.kv_a_layernorm.variance_epsilon = MagicMock()
         cos = MagicMock()
@@ -2045,7 +2050,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
-    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
     def test_exec_kv_decode(self, mock_kv_rmsnorm_rope_cache):
         B = 2
         N = self.impl.num_kv_heads

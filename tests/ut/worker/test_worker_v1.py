@@ -483,8 +483,12 @@ class TestNPUWorker(TestBase):
     @patch("torch.npu.set_device")
     @patch("torch.npu.empty_cache")
     @patch("torch.npu.mem_get_info")
+    @patch("torch.npu.device_count", return_value=1)
+    @patch("torch.npu.is_available", return_value=True)
     def test_init_device(
         self,
+        mock_is_available,
+        mock_device_count,
         mock_mem_get_info,
         mock_empty_cache,
         mock_set_device,
@@ -768,8 +772,8 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
-    @patch("torch_npu.npu.mem_get_info")
+    @patch("torch.npu.memory_stats")
+    @patch("torch.npu.mem_get_info")
     @patch("vllm_ascend.worker.worker.logger")
     def test_determine_available_memory_normal_case(
         self,
@@ -835,8 +839,8 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
-    @patch("torch_npu.npu.mem_get_info")
+    @patch("torch.npu.memory_stats")
+    @patch("torch.npu.mem_get_info")
     def test_determine_available_memory_with_non_torch_allocations(
         self,
         mock_torch_mem_get_info,
@@ -941,8 +945,8 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
-    @patch("torch_npu.npu.mem_get_info")
+    @patch("torch.npu.memory_stats")
+    @patch("torch.npu.mem_get_info")
     def test_determine_available_memory_negative_result(
         self,
         mock_torch_mem_get_info,
