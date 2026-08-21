@@ -71,6 +71,12 @@ Use an Atlas A3 image containing the vLLM version pinned by this release and
 the matching vLLM-Ascend build. Mount the checkpoint at the same path on all
 nodes.
 
+For multi-node serving, first follow the
+[multi-node communication check](../../installation.md#verify-multi-node-communication).
+The commands below cover the A3 configurations validated for this integration.
+The A2 deployment from the vLLM-Ascend 0.23 guide is not carried forward as a
+validated main-branch configuration until it is rerun with the current runtime.
+
 ```shell
 export IMAGE=<VLLM_ASCEND_A3_IMAGE>
 export MODEL_ROOT=<HOST_MODEL_ROOT>
@@ -242,11 +248,80 @@ vllm serve "$MODEL_PATH" \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
-For Prefill-Decode disaggregation, use the same model, tokenizer,
-parallelism, and parser settings on both sides, then follow the
-[Mooncake deployment guide](../features/pd_disaggregation_mooncake_multi_node.md).
+## 7 Two-Node Prefill-Decode Deployment
 
-## 7 Functional Verification
+The functional Prefill-Decode (P/D) check uses one 16-NPU A3 Prefill node and
+one 16-NPU A3 Decode node. Both engines use TP16/EP and the same checkpoint,
+tokenizer, KDA/MLA cache layout, and model revision. Install Mooncake and check
+the data-plane network as described in the
+[multi-node Mooncake guide](../features/pd_disaggregation_mooncake_multi_node.md).
+
+Use these K3-specific settings in addition to the common model and environment
+arguments from Section 5:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Parallelism | TP16/EP | TP16/EP |
+| Execution mode | `--enforce-eager` | `FULL_DECODE_ONLY` |
+| Hybrid state layout | `--mamba-cache-mode align` | `--mamba-cache-mode align` |
+| KV role | `kv_producer` | `kv_consumer` |
+| Prefix Cache | Enabled | Enabled |
+
+Add the following arguments to the Prefill service. Select a `kv_port` outside
+Mooncake's reserved AscendDirectTransport range; for a 16-NPU node, use a port
+of at least 36000.
+
+```shell
+--enforce-eager \
+--mamba-cache-mode align \
+--kv-transfer-config \
+'{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_producer",
+  "kv_port": "<PREFILL_KV_PORT>",
+  "kv_connector_extra_config": {
+    "prefill": {"dp_size": 1, "tp_size": 16},
+    "decode": {"dp_size": 1, "tp_size": 16}
+  }
+}'
+```
+
+Add the following arguments to the Decode service:
+
+```shell
+--mamba-cache-mode align \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--kv-transfer-config \
+'{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_consumer",
+  "kv_port": "<DECODE_KV_PORT>",
+  "kv_connector_extra_config": {
+    "prefill": {"dp_size": 1, "tp_size": 16},
+    "decode": {"dp_size": 1, "tp_size": 16}
+  }
+}'
+```
+
+Start the standard Mooncake proxy with the Prefill and Decode endpoints, then
+send requests to the proxy rather than directly to an engine:
+
+```shell
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+  --host 0.0.0.0 \
+  --port 9000 \
+  --prefiller-hosts <PREFILL_HOST> \
+  --prefiller-ports <PREFILL_SERVICE_PORT> \
+  --decoder-hosts <DECODE_HOST> \
+  --decoder-ports <DECODE_SERVICE_PORT>
+```
+
+The proxy CLI may evolve with the shared P/D implementation. Treat the linked
+Mooncake guide and `--help` output from the checked-out revision as
+authoritative for proxy-only arguments. Do not change the K3 model, tokenizer,
+TP size, or hybrid cache mode between the two engines.
+
+## 8 Functional Verification
 
 Run request generation inside the serving environment or its trusted service
 network. Avoid sending a large benchmark load across a developer workstation
@@ -271,7 +346,24 @@ requested number of finite token log probabilities unless generation reaches a
 configured stop token. Repeat an identical prompt and confirm that Prefix Cache
 metrics increase without changing deterministic output tokens.
 
-## 8 Accuracy and Nightly Validation
+For a multimodal smoke test, replace the message content with an image and a
+text instruction:
+
+```json
+{
+  "role": "user",
+  "content": [
+    {"type": "image_url", "image_url": {"url": "<IMAGE_URL_OR_DATA_URL>"}},
+    {"type": "text", "text": "Describe the image."}
+  ]
+}
+```
+
+Run concurrency and benchmark requests from a host inside the trusted serving
+network. A developer workstation or VPN should be used only for bounded smoke
+requests.
+
+## 9 Accuracy and Nightly Validation
 
 Use the following validation ladder:
 
@@ -294,3 +386,38 @@ GPQA results. Record completed, failed, missing, and unparsed samples in
 addition to the final score. Refer to [AISBench](../../developer_guide/evaluation/using_ais_bench.md)
 or [lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for evaluator
 setup.
+
+## 10 Performance Evaluation
+
+Use [AISBench](../../developer_guide/evaluation/using_ais_bench.md) or the
+[vLLM benchmark tools](https://docs.vllm.ai/en/latest/benchmarking/) from a
+server-side load-generator environment. Record the checkpoint revision,
+topology, graph mode, Prefix Cache setting, input/output lengths, concurrency,
+completed requests, and error count together with throughput and latency.
+
+Reduced checkpoints are useful for execution and scaling comparisons, but
+their throughput is not representative of the full 896-expert model.
+
+## 11 FAQ
+
+### The service returns an incomplete or null choice
+
+First check every rank log for a worker abort, a non-finite tensor, or a graph
+replay failure. Then repeat the same deterministic request with log
+probabilities and verify that every generated token has a finite chosen-token
+log probability. An HTTP 200 response alone is not a sufficient pass condition.
+
+### A Prefix Cache hit fails only at block-size plus one token
+
+Use a prompt that leaves exactly one uncached token after a full cached block.
+Compare its output tokens and chosen-token log probabilities against a cold
+prefill and a post-reset cold run in the same model instance. This exercises
+the one-token prefill classification without conflating it with decode.
+
+### P/D starts but requests hang
+
+Verify that both engines use `--mamba-cache-mode align`, the same model
+revision and TP size, complementary Mooncake roles, reachable non-overlapping
+KV ports, and topology values matching the actual Prefill and Decode groups.
+Check both engine logs and the proxy response; engine health alone does not
+prove hybrid KDA/MLA state transfer.
