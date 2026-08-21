@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shlex
@@ -169,11 +170,22 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
     if any("cudagraph_mode" in display for display in command_displays):
         features.append("aclgraph")
 
+    for command in commands:
+        flag = next(
+            (candidate for candidate in ("--additional-config", "--additional_config") if candidate in command.cmd),
+            None,
+        )
+        if flag is None:
+            continue
+        flag_index = command.cmd.index(flag)
+        additional_config = json.loads(command.cmd[flag_index + 1])
+        if additional_config.get("enable_mlapo") and "mlapo" not in features:
+            features.append("mlapo")
+
     feature_envs = {
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-        "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
     }
     for env_key, feature_name in feature_envs.items():
