@@ -1,3 +1,6 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -15,7 +18,7 @@ this script demonstrates the LoRA-based RL training workflow where:
 * The server immediately serves requests with or without the active LoRA,
   without needing to pause/resume or rebuild the KV cache.
 
-This is a common pattern in online RLHF (e.g., PPO, GRPO) where the policy
+This is a common pattern in online RLHF (e.g., PPO, GRPO) where the active_lora
 is fine-tuned with LoRA and the updated adapter is synced to the inference
 engine at each iteration. LoRA updates are lighter-weight than full-model
 transfers — no HCCL/NCCL process group is needed, and the server never
@@ -37,24 +40,24 @@ The example performs the following steps:
 
 1. Generate text using the vLLM server via OpenAI-compatible API
    **without** any LoRA adapter (baseline).
-2. Deploy the initial policy: load the **Alice** adapter under the fixed
-   name ``policy`` via ``POST /v1/load_lora_adapter`` and generate — the
+2. Deploy the initial active_lora: load the **Alice** adapter under the fixed
+   name ``active_lora`` via ``POST /v1/load_lora_adapter`` and generate — the
    model identifies as Alice.
 3. **Push updated weights in place**: load the **Bob** adapter onto the
-   *same* ``policy`` name via ``POST /v1/load_lora_adapter`` with
+   *same* ``active_lora`` name via ``POST /v1/load_lora_adapter`` with
    ``"load_inplace": true``, and generate — the model now identifies as
    Bob.  The adapter name never changes: it is just a slot, and the
    trainer pushes new checkpoints onto it each RL iteration — no unload,
    no pause/resume, and in-flight requests keep running.
 4. **Roll back to a previous checkpoint**: push Alice's weights onto
-   ``policy`` in place again (Bob → Alice) and generate — the model
+   ``active_lora`` in place again (Bob → Alice) and generate — the model
    identifies as Alice again, showing that any older checkpoint can be
    restored the same way.
-5. **Unload** ``policy`` and generate again — the server falls back to
+5. **Unload** ``active_lora`` and generate again — the server falls back to
    the base model, confirming the rollback path.
 
 A single identity prompt is used so the whole demo completes in about a
-minute.  The script unloads ``policy`` at startup (tolerating 404), so it
+minute.  The script unloads ``active_lora`` at startup (tolerating 404), so it
 can be re-run against a warm server.
 
 This demonstrates the complete RL training LoRA update cycle:
@@ -86,6 +89,7 @@ In a real RLHF setup (e.g., with TRL or OpenRLHF), the trainer would:
         # No unload, no pause/resume, no HCCL broadcast needed
 """
 
+import logging
 import os
 import subprocess
 import time
@@ -93,6 +97,8 @@ from urllib.parse import urlsplit
 
 import requests
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -121,7 +127,7 @@ LORA_BOB = (
 
 # The fixed adapter name the trainer pushes weights onto each iteration.
 # The name is just a slot; only the weights behind it change.
-POLICY_NAME = "policy"
+LORA_ADAPTER_NAME = "active_lora"
 
 # One identity prompt is enough to observe the adapter switch.
 PROMPTS = ["Hi, tell me about you"]
@@ -218,10 +224,10 @@ def load_lora_adapter(
         "lora_path": lora_path,
         "load_inplace": load_inplace,
     }
-    print(f"[trainer] Loading LoRA '{lora_name}' from {lora_path} (load_inplace={load_inplace}) ...")
+    logger.info("[trainer] Loading LoRA '%s' from %s (load_inplace=%s) ...", lora_name, lora_path, load_inplace)
     response = requests.post(url, json=payload, timeout=120)
     response.raise_for_status()
-    print(f"[trainer] LoRA '{lora_name}' loaded successfully")
+    logger.info("[trainer] LoRA '%s' loaded successfully", lora_name)
 
 
 def unload_lora_adapter(
@@ -242,13 +248,13 @@ def unload_lora_adapter(
     """
     url = f"{base_url}/v1/unload_lora_adapter"
     payload = {"lora_name": lora_name}
-    print(f"[trainer] Unloading LoRA '{lora_name}' ...")
+    logger.info("[trainer] Unloading LoRA '%s' ...", lora_name)
     response = requests.post(url, json=payload, timeout=60)
     if ignore_missing and response.status_code == 404:
-        print(f"[trainer] LoRA '{lora_name}' was not loaded; nothing to unload")
+        logger.info("[trainer] LoRA '%s' was not loaded; nothing to unload", lora_name)
         return
     response.raise_for_status()
-    print(f"[trainer] LoRA '{lora_name}' unloaded successfully")
+    logger.info("[trainer] LoRA '%s' unloaded successfully", lora_name)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +272,7 @@ class LoRAServer:
         # If a server is already serving this port, reuse it.
         try:
             if requests.get(f"{base_url}/health", timeout=5).status_code == 200:
-                print(f"[server] using an existing server at {base_url}", flush=True)
+                logger.info("[server] using an existing server at %s", base_url)
                 self.external = True
                 self.proc = None
                 return
@@ -291,7 +297,7 @@ class LoRAServer:
             "--port",
             str(port),
         ]
-        print(f"[server] starting: {' '.join(command)}", flush=True)
+        logger.info("[server] starting: %s", " ".join(command))
         self.proc = subprocess.Popen(command, env=env)
         self._wait_until_ready(base_url)
 
@@ -306,7 +312,7 @@ class LoRAServer:
                 # serving this port, use it instead of failing.
                 try:
                     if requests.get(health_url, timeout=5).status_code == 200:
-                        print(f"[server] using an existing server at {base_url}", flush=True)
+                        logger.info("[server] using an existing server at %s", base_url)
                         self.external = True
                         return
                 except requests.exceptions.RequestException:
@@ -314,7 +320,7 @@ class LoRAServer:
                 raise RuntimeError(f"vLLM server exited with status {self.proc.returncode}")
             try:
                 if requests.get(health_url, timeout=5).status_code == 200:
-                    print(f"[server] ready: {health_url}", flush=True)
+                    logger.info("[server] ready: %s", health_url)
                     return
             except requests.exceptions.RequestException:
                 pass
@@ -344,7 +350,7 @@ def generate_and_print(
     model: str,
     lora_name: str | None = None,
 ) -> list[str]:
-    """Run one generation round and print the outputs.
+    """Run one generation round and log the outputs.
 
     Args:
         client: OpenAI client pointing at the vLLM server.
@@ -355,18 +361,20 @@ def generate_and_print(
     Returns:
         List of generated text strings (one per prompt).
     """
-    print("\n" + "=" * 60)
-    print(title)
-    print("=" * 60)
+    logger.info("\n%s\n%s\n%s", "=" * 60, title, "=" * 60)
     outputs = generate_completions(client, model, PROMPTS, lora_name=lora_name)
     for prompt, output in zip(PROMPTS, outputs):
-        print(f"Prompt: {prompt!r}")
-        print(f"Output: {output!r}")
-        print("-" * 40)
+        logger.info("Prompt: %r", prompt)
+        logger.info("Output: %r", output)
+        logger.info("-" * 40)
     return outputs
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     # Start a local vLLM server (unless one is already serving BASE_URL)
     # and stop it again on exit.
     server = LoRAServer(MODEL_NAME, BASE_URL)
@@ -384,46 +392,46 @@ def main():
 
         # Reset adapter state so the demo is re-runnable against a warm server.
         try:
-            unload_lora_adapter(BASE_URL, POLICY_NAME, ignore_missing=True)
+            unload_lora_adapter(BASE_URL, LORA_ADAPTER_NAME, ignore_missing=True)
         except requests.exceptions.ConnectionError as exc:
             raise SystemExit(f"Could not reach the vLLM server at {BASE_URL}.") from exc
 
         # ── Step 1: Generate WITHOUT LoRA (baseline) ───────────────────
         baseline_outputs = generate_and_print(client, "Step 1: Generating WITHOUT LoRA (baseline)", MODEL_NAME)
 
-        # ── Step 2: Deploy the initial policy (Alice under a fixed name) ──
-        load_lora_adapter(BASE_URL, POLICY_NAME, alice_path)
+        # ── Step 2: Deploy the initial active_lora (Alice under a fixed name) ──
+        load_lora_adapter(BASE_URL, LORA_ADAPTER_NAME, alice_path)
         alice_outputs = generate_and_print(
             client,
-            "Step 2: Generating with the initial policy (Alice)",
+            "Step 2: Generating with the initial active_lora (Alice)",
             MODEL_NAME,
-            lora_name=POLICY_NAME,
+            lora_name=LORA_ADAPTER_NAME,
         )
 
         # ── Step 3: Push updated weights in place (Alice → Bob) ───────
         # The trainer pushes new checkpoint weights onto the existing adapter
-        # name with load_inplace=True.  The name stays "policy": requests
+        # name with load_inplace=True.  The name stays "active_lora": requests
         # keep using it, but they now hit the new weights — no unload, no
         # pause/resume, in-flight requests are not interrupted.
-        load_lora_adapter(BASE_URL, POLICY_NAME, bob_path, load_inplace=True)
+        load_lora_adapter(BASE_URL, LORA_ADAPTER_NAME, bob_path, load_inplace=True)
         bob_outputs = generate_and_print(
             client,
             "Step 3: Generating after inplace push Alice → Bob",
             MODEL_NAME,
-            lora_name=POLICY_NAME,
+            lora_name=LORA_ADAPTER_NAME,
         )
 
         # ── Step 4: Roll back to a previous checkpoint (Bob → Alice) ──
-        load_lora_adapter(BASE_URL, POLICY_NAME, alice_path, load_inplace=True)
+        load_lora_adapter(BASE_URL, LORA_ADAPTER_NAME, alice_path, load_inplace=True)
         rollback_outputs = generate_and_print(
             client,
             "Step 4: Generating after inplace push Bob → Alice (rollback)",
             MODEL_NAME,
-            lora_name=POLICY_NAME,
+            lora_name=LORA_ADAPTER_NAME,
         )
 
-        # ── Step 5: Unload the policy and verify rollback to base ─────
-        unload_lora_adapter(BASE_URL, POLICY_NAME)
+        # ── Step 5: Unload the active_lora and verify rollback to base ─────
+        unload_lora_adapter(BASE_URL, LORA_ADAPTER_NAME)
         after_unload_outputs = generate_and_print(
             client,
             "Step 5: Generating after unload (back to the base model)",
@@ -431,20 +439,18 @@ def main():
         )
 
         # ── Summary ────────────────────────────────────────────────────
-        print("\n" + "=" * 60)
-        print("Summary")
-        print("=" * 60)
+        logger.info("\n%s\n%s\n%s", "=" * 60, "Summary", "=" * 60)
         identity_idx = 0  # "Hi, tell me about you"
-        print(f"Baseline                 : {baseline_outputs[identity_idx]!r}")
-        print(f"policy <- Alice (deploy) : {alice_outputs[identity_idx]!r}")
-        print(f"policy <- Bob (inplace)  : {bob_outputs[identity_idx]!r}")
-        print(f"policy <- Alice (rollback): {rollback_outputs[identity_idx]!r}")
-        print(f"After unload             : {after_unload_outputs[identity_idx]!r}")
+        logger.info("Baseline: %r", baseline_outputs[identity_idx])
+        logger.info("active_lora <- Alice (deploy) : %r", alice_outputs[identity_idx])
+        logger.info("active_lora <- Bob (inplace)  : %r", bob_outputs[identity_idx])
+        logger.info("active_lora <- Alice (rollback): %r", rollback_outputs[identity_idx])
+        logger.info("After unload: %r", after_unload_outputs[identity_idx])
 
-        # Verify each stage of the policy lifecycle.  An assertion failure
+        # Verify each stage of the active_lora lifecycle.  An assertion failure
         # means the corresponding update did not take effect.
         assert alice_outputs[identity_idx] != baseline_outputs[identity_idx], (
-            "Deploying Alice under 'policy' did not change the output vs baseline"
+            "Deploying Alice under 'active_lora' did not change the output vs baseline"
         )
         assert bob_outputs[identity_idx] != alice_outputs[identity_idx], "Inplace push Alice → Bob did not take effect"
         assert rollback_outputs[identity_idx] != bob_outputs[identity_idx], (
@@ -453,7 +459,7 @@ def main():
         assert after_unload_outputs[identity_idx] != rollback_outputs[identity_idx], (
             "Unload did not roll inference back to the base model"
         )
-        print("\nAll checks passed.")
+        logger.info("All checks passed")
     finally:
         server.stop()
 
