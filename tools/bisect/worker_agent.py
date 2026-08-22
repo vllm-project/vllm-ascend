@@ -34,6 +34,7 @@ from tools.bisect import git_ops, runner
 from tools.bisect.build_manager import BuildError, BuildManager
 from tools.bisect.config import BisectInput, BisectOptions
 from tools.bisect.coordinator import Coordinator
+from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter
 
 logger = logging.getLogger("bisect.worker")
 
@@ -77,6 +78,7 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
 def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     coord = Coordinator(opt.coord_dir, opt.num_nodes, opt.node_index)
     builder = BuildManager(opt)
+    version_adapter = VersionAdapter(opt)
     log_dir = Path(opt.work_dir) / "worker_logs" / f"node{opt.node_index}"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -103,13 +105,26 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
         logger.info("[worker] round %d: deploying %s", rnd, commit[:12])
         try:
             builder.prepare(commit, log_path)
-        except BuildError as exc:
-            # Don't block the barrier; report our (built) HEAD so the master can
-            # detect inconsistency. The master will likely hit the same build
-            # failure and record SKIP.
+            version_adapter.ensure_targets(
+                cmd.get("version_targets", {}),
+                tuple(cmd.get("version_checks", ())),
+                log_path,
+            )
+        except (BuildError, VersionAdaptationError) as exc:
+            # Publish a deliberately inconsistent ready marker so the master
+            # aborts the round if it managed to deploy successfully. The worker
+            # waits for the master's start/abort decision and never launches a
+            # partial distributed test.
             logger.error("[worker] build failed for %s: %s", commit[:12], exc)
+            coord.signal_ready(rnd, "worker-deploy-failed")
+            if not coord.wait_start(rnd, opt.barrier_timeout_s):
+                continue
+            continue
 
         coord.signal_ready(rnd, git_ops.current_commit(opt.repo_dir))
+        if not coord.wait_start(rnd, opt.barrier_timeout_s):
+            logger.info("[worker] round %d aborted before test execution", rnd)
+            continue
         # Launch the worker test; it returns when the master's trial completes.
         rc = _launch_pytest(inp, opt, log_path)
         logger.info("[worker] round %d pytest finished rc=%d", rnd, rc)
