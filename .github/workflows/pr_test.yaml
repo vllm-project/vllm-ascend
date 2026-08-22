@@ -423,7 +423,8 @@ jobs:
           echo "Recommended paths from coverage:"
           cat "$LIST_FILE"
           python3 .github/workflows/scripts/select_tests.py \
-            --test-list-file "$LIST_FILE"
+            --test-list-file "$LIST_FILE" \
+            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
 
       - name: Select tests based on changed files
         id: scope-all

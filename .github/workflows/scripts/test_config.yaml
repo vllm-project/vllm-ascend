@@ -319,6 +319,25 @@
     - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
     - tests/e2e/pull_request/eight_card/test_minimax_m3.py
 
+- name: models_minimax_m2
+  optional: false
+  # Run only on PRs tagged with both the job-level ready gate
+  # (`ready-precise`/`ready-all`, formerly `ready`) and `mrv2`.
+  # Callers that do not pass --pr-labels (e.g. nightly/schedule) are not gated.
+  # optional: false = the mrv2 label keeps this module in the matched set on
+  # the diff/ready-all path (precise-testing recommended mode selects from the
+  # coverage recommendation instead); source_file_dependencies only narrows
+  # bisect/test-only edge paths, not PR selection.
+  required_pr_labels: [mrv2]
+  source_file_dependencies:
+    - vllm_ascend/patch/worker/patch_minimax_m2.py
+    - vllm_ascend/patch/worker/patch_minimax_m2_linear_attn.py
+    - tests/e2e/pull_request/four_card/minimax_m2_7_common.py
+    - tools/vllm_bench.py
+  tests:
+    - tests/e2e/pull_request/four_card/test_minimax_m2_7_16k.py
+    - tests/e2e/pull_request/four_card/test_minimax_m2_7_128k.py
+
 # Ops
 - name: ops_basic
   optional: false
@@ -867,6 +886,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 950
+  tests/e2e/pull_request/four_card/test_minimax_m2_7_128k.py: 4000
+  tests/e2e/pull_request/four_card/test_minimax_m2_7_16k.py: 4200
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 190
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 670
@@ -949,4 +970,3 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
-

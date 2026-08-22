@@ -847,6 +847,7 @@ def main():
         help="List of explicit e2e test paths (files or directories) to run. "
         "Bypasses module matching and routes each path to the appropriate runner. "
         "Use this for the /e2e slash command to run a specific subset of tests. "
+        "Note: this explicit path bypasses required_pr_labels label gating. "
         "Supports ``::nodeid`` suffix (e.g. ``test_foo.py::TestClass::test_method``) "
         "to run a single test method.",
     )
@@ -933,6 +934,8 @@ def main():
                 file=sys.stderr,
             )
         for target in explicit_targets:
+            if _is_gated_test_target(target, gated_test_targets):
+                continue
             _route_explicit_test_target(target, all_groups)
         _dedup_groups(all_groups)
     else:
