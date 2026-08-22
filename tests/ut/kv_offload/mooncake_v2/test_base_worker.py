@@ -75,6 +75,7 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
     assert metadata.layer_names == ["layer.0"]
+    assert metadata.layer_block_sizes == [spec.block_size]
     assert metadata.kv_caches_base_addr == [[k_cache.data_ptr(), v_cache.data_ptr()]]
     assert metadata.block_shapes == [[(1, 16, 8), (1, 16, 8)]]
     assert metadata.block_size_scales == [[2, 2]]

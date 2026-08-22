@@ -33,6 +33,7 @@ def make_sending_thread(
     *,
     tp_size: int = 1,
     pp_size: int = 1,
+    dcp_size: int = 1,
 ) -> MooncakeSchedulerSendingThread:
     return MooncakeSchedulerSendingThread(
         host="127.0.0.1",
@@ -42,7 +43,7 @@ def make_sending_thread(
         tp_size=tp_size,
         pp_size=pp_size,
         pcp_size=1,
-        dcp_size=1,
+        dcp_size=dcp_size,
         ready_event=threading.Event(),
     )
 
@@ -74,12 +75,96 @@ def test_sending_thread_merges_tp_private_and_pp_common_metadata() -> None:
     thread = make_sending_thread({0: first, 1: second}, tp_size=2)
     decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
 
+    assert decoded.use_kv_pp is False
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == first.layer_names
     assert pp_metadata.block_shapes == first.block_shapes
     assert pp_metadata.metadata_by_tp_rank[0].kv_caches_base_addr == [[1000]]
     assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [[2000]]
     assert pp_metadata.metadata_by_tp_rank[1].te_rpc_port == 9001
+
+
+def test_sending_thread_merges_layer_split_metadata_by_name() -> None:
+    tp0 = make_transfer_metadata(
+        layer_names=["layer.0", "layer.2"],
+        group_indices=[0, 0],
+        base_addrs=[[1000], [3000]],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+        block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
+        block_size_scales=[[1], [1]],
+    )
+    tp1 = make_transfer_metadata(
+        te_rpc_port=9001,
+        local_ip="10.0.0.2",
+        layer_names=["layer.1", "layer.2"],
+        group_indices=[0, 0],
+        base_addrs=[[2000], [4000]],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+        block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
+        block_size_scales=[[1], [1]],
+    )
+
+    thread = make_sending_thread({0: tp0, 1: tp1}, tp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    assert decoded.use_kv_pp is True
+    pp_metadata = decoded.metadata_by_pp_rank[0]
+    assert pp_metadata.layer_names == ["layer.0", "layer.1", "layer.2"]
+    assert pp_metadata.layer_block_sizes == [16, 16, 16]
+    assert pp_metadata.metadata_by_tp_rank[0].layer_indices == [0, 2]
+    assert pp_metadata.metadata_by_tp_rank[0].kv_caches_base_addr == [[1000], [], [3000]]
+    assert pp_metadata.metadata_by_tp_rank[1].layer_indices == [1, 2]
+    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [[], [2000], [4000]]
+
+
+def test_sending_thread_rejects_layer_split_with_dcp() -> None:
+    tp0 = make_transfer_metadata(layer_names=["layer.0"], base_addrs=[[1000]])
+    tp1 = make_transfer_metadata(
+        te_rpc_port=9001,
+        local_ip="10.0.0.2",
+        layer_names=["layer.1"],
+        base_addrs=[[2000]],
+    )
+
+    with pytest.raises(ValueError, match="LayerSplit cannot be combined with DCP"):
+        make_sending_thread({0: tp0, 1: tp1}, tp_size=2, dcp_size=2)
+
+
+def test_sending_thread_aligns_different_tp_layer_orders() -> None:
+    tp0 = make_transfer_metadata(
+        layer_names=["layer.0", "layer.1"],
+        group_indices=[0, 0],
+        base_addrs=[[1000], [2000]],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+        block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
+        block_size_scales=[[1], [1]],
+    )
+    tp1 = make_transfer_metadata(
+        te_rpc_port=9001,
+        local_ip="10.0.0.2",
+        layer_names=["layer.1", "layer.0"],
+        group_indices=[0, 0],
+        base_addrs=[[4000], [3000]],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+        block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
+        block_size_scales=[[1], [1]],
+    )
+
+    thread = make_sending_thread({0: tp0, 1: tp1}, tp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    pp_metadata = decoded.metadata_by_pp_rank[0]
+    assert pp_metadata.layer_names == ["layer.0", "layer.1"]
+    assert pp_metadata.metadata_by_tp_rank[0].layer_indices == [0, 1]
+    assert pp_metadata.metadata_by_tp_rank[1].layer_indices == [0, 1]
+    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [
+        [3000],
+        [4000],
+    ]
 
 
 def test_sending_thread_accepts_pp_aware_keys() -> None:
