@@ -118,6 +118,27 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     assert afc.get_mc2_tokens_capacity() == 520
 
 
+def test_use_cann_megamoe_is_disabled_for_mtp_draft(monkeypatch):
+    monkeypatch.setattr(afc, "_CANN_OPS_TRANSFORMER_AVAILABLE", True)
+    monkeypatch.setattr(afc, "get_ascend_device_type", lambda: afc.AscendDeviceType.A3)
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=16))
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "is_megamoe_supported_by_config", lambda _: True)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_fused_mc2=1),
+    )
+    vllm_config = _make_vllm_config(quant_type="w8a8")
+    vllm_config.speculative_config = SimpleNamespace(method="mtp")
+
+    assert afc.use_cann_megamoe(vllm_config)
+    assert not afc.use_cann_megamoe(vllm_config, is_draft_model=True)
+
+    vllm_config.speculative_config.method = "eagle3"
+    assert afc.use_cann_megamoe(vllm_config, is_draft_model=True)
+
+
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,

@@ -55,7 +55,19 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
-def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+def use_cann_megamoe(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
+    # MTP draft forwards run nested with the target forward and reuse the
+    # target's FusedMC2 communication method.  MegaMoe keeps a symmetric
+    # buffer and performs a collective handshake, so invoking it from both
+    # target and draft paths can leave the draft waiting in the collective
+    # and make the target's sample_tokens RPC time out.  Keep MegaMoe on the
+    # target path and use the existing FusedMC2 fallback for the MTP draft
+    # path. Other speculative drafters keep their existing behavior.
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    speculative_method = getattr(speculative_config, "method", None)
+    if is_draft_model and speculative_method in {"mtp", "qwen3_5_mtp"}:
+        return False
+
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         _CANN_OPS_TRANSFORMER_AVAILABLE
@@ -117,7 +129,7 @@ def set_ascend_forward_context(
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
-        forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.use_mega_moe = use_cann_megamoe(vllm_config, is_draft_model=is_draft_model)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
