@@ -37,7 +37,7 @@ deployment:
       --gpu-memory-utilization 0.95
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
-      --additional_config '{"enable_multistream_moe": true}'
+      --additional_config '{"multistream_overlap_shared_expert": true}'
 
   -
     envs:
@@ -60,7 +60,7 @@ deployment:
       --gpu-memory-utilization 0.95
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
-      --additional_config '{"enable_multistream_moe": true}'
+      --additional_config '{"multistream_overlap_shared_expert": true}'
 benchmarks:
   perf:
     case_type: performance
