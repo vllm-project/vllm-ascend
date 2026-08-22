@@ -24,9 +24,11 @@ PR changed files
     ▼
 test_config.yaml ──► resolve base inheritance ──► match modules ──► collect test paths
                                                                          │
-                                                                Route by convention:
-                                                                 UT:  a2/, a2_2/, a3_2/, a3_4/, 310p/
-                                                                 E2E: one_card, two_card, four_card, *_310p.py
+                                                                runner_mapping regex
+                                                                         │
+                                                                  logical partition
+                                                                         │
+                                                              partition runner_label
                                                                          │
                                                                 runner_label.json
                                                                          │
@@ -40,6 +42,15 @@ test_config.yaml ──► resolve base inheritance ──► match modules ─�
 | `.github/workflows/scripts/select_tests.py` | Matches changed files, scans tests, routes to runners |
 | `.github/workflows/scripts/test_config.yaml` | Maps source paths to UT/E2E tests |
 | `.github/workflows/scripts/runner_label.json` | Defines runner labels, chip types, NPU count, and image tags |
+
+`runner_mapping` maps test paths to logical partitions such as `a3_x4` or
+`a3_acc_x4`. Each entry in `partition` then selects an exact key from
+`runner_label.json` through `runner_label` and sets the load-balanced group
+count. More-specific path patterns are evaluated before their parents, so a
+directory named `acc` at any depth below `two_card` or `four_card` can use a
+dedicated logical partition. Set `override_only: true` for a partition that is
+selected only through `--runner-override` and therefore has no static
+`runner_mapping` entry.
 
 ## `test_config.yaml` Tutorial
 

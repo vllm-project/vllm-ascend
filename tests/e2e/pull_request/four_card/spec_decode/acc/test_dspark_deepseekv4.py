@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py`.
+Run `pytest tests/e2e/pull_request/four_card/spec_decode/acc/test_dspark_deepseekv4.py`.
 """
 
 import os

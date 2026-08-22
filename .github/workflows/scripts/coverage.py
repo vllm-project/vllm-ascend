@@ -160,6 +160,13 @@ for p in all_expanded:
             break
 
 for key, val in sorted(_part.items()):
+    if not isinstance(val, dict):
+        part_errors.append(f"Key {key!r}: configuration must be a mapping")
+        continue
+    override_only = val.get("override_only", False)
+    if not isinstance(override_only, bool):
+        part_errors.append(f"Key {key!r}: override_only must be a boolean")
+        continue
     if "_x" not in key:
         part_errors.append(f"Key {key!r}: missing '_x' separator")
         continue
@@ -170,7 +177,9 @@ for key, val in sorted(_part.items()):
     if key == "cpu_x0":
         # CPU is the default fallback runner, always valid
         continue
-    if key not in actual_runner_keys:
+    if override_only and key in actual_runner_keys:
+        part_errors.append(f"Key {key!r}: marked override_only but used by runner_mapping")
+    elif key not in actual_runner_keys and not override_only:
         part_errors.append(f"Key {key!r}: no tests route to this runner (unused)")
 
 part_broken = len(part_errors) > 0
