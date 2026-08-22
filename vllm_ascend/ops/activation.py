@@ -18,6 +18,8 @@
 import torch
 import torch_npu
 from vllm.model_executor.layers.activation import (
+    FastGELU,
+    NewGELU,
     QuickGELU,
     SiluAndMul,
     SiluAndMulWithClamp,
@@ -26,8 +28,24 @@ from vllm.model_executor.layers.activation import (
 )
 
 
+class AscendFastGELU(FastGELU):
+    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        import torch_npu
+
+        out = torch_npu.npu_gelu(x, approximate="tanh")
+        return out
+
+
+class AscendNewGELU(NewGELU):
+    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        import torch_npu
+
+        out = torch_npu.npu_gelu(x, approximate="tanh")
+        return out
+
+
 class AscendQuickGELU(QuickGELU):
-    def forward_oot(self, x: torch.tensor) -> torch.Tensor:
+    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         out = torch_npu.npu_fast_gelu(x)
         return out
 
