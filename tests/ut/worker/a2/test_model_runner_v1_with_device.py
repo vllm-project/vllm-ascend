@@ -23,7 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _request_prefill_mask
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 BLOCK_SIZE = 128
@@ -90,6 +90,28 @@ def get_vllm_config():
         parallel_config=parallel_config,
     )
     return vllm_config
+
+
+@pytest.mark.parametrize(
+    "num_computed_tokens, num_prompt_tokens, expected",
+    [
+        pytest.param([0], [100], [True], id="first_prefill_chunk"),
+        pytest.param([32], [100], [True], id="later_prefill_chunk"),
+        pytest.param([100], [100], [False], id="first_decode_step"),
+        pytest.param([105], [100], [False], id="later_decode_step"),
+    ],
+)
+def test_request_prefill_mask_uses_prompt_completion(
+    num_computed_tokens,
+    num_prompt_tokens,
+    expected,
+):
+    result = _request_prefill_mask(
+        np.asarray(num_computed_tokens, dtype=np.int32),
+        np.asarray(num_prompt_tokens, dtype=np.int32),
+    )
+
+    assert result.tolist() == expected
 
 
 @pytest.fixture
@@ -339,6 +361,11 @@ def test_determine_batch_execution_and_padding(
 
     try:
         runner.input_batch.num_computed_tokens_cpu[:num_reqs] = num_computed_tokens
+        runner.input_batch.num_prompt_tokens[:num_reqs] = np.where(
+            np.asarray(num_computed_tokens) > 0,
+            num_computed_tokens,
+            num_scheduled_tokens,
+        )
         num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
 
         kwargs = dict(
@@ -386,6 +413,49 @@ def test_determine_batch_execution_and_padding(
         assert num_tokens_across_dp is None
         # cudagraph_metrics disabled by default
         assert cudagraph_stats is None
+    finally:
+        runner.speculative_config = saved_spec_config
+        runner.uniform_decode_query_len = saved_query_len
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [0, 3])
+def test_chunked_prefill_is_not_dispatched_as_uniform_decode(
+    model_runner,
+    num_speculative_tokens,
+):
+    runner = model_runner
+    saved_spec_config = runner.speculative_config
+    saved_query_len = runner.uniform_decode_query_len
+    if num_speculative_tokens > 0:
+        runner.speculative_config = type(
+            "FakeSpecConfig",
+            (),
+            {"num_speculative_tokens": num_speculative_tokens},
+        )()
+    else:
+        runner.speculative_config = None
+    runner.uniform_decode_query_len = 1 + num_speculative_tokens
+    runner.input_batch.num_computed_tokens_cpu[0] = 32
+    runner.input_batch.num_prompt_tokens[0] = 100
+
+    try:
+        with patch.object(
+            runner.cudagraph_dispatcher,
+            "dispatch",
+            wraps=runner.cudagraph_dispatcher.dispatch,
+        ) as dispatch:
+            runner._determine_batch_execution_and_padding(
+                num_tokens=runner.uniform_decode_query_len,
+                num_reqs=1,
+                num_scheduled_tokens_np=np.asarray(
+                    [runner.uniform_decode_query_len],
+                    dtype=np.int32,
+                ),
+                max_num_scheduled_tokens=runner.uniform_decode_query_len,
+                use_cascade_attn=False,
+            )
+
+        assert dispatch.call_args.kwargs["uniform_decode"] is False
     finally:
         runner.speculative_config = saved_spec_config
         runner.uniform_decode_query_len = saved_query_len

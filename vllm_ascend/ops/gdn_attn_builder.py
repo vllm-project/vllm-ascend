@@ -43,6 +43,9 @@ _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
 _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
 _GDN_CUMSUM_WORKING_SET = 2**18
+# Accepted-token counts are one-based. The zero-length query segment makes
+# graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
+_GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -113,6 +116,65 @@ def _build_actual_seq_lengths(
         out=actual_seq_lengths[1:],
     )
     return actual_seq_lengths
+
+
+def _materialize_graph_request_tensor(
+    buffer: torch.Tensor,
+    values: torch.Tensor,
+    actual_request_count: int,
+    graph_request_count: int,
+    padding_value: int | bool,
+) -> torch.Tensor:
+    """Write request-level values into a stable full-graph buffer."""
+    if actual_request_count > graph_request_count:
+        raise ValueError(
+            f"actual_request_count ({actual_request_count}) exceeds graph_request_count ({graph_request_count})"
+        )
+    if graph_request_count > buffer.size(0):
+        raise ValueError(f"graph_request_count ({graph_request_count}) exceeds buffer capacity ({buffer.size(0)})")
+    if actual_request_count > values.size(0):
+        raise ValueError(f"actual_request_count ({actual_request_count}) exceeds source rows ({values.size(0)})")
+
+    materialized = buffer[:graph_request_count]
+    materialized[:actual_request_count].copy_(
+        values[:actual_request_count],
+        non_blocking=True,
+    )
+    materialized[actual_request_count:].fill_(padding_value)
+    return materialized
+
+
+def _materialize_graph_query_start_loc(
+    buffer: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    actual_request_count: int,
+    graph_request_count: int,
+) -> torch.Tensor:
+    """Pad request boundaries with zero-length dummy request segments."""
+    if actual_request_count > graph_request_count:
+        raise ValueError(
+            f"actual_request_count ({actual_request_count}) exceeds graph_request_count ({graph_request_count})"
+        )
+    if graph_request_count + 1 > buffer.size(0):
+        raise ValueError(
+            f"graph request boundaries ({graph_request_count + 1}) exceed buffer capacity ({buffer.size(0)})"
+        )
+    if actual_request_count + 1 > query_start_loc.size(0):
+        raise ValueError(
+            f"actual request boundaries ({actual_request_count + 1}) exceed source rows ({query_start_loc.size(0)})"
+        )
+    materialized = buffer[: graph_request_count + 1]
+    materialized[: actual_request_count + 1].copy_(
+        query_start_loc[: actual_request_count + 1],
+        non_blocking=True,
+    )
+    padding = materialized[actual_request_count + 1 :]
+    if padding.numel() > 0:
+        padding.copy_(
+            materialized[actual_request_count : actual_request_count + 1].expand_as(padding),
+            non_blocking=True,
+        )
+    return materialized
 
 
 def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
@@ -405,6 +467,97 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         return attn_metadata
 
+    def _pad_spec_decode_metadata(
+        self,
+        attn_metadata: GDNAttentionMetadata,
+        graph_request_count: int,
+    ) -> None:
+        """Materialize speculative decode metadata at graph request granularity."""
+        actual_request_count = attn_metadata.num_spec_decodes
+        spec_state_indices = attn_metadata.spec_state_indices_tensor
+        spec_sequence_masks = attn_metadata.spec_sequence_masks
+        spec_query_start_loc = attn_metadata.spec_query_start_loc
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        assert spec_state_indices is not None
+        assert spec_sequence_masks is not None
+        assert spec_query_start_loc is not None
+        assert num_accepted_tokens is not None
+
+        attn_metadata.spec_state_indices_tensor = _materialize_graph_request_tensor(
+            self.spec_state_indices_tensor,
+            spec_state_indices,
+            actual_request_count,
+            graph_request_count,
+            NULL_BLOCK_ID,
+        )
+        attn_metadata.spec_sequence_masks = _materialize_graph_request_tensor(
+            self.spec_sequence_masks,
+            spec_sequence_masks,
+            actual_request_count,
+            graph_request_count,
+            False,
+        )
+
+        assert attn_metadata.non_spec_token_indx is not None
+        assert attn_metadata.spec_token_indx is not None
+        non_spec_token_count = attn_metadata.non_spec_token_indx.size(0)
+        spec_token_count = attn_metadata.spec_token_indx.size(0)
+        self.non_spec_token_indx[:non_spec_token_count].copy_(
+            attn_metadata.non_spec_token_indx,
+            non_blocking=True,
+        )
+        self.spec_token_indx[:spec_token_count].copy_(
+            attn_metadata.spec_token_indx,
+            non_blocking=True,
+        )
+        attn_metadata.non_spec_token_indx = self.non_spec_token_indx[:non_spec_token_count]
+        attn_metadata.spec_token_indx = self.spec_token_indx[:spec_token_count]
+
+        attn_metadata.spec_query_start_loc = _materialize_graph_query_start_loc(
+            self.spec_query_start_loc,
+            spec_query_start_loc,
+            actual_request_count,
+            graph_request_count,
+        )
+        attn_metadata.num_accepted_tokens = _materialize_graph_request_tensor(
+            self.num_accepted_tokens,
+            num_accepted_tokens,
+            actual_request_count,
+            graph_request_count,
+            _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT,
+        )
+        self._attach_spec_decode_metadata(attn_metadata)
+
+    def _pad_decode_metadata(
+        self,
+        attn_metadata: GDNAttentionMetadata,
+        graph_request_count: int,
+    ) -> None:
+        """Materialize non-speculative decode metadata at request granularity."""
+        actual_request_count = attn_metadata.num_decodes
+        state_indices = attn_metadata.non_spec_state_indices_tensor
+        query_start_loc = attn_metadata.non_spec_query_start_loc
+        assert state_indices is not None
+        assert query_start_loc is not None
+
+        attn_metadata.non_spec_state_indices_tensor = _materialize_graph_request_tensor(
+            self.non_spec_state_indices_tensor,
+            state_indices,
+            actual_request_count,
+            graph_request_count,
+            NULL_BLOCK_ID,
+        )
+        attn_metadata.non_spec_query_start_loc = _materialize_graph_query_start_loc(
+            self.non_spec_query_start_loc,
+            query_start_loc,
+            actual_request_count,
+            graph_request_count,
+        )
+        self._attach_non_spec_decode_metadata(
+            attn_metadata,
+            attn_metadata.non_spec_state_indices_tensor,
+        )
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -642,88 +795,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        batch_size = m.num_actual_tokens
-
-        if (
-            self.use_full_cuda_graph
-            and num_prefills == 0
-            and num_decodes == 0
-            and num_spec_decodes <= self.decode_cudagraph_max_bs
-            and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
-        ):
-            assert spec_sequence_masks is not None
-            # Spec decode has multiple tokens per request. Keep the metadata
-            # passed to conv1d/recurrent kernels at request granularity; padding
-            # it to the token count makes the conv1d update kernel treat every
-            # token as an independent decode sequence.
-            spec_batch_size = m.num_reqs
-
-            self.spec_state_indices_tensor[spec_batch_size:].fill_(NULL_BLOCK_ID)
-            self.spec_state_indices_tensor[:num_spec_decodes].copy_(
-                spec_state_indices_tensor,
-                non_blocking=True,
-            )
-            spec_state_indices_tensor = self.spec_state_indices_tensor[:spec_batch_size]
-            spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
-
-            self.spec_sequence_masks[:num_spec_decodes].copy_(
-                spec_sequence_masks[:num_spec_decodes],
-                non_blocking=True,
-            )
-            spec_sequence_masks = self.spec_sequence_masks[:spec_batch_size]
-            spec_sequence_masks[num_spec_decodes:].fill_(False)
-
-            assert non_spec_token_indx is not None and spec_token_indx is not None
-            self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
-                non_spec_token_indx,
-                non_blocking=True,
-            )
-            non_spec_token_indx = self.non_spec_token_indx[: non_spec_token_indx.size(0)]
-
-            self.spec_token_indx[: spec_token_indx.size(0)].copy_(
-                spec_token_indx,
-                non_blocking=True,
-            )
-            spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
-
-            self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
-                spec_query_start_loc,
-                non_blocking=True,
-            )
-            spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore
-            spec_query_start_loc = self.spec_query_start_loc[: spec_batch_size + 1]
-            spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
-
-            self.num_accepted_tokens[:num_spec_decodes].copy_(
-                num_accepted_tokens,
-                non_blocking=True,
-            )
-            num_accepted_tokens = self.num_accepted_tokens[:spec_batch_size]
-            num_accepted_tokens[num_spec_decodes:].fill_(1)
-
-        if (
-            self.use_full_cuda_graph
-            and num_prefills == 0
-            and num_spec_decodes == 0
-            and num_decodes <= self.decode_cudagraph_max_bs
-        ):
-            self.non_spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor,
-                non_blocking=True,
-            )
-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[:batch_size]
-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
-            non_spec_conv1d_cache_indices = non_spec_state_indices_tensor
-
-            self.non_spec_query_start_loc[: num_decodes + 1].copy_(
-                non_spec_query_start_loc,
-                non_blocking=True,
-            )
-            non_spec_num_query_tokens = non_spec_query_start_loc[-1]
-            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
-            non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
-
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -758,10 +829,27 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         attn_metadata = self._attach_spec_decode_metadata(
             attn_metadata,
         )
-        return self._attach_non_spec_decode_metadata(
+        attn_metadata = self._attach_non_spec_decode_metadata(
             attn_metadata,
             non_spec_conv1d_cache_indices,
         )
+        graph_request_count = m.num_reqs
+        if (
+            self.use_full_cuda_graph
+            and num_prefills == 0
+            and num_decodes == 0
+            and graph_request_count <= self.decode_cudagraph_max_bs
+            and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+        ):
+            self._pad_spec_decode_metadata(attn_metadata, graph_request_count)
+        elif (
+            self.use_full_cuda_graph
+            and num_prefills == 0
+            and num_spec_decodes == 0
+            and graph_request_count <= self.decode_cudagraph_max_bs
+        ):
+            self._pad_decode_metadata(attn_metadata, graph_request_count)
+        return attn_metadata
 
     def _build_prefill_has_initial_state_and_causal_conv1d_meta(
         self,
