@@ -22,14 +22,30 @@ import sys
 _triton_available = importlib.util.find_spec("triton") is not None
 
 # main2main compatibility: stub triton.experimental.gluon modules that
-# vllm main requires but triton-ascend 3.2.1 does not provide. Runs at
-# module-import time, which is triggered by vllm.platforms plugin
-# discovery (importing vllm_ascend to resolve the plugin's `register()`
-# callback) before any `from triton.experimental import gluon` import
-# - including subprocesses such as `python -m vllm.model_executor.models.registry`.
+# vllm main requires but triton-ascend 3.2.x does not provide. Runs at
+# module-import time (vllm.platforms plugin discovery resolves the
+# plugin's `register()` before any `from triton.experimental import gluon`
+# import, including in `python -m vllm.model_executor.models.registry`).
+#
+# The empty stubs must shadow gluon on BOTH architectures:
+# - x86_64: triton-ascend pins triton==3.2.0, which ships no `experimental/`
+#   at all; the parent package must exist in sys.modules (with __path__ so it
+#   is treated as a package) or `from triton.experimental import gluon` raises
+#   ModuleNotFoundError: No module named 'triton.experimental' (#13508).
+# - aarch64: triton-ascend pins triton==3.5.0, whose leftover `experimental/`
+#   ships a *real* gluon — but its `language/_layouts.py` imports
+#   `constexpr_type` from triton.language.core, a symbol added in triton 3.4.0
+#   that triton-ascend's 3.2.0-based core lacks. Loading the real gluon raises
+#   ImportError, so it must be shadowed, not used. Pre-registering the leaves
+#   in sys.modules short-circuits the disk load (importlib `_find_and_load`:
+#   `if name in sys.modules: return`) without executing the real __init__.py.
 if os.getenv("VLLM_VERSION", "") != "0.26.0":
     from types import ModuleType
 
+    if "triton.experimental" not in sys.modules:
+        _experimental = ModuleType("triton.experimental")
+        _experimental.__path__ = []
+        sys.modules["triton.experimental"] = _experimental
     for _gluon_stub in (
         "triton.experimental.gluon",
         "triton.experimental.gluon.language",
