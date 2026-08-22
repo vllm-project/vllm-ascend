@@ -72,11 +72,11 @@ test_cases:
     model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
     envs:
       <<: *envs
-      DYNAMIC_EPLB: "true"
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--additional-config"
-      - '{"eplb_config": {"dynamic_eplb": "true", "expert_heat_collection_interval": 600, "algorithm_execution_interval": 50, "num_redundant_experts": 16, "eplb_policy_type": 2}}'
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"window_size": 600, "step_interval": 50, "use_async": false, "num_redundant_experts": 16}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
