@@ -37,7 +37,6 @@ from vllm_ascend.ops.triton.fla.gdn_decode_tile import (
     QWEN35_CONV_KERNEL_SIZE,
     QWEN35_HEAD_DIM,
     QWEN35_HIDDEN_DIM,
-    QWEN35_MAX_DECODE_BATCH,
     QWEN35_NUM_QK_HEADS,
     QWEN35_NUM_V_HEADS,
     gdn_decode_tile,
@@ -185,12 +184,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             envs.VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE
             and hidden_states.ndim == 2
             and hidden_states.shape[1] == QWEN35_HIDDEN_DIM
-            and hidden_states.dtype == torch.bfloat16
-            and self.tp_size in (1, 2)
+            # FP32 is supported by the fused decode kernel itself, but not by
+            # the existing Qwen3.5 prefill causal-convolution path.
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+            and self.tp_size > 0
             and hasattr(self, "in_proj_qkvz")
             and not getattr(self, "gqa_interleaved_layout", True)
             and self.num_k_heads == QWEN35_NUM_QK_HEADS
             and self.num_v_heads == QWEN35_NUM_V_HEADS
+            and self.num_k_heads % self.tp_size == 0
+            and self.num_v_heads % self.tp_size == 0
+            and self.num_v_heads // self.tp_size == 2 * (self.num_k_heads // self.tp_size)
             and self.head_k_dim == QWEN35_HEAD_DIM
             and self.head_v_dim == QWEN35_HEAD_DIM
             and self.conv_kernel_size == QWEN35_CONV_KERNEL_SIZE
@@ -202,6 +206,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         projected_qkvz: torch.Tensor,
         projected_ba: torch.Tensor,
     ) -> torch.Tensor | None:
+        if (
+            self.tp_size <= 0
+            or self.num_k_heads % self.tp_size != 0
+            or self.num_v_heads % self.tp_size != 0
+            or self.num_v_heads // self.tp_size
+            != 2 * (self.num_k_heads // self.tp_size)
+        ):
+            return None
+
         decode_batch = projected_qkvz.shape[0] if projected_qkvz.ndim == 2 else 0
         expected_qkvz_dim = (self.key_dim * 2 + self.value_dim * 2) // self.tp_size
         expected_ba_dim = self.num_v_heads * 2 // self.tp_size
@@ -209,9 +222,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             projected_qkvz.ndim != 2
             or projected_qkvz.shape[1] != expected_qkvz_dim
             or projected_ba.shape != (decode_batch, expected_ba_dim)
-            or not 1 <= decode_batch <= QWEN35_MAX_DECODE_BATCH
-            or projected_qkvz.dtype != torch.bfloat16
-            or self.tp_size not in (1, 2)
+            or decode_batch < 1
+            or projected_qkvz.dtype not in (torch.bfloat16, torch.float16)
+            or projected_ba.dtype != projected_qkvz.dtype
         ):
             return None
 
@@ -268,6 +281,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
     def _forward_core_rocm(
+        self,
+        qkvz: torch.Tensor,
+        ba: torch.Tensor,
+        z_out: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        """Compatibility hook required by vLLM's packed GDN custom op.
+
+        Upstream currently names the ``use_aiter=True`` callback
+        ``_forward_core_rocm``. Ascend uses that platform-neutral packed-input
+        boundary for graph-safe runtime dispatch, while keeping the actual
+        implementation under an Ascend-neutral name below.
+        """
+        self._forward_core_ascend(qkvz, ba, z_out, core_attn_out)
+
+    def _forward_core_ascend(
         self,
         qkvz: torch.Tensor,
         ba: torch.Tensor,

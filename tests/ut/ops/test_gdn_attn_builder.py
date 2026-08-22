@@ -301,6 +301,18 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
+def test_rocm_named_upstream_hook_delegates_to_ascend_implementation():
+    tensors = [torch.empty(0) for _ in range(4)]
+    captured = []
+    attention = SimpleNamespace(
+        _forward_core_ascend=lambda *args: captured.extend(args)
+    )
+
+    AscendGatedDeltaNetAttention._forward_core_rocm(attention, *tensors)
+
+    assert captured == tensors
+
+
 def test_qwen35_decode_forward_keeps_runtime_dispatch_behind_custom_op(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -412,7 +424,70 @@ def test_qwen35_piecewise_decode_uses_real_metadata_prefix(
     assert captured["query_start_loc"].numel() == 3
 
 
-def test_qwen35_decode_pipeline_rejects_unsupported_dtype_and_tp(
+def test_qwen35_decode_pipeline_accepts_larger_batch_and_divisible_tp(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    batch = 32
+    _, _, layer_metadata = _build_attn_metadata(
+        BatchSpec(
+            seq_lens=[5] * batch,
+            query_lens=[1] * batch,
+            name="decode_batch_32",
+        ),
+        num_speculative_tokens=0,
+        num_decode_draft_tokens_cpu=None,
+    )
+    monkeypatch.setattr(
+        gdn_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer0": layer_metadata}),
+    )
+
+    captured = {}
+
+    def fake_decode_tile(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(
+            (
+                kwargs["projected_qkvz"].shape[0],
+                kwargs["num_v_heads"],
+                kwargs["head_dim"],
+            ),
+            dtype=torch.bfloat16,
+        )
+
+    monkeypatch.setattr(gdn_module, "gdn_decode_tile", fake_decode_tile)
+    attention = SimpleNamespace(
+        key_dim=2048,
+        value_dim=4096,
+        num_v_heads=32,
+        num_k_heads=16,
+        head_k_dim=128,
+        tp_size=4,
+        conv1d=SimpleNamespace(
+            weight=torch.zeros((8192, 1, 4), dtype=torch.bfloat16)
+        ),
+        kv_cache=(torch.empty(0), torch.empty(0)),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        norm=SimpleNamespace(weight=torch.empty(0), eps=1e-6),
+        prefix="layer0",
+    )
+
+    result = AscendGatedDeltaNetAttention._try_qwen35_decode_tile(
+        attention,
+        torch.zeros((batch, 3072), dtype=torch.bfloat16),
+        torch.zeros((batch, 16), dtype=torch.bfloat16),
+    )
+
+    assert result is not None
+    assert result.shape == (batch, 8, 128)
+    assert captured["cache_indices"].numel() == batch
+    assert captured["num_qk_heads"] == 4
+    assert captured["num_v_heads"] == 8
+
+
+def test_qwen35_decode_pipeline_accepts_supported_dtypes_and_divisible_tp(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE", "1")
@@ -428,15 +503,21 @@ def test_qwen35_decode_pipeline_rejects_unsupported_dtype_and_tp(
         activation="silu",
     )
 
-    assert AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
-        attention,
-        torch.empty((2, 4096), dtype=torch.bfloat16),
-    )
+    for dtype in (torch.bfloat16, torch.float16):
+        assert AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+            attention,
+            torch.empty((2, 4096), dtype=dtype),
+        )
     assert not AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
         attention,
         torch.empty((2, 4096), dtype=torch.float32),
     )
     attention.tp_size = 4
+    assert AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+        attention,
+        torch.empty((32, 4096), dtype=torch.bfloat16),
+    )
+    attention.tp_size = 3
     assert not AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
         attention,
         torch.empty((2, 4096), dtype=torch.bfloat16),

@@ -207,6 +207,7 @@ else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._forward_core_rocm = AscendGatedDeltaNetAttention._forward_core_rocm
+    _GDN_PATCH_TARGET._forward_core_ascend = AscendGatedDeltaNetAttention._forward_core_ascend
     _GDN_PATCH_TARGET._supports_qwen35_decode_tile_pipeline = (
         AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline
     )

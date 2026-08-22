@@ -19,7 +19,6 @@ QWEN35_NUM_V_HEADS = 32
 QWEN35_HEAD_DIM = 128
 QWEN35_HIDDEN_DIM = 4096
 QWEN35_CONV_KERNEL_SIZE = 4
-QWEN35_MAX_DECODE_BATCH = 16
 QWEN35_QK_DIM = QWEN35_NUM_QK_HEADS * QWEN35_HEAD_DIM
 QWEN35_V_DIM = QWEN35_NUM_V_HEADS * QWEN35_HEAD_DIM
 QWEN35_CONV_DIM = QWEN35_QK_DIM * 2 + QWEN35_V_DIM
@@ -59,14 +58,14 @@ def _conv_and_update(
     tl.store(conv_state + state_base, state1, mask=valid)
     tl.store(conv_state + state_base + dim, state2, mask=valid)
     tl.store(conv_state + state_base + 2 * dim, raw, mask=valid)
-    return _silu(acc).to(tl.bfloat16)
+    return _silu(acc).to(raw.dtype)
 
 
 @triton.jit
 def _l2_norm(x, eps: tl.constexpr):
     x_fp32 = x.to(tl.float32)
     inv_norm = tl.rsqrt(tl.sum(x_fp32 * x_fp32, axis=0) + eps)
-    return (x_fp32 * inv_norm).to(tl.bfloat16)
+    return (x_fp32 * inv_norm).to(x.dtype)
 
 
 @triton.jit
@@ -103,16 +102,17 @@ def _recurrent_head(
     recurrent_out = tl.sum(state_tile * q_fp32[None, :], axis=1)
     tl.store(state + state_offset, state_tile, mask=valid)
 
-    # Match the unfused path's BF16 recurrent output before RMSNormGated.
-    recurrent_bf16 = recurrent_out.to(tl.bfloat16)
-    recurrent_fp32 = recurrent_bf16.to(tl.float32)
+    # Match the unfused path's model-dtype recurrent output before
+    # RMSNormGated, then perform normalization in FP32.
+    recurrent_model_dtype = recurrent_out.to(q.dtype)
+    recurrent_fp32 = recurrent_model_dtype.to(tl.float32)
     variance = tl.sum(recurrent_fp32 * recurrent_fp32, axis=0) / head_dim
     normed = recurrent_fp32 * tl.rsqrt(variance + norm_eps)
     normed *= tl.load(norm_weight + tl.arange(0, head_dim)).to(tl.float32)
     normed *= _silu(z.to(tl.float32))
     output_offset = value_head * head_dim + tl.arange(0, head_dim)
     output_value = tl.where(valid, normed, 0.0)
-    tl.store(output + output_offset, output_value.to(tl.bfloat16))
+    tl.store(output + output_offset, output_value)
 
 
 @triton.jit
@@ -222,8 +222,10 @@ def qwen35_gdn_decode_tile_kernel(
     k = _l2_norm(k, l2_eps)
 
     ba_base = token_index * 2 * num_v_heads
-    b0 = tl.load(projected_ba + ba_base + value_head0).to(tl.float32)
-    b1 = tl.load(projected_ba + ba_base + value_head1).to(tl.float32)
+    b0_raw = tl.load(projected_ba + ba_base + value_head0)
+    b1_raw = tl.load(projected_ba + ba_base + value_head1)
+    b0 = b0_raw.to(tl.float32)
+    b1 = b1_raw.to(tl.float32)
     a0 = tl.load(projected_ba + ba_base + num_v_heads + value_head0).to(tl.float32)
     a1 = tl.load(projected_ba + ba_base + num_v_heads + value_head1).to(tl.float32)
     dt0 = a0 + tl.load(dt_bias + value_head0).to(tl.float32)
@@ -232,8 +234,8 @@ def qwen35_gdn_decode_tile_kernel(
     softplus1 = tl.where(dt1 <= 20.0, tl.log(1.0 + tl.exp(dt1)), dt1)
     log_decay0 = -tl.exp(tl.load(a_log + value_head0).to(tl.float32)) * softplus0
     log_decay1 = -tl.exp(tl.load(a_log + value_head1).to(tl.float32)) * softplus1
-    beta0 = tl.sigmoid(b0).to(tl.bfloat16).to(tl.float32)
-    beta1 = tl.sigmoid(b1).to(tl.bfloat16).to(tl.float32)
+    beta0 = tl.sigmoid(b0).to(b0_raw.dtype).to(tl.float32)
+    beta1 = tl.sigmoid(b1).to(b1_raw.dtype).to(tl.float32)
 
     state_index = tl.load(recurrent_state_indices + token_index).to(tl.int64)
     token_output = output + token_index * v_dim
@@ -319,6 +321,20 @@ def gdn_decode_tile(
         raise ValueError("query_start_loc must contain one offset per token plus the terminal offset")
     if recurrent_state.dtype != torch.float32:
         raise ValueError(f"expected FP32 recurrent state, got {recurrent_state.dtype}")
+    model_dtype = projected_qkvz.dtype
+    if model_dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        raise ValueError(f"unsupported model dtype: {model_dtype}")
+    model_dtype_tensors = {
+        "projected_ba": projected_ba,
+        "conv_weight": conv_weight,
+        "conv_state": conv_state,
+        "norm_weight": norm_weight,
+    }
+    for name, tensor in model_dtype_tensors.items():
+        if tensor.dtype != model_dtype:
+            raise ValueError(
+                f"expected {name} dtype {model_dtype}, got {tensor.dtype}"
+            )
 
     output = torch.empty((batch, v_dim), dtype=projected_qkvz.dtype, device=projected_qkvz.device)
     use_descriptors = batch > 1
@@ -371,12 +387,12 @@ def qwen35_gdn_decode_tile(
     norm_weight: torch.Tensor,
     norm_eps: float,
 ) -> torch.Tensor:
-    """Run the Qwen3.5-9B non-speculative decode pipeline for B <= 16."""
+    """Run the Qwen3.5-9B non-speculative one-token decode pipeline."""
     batch = projected_qkvz.shape[0] if projected_qkvz.ndim == 2 else 0
-    if not 1 <= batch <= QWEN35_MAX_DECODE_BATCH or projected_qkvz.shape != (batch, QWEN35_QKVZ_DIM):
+    if batch < 1 or projected_qkvz.shape != (batch, QWEN35_QKVZ_DIM):
         raise ValueError(
-            f"expected projected_qkvz [B, {QWEN35_QKVZ_DIM}] with "
-            f"1 <= B <= {QWEN35_MAX_DECODE_BATCH}, got {projected_qkvz.shape}"
+            f"expected projected_qkvz [B, {QWEN35_QKVZ_DIM}] with B >= 1, "
+            f"got {projected_qkvz.shape}"
         )
     return gdn_decode_tile(
         projected_qkvz=projected_qkvz,
