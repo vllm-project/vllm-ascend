@@ -960,6 +960,24 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         self.assertEqual(info.local_block_ids, [[[7, 8, 9]]])
         self.assertIs(info.request, req)
 
+    def test_update_state_after_alloc_decode_without_remote_cached_tokens(self):
+        # A P-first proxy sets do_remote_decode but never fills in
+        # remote_cached_tokens; this used to raise KeyError (#14000).
+        req = MockRequest(
+            "req_u3",
+            prompt_token_ids=list(range(10)),
+            kv_transfer_params={"do_remote_decode": True, "remote_block_ids": []},
+        )
+        blocks = _MockBlocks(unhashed=[], block_ids_tuple=([[7, 8, 9]],))
+        self.scheduler.update_state_after_alloc(req, blocks, num_external_tokens=0)
+        self.assertIn("req_u3", self.scheduler._reqs_need_send_layerwise)
+        info = self.scheduler._reqs_need_send_layerwise["req_u3"]
+        self.assertEqual(info.local_transferred_tokens, 0)
+        self.assertIs(info.request, req)
+        # The default must be written back so build_connector_meta doesn't
+        # read None out of kv_transfer_params later.
+        self.assertEqual(req.kv_transfer_params["remote_cached_tokens"], 0)
+
     def test_build_connector_meta_consumes_reqs_need_recv_and_clears(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True
         req = MockRequest(
