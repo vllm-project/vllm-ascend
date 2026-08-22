@@ -698,6 +698,7 @@
     - vllm_ascend/meta_registration.py
     - vllm_ascend/platform.py
     - vllm_ascend/profiling_config.py
+    - vllm_ascend/recompute_proxy.py
     - vllm_ascend/utils.py
     - setup.py
   tests:
@@ -708,6 +709,7 @@
     - tests/ut/test_logger.py
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
+    - tests/ut/test_recompute_proxy.py
     - tests/ut/test_utils.py
     - tests/ut/test_platform.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
