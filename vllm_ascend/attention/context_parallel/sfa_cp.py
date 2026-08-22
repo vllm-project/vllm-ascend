@@ -114,8 +114,10 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         self.dsa_cp_actual_seq_lengths_key = torch.empty_like(self.dsa_cp_actual_seq_lengths_query)
         self.dsa_cp_spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
         self.dsa_cp_spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
+            max_num_tokens = max(max_num_tokens, max_num_reqs * (spec_token_num + 1))
             self.dsa_cp_spec_actual_seq_lengths_query = [
                 torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
                 for _ in range(spec_token_num)
@@ -124,6 +126,8 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
                 torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
                 for _ in range(spec_token_num)
             ]
+        max_num_tokens_pad = _round_up(max_num_tokens, vllm_config.parallel_config.tensor_parallel_size)
+        self._slot_mapping_pad_buffer = torch.empty(max_num_tokens_pad, dtype=torch.int32, device=device)
 
     def _prepare_parallel_metadata(
         self,
@@ -159,7 +163,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
         pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
         if pad_size_slot > 0:
-            slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size_slot), value=-1)
+            self._slot_mapping_pad_buffer[: slot_mapping.shape[0]].copy_(slot_mapping)
+            self._slot_mapping_pad_buffer[slot_mapping.shape[0] : num_tokens_pad].fill_(-1)
+            slot_mapping = self._slot_mapping_pad_buffer[:num_tokens_pad]
         else:
             slot_mapping = slot_mapping[:num_tokens_pad]
 
