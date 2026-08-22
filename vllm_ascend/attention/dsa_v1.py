@@ -1333,16 +1333,28 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
-        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
-
-        e_q_quant_done = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_q_quant_done)
-            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
+        # When wq_a and wkv have the same quant_method and the same
+        # communication status, their quantize() outputs are equivalent.
+        # Share the result instead of calling quantize() twice on the same input.
+        # - W8A8 no-comm: saves one npu_dynamic_quant (full-tensor read + absmax).
+        # - W4A8 no-comm: saves one no-op pass-through (kernel launch + ref).
+        # - TP comm: both return (hidden_states, None); shareable when custom_op
+        #   types match (same communication path).
+        share_quant = (
+            type(self.cv_wq_a._quant_method) is type(self.cv_wkv._quant_method)
+            and self.cv_wq_a._has_communication == self.cv_wkv._has_communication
+        )
+        if share_quant:
+            q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
+            kv_quant, kv_pertoken_scale = q_quant, q_pertoken_scale
+        else:
+            q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
+            e_q_quant_done = main_stream.record_event()
+            with npu_stream_switch(aux_stream, enabled=True):
+                torch.npu.current_stream().wait_event(e_q_quant_done)
+                kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
 
         wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
-        main_stream.wait_stream(aux_stream)
 
         # Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
         e_part2_start = main_stream.record_event()
@@ -1364,8 +1376,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = qr, None
             qr_pertoken_scale = None
-
-        main_stream.wait_stream(aux_stream)
 
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()
