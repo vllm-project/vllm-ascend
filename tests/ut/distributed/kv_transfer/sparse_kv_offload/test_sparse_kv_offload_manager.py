@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -8,8 +10,36 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    _require_sparse_kv_offload_ops,
     get_host_device_memory_usage_ratio,
 )
+
+
+class TestNativeOpsAvailability(unittest.TestCase):
+    @patch("vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager.enable_custom_op")
+    def test_required_ops_are_available(self, mock_enable_custom_op: Mock):
+        ascend_ops = SimpleNamespace(
+            sparse_kv_lru_resident_compact=Mock(),
+            sparse_kv_compute_lru_resident_addrs=Mock(),
+        )
+        with patch.object(torch.ops, "_C_ascend", ascend_ops, create=True):
+            _require_sparse_kv_offload_ops()
+
+        mock_enable_custom_op.assert_called_once_with()
+
+    @patch("vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager.enable_custom_op")
+    def test_missing_op_raises_clear_error(self, mock_enable_custom_op: Mock):
+        ascend_ops = SimpleNamespace(sparse_kv_lru_resident_compact=Mock())
+        with (
+            patch.object(torch.ops, "_C_ascend", ascend_ops, create=True),
+            self.assertRaisesRegex(
+                RuntimeError,
+                r"only built for Atlas A3.*_C_ascend\.sparse_kv_compute_lru_resident_addrs",
+            ),
+        ):
+            _require_sparse_kv_offload_ops()
+
+        mock_enable_custom_op.assert_called_once_with()
 
 
 class TestHostDeviceMemoryRatio(unittest.TestCase):

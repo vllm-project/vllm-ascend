@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.utils import enable_custom_op
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -42,10 +43,30 @@ OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 
 
 _SUBSCRIBED_COMPUTE_STREAMS: set[object] = set()
+_REQUIRED_SPARSE_KV_OFFLOAD_OPS = (
+    "sparse_kv_lru_resident_compact",
+    "sparse_kv_compute_lru_resident_addrs",
+)
 
 
 def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
+
+
+def _require_sparse_kv_offload_ops() -> None:
+    enable_custom_op()
+    ascend_ops = getattr(torch.ops, "_C_ascend", None)
+    missing_ops = [
+        op_name for op_name in _REQUIRED_SPARSE_KV_OFFLOAD_OPS if ascend_ops is None or not hasattr(ascend_ops, op_name)
+    ]
+    if missing_ops:
+        formatted_ops = ", ".join(f"_C_ascend.{op_name}" for op_name in missing_ops)
+        raise RuntimeError(
+            "Sparse KV offload requires native helpers that are only built "
+            "for Atlas A3 (SOC_VERSION=ascend910_93.*), but the following "
+            f"operators are unavailable: {formatted_ops}. Install or rebuild "
+            "vllm-ascend for Atlas A3."
+        )
 
 
 def get_host_device_memory_usage_ratio(kv_cache_specs: dict[str, KVCacheSpec]) -> float:
@@ -312,6 +333,8 @@ class SparseKVOffloadManager:
         kv_cache_config: KVCacheConfig,
         sparse_kv_offload_config: SparseKVOffloadConfig,
     ):
+        _require_sparse_kv_offload_ops()
+
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.sparse_kv_offload_config = sparse_kv_offload_config
