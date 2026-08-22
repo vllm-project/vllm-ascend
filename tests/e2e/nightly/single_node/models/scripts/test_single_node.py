@@ -609,5 +609,12 @@ async def test_single_node(config: SingleNodeConfig) -> None:
             auto_port=False,
         ) as server,
     ):
-        await _dispatch_tests(config, server)
+        errors = []
+        try:
+            await _dispatch_tests(config, server)
+        except Exception as e:
+            errors.append(e)
+            logger.error("dispatch_tests failed: %s", e)
         await _run_benchmarks_and_spec_decode(config, server, config.server_port)
+        if errors:
+            raise errors[0]
