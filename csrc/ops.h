@@ -131,4 +131,5 @@ namespace vllm_ascend {
         void* gm_tiling_data,
         const uint32_t block_dim
     );
+
 }

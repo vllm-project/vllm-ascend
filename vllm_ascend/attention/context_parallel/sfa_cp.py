@@ -29,6 +29,7 @@ from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin
 from vllm_ascend.utils import (
     _round_up,
+    enable_custom_op,
     enable_dsa_cp,
     enable_dsa_cp_with_o_proj_tp,
     enable_sfa_dcp_replicated_indexer,
@@ -838,9 +839,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 break
         if self._dcp_index_topk <= 0:
             raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
-        device = self.q_proj.weight.device
-        self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
-        self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
+        if not enable_custom_op() or not hasattr(torch.ops._C_ascend, "sfa_remap_sparse_indices"):
+            raise RuntimeError(
+                "DCP SFA requires the _C_ascend.sfa_remap_sparse_indices custom operator. "
+                "Ensure vllm-ascend custom operators are installed and enabled."
+            )
 
     @staticmethod
     def _has_prefill(attn_metadata: M) -> bool:
@@ -936,31 +939,16 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
             )
 
-        # Remap the topk indices from the replicated view to the DCP-local KV cache view.
-        # We use float32 for better performance on Ascend.
-        topk_indices_fp32 = topk_indices.to(torch.float32)
-        interleave_size = self._dcp_interleave_size
-        local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
-        local_owner_base = torch.floor(local_block_indices / self.dcp_size) * self.dcp_size
-        local_owner = local_block_indices - local_owner_base
-        local_owner_mask = (topk_indices_fp32 >= 0) & (local_owner == self.dcp_rank)
-        if interleave_size == 1:
-            remapped_indices_fp32 = torch.floor(topk_indices_fp32 / self.dcp_size)
-        else:
-            local_offsets = topk_indices_fp32 - local_block_indices * interleave_size
-            remapped_indices_fp32 = torch.floor(topk_indices_fp32 / (self.dcp_size * interleave_size))
-            remapped_indices_fp32 = remapped_indices_fp32 * interleave_size + local_offsets
-        remapped_indices = torch.where(
-            local_owner_mask,
-            remapped_indices_fp32,
-            self._remap_invalid_index,
-        ).to(topk_indices.dtype)
-
-        # Compact local indices to the front without changing their top-k order.
-        original_order = self._remap_order[:topk_count].expand_as(topk_indices)
-        pack_keys = original_order + (~local_owner_mask).to(torch.float32) * topk_count
-        _, pack_order = torch.sort(pack_keys, dim=-1)
-        return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
+        contiguous_indices = topk_indices.contiguous()
+        remapped_indices = torch.empty_like(contiguous_indices)
+        torch.ops._C_ascend.sfa_remap_sparse_indices(
+            contiguous_indices,
+            remapped_indices,
+            self.dcp_size,
+            self.dcp_rank,
+            self._dcp_interleave_size,
+        )
+        return remapped_indices
 
     def _all_to_all_dcp_tensor(
         self,

@@ -491,6 +491,36 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     cmd.Run();
     return y_out;
 }
+
+void sfa_remap_sparse_indices(
+    const at::Tensor& input,
+    at::Tensor& output,
+    int64_t dcp_size,
+    int64_t dcp_rank,
+    int64_t interleave_size)
+{
+    constexpr int64_t max_top_k = 8192;
+    TORCH_CHECK(input.is_privateuseone(), "input must be on an NPU device");
+    TORCH_CHECK(output.device() == input.device(), "input and output must be on the same NPU device");
+    TORCH_CHECK(input.scalar_type() == torch::kInt32, "input must have int32 dtype");
+    TORCH_CHECK(output.scalar_type() == input.scalar_type(), "output dtype must match input dtype");
+    TORCH_CHECK(input.sizes() == output.sizes(), "output shape must match input shape");
+    TORCH_CHECK(input.is_contiguous() && output.is_contiguous(), "input and output must be contiguous");
+    TORCH_CHECK(input.dim() >= 1, "input must have at least one dimension");
+    TORCH_CHECK(dcp_size > 1, "dcp_size must be greater than one");
+    TORCH_CHECK(dcp_rank >= 0 && dcp_rank < dcp_size, "dcp_rank must be in [0, dcp_size)");
+    TORCH_CHECK(interleave_size > 0, "interleave_size must be positive");
+
+    const int64_t top_k = input.size(-1);
+    TORCH_CHECK(top_k > 0 && top_k <= max_top_k, "top_k must be in [1, ", max_top_k, "]");
+    const int64_t rows = input.numel() / top_k;
+    if (rows == 0) {
+        return;
+    }
+
+    EXEC_NPU_CMD(aclnnSfaRemapSparseIndices, input, dcp_size, dcp_rank,
+                 interleave_size, output);
+}
 #endif
 
 at::Tensor npu_sign_bits_pack(const at::Tensor& input,
@@ -2003,6 +2033,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
+
+    ops.def(
+        "sfa_remap_sparse_indices(Tensor input, Tensor(a!) output, int dcp_size, "
+        "                         int dcp_rank, int interleave_size) -> ()");
+    ops.impl("sfa_remap_sparse_indices", torch::kPrivateUse1,
+             &vllm_ascend::sfa_remap_sparse_indices);
 #endif
 
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
