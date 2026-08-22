@@ -42,6 +42,19 @@ To guarantee uniform hash generation, it is required to synchronize the PYTHONHA
 export PYTHONHASHSEED=0
 ```
 
+For non-layerwise `AscendStoreConnector` deployments using the Mooncake
+backend, `VLLM_MOONCAKE_LOAD_RECV_THREADS` controls the number of KV-load
+receiver threads (default: `1`):
+
+```bash
+export VLLM_MOONCAKE_LOAD_RECV_THREADS=4
+```
+
+Values greater than `1` enable request-level parallel loading for both
+`load_async: true` and synchronous loading. Each request is handled by one
+receiver thread, so a single request is not split across the pool. The setting
+is ignored by layerwise transfer and non-Mooncake AscendStore backends.
+
 ## 2. Example of using Mooncake as a KV Pool backend
 
 ### Step 2.1: Software Installation

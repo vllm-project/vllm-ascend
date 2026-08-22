@@ -15,8 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import queue
 import threading
 import unittest
+from concurrent.futures import Future
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -44,6 +46,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    SynchronousLoadRequest,
 )
 
 
@@ -607,6 +610,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
+    def test_uses_shared_request_queue(self):
+        shared_queue: queue.Queue = queue.Queue()
+
+        thread = KVCacheStoreRecvingThread(
+            m_store=FakeStore(),
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            request_queue=shared_queue,
+        )
+
+        self.assertIs(thread.request_queue, shared_queue)
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()
@@ -659,6 +675,58 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
+
+    def test_synchronous_request_completes_without_async_notification(self):
+        store = FakeStore()
+        thread = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        completion: Future[None] = Future()
+        load_request = SynchronousLoadRequest(request, completion)
+        thread.request_queue.put(load_request)
+
+        thread._handle_request(load_request)
+
+        self.assertIsNone(completion.result())
+        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+    def test_synchronous_request_propagates_error_without_killing_worker(self):
+        store = FakeStore()
+        store.get = MagicMock(side_effect=RuntimeError("get failed"))
+        thread = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        completion: Future[None] = Future()
+        load_request = SynchronousLoadRequest(request, completion)
+        thread.request_queue.put(load_request)
+
+        thread._handle_request(load_request)
+
+        with self.assertRaisesRegex(RuntimeError, "get failed"):
+            completion.result()
+        self.assertIsNone(thread._fatal_error)
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
