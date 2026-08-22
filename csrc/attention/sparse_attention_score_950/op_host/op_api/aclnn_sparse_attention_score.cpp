@@ -130,7 +130,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnSparseAttentionScoreGetW
         actualSeqLengthsOptional, actualSeqLengthsKvOptional,
         qDequantScaleOptional, kDequantScaleOptional, vDequantScaleOptional,
         numKeyValueHeads, scaleValue, blockSize, topK, innerPrecise,
-        "TND", false,
+        "TND",
         attentionOut,
         executorImpl);
 

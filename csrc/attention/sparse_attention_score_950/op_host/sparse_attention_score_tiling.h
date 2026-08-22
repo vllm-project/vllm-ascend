@@ -13,7 +13,6 @@
 
 #include <cstdint>
 #include <array>
-#include <vector>
 #include "register/tilingdata_base.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling/tiling_api.h"
@@ -30,22 +29,10 @@ constexpr uint64_t SASA_FP16_D128_ARCH35_FD_TILING = SASA_BASE_TILING + 5;
 constexpr uint64_t SASA_BF16_D128_ARCH35_FD_TILING = SASA_BASE_TILING + 6;
 constexpr uint64_t SASA_FP8_D128_ARCH35_FD_TILING = SASA_BASE_TILING + 7;
 constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_FD_TILING = SASA_BASE_TILING + 8;
-constexpr uint64_t SASA_FP8_D128_ARCH35_DENSE_TILING = SASA_BASE_TILING + 9;
-constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_DENSE_TILING = SASA_BASE_TILING + 10;
-constexpr uint64_t SASA_FP8_D128_ARCH35_DENSE_FD_TILING = SASA_BASE_TILING + 11;
-constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_DENSE_FD_TILING = SASA_BASE_TILING + 12;
-constexpr uint64_t SASA_FP8_D128_ARCH35_DENSE_NTD_TILING = SASA_BASE_TILING + 13;
-constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_TILING = SASA_BASE_TILING + 14;
-constexpr uint64_t SASA_FP8_D128_ARCH35_DENSE_NTD_FD_TILING = SASA_BASE_TILING + 15;
-constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_FD_TILING = SASA_BASE_TILING + 16;
 constexpr uint64_t SASA_FP16_D128_ARCH35_NTD_TILING = SASA_BASE_TILING + 17;
 constexpr uint64_t SASA_BF16_D128_ARCH35_NTD_TILING = SASA_BASE_TILING + 18;
 constexpr uint64_t SASA_FP16_D128_ARCH35_NTD_FD_TILING = SASA_BASE_TILING + 19;
 constexpr uint64_t SASA_BF16_D128_ARCH35_NTD_FD_TILING = SASA_BASE_TILING + 20;
-constexpr uint64_t SASA_FP8_D128_ARCH35_DENSE_KVNTD_TILING = SASA_BASE_TILING + 21;
-constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_TILING = SASA_BASE_TILING + 22;
-constexpr uint64_t SASA_FP8_D128_ARCH35_DENSE_KVNTD_FD_TILING = SASA_BASE_TILING + 23;
-constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_FD_TILING = SASA_BASE_TILING + 24;
 
 constexpr uint32_t SASA_FD_MAX_AIC = 32;
 constexpr uint32_t SASA_FD_MAX_BASE_TASK = 32;
@@ -99,7 +86,6 @@ TILING_DATA_FIELD_DEF(uint32_t, pL1BufNum);
 // FlashDecoding metadata. All workspace offsets are bytes
 // relative to AscendC::GetUserWorkspace(workspace).
 TILING_DATA_FIELD_DEF(uint32_t, fdLseSubStride);
-TILING_DATA_FIELD_DEF(uint32_t, denseMode);
 TILING_DATA_FIELD_DEF(uint32_t, layoutMode);
 TILING_DATA_FIELD_DEF(uint32_t, qTokenStride);
 TILING_DATA_FIELD_DEF(uint32_t, qHeadStride);
@@ -174,7 +160,6 @@ private:
     ge::graphStatus ParseSeqlens(gert::TilingContext *context);
     ge::graphStatus ParseSelectNumIdx(gert::TilingContext *context);
     ge::graphStatus CalculateTaskSplit(gert::TilingContext *context);
-    ge::graphStatus CalculateDenseTaskSplit(gert::TilingContext *context);
     ge::graphStatus CalculateWorkSpace(gert::TilingContext *context);
     ge::graphStatus FillTilingData(gert::TilingContext *context);
     ge::graphStatus CheckAttentionOutDtype(gert::TilingContext *sasContext);
@@ -199,8 +184,6 @@ private:
     const int32_t *selectNumIdxList_ = nullptr;
     uint64_t qSeqLenCount_ = 0;
     uint64_t kvSeqLenCount_ = 0;
-    std::vector<uint32_t> denseValidBlockCount_{};
-    std::vector<uint64_t> denseBlockPrefix_{};
 
     uint64_t mm1OutSize_ = 0;
     uint64_t smOnlineOutSize_ = 0;
@@ -209,7 +192,6 @@ private:
     uint64_t workSpaceSize_ = 0;
 
     bool enableFd_ = false;
-    bool denseMode_ = false;
     // "TND": Q=TND, KV=TND-in-block(BSND); "NTD": Q=NTD, KV=NTD-in-block(BNSD);
     // "TND_BNSD": Q=TND, KV=BNSD (mixed).
     bool isQNtd_ = false;

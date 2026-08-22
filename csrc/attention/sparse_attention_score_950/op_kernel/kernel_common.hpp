@@ -56,7 +56,6 @@ struct SparseAttentionScoreTilingData {
     uint32_t vL1BufNum;
     uint32_t pL1BufNum;
     uint32_t fdLseSubStride;
-    uint32_t denseMode;
     uint32_t layoutMode;
     uint32_t qTokenStride;
     uint32_t qHeadStride;
