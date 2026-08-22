@@ -47,6 +47,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
+#include "attention/sparse_attention_score_prefill/sparse_attention_score_prefill_v1_torch_adpt.h"
 #include "attention/sparse_attention_score_prefill/sparse_attention_score_prefill_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
@@ -2086,6 +2087,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           ) -> Tensor "
     );
     ops.impl("npu_sparse_attention_score_prefill", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score_prefill);
+
+    ops.def(
+        "npu_sparse_attention_score_prefill_v1(Tensor query, Tensor key, Tensor value,"
+        "                              Tensor block_table, Tensor k2q_row_ptr,"
+        "                              Tensor k2q_q_indices, Tensor k2q_slot_indices,"
+        "                              int num_key_value_heads, float scale_value,"
+        "                              int block_size, int top_k, int inner_precise, *,"
+        "                              Tensor? actual_seq_lengths=None,"
+        "                              Tensor? actual_seq_lengths_kv=None) -> Tensor"
+    );
+    ops.impl("npu_sparse_attention_score_prefill_v1", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_attention_score_prefill_v1);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
