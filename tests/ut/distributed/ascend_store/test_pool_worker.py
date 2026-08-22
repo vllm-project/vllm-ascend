@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import queue
 import threading
 import unittest
 from types import SimpleNamespace
@@ -624,7 +623,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         self.assertEqual(len(worker.kv_recv_threads), 3)
         self.assertIs(worker.kv_recv_thread, worker.kv_recv_threads[0])
-        self.assertTrue(all(thread.request_queue is worker.recv_request_queue for thread in worker.kv_recv_threads))
+        shared_queue = worker.kv_recv_threads[0].request_queue
+        self.assertTrue(all(thread.request_queue is shared_queue for thread in worker.kv_recv_threads))
         self.assertEqual(start_thread.call_count, 3)
 
     def test_receiver_pool_parallelizes_synchronous_request_batch(self):
@@ -1056,6 +1056,7 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
     def test_start_load_kv_async(self):
         worker = self._make_worker()
         recv_thread = MagicMock()
+        worker.kv_recv_threads = [recv_thread]
         worker.kv_recv_thread = recv_thread
 
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
@@ -1073,30 +1074,10 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
 
         recv_thread.reset_mock()
         worker = self._make_worker()
+        worker.kv_recv_threads = [recv_thread]
         worker.kv_recv_thread = recv_thread
         worker.start_load_kv(AscendConnectorMetadata(set()))
         recv_thread.add_request.assert_not_called()
-
-    def test_async_receiver_pool_uses_shared_queue(self):
-        worker = self._make_worker()
-        worker.recv_request_queue = queue.Queue()
-        worker.kv_recv_threads = [MagicMock(), MagicMock()]
-        worker.kv_recv_thread = worker.kv_recv_threads[0]
-        meta = AscendConnectorMetadata(set())
-        for index in range(2):
-            meta.add_request(
-                ReqMeta(
-                    req_id=f"r{index}",
-                    token_len_chunk=16,
-                    block_ids=[index],
-                    block_hashes=[f"h{index}"],
-                    load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
-                )
-            )
-
-        worker.start_load_kv(meta)
-
-        self.assertEqual(worker.recv_request_queue.qsize(), 2)
 
 
 class TestKVPoolWorkerProcessLayerData(unittest.TestCase):

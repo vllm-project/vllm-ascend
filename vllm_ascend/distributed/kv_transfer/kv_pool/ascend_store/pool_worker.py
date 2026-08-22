@@ -346,7 +346,6 @@ class KVPoolWorker:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
         self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
-        self.recv_request_queue: queue.Queue[Any] | None = None
         self._transfer_threads_started = False
         self.external_slot_release_waiter: Callable[[int], None] | None = None
         # Per-rank GVA cache: maps per-rank store key to its allocated GVA.
@@ -578,7 +577,7 @@ class KVPoolWorker:
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
             if self.load_async or self.num_load_recv_threads > 1:
-                self.recv_request_queue = queue.Queue()
+                recv_request_queue: queue.Queue[Any] = queue.Queue()
                 ready_events = []
                 for index in range(self.num_load_recv_threads):
                     ready_event = threading.Event()
@@ -593,7 +592,7 @@ class KVPoolWorker:
                         invalid_block_ids=self._invalid_block_ids,
                         invalid_block_ids_lock=self._invalid_block_ids_lock,
                         worker=self,
-                        request_queue=self.recv_request_queue,
+                        request_queue=recv_request_queue,
                     )
                     recv_thread.name = f"AscendStoreRecv-{index}"
                     recv_thread.start()
@@ -892,12 +891,11 @@ class KVPoolWorker:
                 self.load_async,
             )
             if self.kv_recv_threads:
-                assert self.recv_request_queue is not None
                 if self.load_async:
-                    self.recv_request_queue.put(request)
+                    self.kv_recv_threads[0].add_request(request)
                 else:
                     completion: Future[None] = Future()
-                    self.recv_request_queue.put(SynchronousLoadRequest(request, completion))
+                    self.kv_recv_threads[0].add_request(SynchronousLoadRequest(request, completion))
                     sync_load_completions.append(completion)
                 continue
             if self.load_async:

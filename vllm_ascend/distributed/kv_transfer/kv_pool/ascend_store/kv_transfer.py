@@ -913,7 +913,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             sync_completion = request_data.completion
         else:
             req_meta = request_data
-        load_error: BaseException | None = None
+        load_error: Exception | None = None
         try:
             load_spec = req_meta.load_spec
             req_id = req_meta.req_id
@@ -1028,7 +1028,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 len(key_list_c),
             )
             self.set_finished_request(req_id)
-        except BaseException as error:
+        except Exception as error:
             load_error = error
             if sync_completion is None:
                 raise
