@@ -1,0 +1,25 @@
+model_name: "google/gemma-4-E4B-it"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.7
+  trust_remote_code: false
+  enforce_eager: true
+
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.052
+  - name: "exact_match,flexible-extract"
+    value: 0.068
+
+num_fewshot: 5
+apply_chat_template: false
+fewshot_as_multiturn: false
+limit: 1000
+batch_size: "auto"
