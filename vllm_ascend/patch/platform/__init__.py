@@ -43,7 +43,12 @@ import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
+# Install the base KV-delivery scheduler before balance derives from it.
+import vllm_ascend.patch.platform.patch_kv_delivery_preemption  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+
+# Must follow the Scheduler class swap so AsyncScheduler inherits it.
+import vllm_ascend.patch.platform.patch_async_scheduler  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
