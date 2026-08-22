@@ -52,8 +52,7 @@ def make_transfer_metadata(
     handshake_port: int = 5000,
     layer_names: list[str] | None = None,
     group_indices: list[int] | None = None,
-    spec_indices: list[int] | None = None,
-    spec_block_sizes: list[int] | None = None,
+    layer_block_sizes: list[int] | None = None,
     base_addrs: list[list[int]] | None = None,
     block_strides: list[list[int]] | None = None,
     block_lens: list[list[int]] | None = None,
@@ -67,10 +66,9 @@ def make_transfer_metadata(
         te_rpc_port=te_rpc_port,
         block_size=16,
         num_blocks=32,
-        spec_block_sizes=spec_block_sizes or [16],
         layer_names=layer_names,
+        layer_block_sizes=layer_block_sizes or [16] * num_layers,
         group_indices=group_indices or [0] * num_layers,
-        spec_indices=spec_indices or [0] * num_layers,
         kv_caches_base_addr=base_addrs or [[1000 + index * 1000] for index in range(num_layers)],
         block_strides=block_strides or [[128] for _ in range(num_layers)],
         block_lens=block_lens or [[128] for _ in range(num_layers)],
@@ -84,24 +82,24 @@ def make_transfer_metadata(
 def make_pp_metadata(
     *,
     layer_names: list[str] | None = None,
-    spec_indices: list[int] | None = None,
-    spec_block_sizes: list[int] | None = None,
+    layer_block_sizes: list[int] | None = None,
     block_shapes: list[list[tuple[int, ...]]] | None = None,
     block_strides: list[list[int]] | None = None,
     block_lens: list[list[int]] | None = None,
     block_size_scales: list[list[int]] | None = None,
     tp_base_addrs: dict[int, list[list[int]]] | None = None,
+    tp_layer_indices: dict[int, list[int]] | None = None,
 ) -> MooncakePPTransferMetadata:
     layer_names = layer_names or ["model.layers.0.self_attn"]
     num_layers = len(layer_names)
     tp_base_addrs = tp_base_addrs or {0: [[5000 + index * 1000] for index in range(num_layers)]}
+    tp_layer_indices = tp_layer_indices or {}
     return MooncakePPTransferMetadata(
         block_size=16,
         num_blocks=32,
-        spec_block_sizes=spec_block_sizes or [16],
         layer_names=layer_names,
+        layer_block_sizes=layer_block_sizes or [16] * num_layers,
         group_indices=[0] * num_layers,
-        spec_indices=spec_indices or [0] * num_layers,
         block_strides=block_strides or [[128] for _ in range(num_layers)],
         block_lens=block_lens or [[128] for _ in range(num_layers)],
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
@@ -109,6 +107,7 @@ def make_pp_metadata(
         metadata_by_tp_rank={
             tp_rank: MooncakeTPTransferMetadata(
                 te_rpc_port=9000 + tp_rank,
+                layer_indices=tp_layer_indices.get(tp_rank, list(range(num_layers))),
                 kv_caches_base_addr=base_addrs,
                 local_ip=f"10.0.0.{tp_rank + 1}",
                 handshake_port=5000 + tp_rank,
@@ -122,6 +121,7 @@ def make_metadata_groups(
     *,
     engine_id: str = "engine-p",
     tp_size: int = 1,
+    use_kv_pp: bool = False,
     pp_metadata: MooncakePPTransferMetadata | None = None,
 ) -> MooncakeTransferMetadataGroups:
     return MooncakeTransferMetadataGroups(
@@ -132,6 +132,7 @@ def make_metadata_groups(
         pcp_size=1,
         dcp_size=1,
         tp_size=tp_size,
+        use_kv_pp=use_kv_pp,
         metadata_by_pp_rank={0: pp_metadata or make_pp_metadata()},
     )
 

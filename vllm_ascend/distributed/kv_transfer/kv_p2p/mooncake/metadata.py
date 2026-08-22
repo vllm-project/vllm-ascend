@@ -17,19 +17,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     """Worker transfer information exchanged during the P/D handshake.
 
-    Per-spec fields use the flattened KV-cache spec order. All per-layer
-    fields use layer_names order; each nested list preserves that layer's
-    cache tensor order.
+    All per-layer fields use layer_names order; each nested list preserves
+    that layer's cache tensor order.
     """
 
     engine_id: str
     te_rpc_port: int
     block_size: int
     num_blocks: int
-    spec_block_sizes: list[int]
     layer_names: list[str]
+    layer_block_sizes: list[int]
     group_indices: list[int]
-    spec_indices: list[int]
     kv_caches_base_addr: list[list[int]]
     block_strides: list[list[int]]
     block_lens: list[list[int]]
@@ -41,8 +39,8 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     def __post_init__(self) -> None:
         num_layers = len(self.layer_names)
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
+            ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
-            ("spec_indices", self.spec_indices),
             ("kv_caches_base_addr", self.kv_caches_base_addr),
             ("block_strides", self.block_strides),
             ("block_lens", self.block_lens),
@@ -77,6 +75,10 @@ class MooncakeTPTransferMetadata:
     """TP-private connection and KV-cache address information."""
 
     te_rpc_port: int
+    # PP-union layer indices physically owned by this TP rank. The address
+    # table remains aligned with the PP-union layer order; unowned entries are
+    # empty lists.
+    layer_indices: list[int]
     kv_caches_base_addr: list[list[int]]
     local_ip: str
     handshake_port: int
@@ -88,10 +90,9 @@ class MooncakePPTransferMetadata:
 
     block_size: int
     num_blocks: int
-    spec_block_sizes: list[int]
     layer_names: list[str]
+    layer_block_sizes: list[int]
     group_indices: list[int]
-    spec_indices: list[int]
     block_strides: list[list[int]]
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
@@ -110,6 +111,7 @@ class MooncakeTransferMetadataGroups:
     pcp_size: int
     dcp_size: int
     tp_size: int
+    use_kv_pp: bool
     metadata_by_pp_rank: dict[int, MooncakePPTransferMetadata]
 
 

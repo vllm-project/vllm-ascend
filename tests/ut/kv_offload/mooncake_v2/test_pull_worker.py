@@ -44,6 +44,7 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.layer_names = ["model.layers.0.self_attn"]
     thread.group_indices = [0]
     thread.spec_indices = [0]
+    thread.layer_block_sizes = [16]
     thread.kv_cache_specs = [make_full_spec()]
     thread.local_metadata = make_transfer_metadata()
     thread.kv_caches_base_addr = [[1000]]
@@ -155,6 +156,7 @@ def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
     groups = SimpleNamespace(
         tp_size=1,
         dcp_size=1,
+        use_kv_pp=False,
         metadata_by_pp_rank={0: pp0, 1: pp1},
     )
 
@@ -162,6 +164,40 @@ def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
 
     assert pairs == {0: [(0, 0)], 1: [(1, 0)]}
     assert rank_groups == {0: {(0, 0): [[0]]}, 1: {(1, 0): [[0]]}}
+    assert thread._get_layer_remote_tp_rank_groups.call_count == 1
+
+
+def test_build_remote_layout_filters_kv_parallel_owners_and_keeps_mtp_replicas() -> None:
+    thread = make_thread(
+        layer_names=["layer.0", "mtp.layer"],
+        spec_indices=[0, 0],
+        kv_cache_specs=[make_full_spec()],
+    )
+    thread._get_layer_remote_tp_rank_groups = MagicMock(return_value=[[0, 1]])  # type: ignore[method-assign]
+    pp_metadata = make_pp_metadata(
+        layer_names=["layer.0", "mtp.layer"],
+        tp_base_addrs={
+            0: [[5000], [6000]],
+            1: [[], [7000]],
+        },
+        tp_layer_indices={0: [0, 1], 1: [1]},
+    )
+    groups = make_metadata_groups(
+        tp_size=2,
+        use_kv_pp=True,
+        pp_metadata=pp_metadata,
+    )
+
+    rank_groups, pairs = thread._build_remote_transfer_layout(groups)
+
+    assert pairs == {0: [(0, 0), (1, 1)]}
+    assert rank_groups == {
+        0: {
+            (0, 0): [[0]],
+            (1, 1): [[0, 1]],
+        }
+    }
+    assert thread._get_layer_remote_tp_rank_groups.call_count == 1
 
 
 def test_build_remote_layout_rejects_missing_local_layer() -> None:
@@ -308,6 +344,7 @@ def test_transfer_bucket_reuses_block_mapping_for_layers_of_same_spec() -> None:
         layer_names=["layer.0", "layer.1"],
         group_indices=[0, 0],
         spec_indices=[0, 0],
+        layer_block_sizes=[16, 16],
         block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
         block_strides=[[128], [128]],
         block_lens=[[128], [128]],
@@ -316,14 +353,12 @@ def test_transfer_bucket_reuses_block_mapping_for_layers_of_same_spec() -> None:
     )
     thread.local_metadata = make_transfer_metadata(
         layer_names=["layer.0", "layer.1"],
-        spec_indices=[0, 0],
-        spec_block_sizes=[16],
+        layer_block_sizes=[16, 16],
     )
     thread._compute_group_block_ids = MagicMock(return_value=[(0, [10], [20])])  # type: ignore[method-assign]
     remote = make_pp_metadata(
         layer_names=["layer.0", "layer.1"],
-        spec_indices=[0, 0],
-        spec_block_sizes=[16],
+        layer_block_sizes=[16, 16],
         tp_base_addrs={0: [[5000], [6000]]},
     )
 
@@ -339,6 +374,53 @@ def test_transfer_bucket_reuses_block_mapping_for_layers_of_same_spec() -> None:
     thread._compute_group_block_ids.assert_called_once()
     assert set(buckets[0][0]) == {(0, 0), (1, 1)}
     assert request_ids == {0: {"request"}}
+
+
+def test_transfer_bucket_separates_same_spec_layers_with_different_tp_owners() -> None:
+    thread = make_thread(
+        layer_names=["layer.0", "layer.1"],
+        group_indices=[0, 0],
+        spec_indices=[0, 0],
+        layer_block_sizes=[16, 16],
+        block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+        block_size_scales=[[1], [1]],
+        kv_caches_base_addr=[[1000], [2000]],
+    )
+    thread.local_metadata = make_transfer_metadata(
+        layer_names=["layer.0", "layer.1"],
+        layer_block_sizes=[16, 16],
+    )
+
+    def compute_block_ids(
+        request_id: str,
+        remote_tp_rank_groups: list[list[int]],
+        *args: object,
+    ) -> list[tuple[int, list[int], list[int]]]:
+        del request_id, args
+        return [(remote_tp_rank_groups[0][0], [10], [20])]
+
+    thread._compute_group_block_ids = MagicMock(side_effect=compute_block_ids)  # type: ignore[method-assign]
+    remote = make_pp_metadata(
+        layer_names=["layer.0", "layer.1"],
+        layer_block_sizes=[16, 16],
+        tp_base_addrs={0: [[5000], []], 1: [[], [6000]]},
+        tp_layer_indices={0: [0], 1: [1]},
+    )
+
+    buckets, request_ids = thread._build_transfer_block_buckets(
+        remote,
+        [(0, 0), (1, 1)],
+        {(0, 0): [[0]], (1, 1): [[1]]},
+        1,
+        {"request": make_req_meta()},
+        {},
+    )
+
+    assert set(buckets) == {0, 1}
+    assert request_ids == {0: {"request"}, 1: {"request"}}
+    assert thread._compute_group_block_ids.call_count == 2
 
 
 def test_attention_address_generation_handles_partial_head_overlap() -> None:

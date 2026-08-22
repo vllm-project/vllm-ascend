@@ -155,11 +155,9 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
-        spec_block_sizes = [spec.block_size for spec in self.kv_cache_specs]
-
         layer_names: list[str] = []
+        layer_block_sizes: list[int] = []
         group_indices: list[int] = []
-        spec_indices: list[int] = []
         kv_caches_base_addr: list[list[int]] = []
         block_strides_per_layer: list[list[int]] = []
         block_lens_per_layer: list[list[int]] = []
@@ -196,8 +194,9 @@ class MooncakeBaseConnectorWorker:
 
                 configured_layer_names.add(layer_name)
                 layer_names.append(layer_name)
+                spec_index = self.layer_name_to_spec_index[layer_name]
+                layer_block_sizes.append(self.kv_cache_specs[spec_index].block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])
-                spec_indices.append(self.layer_name_to_spec_index[layer_name])
                 kv_caches_base_addr.append(base_addrs)
                 block_strides_per_layer.append(block_strides)
                 block_lens_per_layer.append(block_lens)
@@ -217,10 +216,9 @@ class MooncakeBaseConnectorWorker:
             te_rpc_port=self.te_rpc_port,
             block_size=self.block_size,
             num_blocks=self.num_blocks,
-            spec_block_sizes=spec_block_sizes,
             layer_names=layer_names,
+            layer_block_sizes=layer_block_sizes,
             group_indices=group_indices,
-            spec_indices=spec_indices,
             kv_caches_base_addr=kv_caches_base_addr,
             block_strides=block_strides_per_layer,
             block_lens=block_lens_per_layer,

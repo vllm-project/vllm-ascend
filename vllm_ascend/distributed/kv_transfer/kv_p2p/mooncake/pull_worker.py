@@ -84,10 +84,10 @@ class MooncakePullRecvingThread(threading.Thread):
         self.local_metadata = local_metadata
 
         self.block_size = local_metadata.block_size
-        self.spec_block_sizes = local_metadata.spec_block_sizes
         self.layer_names = local_metadata.layer_names
+        self.layer_block_sizes = local_metadata.layer_block_sizes
         self.group_indices = local_metadata.group_indices
-        self.spec_indices = local_metadata.spec_indices
+        self.spec_indices = [layer_name_to_spec_index[layer_name] for layer_name in self.layer_names]
         self.kv_caches_base_addr = local_metadata.kv_caches_base_addr
         self.block_strides = local_metadata.block_strides
         self.block_lens = local_metadata.block_lens
@@ -215,9 +215,12 @@ class MooncakePullRecvingThread(threading.Thread):
         dict[int, list[tuple[int, int]]],
     ]:
         """Build per-PP layer candidates and matching layer index pairs."""
+        if remote_metadata.use_kv_pp and (self.dcp_size != 1 or remote_metadata.dcp_size != 1):
+            raise ValueError("Mooncake KV parallel cannot be combined with DCP")
         groups_by_pp_rank: dict[int, dict[tuple[int, int], list[list[int]]]] = {}
         layer_pairs_by_pp_rank: dict[int, list[tuple[int, int]]] = {}
         matched_local_layer_indices: set[int] = set()
+        raw_tp_rank_groups_by_spec: dict[int, list[list[int]]] = {}
 
         for remote_pp_rank, pp_metadata in sorted(remote_metadata.metadata_by_pp_rank.items()):
             layer_index_pairs: list[tuple[int, int]] = []
@@ -225,6 +228,12 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_layer_index_by_name = {
                 layer_name: layer_index for layer_index, layer_name in enumerate(pp_metadata.layer_names)
             }
+            owner_tp_ranks_by_layer_index: list[set[int]] = [set() for _ in pp_metadata.layer_names]
+            if remote_metadata.use_kv_pp:
+                for remote_tp_rank, tp_metadata in pp_metadata.metadata_by_tp_rank.items():
+                    for remote_layer_index in tp_metadata.layer_indices:
+                        owner_tp_ranks_by_layer_index[remote_layer_index].add(remote_tp_rank)
+
             for local_layer_index, layer_name in enumerate(self.layer_names):
                 remote_layer_index = remote_layer_index_by_name.get(layer_name)
                 if remote_layer_index is None:
@@ -234,14 +243,30 @@ class MooncakePullRecvingThread(threading.Thread):
                 layer_index_pairs.append(layer_pair)
                 matched_local_layer_indices.add(local_layer_index)
                 local_spec_index = self.spec_indices[local_layer_index]
-                groups_by_layer_pair[layer_pair] = self._get_layer_remote_tp_rank_groups(
-                    local_layer_index,
-                    remote_layer_index,
-                    self.kv_cache_specs[local_spec_index],
-                    pp_metadata,
-                    remote_metadata.tp_size,
-                    remote_metadata.dcp_size,
-                )
+                raw_tp_rank_groups = raw_tp_rank_groups_by_spec.get(local_spec_index)
+                if raw_tp_rank_groups is None:
+                    raw_tp_rank_groups = self._get_layer_remote_tp_rank_groups(
+                        local_layer_index,
+                        remote_layer_index,
+                        self.kv_cache_specs[local_spec_index],
+                        pp_metadata,
+                        remote_metadata.tp_size,
+                        remote_metadata.dcp_size,
+                    )
+                    raw_tp_rank_groups_by_spec[local_spec_index] = raw_tp_rank_groups
+
+                remote_tp_rank_groups = raw_tp_rank_groups
+                if remote_metadata.use_kv_pp:
+                    owner_tp_ranks = owner_tp_ranks_by_layer_index[remote_layer_index]
+                    remote_tp_rank_groups = [
+                        [tp_rank for tp_rank in group if tp_rank in owner_tp_ranks] for group in remote_tp_rank_groups
+                    ]
+                    if any(not group for group in remote_tp_rank_groups):
+                        raise ValueError(
+                            "Mooncake KV parallel metadata has no producer TP owning "
+                            f"layer {layer_name!r} for every required TP group on PP rank {remote_pp_rank}"
+                        )
+                groups_by_layer_pair[layer_pair] = remote_tp_rank_groups
 
             layer_pairs_by_pp_rank[remote_pp_rank] = layer_index_pairs
             groups_by_pp_rank[remote_pp_rank] = groups_by_layer_pair
@@ -416,7 +441,13 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
         tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
         layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
-        transfer_block_ids_by_spec: dict[str, dict[int, list[tuple[int, list[int], list[int]]]]] = {}
+        transfer_block_ids_by_spec: dict[
+            str,
+            dict[
+                tuple[int, tuple[tuple[int, ...], ...]],
+                list[tuple[int, list[int], list[int]]],
+            ],
+        ] = {}
         future_to_task: dict[Future[None], tuple[int, int, set[str]]] = {}
         submission_error: Exception | None = None
         try:
@@ -480,7 +511,13 @@ class MooncakePullRecvingThread(threading.Thread):
         tp_rank_groups_by_layer: dict[tuple[int, int], list[list[int]]],
         remote_dcp_size: int,
         requests: dict[str, ReqMeta],
-        transfer_block_ids_by_spec: dict[str, dict[int, list[tuple[int, list[int], list[int]]]]],
+        transfer_block_ids_by_spec: dict[
+            str,
+            dict[
+                tuple[int, tuple[tuple[int, ...], ...]],
+                list[tuple[int, list[int], list[int]]],
+            ],
+        ],
     ) -> tuple[
         dict[int, dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]],
         dict[int, set[str]],
@@ -502,17 +539,20 @@ class MooncakePullRecvingThread(threading.Thread):
                 spec_index = self.spec_indices[local_layer_index]
                 spec = self.kv_cache_specs[spec_index]
                 layer_pair = (local_layer_index, remote_layer_index)
-                transfer_block_ids = request_block_ids_by_spec.get(spec_index)
+                remote_tp_rank_groups = tp_rank_groups_by_layer[layer_pair]
+                cache_key = (
+                    spec_index,
+                    tuple(tuple(group) for group in remote_tp_rank_groups),
+                )
+                transfer_block_ids = request_block_ids_by_spec.get(cache_key)
                 if transfer_block_ids is None:
                     group_index = self.group_indices[local_layer_index]
-                    remote_spec_index = remote_metadata.spec_indices[remote_layer_index]
                     if not isinstance(spec, MambaSpec):
                         local_kernel_block_size = (
-                            self.local_metadata.spec_block_sizes[spec_index]
-                            // self.block_size_scales[local_layer_index][0]
+                            self.layer_block_sizes[local_layer_index] // self.block_size_scales[local_layer_index][0]
                         )
                         remote_kernel_block_size = (
-                            remote_metadata.spec_block_sizes[remote_spec_index]
+                            remote_metadata.layer_block_sizes[remote_layer_index]
                             // remote_metadata.block_size_scales[remote_layer_index][0]
                         )
                         assert local_kernel_block_size == remote_kernel_block_size, (
@@ -522,11 +562,11 @@ class MooncakePullRecvingThread(threading.Thread):
                         )
                     transfer_block_ids = self._compute_group_block_ids(
                         request_id,
-                        tp_rank_groups_by_layer[layer_pair],
+                        remote_tp_rank_groups,
                         remote_dcp_size,
                         spec_index,
-                        self.local_metadata.spec_block_sizes[spec_index],
-                        remote_metadata.spec_block_sizes[remote_spec_index],
+                        self.layer_block_sizes[local_layer_index],
+                        remote_metadata.layer_block_sizes[remote_layer_index],
                         request_metadata.local_block_ids[group_index],
                         request_metadata.local_full_block_ids[group_index],
                         request_metadata.remote_block_ids[group_index],
@@ -538,7 +578,7 @@ class MooncakePullRecvingThread(threading.Thread):
                         spec,
                         selection_index,
                     )
-                    request_block_ids_by_spec[spec_index] = transfer_block_ids
+                    request_block_ids_by_spec[cache_key] = transfer_block_ids
 
                 for remote_tp_rank, local_block_ids, remote_block_ids in transfer_block_ids:
                     request_ids_by_remote_tp_rank.setdefault(remote_tp_rank, set()).add(request_id)
