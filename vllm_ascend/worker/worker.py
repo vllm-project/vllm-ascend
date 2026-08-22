@@ -1047,8 +1047,28 @@ class NPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        if getattr(self.model_runner, "_dp_peer_disconnected", False):
+            logger.warning(
+                "DP peer already disconnected (flag set). Skipping dummy batch. Engine is in degraded state."
+            )
+            return
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+
+        try:
+            self.model_runner._dummy_run(
+                num_tokens=self.model_runner.decode_token_per_req,
+                uniform_decode=True,
+            )
+        except RuntimeError as e:
+            if _is_dp_peer_disconnect_error(e):
+                logger.warning(
+                    "DP peer disconnected during execute_dummy_batch. "
+                    "Skipping dummy batch for this iteration. "
+                    "Error: %s",
+                    e,
+                )
+                return
+            raise
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

@@ -337,6 +337,7 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self._dp_peer_disconnected = False
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
@@ -689,7 +690,25 @@ class NPUModelRunner(GPUModelRunner):
         packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
         packed_tensor[0][self.dp_rank] = num_tokens
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value
-        dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+        try:
+            dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
+        except RuntimeError as e:
+            if _is_dp_peer_disconnect_error(e):
+                logger.warning(
+                    "DP peer disconnected during all_reduce in "
+                    "_sync_metadata_across_dp (dp_rank=%d, dp_size=%d). "
+                    "Falling back to local metadata. The engine will attempt "
+                    "to continue, but graceful shutdown may be needed. "
+                    "Error: %s",
+                    self.dp_rank, self.dp_size, e,
+                )
+                self._dp_peer_disconnected = True
+                num_tokens_after_padding = torch.tensor(
+                    [num_tokens] * self.dp_size, device="cpu", dtype=torch.int32
+                )
+                return num_tokens, num_tokens_after_padding, cudagraph_mode
+            raise
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[0, :]

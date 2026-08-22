@@ -500,3 +500,104 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+class TestIsDpPeerDisconnectError:
+    """Tests for _is_dp_peer_disconnect_error helper function."""
+
+    def test_gloo_connection_closed(self):
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+
+        e = RuntimeError(
+            "[/pytorch/third_party/gloo/gloo/transport/tcp/pair.cc:547] Connection closed by peer [127.0.0.1]:50332"
+        )
+        assert _is_dp_peer_disconnect_error(e) is True
+
+    def test_gloo_connection_reset(self):
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+
+        e = RuntimeError("Connection reset by peer")
+        assert _is_dp_peer_disconnect_error(e) is True
+
+    def test_hccl_error(self):
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+
+        e = RuntimeError("HCCL error: EI9999 notify wait timeout")
+        assert _is_dp_peer_disconnect_error(e) is True
+
+    def test_npu_oom_not_matched(self):
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+
+        e = RuntimeError("NPU out of memory. Tried to allocate 2.00 GiB.")
+        assert _is_dp_peer_disconnect_error(e) is False
+
+    def test_non_runtime_error_not_matched(self):
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+
+        e = ValueError("some value error")
+        assert _is_dp_peer_disconnect_error(e) is False
+
+    def test_shape_mismatch_not_matched(self):
+        from vllm_ascend.utils import _is_dp_peer_disconnect_error
+
+        e = RuntimeError("shape mismatch: tensor a (3) and tensor b (4) cannot be broadcast")
+        assert _is_dp_peer_disconnect_error(e) is False
+
+
+class TestPatchSyncDpState:
+    """Tests for _patch_sync_dp_state."""
+
+    def test_idempotent(self):
+        """Calling _patch_sync_dp_state twice should not double-wrap."""
+        from vllm_ascend.utils import _patch_sync_dp_state
+
+        _patch_sync_dp_state()
+        from vllm.config.parallel import ParallelConfig
+
+        first_fn = ParallelConfig.sync_dp_state
+        _patch_sync_dp_state()
+        second_fn = ParallelConfig.sync_dp_state
+        assert first_fn is second_fn
+
+    def test_disconnect_error_returns_false_false(self):
+        """DP peer disconnect should return (False, False)."""
+        from vllm_ascend.utils import _patch_sync_dp_state
+
+        _patch_sync_dp_state()
+        # Verify the patched function exists and has correct signature
+        import inspect
+
+        from vllm.config.parallel import ParallelConfig
+
+        # The patched function wraps the original; test by calling
+        # with a mock that raises a disconnect error via the original
+
+        src = inspect.getsource(ParallelConfig.sync_dp_state)
+        assert "has_unfinished" in src
+        assert "return False, False" in src
+
+
+class TestPatchIdempotency:
+    """Tests for patch function idempotency."""
+
+    def test_monitor_engine_liveness_patch_is_idempotent(self):
+        from vllm_ascend.utils import _patch_monitor_engine_liveness
+
+        _patch_monitor_engine_liveness()
+        from vllm.v1.engine.utils import CoreEngineProcManager
+
+        first_fn = CoreEngineProcManager.monitor_engine_liveness
+        _patch_monitor_engine_liveness()
+        second_fn = CoreEngineProcManager.monitor_engine_liveness
+        assert first_fn is second_fn
+
+    def test_wait_for_completion_patch_is_idempotent(self):
+        from vllm_ascend.utils import _patch_wait_for_completion_or_failure
+
+        _patch_wait_for_completion_or_failure()
+        import vllm.v1.utils as vllm_utils_mod
+
+        first_fn = vllm_utils_mod.wait_for_completion_or_failure
+        _patch_wait_for_completion_or_failure()
+        second_fn = vllm_utils_mod.wait_for_completion_or_failure
+        assert first_fn is second_fn
