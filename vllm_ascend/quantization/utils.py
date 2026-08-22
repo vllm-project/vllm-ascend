@@ -253,11 +253,16 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+    # 这块代码会消除，A3和A5逻辑统一
     if not is_kv_consumer and get_ascend_device_type() != AscendDeviceType.A5:
         return False
+    # 从量化配置文件中看是否有enable_fa_quant字段
     if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
         if layer_name is not None:
+            # 需要去判断每层是否都开启了fa量化
             return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
         else:
             return True
+        # 需要修改的点：如果返回True的话，需要校验vllm cacheconfig中的传参
+        # 查看传参是否是fp8或者是int8
     return False

@@ -372,15 +372,14 @@ class NPUModelRunner(GPUModelRunner):
         # Set up Attention
         self.use_sparse = enable_sfa(vllm_config)
         # dsa c8
-        self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
-        self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
-        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_ascend_device_type() == AscendDeviceType.A5:
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
-                self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
-                self.c8_k_scale_cache_dtype = torch.float16
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
+        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
+        if vllm_config.attention_config.indexer_kv_dtype == 'fp8':
+            self.c8_k_cache_dtype = torch.float8_e4m3fn
+            self.c8_k_scale_cache_dtype = torch.float32
+        elif vllm_config.attention_config.indexer_kv_dtype == 'int8':
+            self.c8_k_cache_dtype = torch.int8
+            self.c8_k_scale_cache_dtype = torch.float16
 
         self.attn_backend = get_attn_backend(
             0,
@@ -4676,16 +4675,19 @@ class NPUModelRunner(GPUModelRunner):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
+            # DSV4
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
+            # Attention结构，比如GQA
             elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
-
+            # DSV31,DSV32,GLM5
             elif isinstance(attn_module, MLAAttention):
+                # 这里写可能是因为attn_module调用不到ascend定义的attn spec
                 if self.use_sparse:
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
@@ -4727,6 +4729,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     attn_layer_names.add(layer_name)
 
+            # 这里对应的类可以看下是否可以在vllm-ascend里边重新定义
             elif isinstance(attn_module, DeepseekV32IndexerCache):
                 # TODO: This mirrors upstream's separated KV/indexer specs for
                 # SFA, but keeps Ascend-specific shape/block-size accounting.

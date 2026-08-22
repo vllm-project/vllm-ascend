@@ -58,6 +58,14 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+# Eager side-effect import: importing kv_cache_dtype_handlers runs the
+# @register_kv_cache_dtype decorators, which inject the Ascend dtype (e.g.
+# fp8 -> torch.float8_e4m3fn) into the per-process STR_DTYPE_TO_TORCH_DTYPE
+# dict in place. Workers are spawned (fresh interpreter), so the registration
+# that ran only in the launcher's pre_register_and_update does NOT propagate
+# here; this import re-runs it in every Worker process so the upstream
+# kv_cache_dtype_str_to_dtype lookup resolves fp8 to float8_e4m3fn.
+from vllm_ascend.core.kv_cache_dtype_handlers import Fp8AscendHandler, Int8AscendHandler  # noqa: F401
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
