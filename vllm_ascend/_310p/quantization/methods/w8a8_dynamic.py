@@ -18,7 +18,6 @@
 from typing import Any
 
 import torch
-import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 
@@ -26,10 +25,18 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
-from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
+
+# 310P GE retile of FRACTAL_NZ W8A8-Dynamic weights during torch.compile
+# launches QuantBatchMatmulV3_NZ_NZ kernel 21 (hash 5247287448945562503).
+# Eager NZ works; compiled Qwen3.5-2B TP2 does not (fused qkv KV shard N=256
+# and MLP). Linear layers keep ND [N, K] and dequant to fp16 once at load.
+# MoE experts still use grouped-matmul NZ and keep ND [E, N, K] for
+# npu_quant_grouped_matmul_dequant (WeightNZ 3D parameters lose FRACTAL_NZ
+# under GE and fail tiling).
+_MIN_NZ_QUANT_MATMUL_N = 512
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -110,8 +117,11 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         return final_hidden_states
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # Keep ModelSlim [E, N, K] as ND. FRACTAL_NZ is applied inside the
+        # grouped-matmul path at runtime so torch.compile/GE cannot strip
+        # format-29 from 3D Parameters (Qwen3-30B-A3B-W8A8 MRv2).
+        layer.w13_weight.data = layer.w13_weight.data.contiguous()
+        layer.w2_weight.data = layer.w2_weight.data.contiguous()
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
@@ -125,6 +135,8 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
     Notes:
       - This scheme is discovered via 310P local registry.
     """
+
+    act_quant_type: torch.dtype = torch.int8
 
     def get_perchannel_param(
         self,
@@ -143,31 +155,21 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        # NOTE(310P):
-        # - There is an accuracy issue currently, which is expected to be fixed in the next version.
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
-        need_unsqz = False
-        if pertoken_scale.dim() == 2:
-            need_unsqz = True
-            quantized_x = quantized_x.squeeze(dim=1)
-            pertoken_scale = pertoken_scale.squeeze(dim=1)
-
-        # NOTE(310P):
-        # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
-        output = torch_npu.npu_quant_matmul(
-            quantized_x,
-            layer.weight.data,
-            layer.weight_scale,
-            pertoken_scale=pertoken_scale,
-            bias=bias,
-            output_dtype=x.dtype,
-        )
-        if need_unsqz:
-            output = output.unsqueeze(dim=1)
-        return output
+        # Always ND [N, K] + precomputed fp16 dequant. torch.compile/GE cannot
+        # safely run 310P QuantBatchMatmulV3_NZ_NZ on these dynamic-quant linears.
+        bias_term = bias if (tp_rank is None or tp_rank == 0) else None
+        weight_fp = layer.weight_fp
+        if weight_fp.dtype != x.dtype:
+            weight_fp = weight_fp.to(x.dtype)
+        return torch.nn.functional.linear(x, weight_fp, bias_term)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # cast quantized weight tensors in NZ format for higher inference speed
-        layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
+        layer.weight.data = layer.weight.data.contiguous()
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_offset.data = layer.weight_offset.data.flatten()
+        # Dequant once at load: scales are static and redoing int8->fp16 * scale
+        # on every forward is pure hot-path overhead.
+        params_dtype = getattr(layer, "params_dtype", torch.float16)
+        dtype = params_dtype if isinstance(params_dtype, torch.dtype) else torch.float16
+        scale = layer.weight_scale.data.to(dtype).view(-1, 1)
+        layer.weight_fp = torch.nn.Parameter(layer.weight.data.to(dtype) * scale, requires_grad=False)

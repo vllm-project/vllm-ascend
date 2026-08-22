@@ -39,6 +39,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     Mamba request lifecycle and cache-state handling are inherited from
     :class:`MambaHybridModelState`. ``AscendModelState`` remains the second
     base so cooperative ``super()`` calls retain the Ascend model-state MRO.
+
+    Triton-free postprocess for 310P lives in
+    ``vllm_ascend._310p.worker.v2.model_state.Ascend310PMambaHybridModelState``.
     """
 
     def prepare_attn(

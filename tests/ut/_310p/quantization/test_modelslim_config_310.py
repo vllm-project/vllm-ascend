@@ -114,6 +114,7 @@ class TestAscendModelSlimConfig310(TestBase):
 
         # Test quantized layer
         mock_scheme = MagicMock()
+        tid2eid = MagicMock()
         with (
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch("vllm.config.vllm.get_current_vllm_config", return_value=mock_config),
@@ -124,6 +125,22 @@ class TestAscendModelSlimConfig310(TestBase):
                 "vllm_ascend._310p.quantization.modelslim_config.AscendFusedMoEMethod", return_value=MagicMock()
             ) as fused_moe_method,
         ):
-            method = self.ascend_config.get_quant_method(fused_moe_layer, ".moe")
+            method = self.ascend_config.get_quant_method(fused_moe_layer, ".moe", tid2eid=tid2eid)
             self.assertIs(method, fused_moe_method.return_value)
-            fused_moe_method.assert_called_once_with(mock_scheme, fused_moe_layer.moe_config)
+            fused_moe_method.assert_called_once_with(mock_scheme, fused_moe_layer.moe_config, tid2eid)
+
+    def test_create_scheme_for_static_moe_w8a8_raises_with_hint(self):
+        from vllm_ascend._310p.quantization.modelslim_config import create_scheme_for_layer
+
+        with (
+            patch(
+                "vllm_ascend._310p.quantization.modelslim_config.get_quant_type_for_layer",
+                return_value="W8A8",
+            ),
+            patch(
+                "vllm_ascend._310p.quantization.modelslim_config.get_scheme_class",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(NotImplementedError, "W8A8_DYNAMIC"),
+        ):
+            create_scheme_for_layer({}, "model.layers.0.mlp.experts", "moe", None)
