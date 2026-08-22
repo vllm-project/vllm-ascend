@@ -22,6 +22,15 @@ from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
 from vllm_ascend.utils import is_310p
 
+# Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
+# exposes 138 independent state programs per request, while Triton-Ascend
+# flattens all grid dimensions into a coreDim that cannot exceed 65535. Keep
+# the pre-tiling launch shape on Ascend: it has enough state-level parallelism
+# and remains valid at the configured request limit (for example,
+# 32 * 138 * 1 instead of 32 * 138 * 16).
+if hasattr(mamba_utils, "_TEMPORAL_TILES"):
+    mamba_utils._TEMPORAL_TILES = 1
+
 
 def _can_launch_triton_batch_memcpy() -> bool:
     return not is_310p()
