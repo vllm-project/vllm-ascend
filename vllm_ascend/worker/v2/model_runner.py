@@ -59,6 +59,9 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.extract_hidden_states.speculator import (
+    AscendExtractHiddenStatesSpeculator,
+)
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
@@ -110,8 +113,13 @@ class NPUModelRunner(GPUModelRunner):
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | None = None
+        self.speculator: AscendEagleSpeculator | AscendExtractHiddenStatesSpeculator | None = None
         if self.speculative_config is not None:
+            # Parent GPUModelRunner only enables aux hidden outputs for a fixed
+            # method allow-list; older pinned vLLM builds omit
+            # extract_hidden_states. Ensure MRV2 always requests them here.
+            if self.speculative_config.method == "extract_hidden_states":
+                self.use_aux_hidden_state_outputs = True
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.

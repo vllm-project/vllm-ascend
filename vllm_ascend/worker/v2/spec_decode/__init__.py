@@ -29,6 +29,12 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.method == "extract_hidden_states":
+        from vllm_ascend.worker.v2.spec_decode.extract_hidden_states.speculator import (
+            AscendExtractHiddenStatesSpeculator,
+        )
+
+        return AscendExtractHiddenStatesSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
