@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
@@ -14,15 +15,27 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
+_KIMI_K3_TARGET_MLA_LAYER_COUNT = 24
+_KIMI_K3_DSPARK_GQA_LAYER_COUNT = 5
+_KIMI_K3_MAMBA_LAYER_COUNT = 69
+_KIMI_K3_MAMBA_GROUP_COUNT = 3
+_KIMI_K3_DSPARK_SPECULATIVE_BLOCKS = 7
+_KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
+_KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
+_ATTENTION_LAYER_SUFFIX = ".self_attn.attn"
+_MAMBA_LAYER_SUFFIX = ".self_attn"
+
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
+_orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -108,7 +121,171 @@ def _try_get_full_allocation_fallback_groups(
     return vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_type(uniform_spec)
 
 
+def _is_kimi_k3_target_mla_layer(layer_name: str, spec: KVCacheSpec) -> bool:
+    return (
+        layer_name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX)
+        and layer_name.endswith(_ATTENTION_LAYER_SUFFIX)
+        and isinstance(spec, MLAAttentionSpec)
+        and not isinstance(spec, SlidingWindowMLASpec)
+        and not getattr(spec, "non_causal", False)
+        and not getattr(spec, "non_causal_multi_token_decode", False)
+    )
+
+
+def _is_kimi_k3_dspark_gqa_layer(layer_name: str, spec: KVCacheSpec) -> bool:
+    return (
+        layer_name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX)
+        and layer_name.endswith(_ATTENTION_LAYER_SUFFIX)
+        and isinstance(spec, FullAttentionSpec)
+        and not isinstance(spec, MLAAttentionSpec)
+        and not spec.non_causal
+        and spec.sliding_window is None
+        and spec.attention_chunk_size is None
+    )
+
+
+def _is_kimi_k3_mamba_layer(layer_name: str, spec: KVCacheSpec) -> bool:
+    return (
+        layer_name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX)
+        and layer_name.endswith(_MAMBA_LAYER_SUFFIX)
+        and not layer_name.endswith(_ATTENTION_LAYER_SUFFIX)
+        and isinstance(spec, MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and spec.num_speculative_blocks == _KIMI_K3_DSPARK_SPECULATIVE_BLOCKS
+    )
+
+
+def _get_kimi_k3_gqa_mixed_kv_cache_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """Build the Kimi K3 GQA DSpark mixed scheduler groups.
+
+    Target MLA and causal draft GQA layers require the same full-sequence
+    block ownership. Putting them in one UniformType group lets them share one
+    scheduler block table while preserving a separate physical page per layer.
+    The 69 recurrent layers are split into three equal groups, matching the
+    29-layer attention group closely enough to avoid layer padding.
+
+    Keep the signature deliberately strict. A partial match falls back to
+    vLLM's generic hybrid grouping instead of changing another model's cache
+    ownership semantics. Block and page sizes are taken from the matched specs
+    rather than hardcoded TP16/C16 constants.
+    """
+    target_mla_specs = {name: spec for name, spec in kv_cache_spec.items() if _is_kimi_k3_target_mla_layer(name, spec)}
+    draft_gqa_specs = {name: spec for name, spec in kv_cache_spec.items() if _is_kimi_k3_dspark_gqa_layer(name, spec)}
+    mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if _is_kimi_k3_mamba_layer(name, spec)}
+
+    matched_layer_count = len(target_mla_specs) + len(draft_gqa_specs) + len(mamba_specs)
+    signature_matched = (
+        len(target_mla_specs) == _KIMI_K3_TARGET_MLA_LAYER_COUNT
+        and len(draft_gqa_specs) == _KIMI_K3_DSPARK_GQA_LAYER_COUNT
+        and len(mamba_specs) == _KIMI_K3_MAMBA_LAYER_COUNT
+        and matched_layer_count == len(kv_cache_spec)
+    )
+    if not signature_matched:
+        return None
+
+    all_specs = [*target_mla_specs.values(), *draft_gqa_specs.values(), *mamba_specs.values()]
+    block_sizes = {spec.block_size for spec in all_specs}
+    page_sizes = {spec.page_size_bytes for spec in all_specs}
+    if len(block_sizes) != 1 or len(page_sizes) != 1:
+        logger.warning(
+            "Kimi K3 GQA DSpark layer signature matched (%d MLA + %d GQA + %d "
+            "Mamba) but block/page sizes are not unified (block_sizes=%s, "
+            "page_sizes=%s). Falling back to generic hybrid grouping.",
+            len(target_mla_specs),
+            len(draft_gqa_specs),
+            len(mamba_specs),
+            sorted(block_sizes),
+            sorted(page_sizes),
+        )
+        return None
+
+    first_mamba_spec = next(iter(mamba_specs.values()))
+    if any(spec != first_mamba_spec for spec in mamba_specs.values()):
+        logger.warning("Kimi K3 GQA DSpark Mamba specs are not identical; falling back to generic hybrid grouping.")
+        return None
+
+    # Insert target MLA first. generate_scheduler_kv_cache_config unwraps a
+    # UniformType group to its first spec, and this representative is registered
+    # with the same full-attention manager needed by both target MLA and draft GQA.
+    mixed_attention_specs = {**target_mla_specs, **draft_gqa_specs}
+    mixed_attention_spec = UniformTypeKVCacheSpecs.from_specs(mixed_attention_specs)
+    if mixed_attention_spec is None:
+        logger.warning(
+            "Kimi K3 GQA DSpark mixed MLA/GQA specs cannot form a UniformType group; "
+            "falling back to generic hybrid grouping."
+        )
+        return None
+
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=list(mixed_attention_specs),
+            kv_cache_spec=mixed_attention_spec,
+        )
+    ]
+    mamba_layer_names = list(mamba_specs)
+    for group_idx in range(_KIMI_K3_MAMBA_GROUP_COUNT):
+        layer_names = mamba_layer_names[group_idx::_KIMI_K3_MAMBA_GROUP_COUNT]
+        group_specs = {name: mamba_specs[name] for name in layer_names}
+        uniform_mamba_spec = UniformTypeKVCacheSpecs.from_specs(group_specs)
+        assert uniform_mamba_spec is not None
+        groups.append(
+            KVCacheGroupSpec(
+                layer_names=layer_names,
+                kv_cache_spec=uniform_mamba_spec,
+            )
+        )
+
+    logger.info(
+        "Using Kimi K3 GQA DSpark mixed KV grouping: %d target MLA + %d "
+        "draft GQA layers (block_size=%d, page_size=%d), followed by %d "
+        "groups of %d Mamba layers",
+        len(target_mla_specs),
+        len(draft_gqa_specs),
+        next(iter(block_sizes)),
+        next(iter(page_sizes)),
+        _KIMI_K3_MAMBA_GROUP_COUNT,
+        len(groups[1].layer_names),
+    )
+    return groups
+
+
+def _get_kv_cache_groups_uniform_page_size(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    kimi_k3_groups = _get_kimi_k3_gqa_mixed_kv_cache_groups(kv_cache_spec)
+    if kimi_k3_groups is not None:
+        return kimi_k3_groups
+    return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+
+
+def _uniform_kv_cache_specs_max_num_blocks_per_req(
+    self: UniformTypeKVCacheSpecs,
+    vllm_config: VllmConfig,
+    max_len: int,
+) -> int:
+    """Preserve the largest worker block-table requirement of inner specs."""
+    return max(spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values())
+
+
+def _kv_cache_config_has_mamba_layers(self: KVCacheConfig) -> bool:
+    """Recognize Mamba layers nested in UniformType cache groups."""
+    for group in self.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        if isinstance(group_spec, MambaSpec):
+            return True
+        if isinstance(group_spec, UniformTypeKVCacheSpecs) and any(
+            isinstance(spec, MambaSpec) for spec in group_spec.kv_cache_specs.values()
+        ):
+            return True
+    return False
+
+
 def get_kv_cache_groups(vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]) -> list[KVCacheGroupSpec]:
+    kimi_k3_groups = _get_kimi_k3_gqa_mixed_kv_cache_groups(kv_cache_spec)
+    if kimi_k3_groups is not None:
+        return kimi_k3_groups
     try:
         return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
     except NotImplementedError as exc:
@@ -323,10 +500,17 @@ vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_ca
 vllm.v1.core.kv_cache_utils.get_kv_cache_groups = get_kv_cache_groups
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
+vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
 # get_kv_cache_config_from_groups now calls _get_kv_cache_config_packed directly, bypassing
 # the alias patch above. Patch the canonical name so Ascend's non-packed layout is used.
 vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
+UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
+    _uniform_kv_cache_specs_max_num_blocks_per_req
+)
+KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
+    _kv_cache_config_has_mamba_layers
+)
 
 # Also patch the reference used by engine/core.py which imports the function directly.
 import vllm.v1.engine.core  # noqa: E402
