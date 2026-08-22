@@ -10,7 +10,6 @@ _envs: &envs
   OMP_NUM_THREADS: "1"
   LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
   TASK_QUEUE_ENABLE: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 _server_cmd: &server_cmd
   - "--port"
@@ -40,7 +39,7 @@ _server_cmd: &server_cmd
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--additional-config"
-  - '{"enable_cpu_binding": true, "enable_npugraph_ex": true, "enable_static_kernel": true,"enable_fused_mc2":true,"weight_nz_mode":true,"enable_flashcomm1":false}'
+  - '{"enable_cpu_binding": true, "enable_npugraph_ex": true, "enable_static_kernel": true,"enable_fused_mc2":true,"weight_nz_mode":true,"enable_flashcomm1":true}'
 
 _benchmarks_3500: &benchmarks_3500
   perf_50:
