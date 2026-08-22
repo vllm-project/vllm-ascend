@@ -3,7 +3,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -17,6 +20,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
+    _reshape_mamba_kv_cache,
     get_kv_cache_spec,
 )
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
@@ -63,10 +67,74 @@ def _group(spec: MambaSpec):
     )
 
 
+class _RecordingMetadataBuilder:
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        del common_prefix_len, kwargs
+        return common_attn_metadata
+
+
 def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+
+
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "expected_num_reqs", "expected_input_tokens"),
+    [
+        (CUDAGraphMode.NONE, 2, 5),
+        (CUDAGraphMode.FULL, 4, 8),
+    ],
+)
+def test_mamba_prepare_attn_merges_prefill_metadata_and_preserves_graph_tokens(
+    cudagraph_mode,
+    expected_num_reqs,
+    expected_input_tokens,
+):
+    state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    state.max_model_len = 8
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+
+    spec = _mamba_spec()
+    builder = _RecordingMetadataBuilder()
+    group = SimpleNamespace(
+        kv_cache_group_id=0,
+        kv_cache_spec=spec,
+        layer_names=["linear_attn"],
+        get_metadata_builder=lambda _index: builder,
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=4,
+        num_tokens=5,
+        num_tokens_after_padding=8,
+        query_start_loc_np=np.array([0, 2, 5, 5, 5], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 2, 5, 5, 5], dtype=torch.int32),
+        num_scheduled_tokens=np.array([2, 3], dtype=np.int32),
+        seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
+        seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+        dcp_local_seq_lens=None,
+        positions=torch.arange(8, dtype=torch.int32),
+        attn_state=None,
+    )
+
+    metadata = state.prepare_attn(
+        input_batch=input_batch,
+        cudagraph_mode=cudagraph_mode,
+        block_tables=(torch.zeros((4, 1), dtype=torch.int32),),
+        slot_mappings=torch.zeros((1, 8), dtype=torch.int32),
+        attn_groups=[[group]],
+        kv_cache_config=_kv_cache_config(spec, num_blocks=1),
+    )["linear_attn"]
+
+    assert metadata.num_reqs == expected_num_reqs
+    assert metadata.num_actual_tokens == expected_input_tokens
+    assert metadata.num_input_tokens == expected_input_tokens
+    assert torch.equal(
+        metadata.is_prefilling,
+        torch.tensor([True, False, *([False] * (expected_num_reqs - 2))]),
+    )
 
 
 def test_prepare_inputs_propagates_padded_request_count():
@@ -135,6 +203,110 @@ def test_mamba_cache_reshape_returns_contiguous_state_tensors(_mock_config):
     assert ssm_state.is_contiguous()
     assert conv_state.data_ptr() == raw_cache.data_ptr()
     assert ssm_state.data_ptr() - raw_cache.data_ptr() == (conv_state.numel() * conv_state.element_size())
+
+
+def test_mamba_cache_reshape_rejects_unaligned_state_offset():
+    spec = MambaSpec(
+        block_size=1,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float16, torch.float32),
+        page_size_padded=8,
+    )
+
+    with pytest.raises(ValueError, match=r"Mamba state 1 byte offset 2 is not aligned"):
+        _reshape_mamba_kv_cache(
+            torch.zeros(spec.page_size_bytes, dtype=torch.int8),
+            spec,
+        )
+
+
+@patch(
+    "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
+    return_value=SimpleNamespace(kv_transfer_config=None),
+)
+def test_hybrid_attention_cache_rejects_unaligned_typed_view(_mock_config):
+    spec = FullAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        page_size_padded=5,
+    )
+    backend = MagicMock()
+    backend.get_kv_cache_shape.return_value = (2, 1, 1, 1, 1)
+    group = SimpleNamespace(
+        kv_cache_group_id=0,
+        kv_cache_spec=spec,
+        layer_names=["full_attn"],
+        backend=backend,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[KVCacheTensor(size=5, shared_by=["full_attn"])],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["full_attn"],
+                kv_cache_spec=spec,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"Attention K cache.*byte offset 1 is not aligned"):
+        _reshape_kv_cache_v2(
+            attn_groups=[group],
+            kv_cache_raw_tensors={"full_attn": torch.zeros(5, dtype=torch.int8)},
+            cache_dtype="auto",
+            kernel_block_sizes=[1],
+            shared_kv_cache_layers={},
+            kv_cache_config=kv_cache_config,
+        )
+
+
+@patch(
+    "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
+    return_value=SimpleNamespace(kv_transfer_config=None),
+)
+def test_hybrid_cache_rejects_unsupported_packed_block_stride(_mock_config):
+    attention_spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        page_size_padded=20,
+    )
+    mamba_spec = MambaSpec(
+        block_size=4,
+        shapes=((2,), (4,)),
+        dtypes=(torch.float16, torch.float16),
+        page_size_padded=20,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=40,
+                shared_by=["full_attn", "linear_attn"],
+                block_stride=20,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["full_attn"],
+                kv_cache_spec=attention_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["linear_attn"],
+                kv_cache_spec=mamba_spec,
+            ),
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="Packed block-stride KV cache layouts"):
+        _allocate_kv_cache(
+            kv_cache_config,
+            shared_layers={},
+            device=torch.device("cpu"),
+        )
 
 
 @patch(

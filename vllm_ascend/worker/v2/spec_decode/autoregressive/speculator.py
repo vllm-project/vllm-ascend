@@ -34,10 +34,10 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState, AscendMetadata
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -367,8 +367,17 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             return
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
+                # Draft prefill reuses the target model's metadata. Hybrid
+                # models include GDN/SSM metadata in the same dictionary, but
+                # only GQA and MLA metadata use the FIA sequence-length fields.
+                if not isinstance(attn_meta, (AscendMetadata, AscendMLAMetadata)):
+                    continue
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
-                attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
+                # AscendMLAMetadata receives seq_len_list dynamically in the
+                # existing draft path, while AscendMetadata declares it as a
+                # dataclass field. Keep that behavior without pretending the
+                # MLA type statically owns the field.
+                cast(Any, attn_meta).seq_len_list = attn_meta.seq_lens.tolist()
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize per-step decode attention metadata for graph mode."""

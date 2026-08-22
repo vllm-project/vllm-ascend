@@ -87,6 +87,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
+            # GDN FULL graph replay executes a statically padded token shape.
+            # Keep num_actual_tokens and num_input_tokens on that graph shape;
+            # the GDN builder uses the former to size and refresh its captured
+            # state-index and query-start buffers.
             num_tokens=num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
