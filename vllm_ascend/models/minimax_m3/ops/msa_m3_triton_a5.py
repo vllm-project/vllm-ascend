@@ -1334,8 +1334,11 @@ def minimax_m3_sparse_attn_decode(
     sm_scale: float,
     output: torch.Tensor,  # [total_q, num_heads, head_dim]
     decode_query_len: int,
+    block_size: int = SPARSE_BLOCK_SIZE,
 ) -> None:
     """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
+    if block_size != SPARSE_BLOCK_SIZE:
+        raise ValueError(f"A5 sparse decode requires block_size={SPARSE_BLOCK_SIZE}, got {block_size}")
     kv_cache = _as_triton_main_kv_cache(kv_cache)
     total_q, num_heads, head_dim = q.shape
     assert total_q == seq_lens.shape[0] * decode_query_len
