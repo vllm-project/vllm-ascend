@@ -222,9 +222,11 @@
 - name: distributed
   optional: false
   source_file_dependencies:
+    - examples/disaggregated_prefill_v1
     - vllm_ascend/distributed
     - vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
   tests:
+    - tests/ut/test_disaggregated_prefill_proxy.py
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
