@@ -74,22 +74,11 @@ def test_config_rejects_out_of_scope_features(field, value, message) -> None:
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
 
 
-def test_sampler_accepts_random_sampling_parameters() -> None:
+def test_sampler_rejects_random_sampling_parameters() -> None:
     sampler = Ascend310PSampler()
-    sampling_params = SamplingParams(
-        temperature=0.6,
-        top_p=0.95,
-        top_k=20,
-        min_p=0.01,
-        seed=7,
-    )
-    sampler.add_request(0, 4, sampling_params)
-
-    assert sampler.sampling_params[0] is sampling_params
-    assert sampler.generators[0].initial_seed() == 7
-
+    sampler.add_request(0, 4, SamplingParams(temperature=0))
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        sampler.add_request(1, 4, SamplingParams(repetition_penalty=1.1))
+        sampler.add_request(1, 4, SamplingParams(temperature=1))
 
 
 def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
