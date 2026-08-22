@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import requests
 
@@ -16,8 +16,7 @@ def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
     return len(body.get("tokens") or body.get("token_ids", []))
 
 
-def _generate_prompt_for_length(server, seed: str, target_tokens: int,
-                                use_chat: bool = False) -> tuple[str, int]:
+def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
     single_count = _tokenize_count(server, seed, use_chat=use_chat)
     if single_count == 0:
         raise ValueError(f"seed {seed!r} tokenizes to 0 tokens")
@@ -56,7 +55,7 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int,
     return body + "a" * best_pad, best_count
 
 
-def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, Optional[int]]:
+def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None]:
 
     if isinstance(raw, dict):
         seed = str(raw.get("seed", ""))
@@ -69,7 +68,7 @@ def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, Optional[i
     return raw, None
 
 
-def validate_response(response_json: dict, expected: Optional[dict], max_model_len: Optional[int] = None) -> None:
+def validate_response(response_json: dict, expected: dict | None, max_model_len: int | None = None) -> None:
     """Validate token usage from API response."""
     usage = response_json.get("usage", {})
     prompt_tokens = usage.get("prompt_tokens", 0)
@@ -95,13 +94,12 @@ def validate_response(response_json: dict, expected: Optional[dict], max_model_l
 
     limit = expected.get("max_model_len") or max_model_len
     if limit is not None:
-        assert total_tokens <= int(limit), (
-            f"total_tokens ({total_tokens}) exceeds max_model_len ({limit})"
-        )
+        assert total_tokens <= int(limit), f"total_tokens ({total_tokens}) exceeds max_model_len ({limit})"
 
 
-def send_v1_completions(prompt, model, server, request_args=None, expected: Optional[dict] = None,
-                        max_model_len: Optional[int] = None):
+def send_v1_completions(
+    prompt, model, server, request_args=None, expected: dict | None = None, max_model_len: int | None = None
+):
     data: dict[str, Any] = {"model": model, "prompt": prompt}
     if request_args:
         data.update(request_args)

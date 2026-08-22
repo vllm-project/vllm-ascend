@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import requests
 from prometheus_client.parser import text_string_to_metric_families
@@ -31,7 +31,7 @@ def analysis_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[in
 def capture_baseline(
     server,
     num_speculative_tokens: int,
-    warmup_fn: Optional[Callable] = None,
+    warmup_fn: Callable | None = None,
 ) -> tuple[int, list[int]]:
     """Run warmup and capture baseline (num_drafts, num_accepted_tokens_per_pos).
 
@@ -61,9 +61,7 @@ def measure_acceptance_rate(
             num_accepted_tokens_per_pos[i] -= base_accepted[i]
 
     if num_drafts > 0:
-        acceptance_per_pos = [
-            v / num_drafts for v in num_accepted_tokens_per_pos
-        ]
+        acceptance_per_pos = [v / num_drafts for v in num_accepted_tokens_per_pos]
     else:
         acceptance_per_pos = [0.0] * num_speculative_tokens
 
@@ -75,9 +73,7 @@ def measure_acceptance_rate(
     return pos0_rate, acceptance_per_pos
 
 
-def validate_acceptance_rate(
-    actual: float, baseline: float, tolerance: float = 0.05
-) -> None:
+def validate_acceptance_rate(actual: float, baseline: float, tolerance: float = 0.05) -> None:
     """Assert actual (pos0) is within ±tolerance of baseline."""
     lower = baseline * (1 - tolerance)
     upper = baseline * (1 + tolerance)
