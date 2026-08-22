@@ -126,13 +126,11 @@ def verify_and_update_config(cls, vllm_config) -> None:
             # share this doubled token capacity.
             kv_dtype_size = get_dtype_size(kv_cache_dtype)
             assert kv_dtype_size == 2, (
-                "Hybrid MLA C8 cache currently requires a 2-byte "
-                f"unquantized KV dtype, got {kv_cache_dtype}."
+                f"Hybrid MLA C8 cache currently requires a 2-byte unquantized KV dtype, got {kv_cache_dtype}."
             )
             attn_single_token_k_page_size //= kv_dtype_size
             logger.info(
-                "Using hybrid MLA 8-bit latent-cache double-token block layout: K=%d "
-                "B/token, V=%d B/token.",
+                "Using hybrid MLA 8-bit latent-cache double-token block layout: K=%d B/token, V=%d B/token.",
                 attn_single_token_k_page_size,
                 attn_rope_token_page_size,
             )

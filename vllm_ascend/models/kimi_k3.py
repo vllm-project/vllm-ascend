@@ -611,9 +611,7 @@ class AscendKimiK3ForConditionalGeneration(
         # pipeline stages that do not own the vision tower. Use vLLM's common
         # PP ownership helper before inspecting or mutating the projector.
         projector_is_missing = is_pp_missing_parameter("mm_projector.rot_proj", self)
-        rot_proj = (
-            None if projector_is_missing else getattr(self.mm_projector, "rot_proj", None)
-        )
+        rot_proj = None if projector_is_missing else getattr(self.mm_projector, "rot_proj", None)
         skip_prefixes = [] if rot_proj is not None else ["mm_projector.rot_proj."]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         rot_proj_weight_names = (

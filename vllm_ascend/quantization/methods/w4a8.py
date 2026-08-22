@@ -139,8 +139,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         num_offline_shards = scale_bias.shape[1]
         if tp_size <= 0 or num_offline_shards % tp_size != 0:
             raise ValueError(
-                f"scale_bias width {num_offline_shards} must be divisible by "
-                f"the projection TP size {tp_size}"
+                f"scale_bias width {num_offline_shards} must be divisible by the projection TP size {tp_size}"
             )
         if rank < 0 or rank >= tp_size:
             raise ValueError(f"tp_rank {rank} exceeds projection TP size {tp_size}")
@@ -310,9 +309,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
 
         if uses_per_channel_shared_expert:
             if not self.new_quant_version:
-                raise ValueError(
-                    "Per-channel shared-expert W4A8 requires quantization version 1.0.0"
-                )
+                raise ValueError("Per-channel shared-expert W4A8 requires quantization version 1.0.0")
 
             # Preserve the floating-point scale for the fused SiTU path, then
             # bit-cast it to the int64 representation required by grouped

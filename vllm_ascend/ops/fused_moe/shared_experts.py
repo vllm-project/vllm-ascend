@@ -273,10 +273,7 @@ class AscendSharedExperts:
             has_per_channel_w4a8_situ_shared = (
                 shared_is_w4a8
                 and shared_uses_situ
-                and all(
-                    hasattr(proj, "weight_scale_fp32")
-                    for proj in (self.layer.gate_up_proj, self.layer.down_proj)
-                )
+                and all(hasattr(proj, "weight_scale_fp32") for proj in (self.layer.gate_up_proj, self.layer.down_proj))
             )
             if has_quantized_shared_without_lora and (shared_is_w8a8 or has_per_channel_w4a8_situ_shared):
                 original_dtype = hidden_states.dtype
@@ -304,9 +301,7 @@ class AscendSharedExperts:
                     quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
                         x=hidden_states,
                         weight_scale=(
-                            None
-                            if has_per_channel_w4a8_situ_shared
-                            else self.layer.gate_up_proj.weight_scale_fp32
+                            None if has_per_channel_w4a8_situ_shared else self.layer.gate_up_proj.weight_scale_fp32
                         ),
                         activation_scale=None if has_per_channel_w4a8_situ_shared else pertoken_scale,
                         bias=None,

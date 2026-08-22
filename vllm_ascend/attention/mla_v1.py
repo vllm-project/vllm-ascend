@@ -759,10 +759,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not self.use_mla_rope and self.enable_mlapo and device_type != AscendDeviceType.A5:
             logger.warning_once("MLAPO is disabled for MLA layers with RoPE disabled outside A5.")
             self.enable_mlapo = False
-        if not self.use_mla_rope and self.fa_quant_layer and device_type not in {
-            AscendDeviceType.A3,
-            AscendDeviceType.A5,
-        }:
+        if (
+            not self.use_mla_rope
+            and self.fa_quant_layer
+            and device_type
+            not in {
+                AscendDeviceType.A3,
+                AscendDeviceType.A5,
+            }
+        ):
             logger.warning_once("FA quant for no-RoPE MLA layers is supported only on A3/A5; falling back to BF16.")
             self.fa_quant_layer = False
         if self.fa_quant_layer:
@@ -1138,11 +1143,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _uses_a3_mla_fa_quant_cache(self) -> bool:
         """Whether A3 MLA uses separate 8-bit latent and model-dtype caches."""
-        return (
-            bool(self.fa_quant_layer)
-            and not self.use_mla_rope
-            and get_ascend_device_type() == AscendDeviceType.A3
-        )
+        return bool(self.fa_quant_layer) and not self.use_mla_rope and get_ascend_device_type() == AscendDeviceType.A3
 
     @staticmethod
     def _compact_block_table_for_nz_gather(

@@ -21,8 +21,7 @@ def test_non_modelslim_quantization_does_not_enable_mla_fa_quant_cache():
     )
 
     with patch(
-        "vllm_ascend.patch.platform.patch_mamba_config."
-        "model_uses_fa_quantization",
+        "vllm_ascend.patch.platform.patch_mamba_config.model_uses_fa_quantization",
         return_value=True,
     ) as detect_fa_quant:
         assert not _uses_mla_fa_quant_cache(vllm_config)
@@ -65,27 +64,18 @@ def test_mla_fa_quant_metadata_doubles_attention_block_size_before_quant_config_
         quant_config=None,
     )
     model_cls = SimpleNamespace(
-        get_mamba_state_shape_from_config=MagicMock(
-            return_value=((2304, 3), (6, 128, 128))
-        ),
-        get_mamba_state_dtype_from_config=MagicMock(
-            return_value=(torch.bfloat16, torch.float32)
-        ),
+        get_mamba_state_shape_from_config=MagicMock(return_value=((2304, 3), (6, 128, 128))),
+        get_mamba_state_dtype_from_config=MagicMock(return_value=(torch.bfloat16, torch.float32)),
     )
 
     with (
+        patch("vllm_ascend.patch.platform.patch_mamba_config.MambaModelConfig.verify_and_update_config"),
         patch(
-            "vllm_ascend.patch.platform.patch_mamba_config."
-            "MambaModelConfig.verify_and_update_config"
-        ),
-        patch(
-            "vllm_ascend.patch.platform.patch_mamba_config."
-            "ModelRegistry.resolve_model_cls",
+            "vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls",
             return_value=(model_cls, None),
         ),
         patch(
-            "vllm_ascend.patch.platform.patch_mamba_config."
-            "model_uses_fa_quantization",
+            "vllm_ascend.patch.platform.patch_mamba_config.model_uses_fa_quantization",
             return_value=True,
         ) as detect_fa_quant,
     ):

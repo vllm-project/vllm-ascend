@@ -7,10 +7,13 @@ import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
@@ -18,7 +21,6 @@ from vllm_ascend.quantization.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
-from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 

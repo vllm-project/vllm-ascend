@@ -648,9 +648,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             # are loaded through the same nested model-loader path.
             regex_map.update(
                 {
-                    re.compile(
-                        r"(?<!\.mla_attn\.mla_attn)\.indexer\.([qk]_rot)$"
-                    ): r".mla_attn.mla_attn.indexer.\1",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.indexer\.([qk]_rot)$"): r".mla_attn.mla_attn.indexer.\1",
                 }
             )
         if not suffix_map and not regex_map:

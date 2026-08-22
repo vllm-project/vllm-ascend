@@ -144,9 +144,7 @@ def model_uses_fa_quantization(
             exc,
         )
         return False
-    return isinstance(quant_description, dict) and bool(
-        quant_description.get("fa_quant_type")
-    )
+    return isinstance(quant_description, dict) and bool(quant_description.get("fa_quant_type"))
 
 
 def detect_quantization_method(model: str, revision: str | None = None) -> str | None:

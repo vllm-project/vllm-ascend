@@ -9,6 +9,8 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -16,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -34,6 +37,7 @@ _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memo
 _orig_get_max_concurrency_for_kv_cache_config = vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config
 
 _orig_generate_scheduler_kv_cache_config = vllm.v1.core.kv_cache_utils.generate_scheduler_kv_cache_config
+
 
 def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,

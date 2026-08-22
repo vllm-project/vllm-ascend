@@ -7,6 +7,10 @@ import pytest
 import torch
 from torch import nn
 from vllm.model_executor.models.utils import StageMissingLayer
+from vllm_ascend.transformers_utils.configs.kimi_k3 import (
+    KimiK3Config,
+    KimiK3VisionConfig,
+)
 
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
@@ -23,10 +27,6 @@ from vllm_ascend.models.kimi_k3 import (
     get_spec_layer_idx_from_weight_name,
 )
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
-from vllm_ascend.transformers_utils.configs.kimi_k3 import (
-    KimiK3Config,
-    KimiK3VisionConfig,
-)
 
 
 def test_kimi_k3_model_declares_checkpoint_packing_contract():
@@ -139,9 +139,7 @@ def test_kimi_k3_enables_projector_rotation_only_when_weight_is_loaded(
             return loaded_weights
 
     monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
-    wrapper = AscendKimiK3ForConditionalGeneration.__new__(
-        AscendKimiK3ForConditionalGeneration
-    )
+    wrapper = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
     nn.Module.__init__(wrapper)
     wrapper.mm_projector = nn.Module()
     wrapper.mm_projector.rot_proj = nn.Linear(1, 1, bias=False)
@@ -167,9 +165,7 @@ def test_kimi_k3_skips_forwarded_projector_rotation_on_non_vision_pp_stage(
             return set()
 
     monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", StubLoader)
-    wrapper = AscendKimiK3ForConditionalGeneration.__new__(
-        AscendKimiK3ForConditionalGeneration
-    )
+    wrapper = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
     nn.Module.__init__(wrapper)
     wrapped_projector = nn.Module()
     wrapped_projector.rot_proj = nn.Linear(1, 1, bias=False)

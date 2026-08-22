@@ -90,9 +90,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_per_channel_shared_expert_uses_w4a8_grouped_matmul(
-        self, mock_dynamic_quant, mock_grouped_matmul
-    ):
+    def test_apply_per_channel_shared_expert_uses_w4a8_grouped_matmul(self, mock_dynamic_quant, mock_grouped_matmul):
         self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(torch.empty(1, 4, 1, dtype=torch.int32), requires_grad=False)
@@ -132,9 +130,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_per_channel_shared_expert_reuses_quantized_input(
-        self, mock_dynamic_quant, mock_grouped_matmul
-    ):
+    def test_apply_per_channel_shared_expert_reuses_quantized_input(self, mock_dynamic_quant, mock_grouped_matmul):
         self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(torch.empty(1, 4, 1, dtype=torch.int32), requires_grad=False)
@@ -157,9 +153,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_per_channel_shared_expert_sums_owned_tp_scale_bias(
-        self, mock_dynamic_quant, mock_grouped_matmul
-    ):
+    def test_apply_per_channel_shared_expert_sums_owned_tp_scale_bias(self, mock_dynamic_quant, mock_grouped_matmul):
         self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.tp_size = 4
@@ -184,9 +178,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_per_channel_shared_expert_tp1_sums_all_scale_bias(
-        self, mock_dynamic_quant, mock_grouped_matmul
-    ):
+    def test_apply_per_channel_shared_expert_tp1_sums_all_scale_bias(self, mock_dynamic_quant, mock_grouped_matmul):
         self.method.enable_per_channel_shared_expert()
         layer = torch.nn.Module()
         layer.tp_size = 1
@@ -305,9 +297,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_convert_weight_to_int4pack")
-    def test_process_per_channel_shared_expert_prepares_grouped_nz_weight(
-        self, mock_int4pack, mock_maybe_trans_nz
-    ):
+    def test_process_per_channel_shared_expert_prepares_grouped_nz_weight(self, mock_int4pack, mock_maybe_trans_nz):
         self.method.enable_per_channel_shared_expert()
         self.method.new_quant_version = True
         mock_maybe_trans_nz.side_effect = identity
@@ -337,9 +327,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(layer.scale_bias.shape, torch.Size([32]))
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity)
-    def test_process_per_channel_shared_expert_tp1_sums_down_scale_bias(
-        self, _mock_maybe_trans_nz
-    ):
+    def test_process_per_channel_shared_expert_tp1_sums_down_scale_bias(self, _mock_maybe_trans_nz):
         self.method.enable_per_channel_shared_expert()
         self.method.new_quant_version = True
         layer = torch.nn.Module()
