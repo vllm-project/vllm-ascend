@@ -50,7 +50,7 @@ on:
       continue_on_error:
         type: boolean
         required: false
-        default: false
+        default: true
         description: 'Continue running the job even if tests fail'
       enable-coverage:
         type: boolean
