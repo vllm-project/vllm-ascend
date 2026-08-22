@@ -112,6 +112,9 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     if eval_config.get("model_type", "vllm") == "vllm-asr":
         pytest.skip("Skipping ASR config, use test_asr_eval.py instead")
 
+    if eval_config.get("model_type", "vllm") == "vllm-tts":
+        pytest.skip("Skipping TTS config, use test_tts_eval_correctness.py instead")
+
     model_args = build_model_args(eval_config, tp_size)
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
