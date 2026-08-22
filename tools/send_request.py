@@ -1,12 +1,12 @@
 import string
-from typing import Any
+from typing import Any, Optional
 
 import requests
 
 _PAD_ALPHABET = string.ascii_letters
 
-def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
 
+def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
     url = server.url_for("tokenize")
     if use_chat:
         payload: dict[str, Any] = {"messages": [{"role": "user", "content": text}]}
@@ -47,7 +47,6 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat:
 
 
 def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None]:
-
     if isinstance(raw, dict):
         seed = str(raw.get("seed", ""))
         target = int(raw.get("target_tokens", 0))
@@ -136,4 +135,3 @@ def send_v1_chat_completions(
     print(f"Response: {response_text}")
     assert response_text, "empty response"
     validate_response(response_json, expected, max_model_len)
-
