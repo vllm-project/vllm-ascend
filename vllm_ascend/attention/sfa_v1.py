@@ -509,15 +509,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         # - C8 indexer cache for lightning indexer.
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
-        self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        self.enable_sparse_sfa_c8 = self.vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
         self.enable_sparse_li_c8 = self.has_indexer and ascend_config.is_sparse_li_c8_layer(self.indexer.k_cache.prefix)
-        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
-                self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
-                self.c8_k_scale_cache_dtype = torch.float16
+        self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.vllm_config.attention_config.indexer_kv_dtype, 
+            self.vllm_config.model_config
+        )
+        if c8_k_cache_dtype == torch.float8_e4m3fn:
+            self.c8_k_scale_cache_dtype = torch.float32
+        elif c8_k_cache_dtype == torch.int8:
+            self.c8_k_scale_cache_dtype = torch.float16
 
         if self.enable_sparse_sfa_c8:
             self.sfa_qsfa_packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(

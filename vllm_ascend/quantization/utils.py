@@ -265,12 +265,15 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    if vllm_config.cache_config.cache_dtype not in ["fp8", "int8"]:
+        return False
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
     if not is_kv_consumer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         return False
     if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
         if layer_name is not None:
+            # Determine whether quantization is enabled at each layer.
             return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
         else:
             return True
-    return False
+    raise ValueError("The current MLA‑related models adopt static quantization. KV quantization is configured via `--kv‑cache‑dtype` upon service startup, and the corresponding quantized weights are required.")

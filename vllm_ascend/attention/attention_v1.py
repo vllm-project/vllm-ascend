@@ -25,6 +25,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
     AttentionCGSupport,
@@ -485,7 +486,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.hidden_size = self.num_heads * self.head_size
-        self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = sliding_window
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
@@ -500,9 +500,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config)
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
+        if self.kv_cache_dtype in [torch.float16, torch.bfloat16]:
+            self.enable_c8_quant = False
+        else:
+            if not self.enable_c8_quant:
+                raise ValueError("The current GQA‑related models adopt static quantization. KV quantization is configured via `--kv‑cache‑dtype` upon service startup, and the corresponding quantized weights are required.")
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
