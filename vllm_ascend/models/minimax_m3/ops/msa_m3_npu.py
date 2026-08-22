@@ -72,13 +72,13 @@ def _npu_k2q_csr(
 
 @dataclass
 class MiniMaxM3TPDecodeScoreMetadata:
-    """Per-forward metadata for packed TP decode scoring."""
+    """Graph-stable inputs for packed TP decode scoring."""
 
     block_table: torch.Tensor
     cu_seqlens_q: torch.Tensor
-    seq_lens: torch.Tensor
     context_lens: torch.Tensor
-    start_loc: torch.Tensor
+    max_block_count: int
+    block_size: int
     block_offset: int
     block_count: int
     decode_query_len: int
@@ -165,6 +165,8 @@ def _minimax_m3_index_score(
 
     A causal mask selects sparse mode 3. Passing no mask selects dense mode 0
     for a TP chunk that is entirely before the current query positions.
+    ``init_blocks`` and ``local_blocks`` are kept for parity with the index
+    scoring interface; candidate forcing is applied by the TopK stage.
     """
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     return torch.ops._C_ascend.npu_msa_index_score(
@@ -177,8 +179,6 @@ def _minimax_m3_index_score(
         actual_seq_klen=seq_lens,
         layout_key="BBND",
         sparse_mode=3 if causal_mask is not None else 0,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
     )
 
 
@@ -207,6 +207,8 @@ def minimax_m3_index_prefill(
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
     )
     return _minimax_m3_index_prefill_topk(
         score,
@@ -325,6 +327,8 @@ def _minimax_m3_index_decode(
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
     )
     if block_count is None:
         block_count = block_table.shape[-1]
@@ -386,8 +390,9 @@ def minimax_m3_index_tp_block_parallel_decode(
     tp_group: Any,
 ) -> torch.Tensor:
     """Run packed-query scoring and TopK over TP-sharded KV blocks."""
-    full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1)
+    full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1).contiguous()
     tp_rank = tp_group.rank_in_group
+    block_offset = metadata.block_offset
     block_count = metadata.block_count
     if block_count == 0:
         # MsaIndexScore requires a non-empty block-table width. Ranks without
@@ -410,20 +415,53 @@ def minimax_m3_index_tp_block_parallel_decode(
             device=full_idx_q.device,
         )
     else:
+        # Keep all derived tensors in the model forward. FULL_DECODE_ONLY
+        # captures and replays this work, whereas tensors allocated by the
+        # metadata builder would leave the graph holding stale device pointers.
+        halo_blocks = (metadata.decode_query_len - 1 + metadata.block_size - 1) // metadata.block_size
+        score_block_end = min(
+            block_offset + block_count + halo_blocks,
+            metadata.max_block_count,
+        )
+        score_block_table = metadata.block_table[:, block_offset:score_block_end].contiguous()
+        local_context_lens = metadata.context_lens - block_offset * metadata.block_size
+        chunk_capacity = block_count * metadata.block_size
+        score_capacity = score_block_table.shape[-1] * metadata.block_size
+        max_score_k_len = min(
+            chunk_capacity + metadata.decode_query_len - 1,
+            score_capacity,
+        )
+        score_k_lens = torch.clamp(
+            metadata.context_lens + metadata.decode_query_len - block_offset * metadata.block_size,
+            min=0,
+            max=max_score_k_len,
+        )
+        score_start_loc = (
+            torch.div(
+                metadata.context_lens,
+                metadata.block_size,
+                rounding_mode="floor",
+            )
+            .sub(block_offset)
+            .clamp(
+                min=0,
+                max=score_block_table.shape[-1] - 1,
+            )
+        )
         local_topk, local_scores = _minimax_m3_index_decode(
             full_idx_q,
             index_kv_cache,
-            metadata.block_table,
+            score_block_table,
             metadata.cu_seqlens_q,
-            metadata.seq_lens,
-            metadata.context_lens,
-            metadata.start_loc,
+            score_k_lens,
+            local_context_lens,
+            score_start_loc,
             None if metadata.decode_query_len == 1 else causal_mask,
             topk=topk,
             init_blocks=init_blocks,
             local_blocks=local_blocks,
             decode_query_len=metadata.decode_query_len,
-            block_offset=metadata.block_offset,
+            block_offset=block_offset,
             block_count=block_count,
         )
 

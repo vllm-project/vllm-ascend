@@ -264,60 +264,18 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
         max_seq_len: int,
         decode_query_len: int,
     ) -> MiniMaxM3TPDecodeScoreMetadata:
-        """Build the TP halo metadata once for all indexer layers."""
+        """Package graph-stable inputs; derive TP tensors in model forward."""
         tp_rank = get_tp_group().rank_in_group
         max_block_count = (max_seq_len + self.block_size - 1) // self.block_size
         blocks_per_tp = (max_block_count + self.tp_size - 1) // self.tp_size
         block_offset = tp_rank * blocks_per_tp
         block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
-        local_context_lens = context_lens - block_offset * self.block_size
-
-        if block_count == 0:
-            return MiniMaxM3TPDecodeScoreMetadata(
-                block_table=block_table[:, :0],
-                cu_seqlens_q=cu_seqlens_q,
-                seq_lens=torch.zeros_like(context_lens),
-                context_lens=local_context_lens,
-                start_loc=torch.zeros_like(context_lens),
-                block_offset=block_offset,
-                block_count=0,
-                decode_query_len=decode_query_len,
-            )
-
-        halo_blocks = (decode_query_len - 1 + self.block_size - 1) // self.block_size
-        score_block_end = min(
-            block_offset + block_count + halo_blocks,
-            max_block_count,
-        )
-        score_block_table = block_table[:, block_offset:score_block_end].contiguous()
-        chunk_capacity = block_count * self.block_size
-        score_capacity = score_block_table.shape[-1] * self.block_size
-        max_score_k_len = min(
-            chunk_capacity + decode_query_len - 1,
-            score_capacity,
-        )
-        score_k_lens = torch.clamp(
-            context_lens + decode_query_len - block_offset * self.block_size,
-            min=0,
-            max=max_score_k_len,
-        )
-        score_start_loc = (
-            torch.div(
-                context_lens,
-                self.block_size,
-                rounding_mode="floor",
-            )
-            - block_offset
-        ).clamp(
-            min=0,
-            max=score_block_table.shape[-1] - 1,
-        )
         return MiniMaxM3TPDecodeScoreMetadata(
-            block_table=score_block_table,
+            block_table=block_table,
             cu_seqlens_q=cu_seqlens_q,
-            seq_lens=score_k_lens,
-            context_lens=local_context_lens,
-            start_loc=score_start_loc.to(dtype=torch.int32),
+            context_lens=context_lens,
+            max_block_count=max_block_count,
+            block_size=self.block_size,
             block_offset=block_offset,
             block_count=block_count,
             decode_query_len=decode_query_len,
@@ -384,7 +342,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             active_decodes = _active_decode_num_reqs(num_decodes, num_decode_tokens, decode_query_len)
             decode_context_lens = None
             decode_cu_seqlens_q = None
-            decode_start_loc = None
             if _USE_ASCENDC_INDEX_SCORE:
                 decode_context_lens = self.context_len_buffer[:active_decodes]
                 decode_context_lens.copy_(
@@ -392,11 +349,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                     non_blocking=True,
                 )
                 decode_cu_seqlens_q = query_start_loc[: active_decodes + 1].to(torch.int32)
-                decode_start_loc = torch.div(
-                    decode_context_lens,
-                    self.block_size,
-                    rounding_mode="floor",
-                ).to(dtype=torch.int32)
             decode_metadata = AscendMiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:active_decodes],
                 block_table=block_table[:active_decodes],
@@ -404,7 +356,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 decode_query_len=decode_query_len,
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
-                start_loc=decode_start_loc,
             )
             if _USE_ASCENDC_INDEX_SCORE and self.tp_size > 1 and active_prefills == 0:
                 decode_metadata.tp_score = self._build_tp_score_metadata(
@@ -552,6 +503,11 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                         tp_group=tp_group,
                     )
                 else:
+                    decode_start_loc = torch.div(
+                        d.context_lens,
+                        self.block_size,
+                        rounding_mode="floor",
+                    ).to(dtype=torch.int32)
                     decode_topk = minimax_m3_index_decode_ascendc(
                         decode_iq,
                         kv,
@@ -559,7 +515,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                         d.cu_seqlens_q,
                         d.seq_lens,
                         d.context_lens,
-                        d.start_loc,
+                        decode_start_loc,
                         index_md.causal_mask,
                         topk=self.topk_blocks,
                         init_blocks=self.init_blocks,

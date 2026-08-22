@@ -297,10 +297,7 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
-        assert torch.equal(
-            metadata.decode.start_loc,
-            metadata.decode.context_lens // 128,
-        )
+        assert metadata.decode.start_loc is None
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
@@ -356,6 +353,48 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
     assert indexer_metadata.num_prefills == batch_size
     assert indexer_metadata.prefill is not None
     assert indexer_metadata.prefill.context_lens.shape[0] == batch_size
+
+
+def test_indexer_metadata_builder_trims_graph_padded_spec_decode() -> None:
+    device = torch.device("cpu")
+    common = _create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[132] * 16,
+            query_lens=[4] * 16,
+            name="padded_spec_decode",
+        ),
+        block_size=128,
+        device=device,
+    )
+    common.num_actual_tokens = 60
+    builder = _make_indexer_builder(device, tp_size=4)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.msa_m3.get_tp_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+        patch(
+            "vllm_ascend.models.minimax_m3.msa_m3.split_decodes_and_prefills",
+            return_value=(16, 0, 60, 0),
+        ),
+    ):
+        first = builder.build(0, common)
+        second = builder.build(0, common)
+
+    assert first.num_decodes == 15
+    assert first.num_decode_tokens == 60
+    assert first.decode is not None
+    assert first.decode.tp_score is not None
+    assert first.decode.cu_seqlens_q.shape == (16,)
+    assert first.decode.cu_seqlens_q[-1] == 60
+    assert first.decode.block_table.shape[0] == 15
+    assert first.decode.tp_score.context_lens.shape == (15,)
+    assert second.decode is not None
+    assert second.decode.tp_score is not None
+    assert first.decode.tp_score.block_table.data_ptr() == second.decode.tp_score.block_table.data_ptr()
+    assert first.decode.tp_score.context_lens.data_ptr() == second.decode.tp_score.context_lens.data_ptr()
+    assert first.decode.tp_score.cu_seqlens_q.data_ptr() == second.decode.tp_score.cu_seqlens_q.data_ptr()
 
 
 def test_sparse_proj_quant_type_falls_back_to_language_model_prefix() -> None:
@@ -802,6 +841,8 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
             seq_lens,
             start_loc,
             causal_mask,
+            init_blocks=2,
+            local_blocks=3,
         )
 
     assert actual is expected
@@ -887,6 +928,8 @@ def test_ascendc_index_prefill_wraps_score_and_topk() -> None:
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=1,
+        local_blocks=1,
     )
     mock_topk.assert_called_once_with(
         score,
@@ -988,7 +1031,10 @@ def test_decode_applies_forced_blocks_only_in_topk(decode_query_len: int) -> Non
 
     assert actual_indices is expected_indices
     assert actual_scores is expected_scores
-    assert mock_score.call_args.kwargs == {}
+    assert mock_score.call_args.kwargs == {
+        "init_blocks": 1,
+        "local_blocks": 1,
+    }
     assert mock_topk.call_args.kwargs["init_blocks"] == 1
     assert mock_topk.call_args.kwargs["local_blocks"] == 1
 
@@ -1052,6 +1098,7 @@ def test_tp_single_token_decode_uses_dense_mode(
     )
     assert torch.equal(decode_args[3], torch.tensor([0, 1], dtype=torch.int32))
     assert torch.equal(decode_args[4], torch.tensor([256], dtype=torch.int32))
+    assert decode_args[6].dtype == torch.int32
 
 
 @pytest.mark.parametrize(
@@ -1149,6 +1196,43 @@ def test_tp_speculative_decode_uses_packed_causal_halo(
     assert torch.equal(mock_topk.call_args.args[0], causal_score[..., :1])
 
 
+def test_tp_score_metadata_reuses_graph_input_storage() -> None:
+    """TP metadata consumed by ACLGraph must not point at per-build tensors."""
+
+    builder = _make_indexer_builder(torch.device("cpu"), tp_size=2)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 4], dtype=torch.int32)
+    context_lens = torch.tensor([125], dtype=torch.int32)
+
+    tp_group = SimpleNamespace(rank_in_group=1)
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.get_tp_group",
+        return_value=tp_group,
+    ):
+        first = builder._build_tp_score_metadata(
+            block_table,
+            cu_seqlens_q,
+            context_lens,
+            max_seq_len=256,
+            decode_query_len=4,
+        )
+        context_lens.copy_(torch.tensor([129], dtype=torch.int32))
+        second = builder._build_tp_score_metadata(
+            block_table,
+            cu_seqlens_q,
+            context_lens,
+            max_seq_len=256,
+            decode_query_len=4,
+        )
+
+    assert first.block_table is second.block_table is block_table
+    assert first.context_lens is second.context_lens is context_lens
+    assert first.cu_seqlens_q is second.cu_seqlens_q is cu_seqlens_q
+    assert first.max_block_count == second.max_block_count == 2
+    assert first.block_offset == second.block_offset == 1
+    assert first.block_count == second.block_count == 1
+
+
 def test_tp_block_parallel_forwards_global_forced_block_counts() -> None:
     class FakeTPGroup:
         world_size = 2
@@ -1165,9 +1249,9 @@ def test_tp_block_parallel_forwards_global_forced_block_counts() -> None:
     tp_score = MiniMaxM3TPDecodeScoreMetadata(
         block_table=torch.tensor([[4, 5, 6, 7]], dtype=torch.int32),
         cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
-        seq_lens=torch.tensor([512], dtype=torch.int32),
         context_lens=torch.tensor([511], dtype=torch.int32),
-        start_loc=torch.tensor([3], dtype=torch.int32),
+        max_block_count=8,
+        block_size=128,
         block_offset=4,
         block_count=4,
         decode_query_len=1,
@@ -1262,11 +1346,11 @@ def test_indexer_speculative_decode_uses_tp_block_parallel_path(
         tp_score=MiniMaxM3TPDecodeScoreMetadata(
             block_table=torch.tensor([[0, 1, 2]], dtype=torch.int32),
             cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
-            seq_lens=torch.tensor([258], dtype=torch.int32),
             context_lens=torch.tensor([256], dtype=torch.int32),
-            start_loc=torch.tensor([2], dtype=torch.int32),
+            max_block_count=3,
+            block_size=128,
             block_offset=0,
-            block_count=3,
+            block_count=2,
             decode_query_len=2,
         ),
     )
