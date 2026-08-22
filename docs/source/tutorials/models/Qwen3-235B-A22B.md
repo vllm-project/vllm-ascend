@@ -735,7 +735,13 @@ After several minutes, you will get the performance evaluation result.
 |----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|
 | High Throughput | Single-Node | 16 | 4 | 4 | none | On | On  | On |
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |
-| Long Context | Single-Node | 16 | 8 | 1 | none | On | On | Off |
+| Long Context | Single-Node | 16 | 8 | 2 | none | On | On | On |
+
+Key Parameter Descriptions:
+
+* `MTP Speculation Num`: set to `3` only in Low Latency (via `speculative-config(eagle3)`) to cut decode rounds per token; kept none in High Throughput and Long Context where raw throughput/context capacity outweighs per-token latency gains.
+* `FUSED_MC2`: a MoE-specific fused dispatch/combine optimization, applicable since Qwen3-235B-A22B is a true MoE model; kept On in High Throughput and Long Context (sufficient MoE dispatch volume to benefit), but Off in Low Latency (low concurrency doesn't offset the fusion overhead).
+
 
 > For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment)
 
@@ -783,6 +789,12 @@ vllm serve your_model_path \
     --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2": 1}'
 ```
 
+Key Parameter Descriptions:
+
+* `enable_cpu_binding` reduces scheduling jitter under high concurrency; 
+* `enable_flashcomm1` cuts communication overhead; 
+* `enable_fused_mc2` enables fused MoE dispatch/combine operators for better expert efficiency.  
+
 <u>Single-node PD Hybrid — Low Latency:</u>
 
 Single-node PD hybrid deployment optimized for low latency with speculative decoding (Eagle3):
@@ -828,6 +840,11 @@ vllm serve your_model_path \
     --additional-config '{"enable_cpu_binding":true}'
 ```
 
+Key Parameter Descriptions:
+
+* `speculative-config (eagle3)` reduces decode rounds via speculative decoding;
+* `enable_cpu_binding` and `enable_flashcomm1` are still enabled, but `enable_fused_mc2` is left unset since MoE dispatch pressure isn't the bottleneck under low-concurrency traffic.    
+
 <u>Single-node PD Hybrid — Long Context:</u>
 
 Single-node PD hybrid deployment optimized for long context with Context Parallelism and yarn rope-scaling:
@@ -868,6 +885,11 @@ vllm serve your_model_path \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2": 1}'
 ```
+Key Parameter Descriptions:
+
+* YaRN RoPE scaling via `hf-overrides` extends the maximum position length to support a 135k context;
+* `max-num-seqs` is lowered to 32 to avoid OOM from the large per-request memory footprint of long sequences; 
+* `enable_cpu_binding`/`enable_flashcomm1`/`enable_fused_mc2` are all enabled, matching the High Throughput scenario.
 
 ### 9.2 Tuning Guidelines
 

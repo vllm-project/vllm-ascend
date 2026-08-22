@@ -239,7 +239,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --served-model-name qwen3 \
         --trust-remote-code \
         --quantization ascend \
-        --distributed-executor-backend mp \
+        --distributed-executor-backend "mp" \
         --tensor-parallel-size 4 \
         --max-model-len 5500 \
         --max-num-batched-tokens 40960 \
@@ -341,7 +341,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 !!! note
 
-    - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+    - [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — Additional parameter details for vLLM serve commands.
     - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 
 **Service Verification:**
@@ -518,7 +518,12 @@ After several minutes, you will get the performance evaluation result.
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
 
-For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment)
+
+Key Parameter Descriptions:
+
+* `FUSED_MC2`: a MoE-specific fused dispatch/combine communication optimization, not applicable to Qwen3-Dense (a dense, non-MoE architecture), so it is kept Off in all three scenarios.
+
+>For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment)
 
 <u>High Throughput Configuration:</u>
 
@@ -531,7 +536,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 4 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
@@ -544,6 +549,13 @@ vllm serve your_model_path \
     --block-size 128 \
     --gpu-memory-utilization 0.9
 ```
+
+Key Parameter Descriptions:
+
+* `cudagraph_capture_sizes` matches the mid-to-large batch-size distribution under high concurrency to minimize padding;
+* `weight_prefetch_config` overlaps weight loading with compute to boost throughput; 
+* `enable_flashcomm1` exploits TP>=2 with high concurrency to cut communication overhead; 
+* `pa_shape_list` covers the medium-concurrency range where FIA underperforms, forcing a switch to the PA operator.   
 
 <u>Long Context Configuration:</u>
 
@@ -570,6 +582,11 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.9 \
     --quantization ascend
 ```
+Key Parameter Descriptions:
+
+* YaRN RoPE scaling via `hf-overrides` extends the maximum position length to support a 135k context; 
+* `enable_flashcomm1` still helps offset the communication cost from large KV/activation sizes; 
+* `speculative-config (eagle3)` verifies multiple tokens per step to offset the high per-token decode latency of long sequences. 
 
 <u>Low Latency Configuration:</u>
 
@@ -582,7 +599,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 8 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
@@ -594,6 +611,12 @@ vllm serve your_model_path \
     --block-size 128 \
     --gpu-memory-utilization 0.9
 ```
+
+Key Parameter Descriptions:
+
+* `cudagraph_capture_sizes` adds finer-grained small sizes to reduce padding at small batch sizes typical of low-concurrency interactive traffic;
+* `speculative-config` sets `enforce_eager` to avoid extra warm-up/capture latency; 
+* `weight_prefetch`/`flashcomm1`/`pa_shape_list` are left unset because these optimizations require sufficient concurrency to offset their own overhead, which low-latency traffic doesn't provide.
 
 ### 9.2 Tuning Guidelines
 
