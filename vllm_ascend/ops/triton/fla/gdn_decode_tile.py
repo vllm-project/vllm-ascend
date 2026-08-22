@@ -172,6 +172,7 @@ def qwen35_gdn_decode_tile_kernel(
     z1 = tl.load(projected_qkvz + z1_offsets)
 
     cache_index = tl.load(cache_indices + token_index).to(tl.int64)
+    cache_index = tl.where(valid, cache_index, 0)
     conv_state_stride = 3 * conv_dim
     q_channel_offsets = qk_head * head_dim + offsets
     k_channel_offsets = qk_dim + qk_head * head_dim + offsets
@@ -238,6 +239,7 @@ def qwen35_gdn_decode_tile_kernel(
     beta1 = tl.sigmoid(b1).to(b1_raw.dtype).to(tl.float32)
 
     state_index = tl.load(recurrent_state_indices + token_index).to(tl.int64)
+    state_index = tl.where(valid, state_index, 0)
     token_output = output + token_index * v_dim
     _recurrent_head(
         q,
