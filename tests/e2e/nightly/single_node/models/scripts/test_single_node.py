@@ -244,7 +244,8 @@ async def run_check_rank0_process_count(
 
 
 async def run_spec_decode_acceptance_test(
-    config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy",
+    config: SingleNodeConfig,
+    server: "RemoteOpenAIServer | DisaggEpdProxy",
     spec_baseline: tuple[int, list[int]] | None = None,
 ) -> None:
     from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rate
