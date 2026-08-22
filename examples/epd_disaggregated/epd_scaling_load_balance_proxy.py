@@ -19,77 +19,14 @@
 # - Install dependencies:
 #     pip install fastapi<0.124.0 httpx uvicorn vllm
 #
-# Step 1: Start Your Backend Servers
-# ----------------------------------
-# You need to have at least one prefiller and one decoder backend running.
-# These can be mock servers or actual vLLM servers.
-#
-# For testing, you can use the provided mock server:
-#
-#   vllm serve --host 0.0.0.0 --port 8101 ... # Encoder 1
-#   vllm serve --host 0.0.0.0 --port 8102 ... # Encoder 2
-#   vllm serve --host 0.0.0.0 --port 8201 ... # PD 1
-#   vllm serve --host 0.0.0.0 --port 8202 ... # PD 2
-#   vllm serve --host 0.0.0.0 --port 8301 ... # Prefiller 1
-#   vllm serve --host 0.0.0.0 --port 8301 ... # Prefiller 2
-#   vllm serve --host 0.0.0.0 --port 8401 ... # Decoder 1
-#   vllm serve --host 0.0.0.0 --port 8402 ... # Decoder 2
-#
-# Step 2: Start the Proxy Server
-# ------------------------------
-# Run the proxy server, specifying the host/port for each instance:
-#
-# 2 Encoder instance + 2 PD instance:
-#   python epd_load_balance_proxy_layerwise_server_example.py \
-#     --encoder-hosts 127.0.0.1 127.0.0.1 \
-#     --encoder-ports 81001 81002 \
-#     --pd-hosts 127.0.0.1 127.0.0.1 \
-#     --pd-ports 82001 82002 \
-#     --host 0.0.0.0 \
-#     --port 9000
-
-# 2 Encoder instance + 2 Prefill instance + 2 Decode instance:
-#   python epd_load_balance_proxy_layerwise_server_example.py \
-#     --encoder-hosts 127.0.0.1 127.0.0.1 \
-#     --encoder-ports 81001 81002 \
-#     --prefiller-hosts 127.0.0.1 127.0.0.1 \
-#     --prefiller-ports 83001 83002 \
-#     --decoder-hosts 127.0.0.1 127.0.0.1 \
-#     --decoder-ports 84001 84002 \
-#     --host 0.0.0.0 \
-#     --port 9000
-
-# This will start the proxy on port 9000, load balancing between two encoder, tweo pd, two prefiller
-# and two decoder servers.
-#
-# Step 3: Send a Request to the Proxy
-# -----------------------------------
-# You can now send OpenAI-compatible requests to the proxy. For example:
-#
-#   curl -X POST http://localhost:9000/v1/chat/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{
-#           "model": "your-model",
-#           "messages": [{"role": "user","content": [{"type": "image_url","image_url": {"url": f"file://{image_path}"}},
-# 								                     {"type": "text","text": "Describe this image."}]}],
-#           "max_tokens": 16
-#         }'
-#
-# Step 4: Health Check
-# --------------------
-# To check if the proxy is running and see how many backend instances are
-# connected, use:
-#
-#   curl http://localhost:9000/healthcheck
-#
-# This will return a JSON object with the status and the number of encoder, pd, prefiller
-# and decoder instances.
-#
-# Notes:
-# - You can scale the number of encoder, pd, prefiller and decoder servers as needed.
-# - The proxy dispatches requests based on a least-loaded strategy,
-#   using a priority queue to balance the active token workload across instances.
-# - For production, ensure your backend servers are robust and secure.
+# python epd_scaling_load_balance_proxy.py \
+#     --host 127.0.0.1 --port 8001 \
+#     --model-path /model_weights \
+#     --visible-devices 0 1 2 3 4 5 6 \
+#     --encode-threshold 1000 \
+#     --pd-threshold 1000 \
+#     --scale-interval 0.5 \
+#     --deployment-mode e-pd
 #
 # For more details, see the code and comments in this file.
 
@@ -108,12 +45,14 @@ import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 from vllm.logger import init_logger
+from cluster_manager import ClusterManager
 
 logger = init_logger(__name__)
 
@@ -146,8 +85,55 @@ class ServerState:
         self.active_kv_cache = 0
         self.active_requests = 0
         self.aborted_requests = set()
+        self.status = "working"  # could be "working" or "unhealthy"
 
+    def __eq__(self, other):
+        self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+        other_host = other.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+        return self_host == other_host and str(self.port) == str(other.port)
 
+    def __hash__(self):
+        self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+        return hash((self_host, str(self.port)))
+
+    def __repr__(self):
+        return f"{self.host}:{self.port}"
+
+@dataclass
+class InstanceType:
+    ENCODE: str = "encode"
+    PREFILL: str = "prefill"
+    DECODE: str = "decode"
+    PD: str = "pd" 
+
+class DeploymentMode:
+    EPD = "e-p-d"
+    E_DISAGG = "e-pd"
+    PD_DISAGG = "p-d"
+    # Active instance types for each deployment mode
+    ACTIVE_TYPES = {
+        EPD: [InstanceType.ENCODE, InstanceType.PREFILL,
+  InstanceType.DECODE],
+        E_DISAGG: [InstanceType.ENCODE, InstanceType.PD],
+        PD_DISAGG: [InstanceType.PREFILL, InstanceType.DECODE],
+    }
+
+    @staticmethod
+    def detect(args):
+        has_e = bool(args.encoder_hosts)
+        has_p = bool(args.prefiller_hosts)
+        has_d = bool(args.decoder_hosts)
+        has_pd = bool(args.pd_hosts)
+        if has_e and has_p and has_d:
+            return DeploymentMode.EPD
+        if has_e and has_pd:
+            return DeploymentMode.E_DISAGG
+        if has_p and has_d:
+            return DeploymentMode.PD_DISAGG
+        raise ValueError(
+            f"Cannot determine deployment mode from: encoder={has_e}, prefiller={has_p}, decoder={has_d}, pd={has_pd}"
+        )
+      
 class ProxyState:
     def __init__(self, prefiller_instances, decoder_instances, encoder_instances=None, pd_instances=None):
         self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
@@ -157,6 +143,7 @@ class ProxyState:
 
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
+        self.instances_lock = asyncio.Lock()
 
         self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
         self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
@@ -171,29 +158,114 @@ class ProxyState:
         self.req_id_future = {}
         self.req_data_dict = {}
 
+    def _rebuild_encoder_heap(self):
+        """Rebuild encoder min-heap (call after adding/removing instances)."""
+        self.encoder_heap = [(0, i, server) for i, server in enumerate(self.encoders)]
+        heapq.heapify(self.encoder_heap)
+
+    def _rebuild_prefiller_heap(self):
+        """Rebuild prefiller min-heap (call after adding/removing instances)."""
+        self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
+        heapq.heapify(self.prefiller_heap)
+
+    def _rebuild_decoder_heap(self):
+        """Rebuild decoder min-heap (call after adding/removing instances)."""
+        self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
+        heapq.heapify(self.decoder_heap)
+    
+    def _rebuild_pd_heap(self):
+        """Rebuild pd min-heap (call after adding/removing instances)."""
+        self.pd_heap = [(0, i, server) for i, server in enumerate(self.pds)]
+        heapq.heapify(self.pd_heap)
+
+    async def add_instances(self, instance_type: str, instances: list["ServerState"]):
+        """Dynamically add backend instances, auto-deduplicate and rebuild the corresponding heap."""
+        async with self.instances_lock:
+            if instance_type == InstanceType.ENCODE:
+                target = self.encoders
+            elif instance_type == InstanceType.PREFILL:
+                target = self.prefillers
+            elif instance_type == InstanceType.DECODE:
+                target = self.decoders
+            elif instance_type == InstanceType.PD:
+                target = self.pds
+            else:
+                return []
+
+            added = []
+            for inst in instances:
+                if inst not in target:
+                    target.append(inst)
+                    added.append(inst)
+
+            if instance_type == InstanceType.ENCODE:
+                self._rebuild_encoder_heap()
+            elif instance_type == InstanceType.PREFILL:
+                self._rebuild_prefiller_heap()
+            elif instance_type == InstanceType.DECODE:
+                self._rebuild_decoder_heap()
+            elif instance_type == InstanceType.PD:
+                self._rebuild_pd_heap()
+            return added
+    
+    async def remove_instances(self, instance_type: str, instances: list["ServerState"]):
+        """Dynamically remove backend instances and rebuild the corresponding heap."""
+        async with self.instances_lock:
+            if instance_type == InstanceType.ENCODE:
+                target = self.encoders
+            elif instance_type == InstanceType.PREFILL:
+                target = self.prefillers
+            elif instance_type == InstanceType.DECODE:
+                target = self.decoders
+            elif instance_type == InstanceType.PD:
+                target = self.pds
+            else:
+                return []
+
+            removed = []
+            to_remove = set(instances)
+            for inst in list(target):
+                if inst in to_remove:
+                    target.remove(inst)
+                    removed.append(inst)
+
+            if instance_type == InstanceType.ENCODE:
+                self._rebuild_encoder_heap()
+            elif instance_type == InstanceType.PREFILL:
+                self._rebuild_prefiller_heap()
+            elif instance_type == InstanceType.DECODE:
+                self._rebuild_decoder_heap()
+            elif instance_type == InstanceType.PD:
+                self._rebuild_pd_heap()
+            return removed
+        
     def _update_pd_priority(self, server_idx: int):
         server = self.pds[server_idx]
         priority = server.active_tokens + server.active_kv_cache * 0.3
         self.pd_heap = [(p, i, s) for p, i, s in self.pd_heap if i != server_idx]
-        heapq.heappush(self.pd_heap, (priority, server_idx, server))  # type: ignore[misc]
+        if server.status == "working":
+            heapq.heappush(self.pd_heap, (priority, server_idx, server))  # type: ignore[misc]
 
     def _update_prefiller_priority(self, server_idx: int):
         server = self.prefillers[server_idx]
         priority = server.active_tokens + server.active_kv_cache * 0.3
         self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap if i != server_idx]
-        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore[misc]
+        if server.status == "working":
+            heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore[misc]
 
     def _update_decoder_priority(self, server_idx: int):
         server = self.decoders[server_idx]
         priority = server.active_tokens
         self.decoder_heap = [(p, i, s) for p, i, s in self.decoder_heap if i != server_idx]
-        heapq.heappush(self.decoder_heap, (priority, server_idx, server))
+        if server.status == "working":
+            heapq.heappush(self.decoder_heap, (priority, server_idx, server))
 
     def _update_encoder_priority(self, server_idx: int):
         server = self.encoders[server_idx]
         priority = server.active_tokens
         self.encoder_heap = [(p, i, s) for p, i, s in self.encoder_heap if i != server_idx]
-        heapq.heappush(self.encoder_heap, (priority, server_idx, server))
+        if server.status == "working":
+            heapq.heappush(self.encoder_heap, (priority, server_idx, server))
 
     def abort_pd_request(self, server_idx: int, request_id):
         self.pds[server_idx].aborted_requests.add(request_id)
@@ -280,12 +352,48 @@ class ProxyState:
 
 
 proxy_state = None
-
+cluster_manager = None
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument("--model-path", type=str, required=True, help="Path to the model weights")
+    parser.add_argument(
+        "--visible-devices",
+        type=int,
+        nargs="+",
+        default=[0, 1, 2, 3],
+        help="List of NPU device IDs available for the pool",
+    )
+    parser.add_argument("--deployment-mode", type=str, choices=["e-p-d", 
+    "e-pd", "p-d"], default=None, help="Deployment mode (auto-detected if not specified)")
+    parser.add_argument("--encode-threshold", type=int, default=3000, help="Active tokens threshold to scale encoders")
+    parser.add_argument(
+        "--prefill-threshold", type=int, default=3000, help="Active tokens threshold to scale prefillers"
+    )
+    parser.add_argument(
+        "--decode-threshold", type=int, default=5000, help="Active tokens threshold to scale decoders"
+    )
+    parser.add_argument("--pd-threshold", type=int, default=3000, help="Active tokens threshold to scale encoders")
+    parser.add_argument("--scale-interval", type=float, default=0.5, help="Autoscaling check interval (seconds)")
+    parser.add_argument("--scale-in-ratio", type=float, default=5, help="Scale-in threshold ratio of scale-out")
+    parser.add_argument("--encoder-port-start", type=int, default=23001)
+    parser.add_argument("--prefill-port-start", type=int, default=24001)
+    parser.add_argument("--decoder-port-start", type=int, default=25001)
+    parser.add_argument("--pd-port-start", type=int, default=26001)
+    parser.add_argument("--kv-port-start", type=int, default=50001)
+    parser.add_argument("--engine-id-start", type=int, default=0)
+    parser.add_argument("--ec-shared-storage-path", type=str, default="/data/ec_cache")
+    parser.add_argument("--served-model-name", type=str, default="qwenvl")
+    parser.add_argument("--max-model-len", type=int, default=32768)
+    parser.add_argument("--max-num-batched-tokens", type=int, default=114688)
+    parser.add_argument("--max-num-seqs", type=int, default=128)
+    parser.add_argument("--allowed-local-media-path", type=str, default="/")
+    parser.add_argument("--encoder-gpu-memory-utilization", type=float, default=0.01)
+    parser.add_argument("--prefill-gpu-memory-utilization", type=float, default=0.7)
+    parser.add_argument("--decode-gpu-memory-utilization", type=float, default=0.7)
+    parser.add_argument("--pd-gpu-memory-utilization", type=float, default=0.7)
     parser.add_argument("--prefiller-hosts", type=str, nargs="+", default=[])
     parser.add_argument("--prefiller-ports", type=int, nargs="+", default=[])
     parser.add_argument("--decoder-hosts", type=str, nargs="+", default=[])
@@ -298,6 +406,18 @@ def parse_args():
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
     )
+    parser.add_argument(
+        "--max-waiting-retries",
+        type=int,
+        default=200,
+        help="Maximum number of retries for waiting nodes to be started",
+    )
+    parser.add_argument(
+        "--waiting-retry-interval",
+        type=float,
+        default=2,
+        help="Check interval (seconds) for waiting nodes to be started",
+    )
     args = parser.parse_args()
     if len(args.pd_hosts) != len(args.pd_ports):
         raise ValueError("Number of pd hosts must match number of pd ports")
@@ -307,6 +427,11 @@ def parse_args():
         raise ValueError("Number of decoder hosts must match number of decoder ports")
     if len(args.encoder_hosts) != len(args.encoder_ports):
         raise ValueError("Number of encoder hosts must match number of encoder ports")
+    if args.deployment_mode is None:
+        args.deployment_mode = DeploymentMode.detect(args)
+        logger.info("Auto-detected deployment mode: %s", args.deployment_mode)
+    else:
+        logger.info("Using specified deployment mode: %s", args.deployment_mode)
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
     args.encoder_instances = list(zip(args.encoder_hosts, args.encoder_ports))
@@ -317,17 +442,27 @@ def parse_args():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy_state
-    proxy_state = ProxyState(
-        global_args.prefiller_instances,
-        global_args.decoder_instances,
-        global_args.encoder_instances,
-        global_args.pd_instances,
-    )
+    global cluster_manager
+
+    cluster_manager = ClusterManager(global_args, InstanceType)
+    mode = global_args.deployment_mode
+    # Start the initial cluster, returns dict: {"encode": [...], "prefill": [...], ...}
+    initial_instances = await cluster_manager.start_initial_cluster(mode)
+    
+    proxy_state = ProxyState([], [], [], [])
+    for type_name in DeploymentMode.ACTIVE_TYPES[mode]:
+      await proxy_state.add_instances(type_name, initial_instances.get(type_name, []))
+
+    monitor_task = asyncio.create_task(cluster_manager.monitor_and_scale(proxy_state, mode))
+
     print(
         f"Initialized {len(proxy_state.encoders)} encode clients, {len(proxy_state.prefillers)} prefill clients \
             and \{len(proxy_state.decoders)} decode clients, {len(proxy_state.pds)} pd clients."
     )
     yield
+
+    monitor_task.cancel()
+
     for e in proxy_state.encoders:
         await e.client.aclose()
     for p in proxy_state.prefillers:
@@ -337,6 +472,9 @@ async def lifespan(app: FastAPI):
     for pd in proxy_state.pds:
         await pd.client.aclose()
 
+    if cluster_manager:
+        for instance in cluster_manager.instances:
+            instance.stop()
 
 async def listen_for_disconnect(request: Request) -> None:
     while True:
@@ -423,7 +561,7 @@ async def send_request_to_encode_service(
             response.raise_for_status()
             return response
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, str(e))
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -452,21 +590,21 @@ async def stream_service_response_with_retry(
                 return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
+                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
+                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", e)
+                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
+                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
+                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                     raise e
 
 
@@ -661,7 +799,7 @@ async def _handle_completions(api: str, request: Request):
                     ):
                         yield chunk
                 except Exception as e:
-                    logger.error("Error during streaming from pd %s: %s", pd.url, e)
+                    logger.error(f"Error during streaming from pd {pd.url}: {str(e)}")
                     proxy_state.abort_pd_request(pd_idx, request_id)
                 finally:
                     proxy_state.release_pd(pd_idx, token_score)
@@ -723,7 +861,7 @@ async def _handle_completions(api: str, request: Request):
                             try:
                                 chunk_str = chunk.decode("utf-8").strip()
                             except UnicodeDecodeError:
-                                logger.debug("Skipping chunk: %s", chunk)
+                                logger.debug(f"Skipping chunk: {chunk}")
                                 yield chunk
                                 continue
                             if not chunk_str:
@@ -734,7 +872,7 @@ async def _handle_completions(api: str, request: Request):
                                 chunk_json = json.loads(chunk_str)
                             except json.JSONDecodeError:
                                 # if chunk is [done], skip it.
-                                logger.debug("Skipping chunk: %s", chunk_str)
+                                logger.debug(f"Skipping chunk: {chunk_str}")
                                 yield chunk
                                 continue
                             choices = chunk_json.get("choices", [])
@@ -773,11 +911,9 @@ async def _handle_completions(api: str, request: Request):
                             yield chunk
                 except Exception as e:
                     logger.error(
-                        "Error during streaming from decoder %s: %s the aborted request %s "
-                        "will be routing to the target prefiller when new request is ready to dispatch to it",
-                        decoder.url,
-                        e,
-                        request_id,
+                        f"Error during streaming from decoder {decoder.url}: {str(e)} "
+                        f"the aborted request {request_id} will be routing to the target "
+                        "prefiller when new request is ready to dispatch to it"
                     )
 
                 # After streaming done, release tokens
@@ -819,43 +955,60 @@ async def healthcheck():
         "pd_instances": len(proxy_state.pds),
     }
 
+def trans_instances(instances: list[str]) -> list[ServerState]:
+    server_list = []
+    for instance in instances:
+        h, p = instance.split(":")
+        server_list.append(ServerState(h, int(p)))
+    return server_list
 
-async def send_request_to_service(
-    client: httpx.AsyncClient,
-    prefiller_id: int,
-    endpoint: str,
-    req_data: dict,
-    request_id: str,
-    max_retries: int = 3,
-    base_delay: float = 0.2,
-):
-    req_data = req_data.copy()
-    req_data["stream"] = False
-    req_data["max_tokens"] = 1
-    req_data["min_tokens"] = 1
-    if "max_completion_tokens" in req_data:
-        req_data["max_completion_tokens"] = 1
-    if "stream_options" in req_data:
-        del req_data["stream_options"]
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = await client.post(endpoint, json=req_data, headers=headers)
-            response.raise_for_status()
-            if request_id in proxy_state.req_id_future:
-                result_future = proxy_state.req_id_future[request_id]
-                result_future.set_result(response.json()["kv_transfer_params"])
-            return
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
-            last_exc = e
-            if attempt < max_retries:
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
-                raise last_exc
 
+async def _handle_adjust_instances(adjust_mode: str, request: Request):
+    try:
+        req_data = await request.json()
+        instance_type = req_data.get("type", "")
+        instances = req_data.get("instances", [])
+        if isinstance(instances, str):
+            instances = [instances]
+        instances = trans_instances(instances)
+        all_msg = f"{adjust_mode} {instance_type} instances: " f"{[str(server) for server in instances]}."
+
+        active_types = DeploymentMode.ACTIVE_TYPES[global_args.deployment_mode]
+        if instance_type not in active_types:
+            return {
+                "error": f"Instance type {instance_type} is not active in mode "
+                         f"{global_args.deployment_mode}"
+            }
+
+        if adjust_mode == "add":
+            added_nodes = await proxy_state.add_instances(instance_type, instances)
+            all_msg = f"{adjust_mode} {instance_type} instances: {added_nodes}."
+        elif adjust_mode == "remove":
+            removed_nodes = await proxy_state.remove_instances(instance_type, instances)
+            all_msg = f"{adjust_mode} {instance_type} instances: {removed_nodes}."
+
+        return {
+            "message": all_msg,
+            "current_encode_instances": [str(encoder) for encoder in proxy_state.encoders],
+            "current_prefill_instances": [str(prefiller) for prefiller in proxy_state.prefillers],
+            "current_decode_instances": [str(decoder) for decoder in proxy_state.decoders],
+            "current_pd_instances": [str(pd) for pd in proxy_state.pds],
+        }
+    except Exception as e:
+        logger.error(f"Failed to {adjust_mode} instances: {e}")
+        raise e
+
+
+@app.post("/instances/add")
+async def handle_add_instances(request: Request):
+    """API endpoint for dynamically adding backend instances."""
+    return await _handle_adjust_instances("add", request)
+
+
+@app.post("/instances/remove")
+async def handle_remove_instances(request: Request):
+    """API endpoint for dynamically removing backend instances."""
+    return await _handle_adjust_instances("remove", request)
 
 @app.post("/v1/metaserver")
 async def metaserver(request: Request):
@@ -867,12 +1020,12 @@ async def metaserver(request: Request):
         req_data, token_score, api = proxy_state.req_data_dict[request_id]
         request_id = get_origin_request_id(api, request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
-        logger.debug("Prefiller score: %s", token_score)
+        logger.debug(f"Prefiller score: {token_score}")
 
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(token_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
-        logger.debug("Using prefill prefiller.url=%r req_data=%r", prefiller.url, req_data)
+        logger.debug(f"Using prefill {prefiller.url=} {req_data=}")
         # Send request to prefiller
         _ = await send_request_to_service(
             prefiller.client,
@@ -887,7 +1040,7 @@ async def metaserver(request: Request):
         proxy_state.release_prefiller_kv(prefiller_idx, token_score)
 
     except Exception as e:
-        logger.error("Post metaserver failed with: %s", e)
+        logger.error(f"Post metaserver failed with: {str(e)}")
         proxy_state.release_prefiller(prefiller_idx, token_score)
         proxy_state.release_prefiller_kv(prefiller_idx, token_score)
 
