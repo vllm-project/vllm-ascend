@@ -30,7 +30,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
-from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
@@ -116,18 +115,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # the production checkpoint). Preserve the checkpoint contract used
         # by the validated v0.26 implementation.
         self.o_norm.eps = config.rms_norm_eps
-        model_config = vllm_config.model_config
-        multimodal_config = model_config.multimodal_config
-        uses_global_inputs_embeds = bool(
-            model_config.enable_prompt_embeds
-            or (
-                is_vl_model(vllm_config)
-                and multimodal_config is not None
-                and (multimodal_config.enable_mm_embeds or multimodal_config.get_limit_per_prompt("image") > 0)
-            )
-        )
-        self.is_vl_first_layer = bool(uses_global_inputs_embeds and parse_layer_idx(prefix) == 0)
-
         # vLLM keeps the checkpoint-compatible FP32 [3C, 1, W] weight, while
         # npu_causal_conv1d_custom consumes an activation-dtype [W, 3C]
         # tensor. Materialize that kernel layout once after weight loading.
@@ -161,10 +148,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            hidden_states.contiguous(),
-            not self.is_vl_first_layer,
-        )
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
             mixed_qkv = self.in_proj_qkvgfab(hidden_states)[0]
