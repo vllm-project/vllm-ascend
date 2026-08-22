@@ -12,6 +12,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
@@ -37,8 +38,19 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
     get_ascend_device_type,
+    npu_stream_switch,
     olora_tp_enable,
 )
+
+
+_DSV4_DSA_OVERLAP_STREAM = None
+
+
+def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
+    global _DSV4_DSA_OVERLAP_STREAM
+    if _DSV4_DSA_OVERLAP_STREAM is None:
+        _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
+    return _DSV4_DSA_OVERLAP_STREAM
 
 
 def hadamard_transform_ref(
@@ -1114,6 +1126,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         self.vllm_config = get_current_vllm_config()
 
+        ascend_config = get_ascend_config()
+        self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+
         # indexer param
         if self.indexer is not None:
             self.indexer_heads: int = self.indexer.n_heads
@@ -1420,7 +1435,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
+        aux_stream = dsv4_dsa_overlap_stream()
+        hs_local_ready_evt = torch.npu.current_stream().record_event()
+        with npu_stream_switch(aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+            torch.npu.current_stream().wait_event(hs_local_ready_evt)
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
 
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
@@ -1435,7 +1454,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = common_attn_metadata.num_prefills > 0
         swa_req_metadata = swa_metadata.req_metadata
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
@@ -1468,8 +1486,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
+        if self.multistream_dsv4_dsa_overlap:
+            torch.npu.current_stream().wait_stream(aux_stream)
+            hidden_states.record_stream(torch.npu.current_stream())
+
         o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
+        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
