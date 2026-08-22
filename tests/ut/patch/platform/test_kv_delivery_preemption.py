@@ -296,6 +296,7 @@ def test_kv_delivery_schedule_body_matches_target_vllm_commit():
     target_source = _target_schedule_source()
     if target_source is None:
         pytest.skip(f"target vLLM commit {_VLLM_BASE_COMMIT} is unavailable")
+    assert target_source is not None
 
     ours = _kv_schedule_body_ast(inspect.getsource(backport.KVDeliveryScheduler.schedule))
     upstream = _kv_schedule_body_ast(target_source)

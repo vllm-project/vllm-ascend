@@ -154,6 +154,7 @@ def test_pinned_release_schedule_reads_mamba_flag_only_for_partial_group_lookup(
     ref = _pinned_release_schedule_source()
     if ref is None:
         pytest.skip("pinned vLLM release schedule is not retrievable")
+    assert ref is not None
     _, src = ref
     tree = ast.parse(src)
     scheduler = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Scheduler")
