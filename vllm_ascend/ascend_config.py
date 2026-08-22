@@ -314,6 +314,19 @@ class AscendConfig:
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
+        # Experimental: enable FULL aclgraph for the draft_model-method
+        # drafter. The drafter consumes R*(K+2) tokens per step (never a
+        # multiple of (K+1)), so this arms a drafter-specific R*(K+2)
+        # capture-size table and K+2-based dispatch instead of the shared
+        # FULL-uniform path. Default off keeps the drafter eager (upstream
+        # PIECEWISE-only semantics).
+        self.draft_model_full_graph = self._get_config_value(
+            additional_config,
+            "draft_model_full_graph",
+            "VLLM_ASCEND_DRAFT_MODEL_FULL_GRAPH",
+            ascend_envs.VLLM_ASCEND_DRAFT_MODEL_FULL_GRAPH,
+        )
+
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
