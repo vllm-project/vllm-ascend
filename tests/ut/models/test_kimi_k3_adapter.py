@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -93,10 +93,12 @@ def test_ascend_kimi_moe_uses_standard_runner_dispatch(monkeypatch):
         config=_make_moe_config(),
         prefix="model.layers.1.block_sparse_moe",
         layer_idx=1,
+        use_sequence_parallel=True,
     )
 
     assert moe.layer_idx == 1
     assert factory.call_args.kwargs["intermediate_size"] == 32
+    assert factory.call_args.kwargs["is_sequence_parallel"] is True
     assert "runner_cls" not in factory.call_args.kwargs
 
 
@@ -254,6 +256,11 @@ def test_kimi_text_model_layer_factory_accepts_prefix_keyword(monkeypatch):
     )
     vllm_config = MagicMock()
     vllm_config.model_config.hf_text_config = config
+    vllm_config.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1,
+        enable_expert_parallel=True,
+        tensor_parallel_size=2,
+    )
     pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=False)
     decoder_layer = nn.Identity()
     decoder_layer_factory = MagicMock(return_value=decoder_layer)
@@ -276,6 +283,7 @@ def test_kimi_text_model_layer_factory_accepts_prefix_keyword(monkeypatch):
         config,
         vllm_config,
         "model.layers.0",
+        use_sequence_parallel=True,
     )
 
 
@@ -305,14 +313,122 @@ def test_ascend_mla_exposes_layer_and_cache_contract():
     layer._k_scale = 1.0
     attention.mla_attn = MagicMock()
     attention.mla_attn.mla_attn = layer
-    attention.mla_attn.is_vl_first_layer = True
 
     assert attention.layer_name == layer.layer_name
     assert attention.impl is layer.impl
     assert attention.kv_cache is layer.kv_cache
     assert attention.kv_cache_dtype == layer.kv_cache_dtype
     assert attention._k_scale == layer._k_scale
-    assert attention.is_vl_first_layer is True
+
+
+def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
+    layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
+    nn.Module.__init__(layer)
+    layer.use_sequence_parallel = True
+    layer.prev_valid_blocks = 0
+    layer.is_block_write_layer = False
+    layer.input_layernorm = nn.Identity()
+    layer.post_attention_layernorm = nn.Identity()
+    layer.mlp = nn.Identity()
+    layer.self_attention_res_proj = object()
+    layer.self_attention_res_norm = object()
+    layer.mlp_res_proj = object()
+    layer.mlp_res_norm = object()
+    layer._run_self_attn = MethodType(
+        lambda self, positions, hidden_states: hidden_states,
+        layer,
+    )
+
+    collective_shapes = []
+
+    def fake_all_gather(hidden_states):
+        collective_shapes.append(("gather", hidden_states.shape))
+        return torch.cat((hidden_states, hidden_states), dim=0)
+
+    def fake_reduce_scatter(hidden_states):
+        collective_shapes.append(("reduce_scatter", hidden_states.shape))
+        return hidden_states.chunk(2, dim=0)[0]
+
+    monkeypatch.setattr(kimi_k3, "sp_all_gather", fake_all_gather)
+    monkeypatch.setattr(kimi_k3, "sp_reduce_scatter", fake_reduce_scatter)
+    monkeypatch.setattr(
+        kimi_k3,
+        "_apply_ascend_attn_res",
+        lambda prefix_sum, *_args, **_kwargs: prefix_sum,
+    )
+
+    hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
+    block_residual = torch.zeros(2, 1, 2)
+    output, returned_residual = layer.forward_attn_residual(
+        positions=torch.arange(3),
+        hidden_states=hidden_states,
+        block_residual=block_residual,
+    )
+
+    assert collective_shapes == [
+        ("gather", torch.Size([2, 2])),
+        ("reduce_scatter", torch.Size([3, 2])),
+    ]
+    assert output.shape == torch.Size([2, 2])
+    assert returned_residual.shape == torch.Size([2, 1, 2])
+
+
+def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
+    class RecordingLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.residual_shape = None
+
+        def forward(self, *, positions, hidden_states, residual):
+            self.residual_shape = residual.shape
+            return hidden_states, residual
+
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(attn_res_block_size=12)
+    model.start_layer = 0
+    model.end_layer = 1
+    layer = RecordingLayer()
+    model.layers = nn.ModuleList([layer])
+    model.use_sequence_parallel = True
+    model.aux_hidden_state_layers = set()
+    model.output_attn_res_proj = object()
+    model.output_attn_res_norm = object()
+    model._maybe_add_hidden_state = MethodType(
+        lambda self, states, *_args: states,
+        model,
+    )
+
+    monkeypatch.setattr(
+        kimi_k3,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        kimi_k3,
+        "sp_shard",
+        lambda hidden_states: torch.nn.functional.pad(hidden_states, (0, 0, 0, 1))[:2],
+    )
+    monkeypatch.setattr(
+        kimi_k3,
+        "sp_all_gather",
+        lambda hidden_states: torch.cat((hidden_states, hidden_states), dim=0),
+    )
+    monkeypatch.setattr(
+        kimi_k3,
+        "_apply_ascend_attn_res",
+        lambda hidden_states, *_args, **_kwargs: hidden_states,
+    )
+
+    output = model(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=None,
+        inputs_embeds=torch.arange(6, dtype=torch.float32).view(3, 2),
+    )
+
+    assert layer.residual_shape == torch.Size([2, 1, 2])
+    assert output.shape == torch.Size([3, 2])
 
 
 def test_dspark_configures_upstream_mla_without_rebuilding(monkeypatch):
