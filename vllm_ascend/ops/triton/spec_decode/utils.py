@@ -94,6 +94,12 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    KV_CACHE_BLOCK_SIZE: tl.constexpr = 0,
+    BLOCKS_PER_KV_BLOCK: tl.constexpr = 1,
+    TOTAL_CP_WORLD_SIZE: tl.constexpr = 1,
+    TOTAL_CP_RANK: tl.constexpr = 0,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr = 1,
+    PAD_ID: tl.constexpr = -1,
 ):
     for req_idx in range(0, batch_size):
         ctx_start = tl.load(query_start_loc_ptr + req_idx)
@@ -126,9 +132,30 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
             tl.store(out_query_positions_ptr + query_out_idx, query_pos)
 
             query_cache_pos = effective_seq_len + q_idx
-            block_num_q = query_cache_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
-            slot_q = block_id_q * block_size + (query_cache_pos % block_size)
+            if KV_CACHE_BLOCK_SIZE > 0:
+                virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
+            else:
+                # Preserve the old DFlash call contract: callers which omit
+                # the DCP/hybrid constants use one logical block per physical
+                # block and a single CP rank.
+                virtual_block_size = block_size * TOTAL_CP_WORLD_SIZE
+            virtual_block_idx = query_cache_pos // virtual_block_size
+            virtual_block_offset = query_cache_pos - virtual_block_idx * virtual_block_size
+            is_local = (virtual_block_offset // CP_KV_CACHE_INTERLEAVE_SIZE) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
+            local_block_offset = (
+                virtual_block_offset
+                // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+                * CP_KV_CACHE_INTERLEAVE_SIZE
+                + virtual_block_offset % CP_KV_CACHE_INTERLEAVE_SIZE
+            )
+            block_num_q = virtual_block_idx * BLOCKS_PER_KV_BLOCK + local_block_offset // block_size
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_num_q,
+                mask=is_local,
+                other=0,
+            ).to(tl.int64)
+            slot_q = block_id_q * block_size + (local_block_offset % block_size)
+            slot_q = tl.where(is_local, slot_q, PAD_ID)
             tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
 
             if q_idx == 0:

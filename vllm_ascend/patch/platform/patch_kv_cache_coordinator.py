@@ -333,6 +333,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                         else effective_block_size
                     )
                     _max_length = min(curr_hit_length + eagle_margin, max_cache_hit_length)
+                # Full/MLA attention KV is sharded across DCP ranks, while
+                # Mamba recurrent state is replicated on every rank. Keep the
+                # Mamba lookup local so its physical block size is not scaled
+                # by DCP (matching upstream hybrid-DCP coordinator semantics).
+                lookup_dcp_world_size = 1 if isinstance(spec, MambaSpec) else self.dcp_world_size
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
                 hit_result = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
@@ -342,7 +347,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     **eagle_kwarg,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=lookup_dcp_world_size,
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result

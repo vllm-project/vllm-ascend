@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -58,6 +58,14 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "model runner; use greedy (the default) instead."
             )
         super().__init__(vllm_config, device, runner=runner)
+        # The shared DFlash/DSpark input kernel needs the same DCP layout
+        # constants as BlockTable when it computes slots for the draft query
+        # block. Keep safe single-rank defaults for lightweight tests and for
+        # callers which do not configure DCP.
+        self.dcp_size = int(getattr(self, "dcp_size", getattr(runner, "dcp_size", 1)))
+        self.dcp_rank = int(getattr(runner, "dcp_rank", 0))
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        self.cp_kv_cache_interleave_size = int(getattr(parallel_config, "cp_kv_cache_interleave_size", 1))
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
@@ -271,6 +279,35 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_prefill_reqs=0,
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
+        # DCP needs the target pass' B-element sampling indices, not the B*K
+        # indices generated below for the parallel draft block. Register the
+        # long-sequence metadata before replacing that tensor and return the
+        # manager's arguments to the common speculative decode flow.
+        long_seq_args = None
+        runner = getattr(self, "runner", None)
+        dcp_manager = getattr(runner, "dcp_manager", None)
+        if dcp_manager is not None:
+            if token_indices_to_sample is None:
+                token_indices_to_sample = cad.query_start_loc[1:] - 1
+            first_pass_inputs = dcp_manager.prepare_spec_decode_first_pass_inputs(
+                input_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                common_attn_metadata=cad,
+                long_seq_metadata=long_seq_metadata,
+                req_scheduled_tokens=req_scheduled_tokens,
+                req_ids=runner.input_batch.req_ids,
+                logits_indices=runner.logits_indices,
+                num_tokens=target_token_ids.shape[0],
+                num_prefill_reqs=num_prefill_reqs,
+                num_decode_reqs=num_decode_reqs,
+                uses_mrope=self.uses_mrope,
+            )
+            target_positions = first_pass_inputs.target_positions
+            target_hidden_states = first_pass_inputs.target_hidden_states
+            long_seq_args = first_pass_inputs.long_seq_args
+
         # The initial input token of markovHead is the next token
         n = next_token_ids.shape[0]
         self._dspark_seed_buffer[:n].copy_(next_token_ids)
@@ -304,6 +341,14 @@ class AscendDSparkProposer(AscendDflashProposer):
             if gid_block_table is None:
                 continue
             kernel_block_size = self._per_group_kernel_block_sizes[gid]
+            physical_block_size = int(attn_group.kv_cache_spec.block_size)
+            if kernel_block_size <= 0 or physical_block_size % kernel_block_size != 0:
+                raise ValueError(
+                    "DSpark query slot mapping requires the KV cache physical "
+                    f"block size ({physical_block_size}) to be divisible by "
+                    f"the attention kernel block size ({kernel_block_size}) "
+                    f"for KV cache group {gid}."
+                )
             copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,
@@ -332,6 +377,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                 batch_size=batch_size,
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                KV_CACHE_BLOCK_SIZE=physical_block_size,
+                BLOCKS_PER_KV_BLOCK=physical_block_size // kernel_block_size,
+                TOTAL_CP_WORLD_SIZE=self.dcp_size,
+                TOTAL_CP_RANK=self.dcp_rank,
+                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+                PAD_ID=PAD_SLOT_ID,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
@@ -367,7 +418,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
 
     @torch.inference_mode()
     def dummy_run(

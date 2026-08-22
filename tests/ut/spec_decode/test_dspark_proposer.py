@@ -31,6 +31,9 @@ from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid as input_expansion_kernel,
+)
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -42,6 +45,40 @@ _NUM_SPECULATIVE_TOKENS = 3
 _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
+
+
+class _FakeTritonScalar(int):
+    def to(self, _dtype):
+        return self
+
+
+class _FakeTritonPointer:
+    def __init__(self, values: list[int], index: int = 0):
+        self.values = values
+        self.index = index
+
+    def __add__(self, offset: int):
+        return _FakeTritonPointer(self.values, self.index + int(offset))
+
+    def __sub__(self, offset: int):
+        return _FakeTritonPointer(self.values, self.index - int(offset))
+
+
+class _FakeTritonLanguage:
+    int64 = int
+
+    @staticmethod
+    def load(pointer: _FakeTritonPointer, mask=True, other=0):
+        return _FakeTritonScalar(pointer.values[pointer.index] if mask else other)
+
+    @staticmethod
+    def store(pointer: _FakeTritonPointer, value, mask=True):
+        if mask:
+            pointer.values[pointer.index] = int(value)
+
+    @staticmethod
+    def where(condition, true_value, false_value):
+        return true_value if condition else false_value
 
 
 class _DSparkProposerTestBase:
@@ -137,6 +174,8 @@ class _DSparkProposerTestBase:
         context=None,
         num_rejected=None,
         with_optional_attrs=False,
+        token_indices_to_sample=None,
+        long_seq_metadata=None,
     ):
         """Drive ``set_inputs_first_pass`` with a configurable cad.
 
@@ -167,9 +206,10 @@ class _DSparkProposerTestBase:
             next_token_ids=next_token_ids,
             target_positions=torch.zeros(num_reqs, dtype=torch.int32),
             target_hidden_states=target_hidden_states,
-            token_indices_to_sample=None,
+            token_indices_to_sample=token_indices_to_sample,
             cad=cad,
             num_rejected_tokens_gpu=num_rejected,
+            long_seq_metadata=long_seq_metadata,
         )
         return num_query_total, token_indices, cad, extra, next_token_ids, target_hidden_states
 
@@ -634,6 +674,175 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
         assert kwargs["block_size"] == 128
 
+    def test_query_slot_kernel_uses_hybrid_dcp_layout(self):
+        num_reqs, num_speculative_tokens, max_num_tokens = 1, 7, 32
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=num_speculative_tokens,
+        )
+        proposer.draft_attn_groups[0].kv_cache_spec.block_size = 384
+        proposer._per_group_kernel_block_sizes[0] = 128
+        proposer.dcp_size = 2
+        proposer.dcp_rank = 1
+        proposer.cp_kv_cache_interleave_size = 2
+
+        self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=num_speculative_tokens,
+            seq_len=720,
+        )
+
+        kernel = dspark_proposer_module.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["block_size"] == 128
+        assert kwargs["KV_CACHE_BLOCK_SIZE"] == 384
+        assert kwargs["BLOCKS_PER_KV_BLOCK"] == 3
+        assert kwargs["TOTAL_CP_WORLD_SIZE"] == 2
+        assert kwargs["TOTAL_CP_RANK"] == 1
+        assert kwargs["CP_KV_CACHE_INTERLEAVE_SIZE"] == 2
+        assert kwargs["PAD_ID"] == -1
+
+    def test_query_slot_kernel_maps_hybrid_dcp_owner_and_boundary(self, monkeypatch):
+        kernel_fn = getattr(input_expansion_kernel, "fn", input_expansion_kernel)
+        monkeypatch.setitem(kernel_fn.__globals__, "tl", _FakeTritonLanguage)
+
+        out_input_ids = [0] * 7
+        out_context_positions = [0]
+        out_query_positions = [0] * 7
+        out_context_slots = [0]
+        out_query_slots = [0] * 7
+        out_sample_indices = [0] * 7
+        kernel_fn(
+            next_token_ids_ptr=_FakeTritonPointer([42]),
+            target_positions_ptr=_FakeTritonPointer([507]),
+            context_slot_mapping_ptr=_FakeTritonPointer([99]),
+            out_input_ids_ptr=_FakeTritonPointer(out_input_ids),
+            out_context_positions_ptr=_FakeTritonPointer(out_context_positions),
+            out_query_positions_ptr=_FakeTritonPointer(out_query_positions),
+            out_context_slot_mapping_ptr=_FakeTritonPointer(out_context_slots),
+            out_query_slot_mapping_ptr=_FakeTritonPointer(out_query_slots),
+            out_token_indices_ptr=_FakeTritonPointer(out_sample_indices),
+            block_table_ptr=_FakeTritonPointer([10, 11, 12, 20, 21, 22]),
+            block_table_stride=6,
+            query_start_loc_ptr=_FakeTritonPointer([0, 1]),
+            seq_lens_ptr=_FakeTritonPointer([508]),
+            num_rejected_tokens_ptr=_FakeTritonPointer([0]),
+            parallel_drafting_token_id=123,
+            block_size=128,
+            num_query_per_req=7,
+            num_speculative_tokens=7,
+            total_input_tokens=1,
+            batch_size=1,
+            HAS_NUM_REJECTED=False,
+            SAMPLE_FROM_ANCHOR=True,
+            KV_CACHE_BLOCK_SIZE=384,
+            BLOCKS_PER_KV_BLOCK=3,
+            TOTAL_CP_WORLD_SIZE=2,
+            TOTAL_CP_RANK=1,
+            CP_KV_CACHE_INTERLEAVE_SIZE=2,
+            PAD_ID=-1,
+        )
+
+        assert out_context_positions == [507]
+        assert out_context_slots == [99]
+        assert out_query_positions == [508, 509, 510, 511, 512, 513, 514]
+        # Rank 1 owns interleaved pairs 510/511 and 514/515. Position 514
+        # crosses from logical sub-block 1 to sub-block 2 of physical page 0.
+        assert out_query_slots == [-1, -1, 1534, 1535, -1, -1, 1536]
+        assert out_input_ids == [42, 123, 123, 123, 123, 123, 123]
+        assert out_sample_indices == list(range(7))
+
+    def test_shared_kernel_keeps_dflash_single_rank_defaults(self, monkeypatch):
+        kernel_fn = getattr(input_expansion_kernel, "fn", input_expansion_kernel)
+        params = inspect.signature(kernel_fn).parameters
+        assert params["KV_CACHE_BLOCK_SIZE"].default == 0
+        assert params["BLOCKS_PER_KV_BLOCK"].default == 1
+        assert params["TOTAL_CP_WORLD_SIZE"].default == 1
+        assert params["TOTAL_CP_RANK"].default == 0
+        assert params["CP_KV_CACHE_INTERLEAVE_SIZE"].default == 1
+        assert params["PAD_ID"].default == -1
+
+        # DFlash intentionally omits the new arguments. The defaults above
+        # reduce the virtual/hybrid formula to its original slot calculation.
+        dflash_source = inspect.getsource(AscendDflashProposer.set_inputs_first_pass)
+        assert "KV_CACHE_BLOCK_SIZE" not in dflash_source
+
+        monkeypatch.setitem(kernel_fn.__globals__, "tl", _FakeTritonLanguage)
+        out_query_slots = [0]
+        kernel_fn(
+            next_token_ids_ptr=_FakeTritonPointer([42]),
+            target_positions_ptr=_FakeTritonPointer([129]),
+            context_slot_mapping_ptr=_FakeTritonPointer([99]),
+            out_input_ids_ptr=_FakeTritonPointer([0]),
+            out_context_positions_ptr=_FakeTritonPointer([0]),
+            out_query_positions_ptr=_FakeTritonPointer([0]),
+            out_context_slot_mapping_ptr=_FakeTritonPointer([0]),
+            out_query_slot_mapping_ptr=_FakeTritonPointer(out_query_slots),
+            out_token_indices_ptr=_FakeTritonPointer([0]),
+            block_table_ptr=_FakeTritonPointer([7, 8]),
+            block_table_stride=2,
+            query_start_loc_ptr=_FakeTritonPointer([0, 1]),
+            seq_lens_ptr=_FakeTritonPointer([130]),
+            num_rejected_tokens_ptr=_FakeTritonPointer([0]),
+            parallel_drafting_token_id=123,
+            block_size=128,
+            num_query_per_req=1,
+            num_speculative_tokens=1,
+            total_input_tokens=1,
+            batch_size=1,
+        )
+        assert out_query_slots == [8 * 128 + 2]
+
+    def test_dcp_first_pass_preserves_target_sample_indices(self):
+        num_reqs, block_size, max_num_tokens = 2, 5, 64
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+        )
+        proposer.uses_mrope = False
+        dcp_manager = MagicMock()
+        long_seq_metadata = object()
+        expected_target_indices = torch.tensor([4, 9], dtype=torch.int32)
+        decode_query_lens = torch.tensor([1, 1], dtype=torch.int32)
+
+        def prepare_first_pass_inputs(**kwargs):
+            assert torch.equal(
+                kwargs["token_indices_to_sample"],
+                expected_target_indices,
+            )
+            kwargs["common_attn_metadata"].context_parallel_metadata = kwargs["long_seq_metadata"]
+            return SimpleNamespace(
+                target_positions=kwargs["target_positions"],
+                target_hidden_states=kwargs["target_hidden_states"],
+                long_seq_args=(
+                    decode_query_lens,
+                    kwargs["token_indices_to_sample"].clone(),
+                ),
+            )
+
+        dcp_manager.prepare_spec_decode_first_pass_inputs.side_effect = prepare_first_pass_inputs
+        proposer.runner = SimpleNamespace(
+            dcp_manager=dcp_manager,
+            input_batch=SimpleNamespace(req_ids=["r0", "r1"]),
+            logits_indices=torch.tensor([0, 1], dtype=torch.int32),
+        )
+
+        _, draft_sample_indices, cad, long_seq_args, *_ = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            token_indices_to_sample=None,
+            long_seq_metadata=long_seq_metadata,
+        )
+
+        assert draft_sample_indices.shape == (num_reqs * block_size,)
+        assert torch.equal(long_seq_args[0], decode_query_lens)
+        assert torch.equal(long_seq_args[1], expected_target_indices)
+        assert cad.context_parallel_metadata is long_seq_metadata
+
     def test_cad_rewritten_to_cross_attention_shape(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         proposer = self._make_proposer(
@@ -740,6 +949,91 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         assert kwargs["HAS_NUM_REJECTED"] is True
         assert kwargs["num_rejected_tokens_ptr"] is rejected
         assert kwargs["SAMPLE_FROM_ANCHOR"] is True
+
+
+class TestBuildDraftAttnMetadataDCP(_DSparkProposerTestBase):
+    def test_parallel_draft_uses_exact_device_lengths_and_no_causal_mask(self):
+        proposer = self._make_proposer(
+            max_num_tokens=32,
+            num_reqs=2,
+            block_size=3,
+        )
+        proposer.method = "dspark"
+        proposer.use_compress = False
+
+        events = []
+        dcp_manager = MagicMock()
+        generated_mask = object()
+
+        def prepare_cp_metadata(**kwargs):
+            events.append("prepare")
+            # Emulate the generic helper returning freshly prepared nested CP
+            # metadata. The non-causal DSpark path must clear this before the
+            # attention builder observes it.
+            kwargs["common_attn_metadata"].context_parallel_metadata.dcp_mtp_attn_mask = generated_mask
+
+        def update_cp_metadata(**kwargs):
+            del kwargs
+            events.append("update")
+
+        dcp_manager.prepare_spec_decode_drafting_cp_metadata.side_effect = prepare_cp_metadata
+        dcp_manager.update_spec_decode_drafting_cp_metadata.side_effect = update_cp_metadata
+        proposer.runner = SimpleNamespace(dcp_manager=dcp_manager)
+
+        original_mask = object()
+        original_cp_metadata = SimpleNamespace(
+            draft_base_seq_lens=None,
+            dcp_mtp_attn_mask=original_mask,
+        )
+        common_attn_metadata = SimpleNamespace(
+            num_reqs=2,
+            seq_lens=torch.tensor([103, 205], dtype=torch.int32),
+            causal=False,
+            context_parallel_metadata=original_cp_metadata,
+        )
+
+        built_metadata = SimpleNamespace(causal=False, attn_mask=object())
+        captured_common = {}
+        builder = MagicMock()
+
+        def build_for_drafting(common, draft_index, **kwargs):
+            del kwargs
+            events.append("build")
+            captured_common["value"] = common
+            assert draft_index == 1
+            assert common.context_parallel_metadata.dcp_mtp_attn_mask is None
+            return built_metadata
+
+        builder.build_for_drafting.side_effect = build_for_drafting
+        proposer.draft_attn_groups[0].get_metadata_builder = lambda: builder
+
+        multi_step_metadata, returned_metadata = proposer.build_draft_attn_metadata(
+            common_attn_metadata,
+            num_input_tokens=6,
+            num_actual_tokens=6,
+        )
+
+        expected_base = torch.tensor([100, 202], dtype=torch.int32)
+        prepare_kwargs = dcp_manager.prepare_spec_decode_drafting_cp_metadata.call_args.kwargs
+        assert torch.equal(prepare_kwargs["seq_lens"], expected_base)
+        assert prepare_kwargs["draft_index"] == 2
+        assert prepare_kwargs["seq_lens_cpu"] is None
+        assert torch.equal(
+            captured_common["value"].context_parallel_metadata.draft_base_seq_lens,
+            expected_base,
+        )
+
+        update_kwargs = dcp_manager.update_spec_decode_drafting_cp_metadata.call_args.kwargs
+        assert torch.equal(update_kwargs["seq_lens"], expected_base)
+        assert update_kwargs["draft_index"] == 2
+        assert update_kwargs["seq_lens_cpu"] is None
+        assert update_kwargs["attn_metadata_builder"] is builder
+        assert events == ["prepare", "build", "update"]
+        assert original_cp_metadata.draft_base_seq_lens is None
+        assert original_cp_metadata.dcp_mtp_attn_mask is original_mask
+        assert returned_metadata is built_metadata
+        assert multi_step_metadata[0]["L0"] is built_metadata
+        assert built_metadata.attn_mask is None
 
 
 class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):

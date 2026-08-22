@@ -26,6 +26,10 @@ from typing import Any, ClassVar
 from transformers.configuration_utils import PretrainedConfig
 from vllm.logger import logger
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.transformers_utils.model_arch_config_convertor import (
+    MODEL_ARCH_CONFIG_CONVERTORS,
+    ModelArchConfigConvertorBase,
+)
 
 K3_DSPARK_HIDDEN_ACT = "silu"
 K3_DSPARK_MAX_POSITION_EMBEDDINGS = 32768
@@ -88,6 +92,13 @@ class K3DSparkConfig(PretrainedConfig):
     target_hidden_size: int
     v_head_dim: int
     vocab_size: int
+
+
+class K3DSparkModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    """Resolve the standalone K3 draft as an MLA architecture."""
+
+    def is_deepseek_mla(self) -> bool:
+        return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
 
 
 class KimiK3VisionConfig(PretrainedConfig):
@@ -249,4 +260,5 @@ def register_k3_dspark_config() -> None:
     from vllm.transformers_utils import config as vllm_config_module
 
     vllm_config_module._CONFIG_REGISTRY["k3_dspark"] = K3DSparkConfig
+    MODEL_ARCH_CONFIG_CONVERTORS["k3_dspark"] = K3DSparkModelArchConfigConvertor
     AutoConfig.register("k3_dspark", K3DSparkConfig, exist_ok=True)

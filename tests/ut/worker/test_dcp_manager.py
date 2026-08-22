@@ -231,6 +231,56 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
     )
 
 
+def test_prepare_noncausal_mla_drafting_metadata_skips_mtp_mask() -> None:
+    manager = object.__new__(DCPManager)
+    manager.dcp_world_rank = 1
+    manager.speculative_config = object()
+    local_seq_lens = torch.tensor([[52, 51], [103, 102]], dtype=torch.int32)
+    manager._get_dcp_local_seq_lens = MagicMock(return_value=local_seq_lens)
+    manager.generate_mtp_attention_mask_for_decode = MagicMock()
+    manager.dcp_mtp_attn_mask = MagicMock()
+
+    original_mask = torch.ones((2, 3, 8), dtype=torch.bool)
+    exact_base_seq_lens = torch.tensor([100, 202], dtype=torch.int32)
+    original_dcp_metadata = AscendDCPMetadata(
+        num_computed_tokens_of_dcp=[[50, 50], [101, 101]],
+        query_lens_cpu=torch.tensor([1, 1], dtype=torch.int32),
+        max_query_len=1,
+        dcp_mtp_attn_mask=original_mask,
+        draft_base_seq_lens=exact_base_seq_lens,
+    )
+    common_attn_metadata = SimpleNamespace(
+        context_parallel_metadata=original_dcp_metadata,
+        query_start_loc_cpu=torch.tensor([0, 3, 6], dtype=torch.int32),
+        is_prefilling=torch.tensor([False, False]),
+        causal=False,
+    )
+
+    with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True):
+        manager.prepare_spec_decode_drafting_cp_metadata(
+            common_attn_metadata=common_attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=exact_base_seq_lens,
+            seq_lens_cpu=None,
+            draft_index=2,
+        )
+
+    draft_dcp_metadata = common_attn_metadata.context_parallel_metadata
+    assert draft_dcp_metadata is not original_dcp_metadata
+    assert torch.equal(
+        manager._get_dcp_local_seq_lens.call_args.args[0],
+        torch.tensor([103, 205], dtype=torch.int32),
+    )
+    assert torch.equal(
+        draft_dcp_metadata.draft_cp_seq_len,
+        torch.tensor([51, 102], dtype=torch.int32),
+    )
+    assert draft_dcp_metadata.dcp_mtp_attn_mask is None
+    manager.generate_mtp_attention_mask_for_decode.assert_not_called()
+    manager.dcp_mtp_attn_mask.copy_to_gpu.assert_not_called()
+    assert original_dcp_metadata.dcp_mtp_attn_mask is original_mask
+
+
 def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:
     manager = object.__new__(DCPManager)
     attn_metadata = SimpleNamespace(decode=None)

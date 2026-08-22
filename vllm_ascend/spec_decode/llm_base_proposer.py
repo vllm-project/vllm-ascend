@@ -2393,6 +2393,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
+        dcp_manager = getattr(getattr(self, "runner", None), "dcp_manager", None)
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
@@ -2406,16 +2407,61 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             if self.method == "dspark":
                 gid = attn_group.kv_cache_group_id
-                common_attn_metadata = copy.copy(common_attn_metadata)
+                draft_common_attn_metadata = copy.copy(common_attn_metadata)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
                 if block_table is not None:
-                    common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
+                    draft_common_attn_metadata.block_table_tensor = block_table[: draft_common_attn_metadata.num_reqs]
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
-                    common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                    draft_common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+
+                # A parallel DSpark pass writes the complete query block in
+                # one model invocation. Build DCP metadata for the final KV
+                # length directly from the reject-corrected device seq_lens
+                # produced by set_inputs_first_pass. In particular, do not
+                # reuse the optimistic CPU mirrors used by async FIA.
+                dcp_draft_index = self.num_query_per_req - 1
+                draft_base_seq_lens = None
+                if dcp_manager is not None:
+                    num_reqs = draft_common_attn_metadata.num_reqs
+                    final_seq_lens = draft_common_attn_metadata.seq_lens[:num_reqs]
+                    draft_base_seq_lens = final_seq_lens - self.num_query_per_req
+                    dcp_metadata = draft_common_attn_metadata.context_parallel_metadata
+                    assert dcp_metadata is not None, (
+                        "DCP metadata must be populated before building DSpark parallel draft attention metadata."
+                    )
+                    dcp_metadata = copy.copy(dcp_metadata)
+                    dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
+                    draft_common_attn_metadata.context_parallel_metadata = dcp_metadata
+                    dcp_manager.prepare_spec_decode_drafting_cp_metadata(
+                        common_attn_metadata=draft_common_attn_metadata,
+                        kv_cache_spec=attn_group.kv_cache_spec,
+                        seq_lens=draft_base_seq_lens,
+                        draft_index=dcp_draft_index,
+                        seq_lens_cpu=None,
+                    )
+
+                    # DSpark's K3 draft block is non-causal cross-attention.
+                    # The generic DCP helper prepares an MTP causal mask for
+                    # MLA speculative decoding, so remove it from the nested
+                    # CP metadata before the backend builder can consume it.
+                    if not draft_common_attn_metadata.causal:
+                        draft_common_attn_metadata.context_parallel_metadata.dcp_mtp_attn_mask = None
                 attn_metadata = builder.build_for_drafting(
-                    common_attn_metadata, draft_index=1, **extra_attn_metadata_args
+                    draft_common_attn_metadata,
+                    draft_index=1,
+                    **extra_attn_metadata_args,
                 )
+                if dcp_manager is not None:
+                    assert draft_base_seq_lens is not None
+                    dcp_manager.update_spec_decode_drafting_cp_metadata(
+                        attn_metadata=attn_metadata,
+                        kv_cache_spec=attn_group.kv_cache_spec,
+                        seq_lens=draft_base_seq_lens,
+                        draft_index=dcp_draft_index,
+                        seq_lens_cpu=None,
+                        attn_metadata_builder=builder,
+                    )
             else:
                 attn_metadata = builder.build(
                     0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args

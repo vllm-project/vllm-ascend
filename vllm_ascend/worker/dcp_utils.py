@@ -539,7 +539,9 @@ class DCPManager:
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
-        if is_mla and getattr(self, "speculative_config", None) is not None:
+        causal = getattr(common_attn_metadata, "causal", True)
+        is_non_causal = isinstance(causal, bool) and not causal
+        if is_mla and getattr(self, "speculative_config", None) is not None and not is_non_causal:
             num_draft_reqs = query_lens_cpu.shape[0]
             draft_histories = (dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
             mask = self.generate_mtp_attention_mask_for_decode(
@@ -550,6 +552,12 @@ class DCPManager:
             self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
             self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
             dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
+        elif is_mla and is_non_causal:
+            # Parallel DSpark uses non-causal cross-attention over its whole
+            # draft query block. Do not synchronize exact device sequence
+            # lengths to the host merely to construct an MTP causal mask that
+            # this path must discard.
+            dcp_metadata.dcp_mtp_attn_mask = None
         common_attn_metadata.context_parallel_metadata = dcp_metadata
 
         if common_attn_metadata.is_prefilling is not None:
