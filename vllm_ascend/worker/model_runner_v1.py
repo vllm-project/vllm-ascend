@@ -120,6 +120,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    get_tq_fused_slot_bytes,
     using_paged_attention,
 )
 
@@ -374,6 +375,7 @@ class NPUModelRunner(GPUModelRunner):
         # dsa c8
         self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
         self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
+        self.enable_sparse_sfa_turboquant = self.ascend_config.enable_sparse_sfa_turboquant
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
@@ -4692,10 +4694,16 @@ class NPUModelRunner(GPUModelRunner):
                         getattr(impl, "enable_sparse_sfa_c8", False)
                     )
                     if cache_sparse_sfa_c8:
-                        head_size = get_sfa_qsfa_packed_head_dim(
-                            self.model_config.hf_text_config.kv_lora_rank,
-                            self.model_config.hf_text_config.qk_rope_head_dim,
-                        )
+                        if self.enable_sparse_sfa_turboquant:
+                            head_size = get_tq_fused_slot_bytes(
+                                self.model_config.hf_text_config.kv_lora_rank,
+                                self.model_config.hf_text_config.qk_rope_head_dim,
+                            )
+                        else:
+                            head_size = get_sfa_qsfa_packed_head_dim(
+                                self.model_config.hf_text_config.kv_lora_rank,
+                                self.model_config.hf_text_config.qk_rope_head_dim,
+                            )
                         dtype = self.c8_k_cache_dtype
                     else:
                         head_size = (

@@ -259,7 +259,16 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        self.enable_sparse_sfa_c8 = additional_config.get("enable_sparse_sfa_c8", False) and use_sparse
+        # TurboQuant 4-bit MLA latent storage, selected with
+        # --kv-cache-dtype turboquant_4bit_nc and translated to this flag by platform.py.
+        self.enable_sparse_sfa_turboquant = additional_config.get("enable_sparse_sfa_turboquant", False) and use_sparse
+        # TQ4 stores its slot in the packed-SFA KV layout, so it turns that layout on
+        # here rather than downstream: the KV-cache spec, memory profiling and the SFA
+        # impl all read enable_sparse_sfa_c8 and must agree. The lightning-indexer C8
+        # stays independent -- TQ4 keeps a bf16 indexer unless separately enabled.
+        self.enable_sparse_sfa_c8 = (
+            additional_config.get("enable_sparse_sfa_c8", False) or self.enable_sparse_sfa_turboquant
+        ) and use_sparse
         self.enable_sparse_li_c8 = additional_config.get("enable_sparse_li_c8", False) and use_sparse
         self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and additional_config.get(
             "c8_enable_reshape_optim", False

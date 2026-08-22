@@ -367,6 +367,7 @@ class NPUPlatform(Platform):
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
+        _configure_turboquant_cache(vllm_config)
 
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
@@ -513,6 +514,36 @@ class NPUPlatform(Platform):
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,
         }
+
+
+def _configure_turboquant_cache(vllm_config: VllmConfig) -> None:
+    cache_config = vllm_config.cache_config
+    if cache_config is None or cache_config.cache_dtype != "turboquant_4bit_nc":
+        return
+
+    model_config = vllm_config.model_config
+    if not model_uses_sfa_sparse(model_config):
+        raise ValueError("turboquant_4bit_nc is only supported by SFA sparse models")
+
+    device_type = get_ascend_device_type()
+    if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+        raise ValueError(f"turboquant_4bit_nc is only supported on Ascend A2 and A3, but got {device_type.name}")
+
+    if model_config.dtype != torch.bfloat16:
+        raise ValueError(f"turboquant_4bit_nc requires bfloat16 model dtype, but got {model_config.dtype}")
+
+    hf_text_config = model_config.hf_text_config
+    kv_lora_rank = getattr(hf_text_config, "kv_lora_rank", None)
+    if kv_lora_rank != 512:
+        raise ValueError(f"turboquant_4bit_nc requires kv_lora_rank=512, but got {kv_lora_rank}")
+
+    rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", None)
+    if rope_head_dim != 64:
+        raise ValueError(f"turboquant_4bit_nc requires qk_rope_head_dim=64, but got {rope_head_dim}")
+
+    if vllm_config.additional_config is None:
+        vllm_config.additional_config = {}
+    vllm_config.additional_config["enable_sparse_sfa_turboquant"] = True
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:

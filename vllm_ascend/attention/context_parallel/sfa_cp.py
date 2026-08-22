@@ -11,6 +11,7 @@ from vllm.distributed import get_tp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention import tq_latent_store
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -1124,6 +1125,72 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
         return result
 
+    def _execute_tq_dcp_sfa(
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+    ):
+        # Mirrors AscendSFAImpl for the non-DCP case, and additionally asks for
+        # softmax LSE so decode can merge partial results across CP ranks.
+        dcp_context = attn_metadata.dcp_context
+
+        if self._has_prefill(attn_metadata):
+            # Prefill keeps Q local and attends over the gathered KV, so no LSE.
+            gather_context = dcp_context.gather_context
+            dcp_context.gather_context = None
+            if gather_context is None:
+                self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
+                gather_context = dcp_context.gather_context
+                dcp_context.gather_context = None
+            assert gather_context is not None
+            gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            block_table = dcp_context.kv_gather_block_table
+            assert block_table is not None
+            attn_out, _, _ = self._turboquant_sfa(
+                self._tq_rotate_query(ql_nope, q_pe),
+                gathered_kv_cache[0],
+                topk_indices,
+                block_table,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=3,
+            )
+            return tq_latent_store.had_inv(attn_out, head_dim=self.kv_lora_rank)
+
+        # Decode attends over this rank's KV shard only, so the partial results
+        # are recombined by _merge_dcp_outputs using the LSE.
+        gather_context = dcp_context.gather_context
+        dcp_context.gather_context = None
+        if gather_context is None:
+            gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
+        if self.enable_dsa_cp:
+            actual_seq_lengths_query = attn_metadata.cum_query_lens
+            topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
+        topk_indices = self._remap_sparse_indices(topk_indices)
+        ql_nope, q_pe = self._finish_dcp_gather(gather_context)
+        attn_out, softmax_max, softmax_sum = self._turboquant_sfa(
+            self._tq_rotate_query(ql_nope, q_pe),
+            kv_cache[0],
+            topk_indices,
+            dcp_context.block_table,
+            actual_seq_lengths_query,
+            dcp_context.seq_lens,
+            sparse_mode=0,
+            return_softmax_lse=True,
+        )
+        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+        output_dtype = attn_out.dtype
+        output = self._merge_dcp_outputs(attn_out, softmax_lse, attn_metadata.dsa_cp_context)
+        # The merge runs in Hadamard space, so rotate back once at the end.
+        output = tq_latent_store.had_inv(output, head_dim=self.kv_lora_rank)
+        return output.to(output_dtype)
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -1138,6 +1205,16 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
         dcp_context = attn_metadata.dcp_context
+        if self.enable_sparse_sfa_turboquant:
+            return self._execute_tq_dcp_sfa(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
         if self._has_prefill(attn_metadata):
             gather_context = dcp_context.gather_context
             dcp_context.gather_context = None

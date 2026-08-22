@@ -15,7 +15,12 @@
 
 import torch
 
-from vllm_ascend.attention.utils import filter_chunked_req_indices
+from vllm_ascend.attention.utils import (
+    filter_chunked_req_indices,
+    get_sfa_qsfa_packed_head_dim,
+    get_tq_fused_slot_bytes,
+    get_tq_packed_bytes,
+)
 
 
 def test_filter_chunked_req_indices_empty_mask() -> None:
@@ -34,3 +39,16 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     )
 
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
+
+
+def test_get_tq_packed_bytes_is_half_the_latent() -> None:
+    assert get_tq_packed_bytes(512) == 256
+
+
+def test_get_tq_fused_slot_bytes_layout() -> None:
+    # int4 nope (256) + bf16 rope (64 * 2) + fp16 scale (2).
+    assert get_tq_fused_slot_bytes(512, 64) == 386
+
+
+def test_tq_slot_is_smaller_than_the_c8_slot() -> None:
+    assert get_tq_fused_slot_bytes(512, 64) < get_sfa_qsfa_packed_head_dim(512, 64)
