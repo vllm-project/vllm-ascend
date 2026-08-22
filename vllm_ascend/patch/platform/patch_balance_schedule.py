@@ -120,6 +120,10 @@ class BalanceScheduler(KVDeliveryScheduler):
             include_finished_set,
             log_stats,
         )
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self._use_consumer_partial_group_hits = not bool(
+            kv_transfer_config is not None and kv_transfer_config.is_kv_producer
+        )
         short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
         if short_request_first_config.enabled:
             from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
