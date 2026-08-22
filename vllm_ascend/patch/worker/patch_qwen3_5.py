@@ -38,10 +38,15 @@ from vllm_ascend.utils import is_310p
 _GDN_PATCH_TARGET = _GDNBaseCls
 
 
+def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
+    """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
+    return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
+
+
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
-        if "qwen3_5" in self.config.model_type:
+        if _uses_multimodal_rope(self):
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
