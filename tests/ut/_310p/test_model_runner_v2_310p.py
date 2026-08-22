@@ -7,6 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.sampling_params import SamplingParams
 
 import vllm_ascend._310p.worker.v2.model_runner as model_runner_module
@@ -14,6 +15,7 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend._310p.worker.v2.model_state import Ascend310PModelState
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
+from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
 def _make_vllm_config(**overrides):
@@ -180,6 +182,45 @@ def test_model_state_uses_greedy_sampler() -> None:
     assert model_inputs == {}
     assert isinstance(sampler, Ascend310PSampler)
     assert speculator is None
+
+
+def test_model_state_refreshes_full_graph_seq_lens_buffers() -> None:
+    model_state = object.__new__(Ascend310PModelState)
+    model_state._capture_seq_lens_by_ptr = {}
+    shared_capture_buffer = torch.full((4,), -1, dtype=torch.int32)
+    second_capture_buffer = torch.full((3,), -1, dtype=torch.int32)
+
+    model_state._record_capture_seq_lens(shared_capture_buffer[:2])
+    model_state._record_capture_seq_lens(shared_capture_buffer)
+    model_state._record_capture_seq_lens(second_capture_buffer)
+    model_state._refresh_capture_seq_lens(torch.tensor([17, 9], dtype=torch.int32))
+
+    torch.testing.assert_close(shared_capture_buffer, torch.tensor([17, 9, 0, 0], dtype=torch.int32))
+    torch.testing.assert_close(second_capture_buffer, torch.tensor([17, 9, 0], dtype=torch.int32))
+
+
+def test_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
+    model_state = object.__new__(Ascend310PModelState)
+    capture_seq_lens = torch.full((2,), -1, dtype=torch.int32)
+    model_state._capture_seq_lens_by_ptr = {}
+    capture_batch = SimpleNamespace(seq_lens=capture_seq_lens)
+    input_batch = SimpleNamespace(seq_lens=torch.tensor([11, 12], dtype=torch.int32))
+
+    with patch.object(AscendModelState, "prepare_attn", return_value={}):
+        model_state.prepare_attn(
+            capture_batch,
+            CUDAGraphMode.NONE,
+            (),
+            object(),
+            [],
+            object(),
+            for_capture=True,
+        )
+        model_state.prepare_attn(input_batch, CUDAGraphMode.PIECEWISE, (), object(), [], object())
+        torch.testing.assert_close(capture_seq_lens, torch.full((2,), -1, dtype=torch.int32))
+
+        model_state.prepare_attn(input_batch, CUDAGraphMode.FULL, (), object(), [], object())
+        torch.testing.assert_close(capture_seq_lens, input_batch.seq_lens)
 
 
 def test_aclgraph_query_lens_ignore_padded_request_entries() -> None:
