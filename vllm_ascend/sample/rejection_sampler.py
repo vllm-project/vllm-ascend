@@ -30,6 +30,7 @@ from vllm_ascend.ops.triton.reject_sample import (
     rejection_random_sample_kernel,
     sample_recovered_tokens_kernel,
 )
+from vllm_ascend.sample.logits_processor import ReasoningEosLogitsProcessor
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
 
@@ -144,6 +145,12 @@ class AscendRejectionSampler(RejectionSampler):
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             if isinstance(processor, MinTokensLogitsProcessor):
                 logits = processor.apply_with_spec_decode(logits, metadata.num_draft_tokens)
+            elif isinstance(processor, ReasoningEosLogitsProcessor):
+                logits = processor.apply_with_spec_decode(
+                    logits,
+                    sampling_metadata.spec_token_ids or (),
+                    metadata.num_draft_tokens,
+                )
         holder = sampling_metadata.thinking_budget_state_holder
         if holder is not None and holder.has_tracked_requests():
             logits = holder.apply_to_logits(

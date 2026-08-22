@@ -5,10 +5,12 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.sample.logits_processor import ReasoningEosLogitsProcessor
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
@@ -83,6 +85,48 @@ class AscendSampler(Sampler):
 
     def prepare_sampling(self, top_k):
         self.topk_topp_sampler.prepare_sampling(top_k)
+
+    def apply_logits_processors(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        predict_bonus_token: bool,
+    ) -> torch.Tensor:
+        bad_words_token_ids = sampling_metadata.bad_words_token_ids
+        any_penalties_or_bad_words = bool(bad_words_token_ids) or not sampling_metadata.no_penalties
+        output_token_ids = sampling_metadata.output_token_ids
+        if predict_bonus_token and any_penalties_or_bad_words:
+            output_token_ids = self._combine_outputs_with_spec_tokens(
+                output_token_ids,
+                sampling_metadata.spec_token_ids,
+            )
+
+        if sampling_metadata.allowed_token_ids_mask is not None:
+            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, float("-inf"))
+
+        if bad_words_token_ids:
+            apply_bad_words(logits, bad_words_token_ids, output_token_ids)
+
+        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+            if predict_bonus_token and isinstance(processor, ReasoningEosLogitsProcessor):
+                logits = processor.apply_for_bonus(logits, sampling_metadata.spec_token_ids or ())
+            else:
+                logits = processor.apply(logits)
+
+        logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
+        holder = sampling_metadata.thinking_budget_state_holder
+        if holder is not None and holder.has_tracked_requests():
+            holder.update_state(
+                sampling_metadata.output_token_ids,
+                sampling_metadata.spec_token_ids,
+                repeat_indices=None,
+            )
+            logits = holder.apply_to_logits(
+                logits,
+                predict_bonus_token,
+                sampling_metadata.spec_token_ids,
+            )
+        return logits
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:

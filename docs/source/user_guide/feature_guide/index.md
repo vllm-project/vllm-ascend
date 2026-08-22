@@ -27,6 +27,7 @@ ucm_deployment
 Fine_grained_TP
 layer_sharding
 speculative_decoding
+reasoning_eos_policy
 context_parallel
 weight_prefetch
 sequence_parallelism

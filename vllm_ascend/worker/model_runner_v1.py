@@ -95,7 +95,6 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
-from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -150,6 +149,10 @@ from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
+from vllm_ascend.sample.logits_processor import (
+    build_ascend_logitsprocs,
+    reasoning_eos_policy_enabled,
+)
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -520,7 +523,7 @@ class NPUModelRunner(GPUModelRunner):
             block_sizes=[self.block_size],
             kernel_block_sizes=[[self.cache_config.block_size]],
             is_spec_decode=bool(self.vllm_config.speculative_config),
-            logitsprocs=build_logitsprocs(
+            logitsprocs=build_ascend_logitsprocs(
                 self.vllm_config,
                 self.device,
                 self.pin_memory,
@@ -529,7 +532,8 @@ class NPUModelRunner(GPUModelRunner):
             ),
             logitsprocs_need_output_token_ids=bool(
                 self.vllm_config.model_config.logits_processors
-            ),
+            )
+            or reasoning_eos_policy_enabled(self.vllm_config.reasoning_config),
             is_pooling_model=self.is_pooling_model,
             num_speculative_tokens=(
                 self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
@@ -4530,6 +4534,9 @@ class NPUModelRunner(GPUModelRunner):
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
+                logitsprocs_need_output_token_ids=(
+                    self.input_batch.logitsprocs_need_output_token_ids
+                ),
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens

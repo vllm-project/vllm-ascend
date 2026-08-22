@@ -1,9 +1,14 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessors
 
 from tests.ut.base import TestBase
+from vllm_ascend.sample.logits_processor import ReasoningEosLogitsProcessor
 from vllm_ascend.sample.rejection_sampler import (
+    AscendRejectionSampler,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
@@ -29,6 +34,45 @@ def mock_pin_memory(original_func):
 
 
 class TestAscendRejectionSampler(TestBase):
+    def test_apply_logits_processors_dispatches_reasoning_eos_per_position(self):
+        from vllm_ascend.sample.reasoning_phase import (
+            ReasoningPhaseStateHolder,
+            ReasoningProtocolSpec,
+        )
+
+        processor = object.__new__(ReasoningEosLogitsProcessor)
+        processor.phase_state = ReasoningPhaseStateHolder(ReasoningProtocolSpec((90,), ((91,),)))
+        params = SamplingParams()
+        params.update_from_generation_config({"eos_token_id": 2}, 2)
+        processor.update_state(
+            BatchUpdate(
+                batch_size=1,
+                removed=(),
+                added=((0, params, [], [90]),),
+                moved=(),
+            )
+        )
+        sampling_metadata = SimpleNamespace(
+            no_penalties=True,
+            bad_words_token_ids=None,
+            output_token_ids=[[90]],
+            allowed_token_ids_mask=None,
+            logitsprocs=LogitsProcessors([processor]),
+            thinking_budget_state_holder=None,
+            spec_token_ids=[[8, 91, 9]],
+        )
+        spec_metadata = SimpleNamespace(num_draft_tokens=[3])
+
+        result = AscendRejectionSampler.apply_logits_processors(
+            None,
+            torch.zeros((3, 100)),
+            sampling_metadata,
+            spec_metadata,
+        )
+
+        assert torch.isneginf(result[:2, 2]).all()
+        assert result[2, 2] == 0
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
