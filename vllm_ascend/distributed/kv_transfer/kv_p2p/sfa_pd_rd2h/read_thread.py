@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +26,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+# D advertises a request from the scheduler as soon as its blocks are
+# allocated, but the worker only records the destination when the next forward
+# step calls start_load_kv. P can prefill and send READ_READY inside that gap,
+# so wait for the registration instead of failing the pull.
+DEST_REGISTRATION_TIMEOUT_SECONDS = 120.0
+DEST_REGISTRATION_POLL_SECONDS = 0.005
 
 
 @dataclass
@@ -249,6 +256,7 @@ class MembPullReadThread(threading.Thread):
                                     "MF_META was not received from this P connection before READ_READY_BATCH"
                                 )
                             if read_reqs:
+                                self._await_destinations(entry[0] for entry in read_reqs)
                                 self._do_read_batch(
                                     layer_name,
                                     read_reqs,
@@ -294,6 +302,35 @@ class MembPullReadThread(threading.Thread):
             if sock is not None:
                 sock.close(linger=0)
             ctx.destroy(linger=0)
+
+    def _await_destinations(self, ext_req_ids) -> None:
+        """Block until every request in this batch has its D-side destination.
+
+        Failing instead would abort a pull that is merely early: D itself
+        advertised these requests, so the registration is already on its way
+        from the next forward step. A request that never registers still ends
+        in the same failure, just after the wait.
+        """
+        pending = [
+            ext_id for ext_id in ext_req_ids if ext_id not in self._state.dest_blocks_by_req
+        ]
+        if not pending:
+            return
+        deadline = time.monotonic() + DEST_REGISTRATION_TIMEOUT_SECONDS
+        while not self._stop_event.is_set():
+            pending = [
+                ext_id for ext_id in pending if ext_id not in self._state.dest_blocks_by_req
+            ]
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "MembPull D still has no destination blocks for %s after %.0fs",
+                    pending,
+                    DEST_REGISTRATION_TIMEOUT_SECONDS,
+                )
+                return
+            time.sleep(DEST_REGISTRATION_POLL_SECONDS)
 
     def stop(self, timeout: float = THREAD_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         self._stop_event.set()
