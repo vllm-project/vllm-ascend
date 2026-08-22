@@ -344,6 +344,7 @@ class DeepseekV4MoE(nn.Module):
             # DeepSeek V4: normalize top-k weights, then scale routed output.
             # AITER applies routed_scaling_factor internally.
             routed_scaling_factor=self.routed_scaling_factor,
+            swiglu_limit=self.swiglu_limit,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
