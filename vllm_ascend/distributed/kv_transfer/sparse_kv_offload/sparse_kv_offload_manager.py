@@ -1,5 +1,4 @@
 import contextlib
-import os
 import typing
 from zlib import adler32
 
@@ -28,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.utils import enable_custom_op
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -43,10 +43,30 @@ OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 
 
 _SUBSCRIBED_COMPUTE_STREAMS: set[object] = set()
+_REQUIRED_SPARSE_KV_OFFLOAD_OPS = (
+    "sparse_kv_lru_resident_compact",
+    "sparse_kv_compute_lru_resident_addrs",
+)
 
 
 def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
+
+
+def _require_sparse_kv_offload_ops() -> None:
+    enable_custom_op()
+    ascend_ops = getattr(torch.ops, "_C_ascend", None)
+    missing_ops = [
+        op_name for op_name in _REQUIRED_SPARSE_KV_OFFLOAD_OPS if ascend_ops is None or not hasattr(ascend_ops, op_name)
+    ]
+    if missing_ops:
+        formatted_ops = ", ".join(f"_C_ascend.{op_name}" for op_name in missing_ops)
+        raise RuntimeError(
+            "Sparse KV offload requires native helpers that are only built "
+            "for Atlas A3 (SOC_VERSION=ascend910_93.*), but the following "
+            f"operators are unavailable: {formatted_ops}. Install or rebuild "
+            "vllm-ascend for Atlas A3."
+        )
 
 
 def get_host_device_memory_usage_ratio(kv_cache_specs: dict[str, KVCacheSpec]) -> float:
@@ -313,6 +333,8 @@ class SparseKVOffloadManager:
         kv_cache_config: KVCacheConfig,
         sparse_kv_offload_config: SparseKVOffloadConfig,
     ):
+        _require_sparse_kv_offload_ops()
+
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.sparse_kv_offload_config = sparse_kv_offload_config
@@ -353,8 +375,6 @@ class SparseKVOffloadManager:
         )
         self._npu_runtime = torch_npu.npu
 
-        self._build_cpp()
-
         logger.info(
             "SparseKVOffloadManager start init CPU KV pool with %s "
             "GB dram per dp group, it might be time consuming, please wait.",
@@ -369,44 +389,6 @@ class SparseKVOffloadManager:
         config.scene = offload.Scene.SHARED
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
-
-    def _build_cpp(self):
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        ascend_home = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
-        npu_include_path = os.path.join(ascend_home, "include")
-        npu_lib_path = os.path.join(ascend_home, "lib64")
-        if not os.path.exists(npu_lib_path):
-            npu_lib_path = os.path.join(ascend_home, "lib")
-        torch_npu_path = os.path.dirname(torch_npu.__file__)
-        torch_npu_include = os.path.join(torch_npu_path, "include")
-        torch_npu_lib_path = os.path.join(torch_npu_path, "lib")
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        os.environ["CXX"] = "clang++"
-        os.environ["CC"] = "clang"
-        abs_path = os.path.dirname(os.path.abspath(__file__))
-        src_path = os.path.join(abs_path, "sparse_kv_offload.cpp")
-        logger.info_once(f"Sparse KV offload build cpp utils from src: {src_path}")
-        self.sparse_kv_offload_cpp = torch.utils.cpp_extension.load(
-            name="sparse_kv_offload",
-            sources=[src_path],
-            extra_cflags=[
-                "-O3",
-                "-std=c++20",
-                "-fopenmp",
-                "-march=armv8.2-a+sve+fp16+bf16",
-                "-fPIC",
-                f"-I{npu_include_path}",
-                f"-I{torch_npu_include}",
-            ],
-            extra_ldflags=[
-                "-fopenmp",
-                f"-L{npu_lib_path}",
-                "-lascendcl",
-                f"-L{torch_npu_lib_path}",
-                "-ltorch_npu",
-            ],
-            verbose=True,
-        )
 
     def _infer_group_block_sizes(
         self,
@@ -1014,7 +996,7 @@ class SparseKVOffloadManager:
             num_tokens_buffer,
             layer_id,
         ) = args
-        self.sparse_kv_offload_cpp.lru_resident_compact(
+        torch.ops._C_ascend.sparse_kv_lru_resident_compact(
             lru_req_ids_ptr,
             lru_last_req_ids_ptr,
             lru_topk_indices_ptr,
@@ -1037,7 +1019,7 @@ class SparseKVOffloadManager:
             self.lru_workspace_threads,
             self.lru_workspace_threads,
         )
-        self.sparse_kv_offload_cpp.compute_lru_resident_addrs(
+        torch.ops._C_ascend.sparse_kv_compute_lru_resident_addrs(
             miss_count,
             miss_tokens,
             miss_slots,
