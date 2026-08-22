@@ -15,8 +15,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from dataclasses import dataclass
+
 import torch
 import torch_npu
+from torch import nn
 from vllm.model_executor.layers.activation import (
     QuickGELU,
     SiluAndMul,
@@ -24,6 +27,60 @@ from vllm.model_executor.layers.activation import (
     SwigluOAIAndMul,
     SwigluStepAndMul,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SituActivationConfig:
+    """Runtime parameters for Kimi's SiTU gated activation."""
+
+    beta: float = 1.0
+    linear_beta: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.beta <= 0:
+            raise ValueError(f"SiTU beta must be positive, got {self.beta}.")
+        if self.linear_beta is not None and self.linear_beta <= 0:
+            raise ValueError(f"SiTU linear_beta must be positive, got {self.linear_beta}.")
+
+
+def situ_and_mul(
+    x: torch.Tensor,
+    *,
+    beta: float = 1.0,
+    linear_beta: float | None = None,
+) -> torch.Tensor:
+    """Apply Kimi SiTU with FP32 intermediates and restore the input dtype."""
+    config = SituActivationConfig(beta=beta, linear_beta=linear_beta)
+    if x.shape[-1] % 2 != 0:
+        raise ValueError(f"SiTU expects an even last dimension, got {x.shape[-1]}.")
+
+    gate, up = x.to(torch.float32).chunk(2, dim=-1)
+    gate = config.beta * torch.tanh(gate / config.beta) * torch.sigmoid(gate)
+    if config.linear_beta is not None:
+        up = config.linear_beta * torch.tanh(up / config.linear_beta)
+    return (gate * up).to(x.dtype)
+
+
+class AscendSituAndMul(nn.Module):
+    """Module form of Kimi SiTU used by dense and shared-expert MLPs."""
+
+    def __init__(self, beta: float = 1.0, linear_beta: float | None = None) -> None:
+        super().__init__()
+        self.config = SituActivationConfig(beta=beta, linear_beta=linear_beta)
+
+    @property
+    def beta(self) -> float:
+        return self.config.beta
+
+    @property
+    def linear_beta(self) -> float | None:
+        return self.config.linear_beta
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return situ_and_mul(x, beta=self.beta, linear_beta=self.linear_beta)
+
+    def extra_repr(self) -> str:
+        return f"beta={self.beta}, linear_beta={self.linear_beta}"
 
 
 class AscendQuickGELU(QuickGELU):
