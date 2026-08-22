@@ -156,6 +156,16 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
+        moe_comm_method_for_a5_prefill = additional_config.get("moe_comm_method_for_a5_prefill", None)
+        if moe_comm_method_for_a5_prefill is not None:
+            moe_comm_method_for_a5_prefill = str(moe_comm_method_for_a5_prefill).strip().upper()
+            if moe_comm_method_for_a5_prefill not in ("ALLGATHER", "ALLTOALL"):
+                raise ValueError(
+                    "additional_config.moe_comm_method_for_a5_prefill must be "
+                    "'ALLGATHER', 'ALLTOALL', or unset/None; "
+                    f"got {moe_comm_method_for_a5_prefill!r}"
+                )
+        self.moe_comm_method_for_a5_prefill = moe_comm_method_for_a5_prefill
 
         self.enable_fused_mc2 = self._get_config_value(
             additional_config,

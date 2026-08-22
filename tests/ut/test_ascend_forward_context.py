@@ -14,7 +14,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, moe_comm_method_for_a5_prefill=None),
     )
 
 
@@ -72,6 +72,7 @@ def _patch_select_moe_comm_method_deps(
     enable_fused_mc2: int = 0,
     enable_prefill_mc2: int = 0,
     is_moe: bool = True,
+    moe_comm_method_for_a5_prefill: str | None = None,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
@@ -80,7 +81,11 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2),
+        lambda: SimpleNamespace(
+            enable_fused_mc2=enable_fused_mc2,
+            enable_prefill_mc2=enable_prefill_mc2,
+            moe_comm_method_for_a5_prefill=moe_comm_method_for_a5_prefill,
+        ),
     )
 
 
@@ -389,6 +394,45 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("ALLGATHER", MoECommType.ALLGATHER),
+        ("ALLTOALL", MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_a5_prefill_override(
+    monkeypatch,
+    configured,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        moe_comm_method_for_a5_prefill=configured,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=1)
+
+    assert afc.select_moe_comm_method(129, vllm_config) == expected
+
+
+@pytest.mark.parametrize("configured", ["ALLGATHER", "ALLTOALL"])
+def test_select_moe_comm_method_a5_prefill_override_keeps_decode_mc2(
+    monkeypatch,
+    configured,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        moe_comm_method_for_a5_prefill=configured,
+    )
+    vllm_config = _make_vllm_config(world_size=4, top_k_experts=2)
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.MC2
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):

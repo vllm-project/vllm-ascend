@@ -195,6 +195,7 @@ class TestAscendConfig(TestBase):
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
+        self.assertIsNone(ascend_config.moe_comm_method_for_a5_prefill)
         self.assertFalse(ascend_config.enable_kv_nz)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
@@ -231,6 +232,26 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_normalizes_a5_prefill_comm_method(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "moe_comm_method_for_a5_prefill": " allgather ",
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.moe_comm_method_for_a5_prefill, "ALLGATHER")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_invalid_a5_prefill_comm_method(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "moe_comm_method_for_a5_prefill": "INVALID",
+        }
+        with self.assertRaisesRegex(ValueError, "moe_comm_method_for_a5_prefill"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

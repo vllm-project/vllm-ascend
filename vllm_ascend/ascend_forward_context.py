@@ -264,6 +264,10 @@ def _select_a5_moe_comm_method(
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
+    # The override is applied after the MC2 branch so decode batches keep using
+    # MC2. AscendConfig already validates and normalizes this value.
+    prefill_choice = get_ascend_config().moe_comm_method_for_a5_prefill
+
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
         "num_experts_per_tok",
@@ -272,6 +276,8 @@ def _select_a5_moe_comm_method(
     world_size = vllm_config.parallel_config.world_size_across_dp
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
+    if prefill_choice is not None:
+        return MoECommType[prefill_choice]
     if world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
@@ -290,8 +296,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
        all-to-all.
     5. On 310P, always use all-gather.
     6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+       and the EP size is large enough; otherwise honor
+       moe_comm_method_for_a5_prefill when set, and otherwise use all-gather
+       when EP size is smaller than num of topK experts or all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
