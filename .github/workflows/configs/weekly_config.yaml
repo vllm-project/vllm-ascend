@@ -12,7 +12,7 @@ a2:
     test_config:
       # YAML-driven tests
       - name: Qwen3.8-27B-w8a8-A2
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-a2b3-2
         config_file_path: Qwen3.8-27B-w8a8-A2.yaml
   accuracy:
     # Content migrated from
