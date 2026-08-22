@@ -32,11 +32,17 @@ on:
         required: false
         default: ''
         description: 'Content of recommendations from upstream job output (priority 1)'
-    secrets:
-      OBS_ACCESS_KEY_FAILURE_ANALYSIS:
+      pr_number:
+        type: string
         required: false
-      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS:
+        default: 'unknown'
+        description: 'Pull request number included in the generated report'
+      pr_title:
+        type: string
         required: false
+        default: 'untitled'
+        description: 'Pull request title included in the generated report'
+
 
 defaults:
   run:
@@ -109,8 +115,17 @@ jobs:
         if: steps.locate-recs.outputs.has_recommendations != 'false'
         id: analysis
         continue-on-error: true
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_TITLE: ${{ inputs.pr_title }}
         run: |
-          python3 .github/workflows/scripts/analyze_failure_report.py             --log-dir ./test-logs             --recommendations-file "${RECS_FILE}"             --recommendations-source "${RECS_SOURCE:-none}"             --output ./test-logs/failure_report.md
+          python3 .github/workflows/scripts/analyze_failure_report.py \
+            --log-dir ./test-logs \
+            --recommendations-file "${RECS_FILE}" \
+            --recommendations-source "${RECS_SOURCE:-none}" \
+            --pr-number "${PR_NUMBER}" \
+            --pr-title "${PR_TITLE}" \
+            --output ./test-logs/failure_report.md
 
       # ---- Step 4: Upload report ----
       - name: Upload failure analysis report
