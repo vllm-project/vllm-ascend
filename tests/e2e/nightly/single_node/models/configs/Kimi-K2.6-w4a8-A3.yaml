@@ -15,7 +15,6 @@ test_cases:
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
-      DYNAMIC_EPLB: "true"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -33,6 +32,9 @@ test_cases:
       - "2"
       - "--no-enable-prefix-caching"
       - "--enable-expert-parallel"
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"window_size": 600, "step_interval": 50, "use_async": false}'
       - "--max-num-seqs"
       - "24"
       - "--max-model-len"
@@ -47,7 +49,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"eplb_config": {"dynamic_eplb": true},"ascend_compilation_config": {"enable_static_kernel": false}}'
+      - '{"ascend_compilation_config": {"enable_static_kernel": false}}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
