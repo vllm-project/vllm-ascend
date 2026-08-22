@@ -696,7 +696,7 @@ class TestKVCacheStoreKeyLayerThreads(unittest.TestCase):
             is_last_chunk=True,
         )
 
-    def test_sending_thread_batches_keys_and_values(self):
+    def test_sending_thread_batches_values(self):
         store = FakeStore([0, 0])
         database = self._make_database()
         layer_finished = [threading.Event(), threading.Event()]
@@ -723,29 +723,18 @@ class TestKVCacheStoreKeyLayerThreads(unittest.TestCase):
         thread.add_stored_request(request.req_id)
         thread.request_queue.put(queued_tasks)
 
-        with (
-            patch.object(
-                database,
-                "build_layer_key_strings",
-                wraps=database.build_layer_key_strings,
-            ) as build_keys,
-            patch.object(
-                database,
-                "prepare_values",
-                wraps=database.prepare_values,
-            ) as prepare_values,
-        ):
-            # Rebuild after installing the spies so both preparation stages
-            # are explicitly covered by this path test.
-            task.cached_process_tokens = thread.build_cached_process_tokens(task)
+        with patch.object(
+            database,
+            "prepare_values",
+            wraps=database.prepare_values,
+        ) as prepare_values:
             thread._handle_request(queued_tasks)
 
-        self.assertEqual(build_keys.call_count, 2)
         prepare_values.assert_called_once_with([0, 16], [16, 32], [3, 5], layer_id=0)
         self.assertEqual(store.put_calls[0][1], [[1096], [1160]])
         self.assertTrue(layer_finished[0].is_set())
 
-    def test_recving_thread_batches_keys_and_values(self):
+    def test_recving_thread_batches_values(self):
         store = FakeStore()
         database = self._make_database()
         load_finished = [threading.Event(), threading.Event()]
@@ -775,21 +764,13 @@ class TestKVCacheStoreKeyLayerThreads(unittest.TestCase):
         )
         thread.request_queue.put(load_task)
 
-        with (
-            patch.object(
-                database,
-                "build_layer_key_strings",
-                wraps=database.build_layer_key_strings,
-            ) as build_keys,
-            patch.object(
-                database,
-                "prepare_values",
-                wraps=database.prepare_values,
-            ) as prepare_values,
-        ):
+        with patch.object(
+            database,
+            "prepare_values",
+            wraps=database.prepare_values,
+        ) as prepare_values:
             thread._handle_request(load_task)
 
-        build_keys.assert_called_once_with(["h0", "h1"], 1)
         prepare_values.assert_called_once_with([0, 16], [16, 32], [3, 5], layer_id=1)
         self.assertEqual(store.get_calls[0][1], [[2096], [2160]])
         self.assertTrue(load_finished[1].is_set())

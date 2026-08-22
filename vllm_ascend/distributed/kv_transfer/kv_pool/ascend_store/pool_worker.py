@@ -4,7 +4,7 @@ import importlib
 import math
 import threading
 import time
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator
 from typing import Any
 
 import numpy as np
@@ -887,17 +887,24 @@ class KVPoolWorker:
                 def chunk_filter(start: int, group_id=group_id, load_masks=load_masks) -> bool:
                     return self.token_database.mask_allows_chunk(load_masks, group_id, start)
 
-                group_starts, group_ends, group_keys, _, group_block_ids = (
-                    self.token_database.process_token_key_batch_with_block_ids(
-                        token_len,
-                        request.block_hashes,
-                        block_ids,
-                        mask_num,
-                        kv_cache_group_id=group_id,
-                        skip_null_blocks=skip_null,
-                        chunk_filter=chunk_filter,
-                    )
+                group_starts: list[int] = []
+                group_ends: list[int] = []
+                group_keys: list[str] = []
+                group_block_ids: list[int] = []
+                token_iter = self.token_database.process_token_key_strings_with_block_ids(
+                    token_len,
+                    request.block_hashes,
+                    block_ids,
+                    mask_num,
+                    kv_cache_group_id=group_id,
+                    skip_null_blocks=skip_null,
+                    chunk_filter=chunk_filter,
                 )
+                for start, end, key, _block_hash, block_id in token_iter:
+                    group_starts.append(start)
+                    group_ends.append(end)
+                    group_keys.append(key)
+                    group_block_ids.append(block_id)
                 group_addrs, group_sizes = self.token_database.prepare_values(
                     group_starts,
                     group_ends,
@@ -1117,16 +1124,6 @@ class KVPoolWorker:
         else:
             return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
 
-    def _make_layerwise_gva_keys(
-        self,
-        group_id: int,
-        block_hashes: Sequence[BlockHash | str],
-    ) -> list[str]:
-        """Build a batch of GVA layerwise keys with shared prefix/suffix."""
-        prefix = f"{self.model_name}@{group_id}@" if self.num_kv_cache_groups > 1 else f"{self.model_name}@"
-        suffix = f"@{self.head_or_tp_rank}"
-        return [prefix + block_hash_to_str(block_hash) + suffix for block_hash in block_hashes]
-
     def _make_layerwise_partial_key(
         self,
         request: ReqMeta,
@@ -1201,16 +1198,22 @@ class KVPoolWorker:
                     )
                     hit_full_blocks = pool_hit_tokens // effective_block_size
                     save_start_block = max(save_start_block, hit_full_blocks)
-                candidate_start_block = save_start_block
-                candidate_end_block = min(save_end_block, len(group_block_hashes))
-                candidate_keys = self._make_layerwise_gva_keys(
-                    group_id,
-                    group_block_hashes[candidate_start_block:candidate_end_block],
-                )
+                candidate_keys = [
+                    self._make_layerwise_gva_key(
+                        group_id,
+                        block_hash_to_str(group_block_hashes[block_idx]),
+                    )
+                    for block_idx in range(
+                        save_start_block,
+                        min(save_end_block, len(group_block_hashes)),
+                    )
+                ]
                 self._refresh_allocated_gvas(candidate_keys)
                 # Skip blocks that are still present and readable in MemCache.
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = candidate_keys[save_start_block - candidate_start_block]
+                    key = self._make_layerwise_gva_key(
+                        group_id, block_hash_to_str(group_block_hashes[save_start_block])
+                    )
                     if key in self._allocated_gvas:
                         save_start_block += 1
                     else:
@@ -1219,8 +1222,8 @@ class KVPoolWorker:
                 block_gvas: list[int] = []
                 new_keys: list[str] = []
                 new_positions: list[int] = []
-                remaining_keys = candidate_keys[save_start_block - candidate_start_block :]
-                for key in remaining_keys:
+                for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
+                    key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
                         block_gvas.append(cached)
@@ -1370,10 +1373,10 @@ class KVPoolWorker:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
-                keys = self._make_layerwise_gva_keys(
-                    group_id,
-                    group_block_hashes[load_start_block:full_blocks],
-                )
+                keys = [
+                    self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[i]))
+                    for i in range(load_start_block, full_blocks)
+                ]
                 block_indices = list(range(load_start_block, full_blocks))
                 if partial_block_index is not None:
                     keys.append(
@@ -1909,18 +1912,8 @@ class KVPoolWorker:
         all_addrs: list[list[int]] = []
         all_sizes: list[list[int]] = []
         all_block_ids: list[int] = []
-        starts, ends, base_keys, _, resolved_block_ids = self.token_database.process_token_key_batch_with_block_ids(
-            token_len,
-            block_hashes,
-            block_ids,
-            mask_num=mask_num,
-        )
-        for start, end, base_key, block_id in zip(
-            starts,
-            ends,
-            base_keys,
-            resolved_block_ids,
-            strict=True,
+        for start, end, base_key, _block_hash, block_id in self.token_database.process_token_key_strings_with_block_ids(
+            token_len, block_hashes, block_ids, mask_num=mask_num
         ):
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):

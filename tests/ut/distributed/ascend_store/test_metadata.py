@@ -242,69 +242,6 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             ],
         )
 
-    def test_batched_key_strings_match_scalar_path(self):
-        hashes = ["a", "b", "c", "d", "e"]
-        block_ids = [10, 0, 12, 13, 14]
-        kwargs = {
-            "mask_num": 16,
-            "skip_null_blocks": True,
-            "chunk_filter": lambda start: start != 48,
-            "shard_rank": 0,
-            "shard_size": 2,
-        }
-        scalar = list(
-            self.db.process_token_key_strings_with_block_ids(
-                80,
-                hashes,
-                block_ids,
-                **kwargs,
-            )
-        )
-
-        starts, ends, keys, batch_hashes, resolved_block_ids = self.db.process_token_key_batch_with_block_ids(
-            80,
-            hashes,
-            block_ids,
-            **kwargs,
-        )
-
-        self.assertEqual(
-            list(zip(starts, ends, keys, batch_hashes, resolved_block_ids, strict=True)),
-            scalar,
-        )
-
-    def test_batched_key_strings_preserve_tail_block_mapping(self):
-        hashes = [f"h{i}" for i in range(8)]
-        scalar = list(
-            self.db.process_token_key_strings_with_block_ids(
-                128,
-                hashes,
-                [90, 91],
-            )
-        )
-
-        starts, ends, keys, batch_hashes, block_ids = self.db.process_token_key_batch_with_block_ids(
-            128,
-            hashes,
-            [90, 91],
-        )
-
-        self.assertEqual(
-            list(zip(starts, ends, keys, batch_hashes, block_ids, strict=True)),
-            scalar,
-        )
-
-    def test_batched_layer_keys_match_pool_key_serialization(self):
-        hashes = ["aaa", b"\xaa\xbb"]
-        expected = [
-            self.db._make_key_by_hash(hash_value if isinstance(hash_value, str) else hash_value.hex())
-            .split_layers(2)[1]
-            .to_string()
-            for hash_value in hashes
-        ]
-
-        self.assertEqual(self.db.build_layer_key_strings(hashes, layer_id=1), expected)
-
     def test_direct_keys_preserve_multigroup_layerwise_key_semantics(self):
         group_metadata = [
             KeyMetadata("llama", 0, 0, 0, 0),

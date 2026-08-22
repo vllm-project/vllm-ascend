@@ -983,23 +983,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store = MagicMock()
         return worker
 
-    def test_batched_gva_keys_match_scalar_format(self):
-        for num_groups in (1, 2):
-            with self.subTest(num_groups=num_groups):
-                worker = self._make_gva_worker(num_groups)
-                hashes = ["h0", b"h1"]
-
-                self.assertEqual(
-                    worker._make_layerwise_gva_keys(0, hashes),
-                    [
-                        worker._make_layerwise_gva_key(
-                            0,
-                            hash_value if isinstance(hash_value, str) else hash_value.hex(),
-                        )
-                        for hash_value in hashes
-                    ],
-                )
-
     @staticmethod
     def _make_gva_request(num_groups=1, load_spec=None, can_save=None):
         block_ids_by_group = [[7 + group_id] for group_id in range(num_groups)]
