@@ -50,11 +50,8 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     def __init__(self, weight_block_size):
         super().__init__()
         self.block_size = weight_block_size[0]
-        vllm_config = get_current_vllm_config()
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = get_current_vllm_config().model_config.hf_config
         self.n_groups = hf_config.o_groups
-        self.n_local_groups = self.n_groups // tp_size
         self.o_lora_rank = hf_config.o_lora_rank
 
     def get_pergroup_param(
@@ -81,12 +78,16 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
         if layer.prefix.endswith("wo_a"):
+            # layer.tp_size already reflects the active TP-style size (standard
+            # TP, or the OTP group when oproj_tp is on), so read it here instead
+            # of recomputing per-layer in __init__.
+            n_local_groups = self.n_groups // layer.tp_size
             layer.weight.data = (
-                layer.weight.data.T.reshape(self.n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+                layer.weight.data.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
             )
             layer.weight_scale.data = (
                 layer.weight_scale.data.transpose(0, 1)
-                .reshape(self.n_local_groups, self.o_lora_rank, -1, 2)
+                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
                 .transpose(1, 2)
                 .contiguous()
             )
