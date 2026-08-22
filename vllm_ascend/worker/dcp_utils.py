@@ -492,6 +492,7 @@ class DCPManager:
         seq_lens: torch.Tensor,
         draft_index: int,
         seq_lens_cpu: torch.Tensor | None = None,
+        parallel_drafting: bool = False,
     ) -> None:
         """Prepare draft-local DCP metadata before the backend metadata build.
 
@@ -512,6 +513,31 @@ class DCPManager:
         dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
 
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
+        if parallel_drafting:
+            assert is_mla, "Parallel DSpark drafting requires an MLA KV cache."
+            draft_query_lens = query_lens_cpu.to(device=seq_lens.device, dtype=seq_lens.dtype)
+            num_draft_reqs = draft_query_lens.shape[0]
+            draft_base_seq_lens = seq_lens[:num_draft_reqs] - draft_query_lens
+            dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
+
+            local_seq_lens = self._get_dcp_local_seq_lens(seq_lens[:num_draft_reqs])
+            dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
+            dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
+
+            mask = self.generate_mtp_attention_mask_for_decode(
+                draft_base_seq_lens.to("cpu").tolist(),
+                query_lens_cpu[:num_draft_reqs].numpy(),
+                num_decode_reqs=num_draft_reqs,
+            )
+            self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
+            self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
+            dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
+            common_attn_metadata.context_parallel_metadata = dcp_metadata
+
+            if common_attn_metadata.is_prefilling is not None:
+                common_attn_metadata.is_prefilling = torch.zeros_like(common_attn_metadata.is_prefilling)
+            return
+
         if is_mla:
             if dcp_metadata.draft_base_seq_lens is None:
                 local_seq_lens = torch.as_tensor(

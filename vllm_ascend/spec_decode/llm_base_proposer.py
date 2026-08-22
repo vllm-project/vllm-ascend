@@ -51,6 +51,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.glm5_dspark import Glm5DSparkForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -775,6 +776,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     Eagle3VwnLlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                     DSparkDeepseekV4ForCausalLM,
+                    Glm5DSparkForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
@@ -944,7 +946,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             dcp_mtp_inputs = dcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
@@ -2145,6 +2147,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                dcp_manager = getattr(self.runner, "dcp_manager", None)
+                if dcp_manager is not None and dcp_manager._is_mla_kv_cache_spec(attn_group.kv_cache_spec):
+                    # DSpark evaluates the whole proposal block in one MLA
+                    # call. Build rank-local KV lengths and the causal mask for
+                    # the final token in that block before backend metadata is
+                    # materialized.
+                    seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+                    if seq_lens_cpu is None:
+                        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+                    dcp_manager.prepare_spec_decode_drafting_cp_metadata(
+                        common_attn_metadata=common_attn_metadata,
+                        kv_cache_spec=attn_group.kv_cache_spec,
+                        seq_lens=common_attn_metadata.seq_lens,
+                        draft_index=0,
+                        seq_lens_cpu=seq_lens_cpu,
+                        parallel_drafting=True,
+                    )
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
