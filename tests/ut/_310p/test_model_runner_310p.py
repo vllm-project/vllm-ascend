@@ -49,6 +49,8 @@ def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
     assert "self._positions_cpu_buf[:total_num_scheduled_tokens]" in source
     assert "self.seq_lens[:num_reqs].copy_(" in source
     assert "self.optimistic_seq_lens_cpu[:num_reqs]" in source
+    assert "self._sync_num_accepted_tokens(" in source
+    assert "self.input_batch.num_accepted_tokens_cpu[" not in source
 
 
 def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
