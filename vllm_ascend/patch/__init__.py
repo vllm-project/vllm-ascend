@@ -1014,17 +1014,15 @@
 #
 # ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.PrefillSpeculatorCudaGraphManager`,
-#      `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.DecodeSpeculatorCudaGraphManager`
+#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
 #    Why:
-#       The v2 Eagle spec-decode path uses upstream CUDA graph managers for
-#       prefill/decode spec decoding, which are not usable on Ascend.
+#       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
+#       an upstream CUDA graph manager, which is not usable on Ascend.
 #    How：
-#       Replace the prefill/decode speculator graph managers on the upstream
-#       module with `PrefillEagleAclGraphManager` / `DecodeEagleAclGraphManager`
+#       Replace the shared upstream manager with `AutoRegressiveAclGraphManager`
 #       (ACL graph).
 #    Related PR (if no, explain why):
-#       No, vllm-ascend v2 spec-decode ACL graph integration.
+#       https://github.com/vllm-project/vllm-ascend/pull/14310
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
