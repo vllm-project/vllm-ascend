@@ -5,6 +5,7 @@ from typing import Any
 
 import regex as re
 import yaml
+from vllm import envs as envs_vllm
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import KVPoolConfig, parse_kv_pool_config
@@ -169,10 +170,45 @@ class SingleNodeConfigLoader:
             if not isinstance(case["name"], str) or not case["name"].strip():
                 raise ValueError("test case field 'name' must be a non-empty string")
 
+    @staticmethod
+    def _resolve_runner_case(case: dict[str, Any]) -> dict[str, Any]:
+        """Merge the selected model-runner overrides into one test case."""
+        runner_configs = case.get("runner_configs")
+        if runner_configs is None:
+            return case
+        if not isinstance(runner_configs, dict):
+            raise TypeError("test case runner_configs must be a mapping")
+
+        runner_name = "v2" if bool(envs_vllm.VLLM_USE_V2_MODEL_RUNNER) else "v1"
+        if runner_name not in runner_configs:
+            raise KeyError(f"test case runner_configs.{runner_name} is required")
+        runner_config = runner_configs[runner_name]
+        if not isinstance(runner_config, dict):
+            raise TypeError(f"test case runner_configs.{runner_name} must be a mapping")
+
+        runner_envs = runner_config.get("envs", {})
+        if not isinstance(runner_envs, dict):
+            raise TypeError(f"test case runner_configs.{runner_name}.envs must be a mapping")
+        runner_server_cmd_extra = runner_config.get("server_cmd_extra", [])
+        if not isinstance(runner_server_cmd_extra, list):
+            raise TypeError(f"test case runner_configs.{runner_name}.server_cmd_extra must be a list")
+
+        resolved_case = dict(case)
+        resolved_case.pop("runner_configs")
+        envs = dict(case.get("envs", {}))
+        envs.update(runner_envs)
+        resolved_case["envs"] = envs
+        resolved_case["server_cmd_extra"] = [
+            *case.get("server_cmd_extra", []),
+            *runner_server_cmd_extra,
+        ]
+        return resolved_case
+
     @classmethod
     def _parse_test_cases(cls, cases: list[dict[str, Any]]) -> list[SingleNodeConfig]:
         result: list[SingleNodeConfig] = []
         for case in cases:
+            case = cls._resolve_runner_case(case)
             server_cmd = case.get("server_cmd", [])
             server_cmd_extra = case.get("server_cmd_extra", [])
             full_cmd = list(server_cmd) + list(server_cmd_extra)
