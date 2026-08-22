@@ -19,7 +19,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p
 
-if HAS_TRITON:
+if HAS_TRITON and not is_310p():
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
