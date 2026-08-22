@@ -5,7 +5,8 @@ import os
 import shlex
 import subprocess
 import sys
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import openai
 import psutil
