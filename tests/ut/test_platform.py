@@ -307,7 +307,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.platform.init_ascend_config")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     def test_check_and_update_config_preserves_platform_default_max_input(
         self,
