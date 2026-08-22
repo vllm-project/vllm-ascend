@@ -154,29 +154,89 @@ class BlockTable:
             )
             self._compute_dcp_slot_mapping(req_indices, positions)
         else:
-            TILE_BLOCK_SIZE = 1024
-            kernel_kwargs = {
-                "KV_CACHE_BLOCK_SIZE": self.physical_block_size,
-                "BLOCKS_PER_KV_BLOCK": self.blocks_per_phys_block,
-                "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
-                "TOTAL_CP_RANK": total_cp_rank,
-                "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
-                "PAD_ID": PAD_SLOT_ID,
-                "TILE_BLOCK_SIZE": TILE_BLOCK_SIZE,
-                "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(TILE_BLOCK_SIZE, self.block_size) + 1),
-            }
+            # NOTE: Triton-decorated kernels are exposed as plain Python callables
+            # instead of launcher objects when Triton is unavailable and vLLM falls
+            # back to its Triton placeholder. Use an equivalent torch implementation
+            # in that case to keep model execution functional.
+            if hasattr(_compute_slot_mapping_kernel, "__getitem__"):
+                TILE_BLOCK_SIZE = 1024
+                kernel_kwargs = {
+                    "KV_CACHE_BLOCK_SIZE": self.physical_block_size,
+                    "BLOCKS_PER_KV_BLOCK": self.blocks_per_phys_block,
+                    "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
+                    "TOTAL_CP_RANK": total_cp_rank,
+                    "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
+                    "PAD_ID": PAD_SLOT_ID,
+                    "TILE_BLOCK_SIZE": TILE_BLOCK_SIZE,
+                    "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(TILE_BLOCK_SIZE, self.block_size) + 1),
+                }
 
-            _compute_slot_mapping_kernel[(num_reqs + 1,)](
-                num_tokens,
-                self.max_num_batched_tokens,
-                query_start_loc,
-                positions,
-                self.block_table.gpu,
-                self.block_table.gpu.stride(0),
-                self.block_size,
-                self.slot_mapping.gpu,
-                **kernel_kwargs,
+                _compute_slot_mapping_kernel[(num_reqs + 1,)](
+                    num_tokens,
+                    self.max_num_batched_tokens,
+                    query_start_loc,
+                    positions,
+                    self.block_table.gpu,
+                    self.block_table.gpu.stride(0),
+                    self.block_size,
+                    self.slot_mapping.gpu,
+                    **kernel_kwargs,
+                )
+            else:
+                self._compute_slot_mapping_fallback(
+                    num_reqs=num_reqs,
+                    query_start_loc=query_start_loc,
+                    positions=positions,
+                    total_cp_world_size=total_cp_world_size,
+                    total_cp_rank=total_cp_rank,
+                )
+
+    def _compute_slot_mapping_fallback(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        total_cp_world_size: int,
+        total_cp_rank: int,
+    ) -> None:
+        """Torch equivalent of ``_compute_slot_mapping_kernel``.
+
+        Only used when the Triton kernel is not launchable in the current runtime.
+        """
+        slot_mapping_gpu = self.slot_mapping.gpu
+        slot_mapping_gpu[: self.max_num_batched_tokens].fill_(PAD_SLOT_ID)
+        block_table_gpu = self.block_table.gpu
+        virtual_block_size = self.block_size * total_cp_world_size
+
+        # Transfer the request boundaries to host in one shot to avoid a
+        # device-to-host synchronization per request in the loop below.
+        req_boundaries = query_start_loc[: num_reqs + 1].tolist()
+
+        for req_idx in range(num_reqs):
+            start_idx = req_boundaries[req_idx]
+            end_idx = req_boundaries[req_idx + 1]
+            if end_idx <= start_idx:
+                continue
+
+            req_positions = positions[start_idx:end_idx]
+            block_indices = torch.div(req_positions, virtual_block_size, rounding_mode="floor")
+            block_numbers = block_table_gpu[req_idx, block_indices]
+
+            virtual_block_offsets = req_positions - block_indices * virtual_block_size
+            is_local = (
+                torch.div(virtual_block_offsets, self.cp_kv_cache_interleave_size, rounding_mode="floor")
+                % total_cp_world_size
+                == total_cp_rank
             )
+            local_block_offsets = torch.div(
+                virtual_block_offsets,
+                total_cp_world_size * self.cp_kv_cache_interleave_size,
+                rounding_mode="floor",
+            ) * self.cp_kv_cache_interleave_size + (virtual_block_offsets % self.cp_kv_cache_interleave_size)
+
+            slot_ids = block_numbers.to(req_positions.dtype) * self.block_size + local_block_offsets
+            slot_ids = torch.where(is_local, slot_ids, PAD_SLOT_ID)
+            slot_mapping_gpu[start_idx:end_idx] = slot_ids.to(slot_mapping_gpu.dtype)
 
     def compute_slot_mapping_draft(
         self,
