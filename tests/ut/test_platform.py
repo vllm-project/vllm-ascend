@@ -296,7 +296,7 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
 
-    def test_validate_indexer_pp_config_rejects_invalid_partition(self):
+    def test_validate_indexer_pp_config_rejects_indexshare_partition(self):
         indexer_types = ["full", "full", "full", "shared", "shared", "shared"]
         indexer_types.extend(["full", "shared", "shared", "shared"] * 18)
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -306,8 +306,57 @@ class TestNPUPlatform(TestBase):
             indexer_types=indexer_types,
         )
 
-        with pytest.raises(ValueError, match='VLLM_PP_LAYER_PARTITION="38,40"'):
+        with (
+            patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None),
+            pytest.raises(ValueError, match="layer 39 uses a shared Indexer"),
+        ):
             self.platform._validate_indexer_pp_config(vllm_config)
+
+    def test_validate_indexer_pp_config_accepts_aligned_partition(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.model_config.hf_text_config = SimpleNamespace(
+            num_hidden_layers=8,
+            indexer_types=["full", "shared", "shared", "shared"] * 2,
+        )
+
+        with patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None):
+            self.platform._validate_indexer_pp_config(vllm_config)
+
+    def test_validate_indexer_pp_config_rejects_index_cache_partition(self):
+        test_cases = (
+            (
+                2,
+                SimpleNamespace(
+                    num_hidden_layers=6,
+                    use_index_cache=True,
+                    index_topk_freq=4,
+                    index_skip_topk_offset=3,
+                ),
+                "layer 3 skips Top-K computation",
+            ),
+            (
+                3,
+                SimpleNamespace(
+                    num_hidden_layers=6,
+                    use_index_cache=True,
+                    index_topk_pattern="FFSFFS",
+                ),
+                "layer 2 skips Top-K computation",
+            ),
+        )
+
+        for pp_size, hf_text_config, error_match in test_cases:
+            with self.subTest(pp_size=pp_size, error_match=error_match):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.parallel_config.pipeline_parallel_size = pp_size
+                vllm_config.model_config.hf_text_config = hf_text_config
+
+                with (
+                    patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None),
+                    pytest.raises(ValueError, match=error_match),
+                ):
+                    self.platform._validate_indexer_pp_config(vllm_config)
 
     @patch.object(
         NPUPlatform,
