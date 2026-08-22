@@ -703,7 +703,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
     def test_synchronous_request_propagates_error_without_killing_worker(self):
         store = FakeStore()
-        store.get = MagicMock(side_effect=RuntimeError("get failed"))
+        store.get = MagicMock(side_effect=RuntimeError("get failed"))  # type: ignore[method-assign]
         thread = KVCacheStoreRecvingThread(
             m_store=store,
             token_database=FakeTokenDatabase(),
