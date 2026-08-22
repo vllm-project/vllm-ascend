@@ -46,6 +46,30 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_LOCAL_MEGA_MOE_MAX_TOKENS_PER_CALL = 2048
+
+
+def _as_local_mega_moe_tensor_list(
+    value,
+    item_dim: int,
+    name: str,
+    num_experts: int | None = None,
+) -> list[torch.Tensor]:
+    """Normalize stacked per-expert tensors for the local MegaMoe op."""
+    values = value if isinstance(value, list) else [value]
+    if len(values) == 1 and values[0].dim() == item_dim + 1:
+        values = list(values[0].unbind(dim=0))
+    elif len(values) == 1 and item_dim == 1 and num_experts is not None and num_experts > 1:
+        flat_scale = values[0]
+        if flat_scale.dim() == 1 and flat_scale.numel() % num_experts == 0:
+            values = list(flat_scale.view(num_experts, -1).unbind(dim=0))
+
+    invalid_dims = [tensor.dim() for tensor in values if tensor.dim() != item_dim]
+    if invalid_dims:
+        raise ValueError(
+            f"Local MegaMoe expects {name} entries to be {item_dim}-D, but got entry dimensions {invalid_dims}."
+        )
+    return values
 
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
@@ -280,6 +304,84 @@ class FusedMC2CommImpl(MoECommMethod):
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
+    def _apply_local_mega_moe(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+    ):
+        assert fused_experts_input.quant.quant_type == QuantType.W8A8
+        assert fused_experts_input.weights.w1_scale is not None
+        assert fused_experts_input.weights.w2_scale is not None
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+
+        weight1 = _as_local_mega_moe_tensor_list(fused_experts_input.weights.w1, 2, "weight1")
+        weight2 = _as_local_mega_moe_tensor_list(fused_experts_input.weights.w2, 2, "weight2")
+        weight_scales1 = _as_local_mega_moe_tensor_list(
+            fused_experts_input.weights.w1_scale, 1, "weight_scales1", num_experts=len(weight1)
+        )
+        weight_scales2 = _as_local_mega_moe_tensor_list(
+            fused_experts_input.weights.w2_scale, 1, "weight_scales2", num_experts=len(weight2)
+        )
+        expert_counts = {len(weight1), len(weight2), len(weight_scales1), len(weight_scales2)}
+        if len(expert_counts) != 1:
+            raise ValueError(
+                "Local MegaMoe requires equal per-expert weight and scale list lengths, "
+                f"got w1={len(weight1)}, w2={len(weight2)}, "
+                f"w1_scale={len(weight_scales1)}, w2_scale={len(weight_scales2)}."
+            )
+        weight_scales1 = [scale.view(torch.uint64) if scale.dtype == torch.int64 else scale for scale in weight_scales1]
+        weight_scales2 = [scale.view(torch.uint64) if scale.dtype == torch.int64 else scale for scale in weight_scales2]
+
+        num_topk = self.moe_config.experts_per_token
+        num_experts = self.moe_config.num_experts
+        expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
+
+        x_active_mask = None
+        if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
+            x_active_mask = fused_experts_input.routing.mc2_mask.to(torch.int8).contiguous()
+
+        hidden_states = fused_experts_input.hidden_states
+        topk_ids = fused_experts_input.topk_ids.to(torch.int32)
+        topk_weights = fused_experts_input.topk_weights.to(torch.float32)
+        num_tokens = hidden_states.shape[0]
+
+        outputs = []
+        expert_tokens = None
+        for start in range(0, num_tokens, _LOCAL_MEGA_MOE_MAX_TOKENS_PER_CALL):
+            end = min(start + _LOCAL_MEGA_MOE_MAX_TOKENS_PER_CALL, num_tokens)
+            chunk_tokens = end - start
+            chunk_mask = None if x_active_mask is None else x_active_mask[start:end]
+            max_recv_token_num = max(
+                1,
+                min(
+                    get_ascend_config().mega_moe_max_tokens,
+                    chunk_tokens * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
+                ),
+            )
+            chunk_out, chunk_expert_tokens = torch.ops._C_ascend.mega_moe(
+                hidden_states[start:end],
+                topk_ids[start:end],
+                topk_weights[start:end],
+                weight1,
+                weight2,
+                weight_scales1,
+                weight_scales2,
+                chunk_mask,
+                self.token_dispatcher.moe_all_to_all_group_name,
+                num_experts,
+                self.token_dispatcher.ep_world_size,
+                max_recv_token_num,
+                chunk_tokens,
+                activation="swigluoai",
+                activation_clamp=self.swiglu_limit,
+                activation_alpha=self.swiglu_alpha,
+                activation_beta=self.swiglu_beta,
+            )
+            outputs.append(chunk_out)
+            expert_tokens = chunk_expert_tokens if expert_tokens is None else expert_tokens + chunk_expert_tokens
+
+        assert expert_tokens is not None, "MegaMoe requires at least one input token."
+        return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0), expert_tokens
+
     def _init_mega_moe_symm_buffer(
         self,
         dispatch_quant_mode: int = 0,
@@ -419,7 +521,13 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            if _MEGA_MOE_SUPPORTED:
+            if (
+                hasattr(torch.ops._C_ascend, "mega_moe")
+                and getattr(fused_experts_input.activation, "value", fused_experts_input.activation)
+                == "swigluoai_uninterleave"
+            ):
+                out, expert_tokens = self._apply_local_mega_moe(fused_experts_input)
+            elif _MEGA_MOE_SUPPORTED:
                 out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input)
             else:
                 assert not (

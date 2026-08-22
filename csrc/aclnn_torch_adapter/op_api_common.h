@@ -505,6 +505,14 @@ inline aclBoolArray *ConvertType(const at::ArrayRef<bool> &value) {
   return array;
 }
 
+inline aclFloatArray *ConvertType(const std::vector<float> &value) {
+  static const auto aclCreateFloatArray = GET_OP_API_FUNC(aclCreateFloatArray);
+  if (aclCreateFloatArray == nullptr) {
+    return nullptr;
+  }
+  return aclCreateFloatArray(value.data(), value.size());
+}
+
 inline aclTensorList *ConvertType(const at::TensorList &at_tensor_list) {
   static const auto aclCreateTensorList = GET_OP_API_FUNC(aclCreateTensorList);
   if (aclCreateTensorList == nullptr) {
