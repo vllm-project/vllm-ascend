@@ -5,7 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import openai
 import psutil
@@ -268,8 +268,7 @@ async def run_spec_decode_acceptance_test(
     validate_acceptance_rate(all_rates[0], float(baseline_val), float(tolerance))
 
 
-# Extend this dictionary to add new test capabilities
-TEST_HANDLERS = {
+TEST_HANDLERS: dict[str, Callable[..., Awaitable[None]]] = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
