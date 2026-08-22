@@ -288,6 +288,18 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+def _is_ec_producer_only() -> bool:
+    """Return whether this worker only produces external encoder caches.
+
+    An ``ec_both`` connector is also a producer, but it still needs the
+    normal model execution path after loading or computing encoder outputs.
+    Only a connector without the consumer role should take the encoder-only
+    early-return path and skip KV-cache allocation.
+    """
+    # ec_both still needs the full model path because it is also a consumer.
+    return has_ec_transfer() and not get_ec_transfer().is_consumer
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
@@ -1861,8 +1873,10 @@ class NPUModelRunner(GPUModelRunner):
                     scheduler_output
                 )
 
-                if has_ec_transfer() and not get_ec_transfer().is_consumer:
-                    self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
+                if _is_ec_producer_only():
+                    self._start_dump_data(
+                        scheduled_tokens=scheduler_output.num_scheduled_tokens
+                    )
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
@@ -4653,7 +4667,7 @@ class NPUModelRunner(GPUModelRunner):
             format. Layers that do not need KV cache are not included.
         """
 
-        if has_ec_transfer() and not get_ec_transfer().is_consumer:
+        if _is_ec_producer_only():
             return {}
 
         kv_cache_spec: dict[str, KVCacheSpec] = {}
