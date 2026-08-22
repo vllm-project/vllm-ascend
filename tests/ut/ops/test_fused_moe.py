@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -897,7 +897,7 @@ def _make_quantized_situ_shared_experts(quant_type, gate_up_proj, down_proj):
         shared_experts.situ_activation = SituAndMul(beta=4.0, linear_beta=25.0)
     shared_experts.lora_context = None
     shared_experts.parallel_mode = MagicMock(
-        return_value=SharedExpertParallelMode.FLASHCOMM_OFF_SHARED_EXPERT_DP_OFF,
+        return_value=SharedExpertParallelMode.TENSOR_PARALLEL,
     )
     return shared_experts
 
@@ -1105,6 +1105,125 @@ def test_sequence_parallel_only_gathers_unpads_pads_and_reduce_scatters(monkeypa
         )
 
 
+@pytest.mark.parametrize(
+    ("mode", "multistream_overlap", "starts_all_gather"),
+    [
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, True, True),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, False, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP, True, False),
+    ],
+)
+def test_prepare_shared_expert_input_only_starts_sp_tp_all_gather(
+    monkeypatch,
+    mode,
+    multistream_overlap,
+    starts_all_gather,
+):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.multistream_overlap = multistream_overlap
+    shared_experts.parallel_mode = MagicMock(return_value=mode)
+    hidden_states = torch.randn(2, 4)
+    gathered_states = torch.randn(4, 4)
+    shared_experts._gather_sp_input = MagicMock(return_value=gathered_states)
+    default_stream = MagicMock()
+    auxiliary_stream = MagicMock()
+    input_ready = MagicMock()
+    all_gather_done = MagicMock()
+    default_stream.record_event.return_value = input_ready
+    auxiliary_stream.record_event.return_value = all_gather_done
+    stream_state = {"current": default_stream}
+
+    @contextmanager
+    def switch_stream(stream, enabled):
+        previous_stream = stream_state["current"]
+        if enabled:
+            stream_state["current"] = stream
+        try:
+            yield
+        finally:
+            stream_state["current"] = previous_stream
+
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", switch_stream)
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", lambda: auxiliary_stream)
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: stream_state["current"])
+
+    result, done_event = shared_experts.prepare_input_before_routed_experts(hidden_states)
+
+    if starts_all_gather:
+        assert result is gathered_states
+        assert done_event is all_gather_done
+        default_stream.record_event.assert_called_once_with()
+        auxiliary_stream.wait_event.assert_called_once_with(input_ready)
+        shared_experts._gather_sp_input.assert_called_once_with(hidden_states)
+        auxiliary_stream.record_event.assert_called_once_with()
+    else:
+        assert result is hidden_states
+        assert done_event is None
+        default_stream.record_event.assert_not_called()
+        shared_experts._gather_sp_input.assert_not_called()
+
+
+def test_sp_multistream_down_projection_and_reduce_scatter_wait_for_routed_finalize(
+    monkeypatch,
+):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.layer = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(),
+        down_proj=SimpleNamespace(),
+    )
+    shared_experts.multistream_overlap = True
+    shared_experts.quant_type = QuantType.NONE
+    shared_experts.lora_context = None
+    shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY)
+    hidden_states = torch.randn(4, 4)
+    part1_out = torch.randn(4, 8)
+    shared_out = torch.randn(4, 4)
+    reduced_out = torch.randn(2, 4)
+    shared_experts.part1 = MagicMock(return_value=part1_out)
+    shared_experts.part2 = MagicMock(return_value=shared_out)
+    shared_experts._gather_sp_input = MagicMock()
+    shared_experts._pad_and_reduce_scatter = MagicMock(return_value=reduced_out)
+    default_stream = MagicMock()
+    auxiliary_stream = MagicMock()
+    stream_state = {"current": default_stream}
+    events = FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_combine=MagicMock(),
+        after_routed_finalize=MagicMock(),
+    )
+
+    @contextmanager
+    def switch_stream(stream, enabled):
+        previous_stream = stream_state["current"]
+        if enabled:
+            stream_state["current"] = stream
+        try:
+            yield
+        finally:
+            stream_state["current"] = previous_stream
+
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", switch_stream)
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", lambda: auxiliary_stream)
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: stream_state["current"])
+
+    result = shared_experts.forward(
+        hidden_states,
+        events,
+        input_is_gathered=True,
+    )
+
+    assert result is reduced_out
+    shared_experts._gather_sp_input.assert_not_called()
+    auxiliary_stream.wait_event.assert_any_call(events.after_routed_finalize)
+    assert not any(
+        event_wait.args == (events.before_combine,) for event_wait in auxiliary_stream.wait_event.call_args_list
+    )
+    shared_experts.part2.assert_called_once_with(hidden_states, part1_out)
+    shared_experts._pad_and_reduce_scatter.assert_called_once_with(shared_out)
+    default_stream.wait_stream.assert_called_once_with(auxiliary_stream)
+
+
 def test_sequence_parallel_sedp_forward_skips_token_comms(monkeypatch):
     """SP+DP (replicated weights) computes directly on the SP shard without
     any token gather/scatter."""
@@ -1210,7 +1329,10 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
     input_ids = torch.tensor([11, 22])
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
-    ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
+    ascend_shared_experts = SimpleNamespace(
+        prepare_input_before_routed_experts=MagicMock(return_value=(hidden_states, None)),
+        forward=MagicMock(return_value=shared_out),
+    )
     routed_events = FusedMoEEvents(
         before_routed_experts=None,
         after_routed_experts=None,
@@ -1236,6 +1358,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
     )
 
     if has_shared_experts:
+        ascend_shared_experts.prepare_input_before_routed_experts.assert_called_once_with(hidden_states)
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -1270,7 +1393,14 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
         before_combine=None,
     )
     runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, routed_events)))
-    runner.ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
+    shared_input_all_gather_done = MagicMock()
+    prepared_shared_hidden_states = torch.randn(4, 8)
+    runner.ascend_shared_experts = SimpleNamespace(
+        prepare_input_before_routed_experts=MagicMock(
+            return_value=(prepared_shared_hidden_states, shared_input_all_gather_done),
+        ),
+        forward=MagicMock(return_value=shared_out),
+    )
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     current_stream = MagicMock()
 
@@ -1296,9 +1426,13 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
         router_logits=router_logits,
         input_ids=None,
     )
+    runner.ascend_shared_experts.prepare_input_before_routed_experts.assert_called_once_with(shared_hidden_states)
+    current_stream.wait_event.assert_called_once_with(shared_input_all_gather_done)
+    assert routed_events.after_routed_finalize is current_stream.record_event.return_value
     runner.ascend_shared_experts.forward.assert_called_once_with(
-        shared_hidden_states,
+        prepared_shared_hidden_states,
         routed_events,
+        input_is_gathered=True,
     )
     assert result[0] is shared_out
     assert result[1] is routed_out

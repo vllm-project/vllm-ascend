@@ -48,6 +48,7 @@ class FusedMoEEvents:
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
+    after_routed_finalize: torch.npu.Event | None = field(default=None)
 
 
 class SharedExpertParallelMode(Enum):
@@ -242,9 +243,34 @@ class AscendSharedExperts:
             shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(shared_out, dim=0)
 
-    def forward(self, hidden_states: torch.Tensor, fused_moe_evts: FusedMoEEvents):
+    def prepare_input_before_routed_experts(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.npu.Event | None]:
+        """Start the SP-only input all-gather on the shared-expert stream."""
+        if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
+            return hidden_states, None
+
+        input_ready = torch.npu.current_stream().record_event()
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
+            torch.npu.current_stream().wait_event(input_ready)
+            hidden_states = self._gather_sp_input(hidden_states)
+            all_gather_done = torch.npu.current_stream().record_event()
+        return hidden_states, all_gather_done
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fused_moe_evts: FusedMoEEvents,
+        input_is_gathered: bool = False,
+    ):
         mode = self.parallel_mode()
         local_dp_metadata = None
+        down_projection_ready = (
+            fused_moe_evts.after_routed_finalize
+            if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            else fused_moe_evts.before_combine
+        )
 
         def maybe_wait_event(evt: torch.npu.Event | None):
             if evt is not None:
@@ -260,8 +286,9 @@ class AscendSharedExperts:
                 # Sharded activations + TP-sharded weights: gather the SP
                 # shard to full activations before the MLP; the output is
                 # padded and reduce-scattered back below.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
-                hidden_states = self._gather_sp_input(hidden_states)
+                if not input_is_gathered:
+                    maybe_wait_event(fused_moe_evts.before_routed_experts)
+                    hidden_states = self._gather_sp_input(hidden_states)
             # Only used for int quantization
             has_quantized_shared_without_lora = (
                 not has_lora(self.lora_context)
@@ -320,9 +347,7 @@ class AscendSharedExperts:
                             else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
                         ),
                     )
-                # Execute the down projection concurrently with the combine
-                # communication.
-                maybe_wait_event(fused_moe_evts.before_combine)
+                maybe_wait_event(down_projection_ready)
                 shared_out = torch_npu.npu_quant_matmul(
                     quantized_x,
                     self.layer.down_proj.weight,
@@ -361,9 +386,7 @@ class AscendSharedExperts:
                         quant_mode=2,
                         clamp_value=self.swiglu_limit,
                     )
-                # Execute the down projection concurrently with the combine
-                # communication.
-                maybe_wait_event(fused_moe_evts.before_combine)
+                maybe_wait_event(down_projection_ready)
                 shared_out = self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
@@ -372,19 +395,24 @@ class AscendSharedExperts:
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
                 part1_out = self.part1(hidden_states)
-                # Execute the down projection concurrently with the combine
-                # communication.
-                maybe_wait_event(fused_moe_evts.before_combine)
+                maybe_wait_event(down_projection_ready)
                 shared_out = self.part2(hidden_states, part1_out)
 
-        # Make sure the default stream waits for the shared experts stream to
-        # finish.
+        if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+            # Keep the shared-expert output collective on the auxiliary stream,
+            # but start it only after routed dispatch/combine/finalize
+            # communication has completed.
+            with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
+                maybe_wait_event(fused_moe_evts.after_routed_finalize)
+                shared_out = self._pad_and_reduce_scatter(shared_out)
+
+        # Make sure the default stream waits for the shared experts stream to finish.
         if self.multistream_overlap:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
             assert local_dp_metadata is not None
             shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
-        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not self.multistream_overlap:
             shared_out = self._pad_and_reduce_scatter(shared_out)
         return shared_out
