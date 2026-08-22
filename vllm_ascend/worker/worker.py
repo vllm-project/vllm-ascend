@@ -272,6 +272,8 @@ class NPUWorker(WorkerBase):
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
+        self.synchronize_device()
+
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -1044,6 +1046,10 @@ class NPUWorker(WorkerBase):
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
+
+    def synchronize_device(self) -> None:
+        """Block until all in-flight NPU work has completed."""
+        torch.npu.synchronize()
 
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
