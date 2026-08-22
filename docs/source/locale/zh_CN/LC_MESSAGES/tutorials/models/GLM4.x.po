@@ -97,13 +97,6 @@ msgstr ""
 "参数说明如下："
 
 msgid ""
-"- `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.\n"
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance."
-msgstr ""
-"- `fusion_ops_gmmswigluquant`：当NPU总数 ≤ 16时，GmmSwigluQuant融合算子的性能可能会下降。\n"
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：由于该特性引入的填充数据会使FIA算子的FD特性失效，我们建议在长序列（≥16k）且低并发（≤8 batch size）场景下禁用 `flashcomm1` 特性。对于长序列且高并发场景，您可以启用此特性以获得更好的Prefill性能。"
-
-msgid ""
 "While the previous documentation advises against multi-node deployment on "
 "the Atlas 800 A2 (64G × 8) platform, this configuration can still be "
 "implemented for the GLM-4.x model if required. To proceed with a dual-node "
@@ -334,3 +327,8 @@ msgstr "我们想展示`GLM-4.7`在多节点环境中使用2P1D以获得更好�
 
 msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
 msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid ""
+"- `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion "
+"operator tends to degrade when the total number of NPUs is ≤ 16."
+msgstr "- `fusion_ops_gmmswigluquant` 当NPU总数≤16时，GmmSwigluQuant融合算子的性能往往会下降。"

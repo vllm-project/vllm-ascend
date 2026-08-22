@@ -328,11 +328,6 @@ msgid "| `--compilation-config` | Uses `FULL_DECODE_ONLY` ACL Graph replay. |"
 msgstr "| `--compilation-config` | 使用`FULL_DECODE_ONLY` ACL图重放。 |"
 
 msgid ""
-"| `--additional-config` | Enables CPU binding and Fused MC2 while disabling "
-"FlashComm1. |"
-msgstr "| `--additional-config` | 启用CPU绑定和Fused MC2，同时禁用FlashComm1。 |"
-
-msgid ""
 "If a worker exits immediately, confirm that Node 0 is already running,\n"
 "`--data-parallel-address` resolves to Node 0, all nodes use the same RPC port,\n"
 "and every worker uses a unique DP start rank."
@@ -576,9 +571,6 @@ msgid ""
 "|"
 msgstr "| Fused MC2 | 通过环境变量和额外配置启用。 |"
 
-msgid "| FlashComm1 | Disabled in the validated configuration. |"
-msgstr "| FlashComm1 | 在已验证的配置中禁用。 |"
-
 msgid "| CPU Binding | Reduces cross-core scheduling overhead. |"
 msgstr "| CPU绑定 | 减少跨核调度开销。 |"
 
@@ -644,3 +636,6 @@ msgstr ""
 "答：根据模型兼容性、\n"
 "  权重内存、KV缓存容量和通信性能，综合选择TP、PP、DP和EP。\n"
 "  请在目标A3集群上验证完整的拓扑配置。"
+
+msgid "| `--additional-config` | Enables CPU binding and Fused MC2. |"
+msgstr "| `--additional-config` | 启用CPU绑定和Fused MC2。 |"
