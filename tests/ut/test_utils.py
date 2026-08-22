@@ -173,12 +173,13 @@ class TestUtils(TestBase):
     def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
         dsa_cp_config = SimpleNamespace(
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
-            additional_config={"enable_dsa_cp": True},
             parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
         )
+        ascend_config = SimpleNamespace(enable_dsa_cp=True)
 
         with (
             mock.patch("vllm.config.get_current_vllm_config", return_value=dsa_cp_config),
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
             mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
         ):
             self.assertTrue(utils.enable_dsa_cp())
