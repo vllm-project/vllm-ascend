@@ -250,15 +250,11 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
-        # In async scheduling or multi-threaded (MT) scenarios, it is possible that
-        # the CPU's record event (from update_attn_params) for the iteration i completes
-        # before the grph replay of iteration i-1.
-        # To ensure proper ordering, we must call synchronize here before replaying,
-        # so that update_attn_params only executes after the previous graph replay has fully completed.
-        # If we do not in main model and in full-graph mode when using merge-eagle-graph,
-        # we do not need to synchronize.
-        # When enable_enpu is on, model_runner orders update vs replay; skip here.
-        # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+        # Keep the V1 FULL-graph barrier for the main model.  In async
+        # scheduling, the CPU-side update event for the next iteration can be
+        # observed before the previous replay has completed on the NPU.  The
+        # draft Eagle graph is merged with the main graph and must not take
+        # this barrier, matching the existing V1 Eagle ordering contract.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:

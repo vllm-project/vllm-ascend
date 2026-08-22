@@ -484,6 +484,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.use_eagle,
                 self.enable_enpu,
             )
+            # The main V1 model runner assigns its update stream after the
+            # drafter has been constructed.  Keeping this unset here avoids
+            # creating an independent stream for the draft graph updates.
             self.update_stream = None
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
