@@ -366,7 +366,20 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if self.attn_architecture in ("DSA", "SFA"):
             return
         if attn_metadata is not None:
+            updated_metadata_ids: set[int] = set()
             for attn_meta in attn_metadata.values():
+                # Hybrid targets mix full-attention metadata with linear/GDN
+                # metadata.  The latter tracks recurrent state and has no
+                # sequence-length tensors for the autoregressive draft to bump.
+                if not hasattr(attn_meta, "seq_lens"):
+                    continue
+                # All layer aliases in one attention group share the same
+                # metadata object.  Advance it once per draft step, not once
+                # per registered layer name.
+                metadata_id = id(attn_meta)
+                if metadata_id in updated_metadata_ids:
+                    continue
+                updated_metadata_ids.add(metadata_id)
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
 

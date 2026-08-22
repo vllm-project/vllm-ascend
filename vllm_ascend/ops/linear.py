@@ -63,7 +63,12 @@ def unquantized_gemm_fake(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    output_shape = (x.shape[0], weight.shape[0])
+    # Match torch.nn.functional.linear: replace only the input feature
+    # dimension and preserve every leading dimension.  In particular,
+    # DFlash2's candidate selector projects [batch, steps, hidden] inputs.
+    # Dropping ``steps`` here makes FakeTensor/AOT tracing infer a 2-D output
+    # even though the real NPU kernel returns a 3-D tensor.
+    output_shape = (*x.shape[:-1], weight.shape[0])
     return torch.empty(output_shape, dtype=x.dtype, device=x.device)
 
 
