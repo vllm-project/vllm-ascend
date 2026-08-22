@@ -732,8 +732,7 @@ class PrefillMLAPreprocessResult(NamedTuple):
 
 
 def _apply_output_gate(o_proj_input: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    """Align an MLA output gate with the rank-local FlashComm token shard."""
-    gate = torch.ops.vllm.maybe_chunk_residual(o_proj_input, gate)
+    """Apply the output gate to model-aligned sequence-parallel tokens."""
     return o_proj_input.mul_(torch.sigmoid(gate))
 
 

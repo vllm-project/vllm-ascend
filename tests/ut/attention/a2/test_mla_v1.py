@@ -148,35 +148,19 @@ class TestMLAOutputGate(TestBase):
         mock_gather.assert_not_called()
         self.assertIs(gate, global_gate)
 
-    @patch("torch.ops.vllm.maybe_chunk_residual")
-    def test_flashcomm_gate_is_aligned_to_rank_local_tokens(self, mock_chunk):
+    def test_output_gate_uses_model_aligned_tokens(self):
         o_proj_input = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-        global_gate = torch.tensor(
+        gate = torch.tensor(
             [
-                [10.0, 10.0],
-                [20.0, 20.0],
                 [-1.0, 0.0],
                 [1.0, 2.0],
             ]
         )
-        rank_local_gate = global_gate[2:]
-        captured = {}
+        output = _apply_output_gate(o_proj_input.clone(), gate)
 
-        def fake_chunk(chunk_input, chunk_gate):
-            captured["input"] = chunk_input.clone()
-            captured["gate"] = chunk_gate
-            return rank_local_gate
-
-        mock_chunk.side_effect = fake_chunk
-
-        output = _apply_output_gate(o_proj_input.clone(), global_gate)
-
-        mock_chunk.assert_called_once()
-        torch.testing.assert_close(captured["input"], o_proj_input)
-        self.assertIs(captured["gate"], global_gate)
         torch.testing.assert_close(
             output,
-            o_proj_input * torch.sigmoid(rank_local_gate),
+            o_proj_input * torch.sigmoid(gate),
         )
 
 
