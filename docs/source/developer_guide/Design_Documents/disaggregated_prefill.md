@@ -102,4 +102,6 @@ Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected 
 
 - Heterogeneous P and D nodes are not supported, for example, running P nodes on A2 and D nodes on A3.
 
+- P nodes in PD-disaggregated deployments do not support non-default `max_num_partial_prefills` values. Keep it at the default value of `1`; other values are ignored and reset to `1`.
+
 - In non-symmetric TP configurations, only cases where the P nodes have a higher TP degree than the D nodes and the P TP count is an integer multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0).
