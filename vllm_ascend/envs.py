@@ -94,6 +94,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
     # `mega_moe` can be used only for moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Development-only W4A8 MXFP MoE routing override. When enabled, eager
+    # requests reuse enable_force_load_balance to route equal expert loads to
+    # every EP rank. Graph-mode requests remain unchanged.
+    "VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", "0"))
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

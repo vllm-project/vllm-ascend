@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from torch import nn
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
@@ -14,6 +15,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     AscendMoERunner,
     AscendUnquantizedFusedMoEMethod,
     make_eplb_placement_config,
+    should_force_moe_load_balance,
     use_multistage_eplb_load,
 )
 from vllm_ascend.quantization.quant_type import QuantType
@@ -124,6 +126,61 @@ def test_make_eplb_placement_config_does_not_copy_source():
     assert placement_config.dynamic_eplb is True
     assert placement_config.num_redundant_experts == 8
     assert source.num_redundant_experts == 0
+
+
+def test_force_load_balance_env_enables_real_w4a8_mxfp_eager_requests(monkeypatch):
+    monkeypatch.setattr(fused_moe_module, "ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", True)
+
+    assert should_force_moe_load_balance(
+        quant_type=QuantType.W4A8MXFP,
+        in_profile_run=False,
+        capturing=False,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+
+
+def test_force_load_balance_env_does_not_change_other_quant_types(monkeypatch):
+    monkeypatch.setattr(fused_moe_module, "ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", True)
+
+    assert not should_force_moe_load_balance(
+        quant_type=QuantType.W8A8MXFP,
+        in_profile_run=False,
+        capturing=False,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("capturing", "cudagraph_runtime_mode"),
+    [
+        (True, CUDAGraphMode.NONE),
+        (False, CUDAGraphMode.FULL),
+        (False, CUDAGraphMode.PIECEWISE),
+    ],
+)
+def test_force_load_balance_env_skips_graph_requests(monkeypatch, capturing, cudagraph_runtime_mode):
+    monkeypatch.setattr(fused_moe_module, "ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", True)
+    warning_once = MagicMock()
+    monkeypatch.setattr(fused_moe_module.logger, "warning_once", warning_once)
+
+    assert not should_force_moe_load_balance(
+        quant_type=QuantType.W4A8MXFP,
+        in_profile_run=False,
+        capturing=capturing,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+    )
+    warning_once.assert_called_once()
+
+
+def test_force_load_balance_profile_run_preserves_existing_behavior(monkeypatch):
+    monkeypatch.setattr(fused_moe_module, "ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", False)
+
+    assert should_force_moe_load_balance(
+        quant_type=QuantType.NONE,
+        in_profile_run=True,
+        capturing=False,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
 
 
 def test_ascend_unquantized_skips_upstream_modular_kernel_init():
