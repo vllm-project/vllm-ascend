@@ -1892,8 +1892,7 @@ class KVPoolWorker:
         block_bases = base_addrs + block_id * block_strides + head_offset_bytes
         token_offsets = np.arange(token_count, dtype=np.int64)[None, :] * entry_per_token_bytes[:, None]
         addrs_array = block_bases[:, None] + token_offsets
-        sizes_array = np.full(addrs_array.shape, self.sub_size_bytes, dtype=np.int64)
-        return addrs_array.ravel().tolist(), sizes_array.ravel().tolist()
+        return addrs_array.ravel().tolist(), [self.sub_size_bytes] * addrs_array.size
 
     def _build_tp_mismatch_keys_and_addrs(
         self,

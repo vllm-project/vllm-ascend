@@ -1132,26 +1132,16 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
                 ends = ends[self.tp_rank % self.put_step :: self.put_step]
                 keys = keys[self.tp_rank % self.put_step :: self.put_step]
 
-            valid_positions = [
-                index for index, start in enumerate(starts) if start // group_block_size < len(request.block_ids)
-            ]
-            valid_starts = [starts[index] for index in valid_positions]
-            valid_ends = [ends[index] for index in valid_positions]
-            resolved_block_ids = [request.block_ids[starts[index] // group_block_size] for index in valid_positions]
-            valid_addrs, valid_sizes = self.token_database.prepare_values(
-                valid_starts,
-                valid_ends,
-                resolved_block_ids,
-                layer_id=layer_id,
-            )
-            addrs: list[list[int]] = [[] for _ in starts]
-            sizes: list[list[int]] = [[] for _ in starts]
-            for position, addr, size in zip(valid_positions, valid_addrs, valid_sizes, strict=True):
-                addrs[position] = addr
-                sizes[position] = size
-            key_list.extend(key.to_string() for key in keys)
-            addr_list.extend(addrs)
-            size_list.extend(sizes)
+            for index, key in enumerate(keys):
+                key_list.append(key.to_string())
+                addr, size, _ = self.token_database.prepare_value_layer(
+                    starts[index],
+                    ends[index],
+                    request.block_ids,
+                    layer_id,
+                )
+                addr_list.append(addr)
+                size_list.append(size)
 
         for req_id in req_ids:
             self.dec_stored_request(req_id)
@@ -1239,12 +1229,6 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                 request = block_range.request
                 req_ids.append(request.req_id)
                 is_last_chunks.append(request.is_last_chunk)
-                starts = []
-                ends = []
-                keys = []
-                valid_positions = []
-                resolved_block_ids = []
-                group_block_size = self._get_block_size(0)
                 for block_index in range(block_range.start_block, block_range.end_block):
                     if block_index >= len(request.block_hashes):
                         continue
@@ -1253,26 +1237,18 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                     key = self.token_database._make_key_by_hash(
                         chunk_hash,
                     ).split_layers(self.final_layer_id + 1)[layer_id]
-                    starts.append(block_index * group_block_size)
-                    ends.append((block_index + 1) * group_block_size)
-                    keys.append(key.to_string())
-                    if block_index < len(request.block_ids):
-                        valid_positions.append(len(starts) - 1)
-                        resolved_block_ids.append(request.block_ids[block_index])
-                valid_addrs, valid_sizes = self.token_database.prepare_values(
-                    [starts[index] for index in valid_positions],
-                    [ends[index] for index in valid_positions],
-                    resolved_block_ids,
-                    layer_id=layer_id,
-                )
-                addrs: list[list[int]] = [[] for _ in starts]
-                sizes: list[list[int]] = [[] for _ in starts]
-                for position, addr, size in zip(valid_positions, valid_addrs, valid_sizes, strict=True):
-                    addrs[position] = addr
-                    sizes[position] = size
-                key_list.extend(keys)
-                addr_list.extend(addrs)
-                size_list.extend(sizes)
+                    group_block_size = self._get_block_size(0)
+                    start = block_index * group_block_size
+                    end = start + group_block_size
+                    addr, size, _ = self.token_database.prepare_value_layer(
+                        start,
+                        end,
+                        request.block_ids,
+                        layer_id,
+                    )
+                    key_list.append(key.to_string())
+                    addr_list.append(addr)
+                    size_list.append(size)
 
         if key_list:
             shift = (self.tp_rank * len(key_list)) // self.tp_size

@@ -17,7 +17,7 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 
@@ -38,8 +38,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
-    KVCacheStoreKeyLayerRecvingThread,
-    KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
@@ -467,16 +465,10 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 if tracked:
                     t.add_stored_request("r1")
                 t.request_queue.put(req)
-                with patch.object(
-                    t.token_database,
-                    "prepare_values",
-                    wraps=t.token_database.prepare_values,
-                ) as prepare_values:
-                    t._handle_request(req)
+                t._handle_request(req)
                 self.assertEqual(len(store.put_calls), put_count)
                 if put_count:
                     self.assertEqual(len(store.put_calls[0][0]), key_count)
-                    prepare_values.assert_called_once()
 
     def test_handle_request_with_kv_event(self):
         t, store = self._make_thread([0], enable_kv_event=True)
@@ -637,14 +629,8 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             load_spec=load_spec,
         )
         t.request_queue.put(req)
-        with patch.object(
-            db,
-            "prepare_values",
-            wraps=db.prepare_values,
-        ) as prepare_values:
-            t._handle_request(req)
+        t._handle_request(req)
         self.assertEqual(len(store.get_calls), 1)
-        prepare_values.assert_called_once()
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
 
@@ -673,108 +659,6 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
-
-
-class TestKVCacheStoreKeyLayerThreads(unittest.TestCase):
-    def _make_database(self):
-        database = FakeTokenDatabase()
-        database.set_group_buffers(
-            {0: [1000, 2000]},
-            {0: [16, 16]},
-            {0: [32, 32]},
-            group_num_layers={0: 2},
-        )
-        return database
-
-    @staticmethod
-    def _make_request():
-        return ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            block_ids=[3, 5],
-            block_hashes=["h0", "h1"],  # type: ignore[list-item]
-            is_last_chunk=True,
-        )
-
-    def test_sending_thread_batches_values(self):
-        store = FakeStore([0, 0])
-        database = self._make_database()
-        layer_finished = [threading.Event(), threading.Event()]
-        thread = KVCacheStoreKeyLayerSendingThread(
-            m_store=store,
-            token_database=database,
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            put_step=1,
-            ready_event=threading.Event(),
-            num_layers=2,
-            layer_save_finished_events=layer_finished,
-            sync_save_events=[MagicMock(), MagicMock()],
-        )
-        request = self._make_request()
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request, 0, 2)],
-        )
-        task.cached_process_tokens = thread.build_cached_process_tokens(task)
-        queued_tasks = [task]
-        thread.add_stored_request(request.req_id)
-        thread.request_queue.put(queued_tasks)
-
-        with patch.object(
-            database,
-            "prepare_values",
-            wraps=database.prepare_values,
-        ) as prepare_values:
-            thread._handle_request(queued_tasks)
-
-        prepare_values.assert_called_once_with([0, 16], [16, 32], [3, 5], layer_id=0)
-        self.assertEqual(store.put_calls[0][1], [[1096], [1160]])
-        self.assertTrue(layer_finished[0].is_set())
-
-    def test_recving_thread_batches_values(self):
-        store = FakeStore()
-        database = self._make_database()
-        load_finished = [threading.Event(), threading.Event()]
-        get_event = threading.Event()
-        thread = KVCacheStoreKeyLayerRecvingThread(
-            m_store=store,
-            token_database=database,
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            ready_event=threading.Event(),
-            get_event=get_event,
-            layer_load_finished_events=load_finished,
-            layer_save_finished_events=[threading.Event(), threading.Event()],
-            num_layers=2,
-        )
-        request = self._make_request()
-        transfer_task = LayerTransferTask(
-            layer_id=1,
-            block_ranges=[LayerBlockRange(request, 0, 2)],
-        )
-        load_task = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[transfer_task],
-            layer_id=1,
-        )
-        thread.request_queue.put(load_task)
-
-        with patch.object(
-            database,
-            "prepare_values",
-            wraps=database.prepare_values,
-        ) as prepare_values:
-            thread._handle_request(load_task)
-
-        prepare_values.assert_called_once_with([0, 16], [16, 32], [3, 5], layer_id=1)
-        self.assertEqual(store.get_calls[0][1], [[2096], [2160]])
-        self.assertTrue(load_finished[1].is_set())
-        self.assertTrue(get_event.is_set())
 
 
 class TestLayerBatchBuilder(unittest.TestCase):

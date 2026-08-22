@@ -387,25 +387,6 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(addr[0], 1000 + 5 * 160)
         self.assertEqual(addr[1], 2000 + 5 * 320)
 
-    def test_prepare_values_layer_matches_scalar_path(self):
-        self.db.set_group_buffers(
-            {0: [1000, 2000, 3000, 4000]},
-            {0: [160, 320, 160, 320]},
-            {0: [200, 400, 200, 400]},
-            group_num_layers={0: 2},
-        )
-        starts = [0, 16]
-        ends = [16, 24]
-        block_ids = [5, 6]
-        expected = [
-            self.db.prepare_value_layer(start, end, block_ids, layer_id=1)[:2]
-            for start, end in zip(starts, ends, strict=True)
-        ]
-
-        addrs, sizes = self.db.prepare_values(starts, ends, block_ids, layer_id=1)
-
-        self.assertEqual(list(zip(addrs, sizes, strict=True)), expected)
-
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
         self.assertEqual(key, ["k1"])

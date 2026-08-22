@@ -635,14 +635,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        with patch.object(
-            worker.token_database,
-            "prepare_values",
-            wraps=worker.token_database.prepare_values,
-        ) as prepare_values:
-            worker.start_load_kv(meta)
+        worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
-        prepare_values.assert_called_once()
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",

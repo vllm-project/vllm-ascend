@@ -471,7 +471,6 @@ class ChunkedTokenDatabase:
         block_ids: Sequence[int],
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
-        layer_id: int | None = None,
     ) -> tuple[list[list[int]], list[list[int]]]:
         """Prepare addresses and sizes for a batch of resolved cache blocks."""
         if not (len(starts) == len(ends) == len(block_ids)):
@@ -481,21 +480,10 @@ class ChunkedTokenDatabase:
 
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         if not group_addrs or not group_block_len:
-            empty_values: list[list[int]] = [[] for _ in block_ids]
-            return empty_values, [values.copy() for values in empty_values]
+            return ([[] for _ in block_ids], [[] for _ in block_ids])
 
-        entry_indices: np.ndarray = np.arange(len(group_addrs), dtype=np.int64)
-        if layer_id is not None:
-            num_layers = self.group_num_layers.get(cache_role, {}).get(kv_cache_group_id, 1)
-            entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
-            if layer_id >= num_layers or entries_per_layer == 0:
-                empty_values = [[] for _ in block_ids]
-                return empty_values, [values.copy() for values in empty_values]
-            start_index = layer_id * entries_per_layer
-            entry_indices = entry_indices[start_index : start_index + entries_per_layer]
-
-        layout_indices: np.ndarray = entry_indices % len(group_block_len)
-        base_addrs = np.asarray(group_addrs, dtype=np.int64)[entry_indices]
+        layout_indices: np.ndarray = np.arange(len(group_addrs), dtype=np.int64) % len(group_block_len)
+        base_addrs = np.asarray(group_addrs, dtype=np.int64)
         block_lens = np.asarray(group_block_len, dtype=np.int64)[layout_indices]
         block_strides = (
             np.asarray(group_block_stride, dtype=np.int64)[layout_indices] if group_block_stride else block_lens
