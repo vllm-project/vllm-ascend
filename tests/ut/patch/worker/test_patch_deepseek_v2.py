@@ -2,9 +2,7 @@
 
 from types import SimpleNamespace
 
-from vllm_ascend.patch.worker.patch_deepseek_v2 import (
-    _should_skip_indexer_init,
-)
+from vllm_ascend.patch.worker.patch_deepseek_v2 import _should_skip_indexer_init
 
 
 def _config(**overrides) -> SimpleNamespace:
