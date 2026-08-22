@@ -172,7 +172,7 @@ __global__ __aicore__ void SasaInferIntfRegular(
     sasaKernel(params);
 }
 
-template <class InDtype, class SMDtype, class REDtype, Format qFormat, bool IS_FD, bool IS_DENSE = false>
+template <class InDtype, class SMDtype, class REDtype, Format qFormat, bool IS_FD>
 __global__ __aicore__ void SasaInferInterfaceFullQuant(
     GM_ADDR q, GM_ADDR k, GM_ADDR v,
     GM_ADDR selectIdx, GM_ADDR blockTable, GM_ADDR selectNumIdx,
@@ -231,7 +231,7 @@ __global__ __aicore__ void SasaInferInterfaceFullQuant(
         DispatchPolicyRescaleO, ElementO, ElementOTmp, ElementS, ElementK, TileCopyRescaleO, Arch::PositionL0C>;
 
     using SasaKernel = SasaFullQuantKernelArch35<
-        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat, IS_FD, IS_DENSE>;
+        BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat, IS_FD>;
 
     SasaFullQuantKernelParamsArch35 params{
         q, k, v, selectIdx, blockTable, selectNumIdx,

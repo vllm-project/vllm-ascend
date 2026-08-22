@@ -34,7 +34,6 @@ const std::array<const aclTensor *, 2> SparseAttentionScore_950(
     int64_t topK,
     int64_t innerPrecise,
     const char *inputLayout,
-    bool isDense,
     const aclTensor *attentionOut,
     aclOpExecutor *executor);
 

@@ -43,22 +43,10 @@ extern "C" __global__ __aicore__ void sparse_attention_score_950(
         TILING_KEY_IS(SASA_BF16_D128_ARCH35_FD_TILING);
         TILING_KEY_IS(SASA_FP8_D128_ARCH35_FD_TILING);
         TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_FD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_ARCH35_DENSE_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_DENSE_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_ARCH35_DENSE_FD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_DENSE_FD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_ARCH35_DENSE_NTD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_ARCH35_DENSE_NTD_FD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_FD_TILING);
         TILING_KEY_IS(SASA_FP16_D128_ARCH35_NTD_TILING);
         TILING_KEY_IS(SASA_BF16_D128_ARCH35_NTD_TILING);
         TILING_KEY_IS(SASA_FP16_D128_ARCH35_NTD_FD_TILING);
         TILING_KEY_IS(SASA_BF16_D128_ARCH35_NTD_FD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_ARCH35_DENSE_KVNTD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_ARCH35_DENSE_KVNTD_FD_TILING);
-        TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_FD_TILING);
 
 #if TILING_KEY_VAR == SASA_FP8_D128_TILING
         SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND, false>(
@@ -100,78 +88,6 @@ extern "C" __global__ __aicore__ void sparse_attention_score_950(
             attentionOut, softmaxLse, user, tiling);
 #elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_FD_TILING
         SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::TND, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_ARCH35_DENSE_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND, false, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_DENSE_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::TND, false, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_ARCH35_DENSE_FD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND, true, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_DENSE_FD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::TND, true, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_ARCH35_DENSE_KVNTD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND, false, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::TND, false, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_ARCH35_DENSE_KVNTD_FD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND, true, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_FD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::TND, true, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_ARCH35_DENSE_NTD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::NTD, false, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::NTD, false, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_ARCH35_DENSE_NTD_FD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::NTD, true, true>(
-            query, key, value, selectIdx, blockTable, selectNumIdx,
-            actualSeqLengths, actualSeqLengthsKv,
-            qDequantScale, kDequantScale, vDequantScale,
-            attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_FD_TILING
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::NTD, true, true>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
             qDequantScale, kDequantScale, vDequantScale,

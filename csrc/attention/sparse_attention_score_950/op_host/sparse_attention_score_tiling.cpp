@@ -58,7 +58,6 @@ constexpr int ATTR_BLOCK_SIZE_INDEX = 2;
 constexpr int ATTR_TOP_K_INDEX = 3;
 constexpr int ATTR_INNER_PRECISE_INDEX = 4;
 constexpr int ATTR_INPUT_LAYOUT_INDEX = 5;
-constexpr int ATTR_IS_DENSE_INDEX = 6;
 
 constexpr uint32_t SOC_VER_950_CODE = 4;
 
@@ -160,9 +159,6 @@ ge::graphStatus SASATiling::ParseAttrs(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
 
-    const bool *isDensePtr = attrs->GetAttrPointer<bool>(ATTR_IS_DENSE_INDEX);
-    denseMode_ = isDensePtr != nullptr && *isDensePtr;
-
     return ge::GRAPH_SUCCESS;
 }
 
@@ -260,41 +256,30 @@ ge::graphStatus SASATiling::ParseInputTensors(gert::TilingContext *context)
     batch_ = static_cast<uint32_t>(blockTableShape->GetStorageShape().GetDim(BLOCK_TABLE_DIM_BATCH));
     maxBlocksPerBatch_ = static_cast<uint32_t>(blockTableShape->GetStorageShape().GetDim(BLOCK_TABLE_DIM_MAX_BLOCKS));
 
-    if (denseMode_) {
-        maxQSeqlen_ = totalQTokens_;
-    } else {
-        const gert::StorageShape *selectIdxShape = context->GetOptionalInputShape(SELECT_IDX_INDEX);
-        OP_CHECK_IF(selectIdxShape == nullptr, OPS_REPORT_VECTOR_INNER_ERR("SparseAttentionScore",
-            "SelectIdx is required in sparse mode."), return ge::GRAPH_FAILED);
-        const auto &selectShape = selectIdxShape->GetStorageShape();
-        if (selectShape.GetDimNum() != 3U) {
-            OP_LOGE(context->GetNodeName(), "SelectIdx must be rank 3 in sparse mode.");
-            return ge::GRAPH_FAILED;
-        }
-        const uint32_t selectKvHeads = static_cast<uint32_t>(selectShape.GetDim(SELECT_IDX_DIM_KV_HEAD));
-        maxQSeqlen_ = static_cast<uint32_t>(selectShape.GetDim(SELECT_IDX_DIM_SEQ));
-        const uint32_t selectTopK = static_cast<uint32_t>(selectShape.GetDim(SELECT_IDX_DIM_TOPK));
-        if (selectKvHeads != kvHeads_ || selectTopK != topK_ || maxQSeqlen_ < totalQTokens_) {
-            OP_LOGE(context->GetNodeName(),
-                "SelectIdx shape must match [kvHeads, >=totalQTokens, topK], got [%u,%u,%u], "
-                "expected [%u,>=%u,%u].", selectKvHeads, maxQSeqlen_, selectTopK,
-                kvHeads_, totalQTokens_, topK_);
-            return ge::GRAPH_FAILED;
-        }
+    const gert::StorageShape *selectIdxShape = context->GetOptionalInputShape(SELECT_IDX_INDEX);
+    OP_CHECK_IF(selectIdxShape == nullptr, OPS_REPORT_VECTOR_INNER_ERR("SparseAttentionScore",
+        "SelectIdx is required in sparse mode."), return ge::GRAPH_FAILED);
+    const auto &selectShape = selectIdxShape->GetStorageShape();
+    if (selectShape.GetDimNum() != 3U) {
+        OP_LOGE(context->GetNodeName(), "SelectIdx must be rank 3 in sparse mode.");
+        return ge::GRAPH_FAILED;
+    }
+    const uint32_t selectKvHeads = static_cast<uint32_t>(selectShape.GetDim(SELECT_IDX_DIM_KV_HEAD));
+    maxQSeqlen_ = static_cast<uint32_t>(selectShape.GetDim(SELECT_IDX_DIM_SEQ));
+    const uint32_t selectTopK = static_cast<uint32_t>(selectShape.GetDim(SELECT_IDX_DIM_TOPK));
+    if (selectKvHeads != kvHeads_ || selectTopK != topK_ || maxQSeqlen_ < totalQTokens_) {
+        OP_LOGE(context->GetNodeName(),
+            "SelectIdx shape must match [kvHeads, >=totalQTokens, topK], got [%u,%u,%u], "
+            "expected [%u,>=%u,%u].", selectKvHeads, maxQSeqlen_, selectTopK,
+            kvHeads_, totalQTokens_, topK_);
+        return ge::GRAPH_FAILED;
     }
 
     auto queryDesc = context->GetInputDesc(QUERY_INDEX);
     if (queryDesc != nullptr) {
         dataType_ = queryDesc->GetDataType();
     }
-    if (denseMode_ &&
-        (socVer_ != SOC_VER_950_CODE || dataType_ != ge::DT_FLOAT8_E4M3FN)) {
-        OP_LOGE(context->GetNodeName(),
-            "DenseAttentionScore only supports FP8 input on Arch35, got dtype=%d, soc=%u.",
-            static_cast<int32_t>(dataType_), socVer_);
-        return ge::GRAPH_FAILED;
-    }
-    if (!denseMode_ && (isQNtd_ || isKvNtd_)) {
+    if (isQNtd_ || isKvNtd_) {
         OP_LOGE(context->GetNodeName(),
             "SparseAttentionScore only supports the legacy TND layout.");
         return ge::GRAPH_FAILED;
@@ -306,7 +291,6 @@ ge::graphStatus SASATiling::ParseInputTensors(gert::TilingContext *context)
             static_cast<int32_t>(dataType_), socVer_);
         return ge::GRAPH_FAILED;
     }
-
     const uint64_t qTokenStride = isQNtd_ ? embeddingSize_ :
         static_cast<uint64_t>(numHeads_) * embeddingSize_;
     const uint64_t qHeadStride = isQNtd_ ?
@@ -369,9 +353,6 @@ ge::graphStatus SASATiling::ParseSeqlens(gert::TilingContext *context)
 ge::graphStatus SASATiling::ParseSelectNumIdx(gert::TilingContext *context)
 {
     selectNumIdxList_ = nullptr;
-    if (denseMode_) {
-        return ge::GRAPH_SUCCESS;
-    }
     const gert::Tensor *selectNumIdxTensor = context->GetOptionalInputTensor(SELECT_NUM_IDX_INDEX);
     if (selectNumIdxTensor == nullptr) {
         return ge::GRAPH_SUCCESS;
@@ -401,185 +382,6 @@ ge::graphStatus SASATiling::ParseSelectNumIdx(gert::TilingContext *context)
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus SASATiling::CalculateDenseTaskSplit(gert::TilingContext *context)
-{
-    if (kvHeads_ == 0 || numHeads_ % kvHeads_ != 0 || blockSize_ == 0 ||
-        embeddingSize_ != 128 || blockSize_ != 128 || innerPrecise_ != 4) {
-        OP_LOGE(context->GetNodeName(),
-            "Dense FP8 only supports headDim=128, blockSize=128, innerPrecise=4 and valid GQA heads; "
-            "got numHeads=%u, kvHeads=%u, headDim=%u, blockSize=%u, innerPrecise=%u.",
-            numHeads_, kvHeads_, embeddingSize_, blockSize_, innerPrecise_);
-        return ge::GRAPH_FAILED;
-    }
-
-    denseValidBlockCount_.assign(totalTaskNum_, 0U);
-    denseBlockPrefix_.assign(static_cast<size_t>(totalTaskNum_) + 1U, 0U);
-    uint32_t maxValidBlockNum = 0U;
-    const bool hasHostSeqLens = qSeqLenList_ != nullptr && kvSeqLenList_ != nullptr &&
-        qSeqLenCount_ >= batch_ && kvSeqLenCount_ >= batch_;
-    if (hasHostSeqLens) {
-        uint64_t qTokenOffset = 0U;
-        for (uint32_t batchIdx = 0; batchIdx < batch_; ++batchIdx) {
-            const int32_t qSeqLenValue = qSeqLenList_[batchIdx];
-            const int32_t kvSeqLenValue = kvSeqLenList_[batchIdx];
-            if (qSeqLenValue <= 0 || kvSeqLenValue < qSeqLenValue) {
-                OP_LOGE(context->GetNodeName(),
-                    "Dense FP8 requires 0 < qSeqLen <= kvSeqLen for every batch; "
-                    "batch=%u has qSeqLen=%d, kvSeqLen=%d.",
-                    batchIdx, qSeqLenValue, kvSeqLenValue);
-                return ge::GRAPH_FAILED;
-            }
-            const uint32_t qSeqLen = static_cast<uint32_t>(qSeqLenValue);
-            const uint32_t kvSeqLen = static_cast<uint32_t>(kvSeqLenValue);
-            if (CeilDiv(kvSeqLen, blockSize_) > maxBlocksPerBatch_) {
-                OP_LOGE(context->GetNodeName(),
-                    "Dense FP8 blockTable cannot cover actual KV length: batch=%u, kvSeqLen=%u, "
-                    "blockSize=%u, maxBlocksPerBatch=%u.",
-                    batchIdx, kvSeqLen, blockSize_, maxBlocksPerBatch_);
-                return ge::GRAPH_FAILED;
-            }
-
-            const uint32_t historyLen = kvSeqLen - qSeqLen;
-            for (uint32_t localQToken = 0; localQToken < qSeqLen; ++localQToken) {
-                if (qTokenOffset >= totalQTokens_) {
-                    OP_LOGE(context->GetNodeName(),
-                        "Sum(actualSeqLengths) exceeds totalQTokens=%u.", totalQTokens_);
-                    return ge::GRAPH_FAILED;
-                }
-                const uint32_t visibleKvLen = historyLen + localQToken + 1U;
-                const uint32_t validBlockNum = CeilDiv(visibleKvLen, blockSize_);
-                maxValidBlockNum = std::max(maxValidBlockNum, validBlockNum);
-                for (uint32_t kvHead = 0; kvHead < kvHeads_; ++kvHead) {
-                    const uint32_t baseTask = static_cast<uint32_t>(qTokenOffset) * kvHeads_ + kvHead;
-                    denseValidBlockCount_[baseTask] = validBlockNum;
-                    const uint64_t nextPrefix = denseBlockPrefix_[baseTask] + validBlockNum;
-                    if (nextPrefix > std::numeric_limits<uint32_t>::max()) {
-                        OP_LOGE(context->GetNodeName(), "Dense FP8 flattened block count exceeds uint32 range.");
-                        return ge::GRAPH_FAILED;
-                    }
-                    denseBlockPrefix_[baseTask + 1U] = nextPrefix;
-                }
-                ++qTokenOffset;
-            }
-        }
-        if (qTokenOffset != totalQTokens_) {
-            OP_LOGE(context->GetNodeName(),
-                "Sum(actualSeqLengths)=%lu does not match totalQTokens=%u.", qTokenOffset, totalQTokens_);
-            return ge::GRAPH_FAILED;
-        }
-    } else {
-        // Eager ACLNN keeps sequence-length tensors on NPU.  Host tiling uses
-        // the block-table width as a rectangular upper bound; the kernel
-        // clamps every range with the real causal visible length and emits a
-        // neutral partial for an upper-bound-only shard.
-        if (maxBlocksPerBatch_ == 0U) {
-            OP_LOGE(context->GetNodeName(), "Dense FP8 requires a non-empty blockTable.");
-            return ge::GRAPH_FAILED;
-        }
-        maxValidBlockNum = maxBlocksPerBatch_;
-        for (uint32_t baseTask = 0; baseTask < totalTaskNum_; ++baseTask) {
-            denseValidBlockCount_[baseTask] = maxBlocksPerBatch_;
-            const uint64_t nextPrefix = denseBlockPrefix_[baseTask] + maxBlocksPerBatch_;
-            if (nextPrefix > std::numeric_limits<uint32_t>::max()) {
-                OP_LOGE(context->GetNodeName(), "Dense FP8 flattened block upper bound exceeds uint32 range.");
-                return ge::GRAPH_FAILED;
-            }
-            denseBlockPrefix_[baseTask + 1U] = nextPrefix;
-        }
-        OP_LOGI(context->GetNodeName(),
-            "Dense FP8 uses blockTable-width upper-bound tiling because actual sequence lengths are on NPU: "
-            "baseTasks=%u, blocksPerTask=%u.", totalTaskNum_, maxBlocksPerBatch_);
-    }
-
-    fdIdentityCount_ = std::max(1U, maxValidBlockNum);
-    const uint64_t totalValidKvBlockNum = denseBlockPrefix_.back();
-    if (totalValidKvBlockNum <= blockDim_ || aicNum_ == 0U ||
-        totalTaskNum_ > SASA_FD_MAX_BASE_TASK) {
-        OP_LOGI(context->GetNodeName(),
-            "Use Arch35 dense FP8 without FD: baseTasks=%u, validKvBlocks=%lu, normalBlockDim=%u.",
-            totalTaskNum_, totalValidKvBlockNum, blockDim_);
-        return ge::GRAPH_SUCCESS;
-    }
-
-    const uint32_t groupSize = numHeads_ / kvHeads_;
-    const uint32_t m16 = CeilDiv(groupSize, 16U);
-    uint64_t totalCost = 0U;
-    for (uint32_t baseTask = 0; baseTask < totalTaskNum_; ++baseTask) {
-        const uint64_t validBlockNum = denseValidBlockCount_[baseTask];
-        totalCost += FD_COST_M16 * static_cast<uint64_t>(m16) +
-            FD_COST_N * validBlockNum +
-            FD_COST_M16_N * static_cast<uint64_t>(m16) * validBlockNum;
-    }
-    const uint64_t maxCoreLimit = std::min(static_cast<uint64_t>(aicNum_),
-        static_cast<uint64_t>(SASA_FD_MAX_AIC));
-    const uint32_t maxCore = static_cast<uint32_t>(std::min(maxCoreLimit, totalValidKvBlockNum));
-    const uint32_t bestCoreNum = CalcFdBestCore(totalCost, FD_LAUNCH_COST, maxCore);
-    if (bestCoreNum <= blockDim_) {
-        OP_LOGI(context->GetNodeName(),
-            "Use Arch35 dense FP8 without FD: cost-model bestCores=%u does not exceed normalBlockDim=%u.",
-            bestCoreNum, blockDim_);
-        return ge::GRAPH_SUCCESS;
-    }
-
-    const uint32_t usedCoreNum = bestCoreNum;
-    fdCoreRange_.usedCoreNum = usedCoreNum;
-    fdCoreRange_.perCoreTaskNum = CeilDiv(static_cast<uint32_t>(totalValidKvBlockNum), usedCoreNum);
-    std::array<uint64_t, SASA_FD_MAX_AIC> coreFlatStart{};
-    std::array<uint64_t, SASA_FD_MAX_AIC> coreFlatEnd{};
-    auto decodePosition = [this, totalValidKvBlockNum](uint64_t flatPos,
-        uint32_t &baseTask, uint32_t &blockIdx) {
-        if (flatPos >= totalValidKvBlockNum) {
-            baseTask = totalTaskNum_;
-            blockIdx = 0U;
-            return;
-        }
-        const auto upper = std::upper_bound(denseBlockPrefix_.begin(), denseBlockPrefix_.end(), flatPos);
-        baseTask = static_cast<uint32_t>(std::distance(denseBlockPrefix_.begin(), upper) - 1);
-        blockIdx = static_cast<uint32_t>(flatPos - denseBlockPrefix_[baseTask]);
-    };
-
-    fdIdentityCount_ = 1U;
-    for (uint32_t core = 0; core < usedCoreNum; ++core) {
-        const uint64_t flatStart = totalValidKvBlockNum * core / usedCoreNum;
-        const uint64_t flatEnd = totalValidKvBlockNum * (core + 1U) / usedCoreNum;
-        coreFlatStart[core] = flatStart;
-        coreFlatEnd[core] = flatEnd;
-        fdCoreRange_.taskStart[core] = static_cast<uint32_t>(flatStart);
-        fdCoreRange_.taskEnd[core] = static_cast<uint32_t>(flatEnd);
-        decodePosition(flatStart, fdCoreRange_.startBaseTask[core], fdCoreRange_.startBlockIdx[core]);
-        decodePosition(flatEnd, fdCoreRange_.endBaseTask[core], fdCoreRange_.endBlockIdx[core]);
-        fdIdentityCount_ = std::max(fdIdentityCount_, static_cast<uint32_t>(flatEnd - flatStart));
-    }
-
-    for (uint32_t baseTask = 0; baseTask < totalTaskNum_; ++baseTask) {
-        const uint64_t taskStart = denseBlockPrefix_[baseTask];
-        const uint64_t taskEnd = denseBlockPrefix_[baseTask + 1U];
-        uint32_t splitCount = 0U;
-        for (uint32_t core = 0; core < usedCoreNum; ++core) {
-            if (coreFlatStart[core] < taskEnd && coreFlatEnd[core] > taskStart) {
-                ++splitCount;
-            }
-        }
-        if (splitCount <= 1U) {
-            continue;
-        }
-        fdCombineRange_.baseTask[fdCombineRange_.combineTaskNum++] = baseTask;
-        fdCombineRange_.partialStartByBase[baseTask] = fdCombineRange_.partialTaskNum;
-        fdCombineRange_.partialCountByBase[baseTask] = splitCount;
-        fdCombineRange_.partialTaskNum += splitCount;
-    }
-
-    fdLseSubStride_ = CeilDiv(CeilDiv(groupSize, 2U), 8U) * 8U;
-    blockDim_ = usedCoreNum;
-    enableFd_ = true;
-    OP_LOGI(context->GetNodeName(),
-        "Enable Arch35 dense FP8 FlashDecoding: baseTasks=%u, splitBlocks=%lu, totalCost=%lu, "
-        "bestCores=%u, perCoreBlocks=%u, combineTasks=%u, partialTasks=%u, identityCount=%u.",
-        totalTaskNum_, totalValidKvBlockNum, totalCost, bestCoreNum, fdCoreRange_.perCoreTaskNum,
-        fdCombineRange_.combineTaskNum, fdCombineRange_.partialTaskNum, fdIdentityCount_);
-    return ge::GRAPH_SUCCESS;
-}
-
 ge::graphStatus SASATiling::CalculateTaskSplit(gert::TilingContext *context)
 {
     totalTaskNum_ = totalQTokens_ * kvHeads_;
@@ -603,10 +405,6 @@ ge::graphStatus SASATiling::CalculateTaskSplit(gert::TilingContext *context)
     fdCombineRange_.baseTask.fill(0);
     fdCombineRange_.partialStartByBase.fill(0);
     fdCombineRange_.partialCountByBase.fill(0);
-
-    if (denseMode_) {
-        return CalculateDenseTaskSplit(context);
-    }
 
     const uint32_t groupSize = kvHeads_ == 0 ? 0 : numHeads_ / kvHeads_;
     const bool fdDtypeSupported = dataType_ == ge::DT_FLOAT16 || dataType_ == ge::DT_BF16 ||
@@ -748,14 +546,6 @@ ge::graphStatus SASATiling::CalculateWorkSpace(gert::TilingContext *context)
                 return ge::GRAPH_FAILED;
             }
             workSpaceSize_ = libapiSize_ + userWorkspaceSize;
-        } else if (denseMode_) {
-            const uint64_t identityIdxSize = static_cast<uint64_t>(fdIdentityCount_) * sizeof(int32_t);
-            if (identityIdxSize > std::numeric_limits<size_t>::max() - libapiSize_) {
-                OP_LOGE(context->GetNodeName(), "Dense FP8 workspace size overflow.");
-                return ge::GRAPH_FAILED;
-            }
-            fdIdentityOffset_ = 0;
-            workSpaceSize_ = libapiSize_ + identityIdxSize;
         } else {
             uint32_t dtypeSize = (dataType_ == ge::DT_FLOAT8_E4M3FN) ? 1 : 2;
             uint64_t perTaskWorkspace = static_cast<uint64_t>(topK_) * blockSize_ * embeddingSize_ * dtypeSize * 2;
@@ -800,34 +590,10 @@ uint64_t SASATiling::GenerateTilingKey()
     }
     if (dataType_ == ge::DT_FLOAT8_E4M3FN && embeddingSize_ == 128 && blockSize_ == 128) {
         if (attentionOutDtype_ == ge::DT_BF16) {
-            if (denseMode_) {
-                if (!isQNtd_ && isKvNtd_) {
-                    return enableFd_ ? SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_FD_TILING :
-                        SASA_FP8_D128_BF16_ARCH35_DENSE_KVNTD_TILING;
-                }
-                if (isQNtd_) {
-                    return enableFd_ ? SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_FD_TILING :
-                        SASA_FP8_D128_BF16_ARCH35_DENSE_NTD_TILING;
-                }
-                return enableFd_ ? SASA_FP8_D128_BF16_ARCH35_DENSE_FD_TILING :
-                    SASA_FP8_D128_BF16_ARCH35_DENSE_TILING;
-            }
             if (enableFd_) {
                 return SASA_FP8_D128_BF16_ARCH35_FD_TILING;
             }
             return SASA_FP8_D128_BF16_TILING;
-        }
-        if (denseMode_) {
-            if (!isQNtd_ && isKvNtd_) {
-                return enableFd_ ? SASA_FP8_D128_ARCH35_DENSE_KVNTD_FD_TILING :
-                    SASA_FP8_D128_ARCH35_DENSE_KVNTD_TILING;
-            }
-            if (isQNtd_) {
-                return enableFd_ ? SASA_FP8_D128_ARCH35_DENSE_NTD_FD_TILING :
-                    SASA_FP8_D128_ARCH35_DENSE_NTD_TILING;
-            }
-            return enableFd_ ? SASA_FP8_D128_ARCH35_DENSE_FD_TILING :
-                SASA_FP8_D128_ARCH35_DENSE_TILING;
         }
         if (enableFd_) {
             return SASA_FP8_D128_ARCH35_FD_TILING;
@@ -905,7 +671,6 @@ ge::graphStatus SASATiling::FillTilingData(gert::TilingContext *context)
     tilingData_->set_vL1BufNum(1);
     tilingData_->set_pL1BufNum(3);  // PRE_LAUNCH + 1
     tilingData_->set_fdLseSubStride(enableFd_ ? fdLseSubStride_ : 0);
-    tilingData_->set_denseMode(denseMode_ ? 1U : 0U);
     tilingData_->set_layoutMode(isQNtd_ ? 1U : 0U);
     tilingData_->set_qTokenStride(qTokenStride_);
     tilingData_->set_qHeadStride(qHeadStride_);

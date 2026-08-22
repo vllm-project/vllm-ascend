@@ -37,7 +37,6 @@ const std::array<const aclTensor *, 2> SparseAttentionScore_950(
     int64_t topK,
     int64_t innerPrecise,
     const char *inputLayout,
-    bool isDense,
     const aclTensor *attentionOut,
     aclOpExecutor *executor)
 {
@@ -45,7 +44,7 @@ const std::array<const aclTensor *, 2> SparseAttentionScore_950(
            selectNumIdxOptional, actualSeqLengthsOptional, actualSeqLengthsKvOptional,
            qDequantScaleOptional, kDequantScaleOptional, vDequantScaleOptional,
            numKeyValueHeads, scaleValue, blockSize, topK, innerPrecise,
-           inputLayout, isDense);
+           inputLayout);
 
     // Non-FP8: output dtype follows query (same as input).
     // FP8: output dtype is derived from user-provided attentionOut tensor,
@@ -66,8 +65,7 @@ const std::array<const aclTensor *, 2> SparseAttentionScore_950(
                                    static_cast<int64_t>(blockSize),
                                    static_cast<int64_t>(topK),
                                    static_cast<int64_t>(innerPrecise),
-                                   inputLayout,
-                                   isDense));
+                                   inputLayout));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "SparseAttentionScore_950 infer shape failed.");
         return {nullptr, nullptr};
@@ -83,8 +81,7 @@ const std::array<const aclTensor *, 2> SparseAttentionScore_950(
                                         static_cast<int64_t>(blockSize),
                                         static_cast<int64_t>(topK),
                                         static_cast<int64_t>(innerPrecise),
-                                        inputLayout,
-                                        isDense));
+                                        inputLayout));
 
     return {attentionOutTensor, softmaxLseTensor};
 }

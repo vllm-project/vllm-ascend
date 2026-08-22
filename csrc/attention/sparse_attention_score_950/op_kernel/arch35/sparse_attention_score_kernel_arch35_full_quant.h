@@ -27,8 +27,7 @@ template <
     class EpilogueRescaleO,
     Format qFormat,
     Format kvFormat,
-    bool IS_FD = false,
-    bool IS_DENSE = false>
+    bool IS_FD = false>
 class SasaFullQuantKernelArch35 {
 public:
     using ArchTag = typename BlockMmadPV::ArchTag;
@@ -139,25 +138,11 @@ public:
         uint32_t taskLoopStep = coreNum;
         uint32_t fdFlatTaskStart = 0;
         uint32_t fdFlatTaskEnd = 0;
-        uint32_t fdStartBaseTask = 0;
-        uint32_t fdStartBlockIdx = 0;
-        uint32_t fdEndBaseTask = 0;
-        uint32_t fdEndBlockIdx = 0;
         if constexpr (IS_FD) {
-            if constexpr (IS_DENSE) {
-                fdStartBaseTask = sasaTilingData->fdCoreStartBaseTask[coreIdx];
-                fdStartBlockIdx = sasaTilingData->fdCoreStartBlockIdx[coreIdx];
-                fdEndBaseTask = sasaTilingData->fdCoreEndBaseTask[coreIdx];
-                fdEndBlockIdx = sasaTilingData->fdCoreEndBlockIdx[coreIdx];
-                taskLoopStart = fdStartBaseTask;
-                taskLoopEnd = fdEndBaseTask +
-                    ((fdEndBaseTask < totalTaskNum_ && fdEndBlockIdx > 0U) ? 1U : 0U);
-            } else {
-                fdFlatTaskStart = sasaTilingData->fdCoreTaskStart[coreIdx];
-                fdFlatTaskEnd = sasaTilingData->fdCoreTaskEnd[coreIdx];
-                taskLoopStart = fdFlatTaskStart / topK_;
-                taskLoopEnd = CeilDiv(fdFlatTaskEnd, topK_);
-            }
+            fdFlatTaskStart = sasaTilingData->fdCoreTaskStart[coreIdx];
+            fdFlatTaskEnd = sasaTilingData->fdCoreTaskEnd[coreIdx];
+            taskLoopStart = fdFlatTaskStart / topK_;
+            taskLoopEnd = CeilDiv(fdFlatTaskEnd, topK_);
             taskLoopStep = 1;
         }
         for (uint32_t taskLoopIdx = taskLoopStart; taskLoopIdx < taskLoopEnd; taskLoopIdx += taskLoopStep) {
@@ -166,7 +151,7 @@ public:
             uint32_t rawEnd = topK_;
             uint32_t fdPartialTaskId = 0;
             bool isFdPartial = false;
-            if constexpr (IS_FD && !IS_DENSE) {
+            if constexpr (IS_FD) {
                 const uint32_t taskFlatStart = taskIdx * topK_;
                 rawBegin = fdFlatTaskStart > taskFlatStart ? fdFlatTaskStart - taskFlatStart : 0;
                 const uint32_t remainingFlatTasks = fdFlatTaskEnd - taskFlatStart;
@@ -208,53 +193,26 @@ public:
             int64_t selectIdxBase = static_cast<int64_t>(kvHeadIdx) * maxQSeqlen_ * topK_ +
                                     static_cast<int64_t>(qToken) * topK_;
 
-            if constexpr (IS_DENSE) {
-                rawEnd = validLogicalBlockNum;
-                if constexpr (IS_FD) {
-                    if (taskIdx == fdStartBaseTask) {
-                        rawBegin = fdStartBlockIdx;
-                    }
-                    if (taskIdx == fdEndBaseTask) {
-                        rawEnd = fdEndBlockIdx;
-                    }
-                    rawBegin = rawBegin < validLogicalBlockNum ? rawBegin : validLogicalBlockNum;
-                    rawEnd = rawEnd < validLogicalBlockNum ? rawEnd : validLogicalBlockNum;
-                    const uint32_t splitCount = sasaTilingData->fdPartialCountByBase[taskIdx];
-                    isFdPartial = splitCount > 1U;
-                    if (isFdPartial) {
-                        uint32_t partialOrdinal = 0U;
-                        for (uint32_t previousCore = 0; previousCore < coreIdx; ++previousCore) {
-                            if (DenseCoreIntersectsBaseTask(sasaTilingData, previousCore, taskIdx)) {
-                                ++partialOrdinal;
-                            }
-                        }
-                        fdPartialTaskId = sasaTilingData->fdPartialStartByBase[taskIdx] + partialOrdinal;
-                    }
+            uint32_t validTopK = topK_;
+            if (params.selectNumIdx != nullptr) {
+                int64_t selectNumOffset = static_cast<int64_t>(kvHeadIdx) * maxQSeqlen_ + qToken;
+                const int32_t selectNum = gSelectNumIdx.GetValue(selectNumOffset);
+                validTopK = selectNum <= 0 ? 0U :
+                    (static_cast<uint32_t>(selectNum) < topK_ ? static_cast<uint32_t>(selectNum) : topK_);
+            }
+            if constexpr (!IS_FD) {
+                if (validTopK == 0U) {
+                    continue;
                 }
+                rawEnd = validTopK;
             } else {
-                uint32_t validTopK = topK_;
-                if (params.selectNumIdx != nullptr) {
-                    int64_t selectNumOffset = static_cast<int64_t>(kvHeadIdx) * maxQSeqlen_ + qToken;
-                    const int32_t selectNum = gSelectNumIdx.GetValue(selectNumOffset);
-                    validTopK = selectNum <= 0 ? 0U :
-                        (static_cast<uint32_t>(selectNum) < topK_ ? static_cast<uint32_t>(selectNum) : topK_);
-                }
-                if constexpr (!IS_FD) {
-                    if (validTopK == 0U) {
-                        continue;
-                    }
-                    rawEnd = validTopK;
-                } else {
-                    rawBegin = rawBegin < validTopK ? rawBegin : validTopK;
-                    rawEnd = rawEnd < validTopK ? rawEnd : validTopK;
-                }
+                rawBegin = rawBegin < validTopK ? rawBegin : validTopK;
+                rawEnd = rawEnd < validTopK ? rawEnd : validTopK;
             }
 
             uint32_t kvSLoopNum = rawEnd > rawBegin ? rawEnd - rawBegin : 0U;
-            if constexpr (!IS_DENSE) {
-                kvSLoopNum = CountSparseLogicalBlocks(
-                    gSelectIdx, selectIdxBase, rawBegin, rawEnd, validLogicalBlockNum);
-            }
+            kvSLoopNum = CountSparseLogicalBlocks(
+                gSelectIdx, selectIdxBase, rawBegin, rawEnd, validLogicalBlockNum);
 
             uint32_t rowNum = groupSize;
             uint32_t rowNumRound = RoundUp(rowNum, 16);
@@ -457,9 +415,6 @@ private:
                                   uint32_t validLogicalBlockNum,
                                   uint32_t packedBlockIdx)
     {
-        if constexpr (IS_DENSE) {
-            return static_cast<int32_t>(rawBegin + packedBlockIdx);
-        }
         uint32_t validIdx = 0U;
         for (uint32_t rawIdx = rawBegin; rawIdx < rawEnd; ++rawIdx) {
             const int32_t logicalBlockId = gSelectIdx.GetValue(selectIdxBase + rawIdx);
@@ -472,20 +427,6 @@ private:
             ++validIdx;
         }
         return 0;
-    }
-
-    __aicore__ inline
-    bool DenseCoreIntersectsBaseTask(__gm__ SparseAttn::SparseAttentionScoreTilingData *tilingData,
-                                     uint32_t coreIdx,
-                                     uint32_t baseTask)
-    {
-        const uint32_t startBaseTask = tilingData->fdCoreStartBaseTask[coreIdx];
-        const uint32_t endBaseTask = tilingData->fdCoreEndBaseTask[coreIdx];
-        const uint32_t endBlockIdx = tilingData->fdCoreEndBlockIdx[coreIdx];
-        const bool startsBeforeTaskEnd = startBaseTask <= baseTask;
-        const bool endsAfterTaskStart = endBaseTask > baseTask ||
-            (endBaseTask == baseTask && endBlockIdx > 0U);
-        return startsBeforeTaskEnd && endsAfterTaskStart;
     }
 
     __aicore__ inline
