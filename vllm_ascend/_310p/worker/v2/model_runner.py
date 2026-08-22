@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-"""Text-only model-runner-v2 implementation for Ascend 310P."""
-
 from __future__ import annotations
 
 from copy import deepcopy
@@ -41,7 +39,7 @@ _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
 class NPUModelRunner310V2(NPUModelRunner):
-    """MRV2 runner aligned with the text-only 310P MRV1 constraints."""
+    """Model runner v2 for Ascend 310P."""
 
     request_state_cls = Ascend310PRequestState
 
@@ -55,16 +53,20 @@ class NPUModelRunner310V2(NPUModelRunner):
     @staticmethod
     def _validate_config(vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
+        # TODO: Support multimodal and hybrid models in the next 310P MRV2 iteration.
         if model_config.is_multimodal_model or model_config.is_hybrid:
-            raise NotImplementedError("310P model runner v2 currently supports text-only, non-hybrid models.")
+            raise NotImplementedError("Multimodal and hybrid models are not supported by model runner v2 on 310P.")
         if model_config.use_mla:
             raise NotImplementedError("MLA is not supported by model runner v2 on 310P.")
+        # TODO: Support multi-dimensional RoPE in the next 310P MRV2 iteration.
         if getattr(model_config, "uses_mrope", False):
-            raise NotImplementedError("Multi-dimensional RoPE is outside the text-only 310P MRV2 scope.")
+            raise NotImplementedError("Multi-dimensional RoPE is not supported by model runner v2 on 310P.")
         if getattr(model_config, "enable_sleep_mode", False):
-            raise NotImplementedError("Sleep mode is outside the initial 310P MRV2 scope.")
+            raise NotImplementedError("Sleep mode is not supported by model runner v2 on 310P.")
 
         parallel_config = vllm_config.parallel_config
+        # TODO: Restore MRV1 data parallel support in the next 310P MRV2 iteration.
+        # Pipeline and context parallelism remain unsupported on 310P.
         unsupported_parallel = {
             "pipeline_parallel_size": getattr(parallel_config, "pipeline_parallel_size", 1),
             "data_parallel_size": getattr(parallel_config, "data_parallel_size", 1),
@@ -77,15 +79,18 @@ class NPUModelRunner310V2(NPUModelRunner):
                 f"310P model runner v2 only supports tensor parallelism; unsupported settings: {', '.join(enabled)}."
             )
         if getattr(parallel_config, "enable_expert_parallel", False):
-            raise NotImplementedError("Expert parallelism is outside the initial 310P MRV2 scope.")
+            raise NotImplementedError("Expert parallelism is not supported by model runner v2 on 310P.")
+        # TODO: Support speculative decoding in the next 310P MRV2 iteration.
         if vllm_config.speculative_config is not None:
             raise NotImplementedError("Speculative decoding is not supported by model runner v2 on 310P.")
         if vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
+        # TODO: Support prefix caching in the next 310P MRV2 iteration.
         if vllm_config.cache_config.enable_prefix_caching:
-            raise NotImplementedError("Prefix caching is outside the initial 310P MRV2 scope.")
+            raise NotImplementedError("Prefix caching is not supported by model runner v2 on 310P.")
+        # TODO: Support LoRA in the next 310P MRV2 iteration.
         if vllm_config.lora_config is not None:
-            raise NotImplementedError("LoRA is outside the initial 310P MRV2 scope.")
+            raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate the 310P attention cache as separate K/V NZ tensors."""
@@ -157,7 +162,8 @@ class NPUModelRunner310V2(NPUModelRunner):
                 specs = (group_spec,)
             attention_specs = [spec for spec in specs if isinstance(spec, AttentionSpec)]
             if len(attention_specs) != len(specs):
-                raise NotImplementedError("The initial 310P MRV2 implementation supports attention KV caches only.")
+                # TODO: Support non-attention KV cache specs in the next 310P MRV2 iteration.
+                raise NotImplementedError("Non-attention KV cache specs are not supported by model runner v2 on 310P.")
             max_head_size = max(spec.head_size for spec in attention_specs)
             if max_head_size > 256:
                 raise NotImplementedError(f"310P paged attention requires head_size <= 256, got {max_head_size}.")
@@ -335,6 +341,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         del idx_mapping, query_start_loc, seq_lens, prefill_len
         del draft_tokens, cu_num_logits, num_bonus_tokens
         if num_logits != len(idx_mapping_np):
+            # TODO: Support draft tokens in the next 310P MRV2 iteration.
             raise NotImplementedError("310P MRV2 does not support draft tokens.")
         logits_indices_np = np.empty(num_logits, dtype=np.int64)
         for batch_idx, req_idx in enumerate(idx_mapping_np):
@@ -378,7 +385,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         grammar_output: GrammarOutput | None,
     ):
         if grammar_output is not None:
-            raise NotImplementedError("Structured output is outside the initial 310P MRV2 scope.")
+            # TODO: Restore MRV1 structured output support in the next 310P MRV2 iteration.
+            raise NotImplementedError("Structured output is not supported by model runner v2 on 310P.")
         logits = self.model.compute_logits(hidden_states[input_batch.logits_indices])
         sampler_output = self.sampler(logits, input_batch)
         can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np

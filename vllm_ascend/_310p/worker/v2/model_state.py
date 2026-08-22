@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-"""Text-only MRV2 model state for Ascend 310P."""
+"""MRV2 model state for Ascend 310P."""
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ from .sampler import Ascend310PSampler
 
 
 class Ascend310PModelState(AscendModelState):
-    """Text-only model state with the Triton-free 310P sampler."""
+    """Model state with the Triton-free 310P sampler."""
 
     def __init__(
         self,
@@ -24,7 +24,8 @@ class Ascend310PModelState(AscendModelState):
         device: torch.device,
     ) -> None:
         if encoder_cache is not None:
-            raise NotImplementedError("Multimodal encoder state is outside the text-only 310P MRV2 scope.")
+            # TODO: Support multimodal encoder state in the next 310P MRV2 iteration.
+            raise NotImplementedError("Multimodal encoder state is not supported by model runner v2 on 310P.")
         # Plain-text Qwen3 uses ordinary 1D RoPE, for which upstream returns
         # no RopeState and therefore does not launch its Triton position kernel.
         super().__init__(vllm_config, model, encoder_cache, device)

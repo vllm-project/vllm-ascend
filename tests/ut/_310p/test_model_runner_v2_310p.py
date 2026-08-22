@@ -77,7 +77,7 @@ def test_config_rejects_out_of_scope_features(field, value, message) -> None:
 def test_greedy_sampler_rejects_triton_sampling_features() -> None:
     sampler = Ascend310PSampler()
     sampler.add_request(0, 4, SamplingParams(temperature=0))
-    with pytest.raises(NotImplementedError, match="greedy sampling only"):
+    with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
         sampler.add_request(0, 4, SamplingParams(temperature=1))
 
 

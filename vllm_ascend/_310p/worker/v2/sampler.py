@@ -9,7 +9,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 
 class Ascend310PSampler:
-    """Triton-free sampler for 310P MRV2; currently supports greedy sampling."""
+    """Triton-free sampler for 310P MRV2."""
 
     def __init__(self) -> None:
         self.penalties_state = SimpleNamespace(output_bin_counts=None)
@@ -43,9 +43,9 @@ class Ascend310PSampler:
         ):
             unsupported.append("logits processors")
         if unsupported:
+            # TODO: Support additional sampling features in the next 310P MRV2 iteration.
             raise NotImplementedError(
-                "310P model runner v2 currently supports greedy sampling only; "
-                f"unsupported parameters: {', '.join(unsupported)}."
+                f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
 
     def apply_staged_writes(self) -> None:
