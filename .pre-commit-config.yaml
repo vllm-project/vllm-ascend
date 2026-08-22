@@ -110,6 +110,14 @@ repos:
     language: script
     types: [python]
     pass_filenames: false
+  - id: check-log-quality
+    name: Basic log quality checks for vllm_ascend
+    entry: python tools/check_log_quality.py --incremental
+    language: python
+    types: [python]
+    files: ^vllm_ascend/
+    pass_filenames: true
+    additional_dependencies: [regex]
   - id: check-forbidden-imports
     name: Check for forbidden imports
     entry: python tools/check_forbidden_imports.py
