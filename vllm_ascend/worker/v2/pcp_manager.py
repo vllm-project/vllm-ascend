@@ -17,13 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import torch
-from vllm.config import VllmConfig
-from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.states import RequestState
+from copy import copy
+from dataclasses import replace
 
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+import torch
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
@@ -35,65 +35,78 @@ class AscendPCPManager(PCPManager):
         vllm_config: VllmConfig,
         supports_mm_inputs: bool,
     ) -> None:
-        """Validate the Ascend MRV2 MLA and GQA PCP implementations."""
-        parallel_config = vllm_config.parallel_config
-        model_config = vllm_config.model_config
-        if parallel_config.prefill_context_parallel_size <= 1:
-            return
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if cudagraph_mode.has_full_cudagraphs():
+            if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+                raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
+            vllm_config = copy(vllm_config)
+            vllm_config.compilation_config = copy(vllm_config.compilation_config)
+            vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
-        if parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError("Ascend MRV2 PCP does not support PP yet.")
-        if model_config.is_encoder_decoder:
-            raise NotImplementedError("Ascend MRV2 PCP does not support encoder-decoder models yet.")
-        if supports_mm_inputs:
-            raise NotImplementedError("Ascend MRV2 PCP does not support MM inputs yet.")
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("Ascend MRV2 PCP does not support LoRA yet.")
-
-    def __init__(
-        self,
-        pcp_world_size: int,
-        pcp_rank: int,
-        device: torch.device,
-        vllm_config: VllmConfig | None = None,
-        req_states: RequestState | None = None,
-        max_num_reqs: int | None = None,
-        max_num_tokens: int | None = None,
-        block_tables: BlockTables | None = None,
-        dcp_world_size: int = 1,
-        dcp_rank: int = 0,
-        cp_interleave: int = 1,
-    ) -> None:
-        super().__init__(
-            pcp_world_size,
-            pcp_rank,
-            device,
-            req_states=req_states,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
-        self.vllm_config = vllm_config
+        PCPManager.validate_config(vllm_config, supports_mm_inputs)
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        assert self.vllm_config is not None
         local_batch = super().partition_batch(input_batch)
         assert isinstance(local_batch, AscendInputBatch)
 
-        local_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
-        local_batch.seq_lens_np = local_seq_lens_np
-        local_batch.attn_state = build_attn_state(
-            self.vllm_config,
-            local_seq_lens_np,
-            local_batch.num_reqs,
-            local_batch.num_scheduled_tokens,
-            local_batch.num_scheduled_tokens
-            - (local_batch.num_draft_tokens_per_req if local_batch.num_draft_tokens_per_req is not None else 0),
-        )
+        # PCP builds the local layout from actual tokens, but a FULL decode
+        # graph replays a fixed padded layout on every rank.
+        graph_num_tokens = input_batch.num_tokens_after_padding
+        is_decode_only = not bool(input_batch.is_prefilling_np.any())
+        # FULL_DECODE_ONLY graphs capture one token for every padded request.
+        # Keep the request-shaped metadata at that same fixed graph extent.
+        graph_num_reqs = graph_num_tokens if is_decode_only else input_batch.num_reqs_after_padding
+        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding:
+            assert self._input_buffers is not None
+            input_buffers = self._input_buffers
+            actual_tokens = local_batch.num_tokens
+            actual_reqs = local_batch.num_reqs
+            if graph_num_tokens > input_buffers.max_num_tokens:
+                raise RuntimeError(
+                    "PCP graph token count exceeds the local input buffer: "
+                    f"{graph_num_tokens} > {input_buffers.max_num_tokens}."
+                )
+            if graph_num_reqs > input_buffers.max_num_reqs:
+                raise RuntimeError(
+                    "PCP graph request count exceeds the local input buffer: "
+                    f"{graph_num_reqs} > {input_buffers.max_num_reqs}."
+                )
+            input_buffers.input_ids[actual_tokens:graph_num_tokens].zero_()
+            input_buffers.positions[actual_tokens:graph_num_tokens].zero_()
+            input_buffers.is_padding[actual_tokens:graph_num_tokens].fill_(True)
+            input_buffers.seq_lens[actual_reqs:graph_num_reqs].zero_()
+            input_buffers.query_start_loc[actual_reqs + 1 : graph_num_reqs + 1].fill_(actual_tokens)
+            seq_lens_cpu_upper_bound = torch.zeros(
+                graph_num_reqs,
+                dtype=local_batch.seq_lens_cpu_upper_bound.dtype,
+            )
+            seq_lens_cpu_upper_bound[:actual_reqs].copy_(local_batch.seq_lens_cpu_upper_bound[:actual_reqs])
+            local_batch = replace(  # type: ignore[call-arg]
+                local_batch,
+                num_reqs_after_padding=graph_num_reqs,
+                num_tokens_after_padding=graph_num_tokens,
+                query_start_loc=input_buffers.query_start_loc[: graph_num_reqs + 1],
+                seq_lens=input_buffers.seq_lens[:graph_num_reqs],
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                input_ids=input_buffers.input_ids[:graph_num_tokens],
+                positions=input_buffers.positions[:graph_num_tokens],
+                is_padding=input_buffers.is_padding[:graph_num_tokens],
+            )
+
+        local_batch.seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         return local_batch
+
+    def prepare_slot_mappings(self) -> torch.Tensor:
+        """Pad PCP slot mappings to the fixed FULL-decode graph layout."""
+        slot_mappings = super().prepare_slot_mappings()
+        assert self._global_batch is not None
+        graph_num_tokens = self._global_batch.num_tokens_after_padding
+        is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
+        if not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
+            return slot_mappings
+
+        assert self._gathered_kv_slot_mappings is not None
+        graph_num_slots = graph_num_tokens * self.pcp_world_size
+        self._gathered_kv_slot_mappings[:, slot_mappings.shape[1] : graph_num_slots].fill_(-1)
+        return self._gathered_kv_slot_mappings[:, :graph_num_slots]

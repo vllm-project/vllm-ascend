@@ -343,6 +343,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.max_model_len = 8
+        model_state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
         input_batch = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
