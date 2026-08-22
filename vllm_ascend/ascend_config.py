@@ -253,7 +253,6 @@ class AscendConfig:
     c8_enable_reshape_optim: bool = False
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
-    enable_flashcomm1: bool = False
     enable_fused_mc2: int = 0
     enable_mlapo: bool = True
     msmonitor_use_daemon: bool = False
@@ -300,7 +299,6 @@ class AscendConfig:
         from vllm_ascend import envs as ascend_envs
 
         _A_FAMILY = {
-            "enable_flashcomm1": "VLLM_ASCEND_ENABLE_FLASHCOMM1",
             "enable_fused_mc2": "VLLM_ASCEND_ENABLE_FUSED_MC2",
             "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
             "msmonitor_use_daemon": "MSMONITOR_USE_DAEMON",
@@ -330,7 +328,7 @@ class AscendConfig:
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
     # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
-    # the max_num_batched_tokens that FLASHCOMM1 writeback just corrected).
+    # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         self._check_mooncake_c8_kv_cache_quant(vc)
@@ -371,15 +369,15 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
 
-        # FLASHCOMM1 max_num_batched_tokens divisibility writeback
-        if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc, ascend_config=self):
+        # Sequence-parallel max_num_batched_tokens divisibility writeback
+        if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
             if vc.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
                 vc.scheduler_config.max_num_batched_tokens = (
                     cdiv(vc.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
                 )
                 logger.warning_once(
-                    "When using FLASHCOMM1, the max_num_batched_tokens should be divisible "
+                    "When using sequence parallelism, the max_num_batched_tokens should be divisible "
                     "by tp_size * pcp_size (%s). It has been adjusted to %s.",
                     str(tp_pcp_size),
                     str(vc.scheduler_config.max_num_batched_tokens),
@@ -1146,6 +1144,11 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+    if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
+        logger.warning(
+            "FlashComm is deprecated; remove enable_flashcomm1 and "
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
+        )
     refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
     raw_rl_config = additional_config.get("rl_config", {})
     if isinstance(raw_rl_config, dict):
@@ -1180,6 +1183,9 @@ def init_ascend_config(vllm_config):
     _NON_USER_INPUT_KEYS = {
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
+        # Removed upstream option: warn above, but do not pass it into the
+        # strict AscendConfig schema where it would be reported as a typo.
+        "enable_flashcomm1",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
