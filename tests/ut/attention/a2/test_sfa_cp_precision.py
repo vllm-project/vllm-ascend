@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import torch
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
@@ -32,23 +35,36 @@ def test_sfa_dcp_sparse_indices_are_compacted_per_owner_rank() -> None:
     )
 
 
-def test_sfa_dcp_torch_merge_handles_invalid_lse() -> None:
-    output = torch.tensor(
-        [
-            [[[1.0]], [[3.0]]],
-            [[[5.0]], [[7.0]]],
-        ]
+@patch("torch.ops.vllm.sfa_dcp_a2a_fused")
+def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
+    impl = _make_impl(rank=1)
+    impl.dcp_group = SimpleNamespace(unique_name="dcp:0")
+    output = torch.empty(3, 4, 8)
+    lse = torch.empty(3, 4, 1, dtype=torch.float32)
+    expected = torch.empty(3, 2, 8)
+    fused_a2a.return_value = expected
+
+    actual = impl._merge_dcp_outputs(output, lse)
+
+    assert actual is expected
+    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0")
+
+
+@patch("torch.ops.vllm.sfa_dcp_a2a_fused")
+def test_sfa_dsa_dcp_routes_token_scatter_to_custom_op(fused_a2a) -> None:
+    impl = _make_impl(rank=1)
+    impl.dcp_group = SimpleNamespace(unique_name="dcp:0")
+    output = torch.empty(4, 2, 8)
+    lse = torch.empty(4, 2, 1, dtype=torch.float32)
+    expected = torch.empty(2, 2, 8)
+    fused_a2a.return_value = expected
+    dsa_cp_context = SimpleNamespace(
+        num_tokens_pad=4,
+        local_start=2,
+        local_end_with_pad=4,
     )
-    lse = torch.tensor(
-        [
-            [[0.0], [float("-inf")]],
-            [[0.0], [0.0]],
-        ]
-    )
 
-    merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=2)
+    actual = impl._merge_dcp_outputs(output, lse, dsa_cp_context)
 
-    torch.testing.assert_close(merged, torch.tensor([[[3.0], [7.0]]]))
-
-    dsa_merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=1)
-    torch.testing.assert_close(dsa_merged, torch.tensor([[[3.0]], [[7.0]]]))
+    assert actual is expected
+    fused_a2a.assert_called_once_with(output, lse, 2, 0, "dcp:0")
