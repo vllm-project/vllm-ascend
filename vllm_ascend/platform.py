@@ -52,14 +52,6 @@ from vllm_ascend.utils import (
     enable_sp,
 )
 
-# Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
-# carry @support_torch_compile. This makes vLLM auto-enable the breakable
-# cudagraph PIECEWISE path, which is not supported on Ascend yet.
-envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH = False
-logger.info(
-    "Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet."
-)
-
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
@@ -67,6 +59,15 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+
+# Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
+# for selected architectures when the environment variable is absent.
+value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+logger.info_once(
+    "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
+    value,
+    scope="process",
+)
 
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
@@ -1072,7 +1073,7 @@ def _setup_compile_backend(
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
     elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
-        if compilation_config.mode != CompilationMode.VLLM_COMPILE:
+        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
