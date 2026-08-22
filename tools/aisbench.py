@@ -41,7 +41,7 @@ class AisbenchRunner:
         "aime2024": "aime",
         "gsm8k-lite": "gsm8k",
         "textvqa-lite": "textvqa",
-        "longbenchv2": "longbenchv2"
+        "longbenchv2": "longbenchv2",
     }
 
     def _run_aisbench_task(self):
