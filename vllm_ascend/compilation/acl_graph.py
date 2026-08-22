@@ -281,17 +281,6 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
-    # Graph-task updates are enqueued on a dedicated stream.  Establish both
-    # sides of the dependency explicitly:
-    #
-    #   current stream (replay) -> update stream -> current stream (next replay)
-    #
-    # This replaces the device-wide synchronize that used to live in
-    # ACLGraphWrapper.__call__.  It is important that main and draft models use
-    # the same update stream in the V1 Eagle path so their updates stay ordered.
-    current_stream = torch.npu.current_stream()
-    update_stream.wait_stream(current_stream)
-
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(
         update_stream,
@@ -301,10 +290,6 @@ def update_full_graph_params(
         speculative_config,
         draft_attn_metadatas=draft_attn_metadatas,
     )
-
-    # Make a subsequent replay on the current stream wait until all graph-task
-    # updates have been enqueued and completed on the update stream.
-    current_stream.wait_stream(update_stream)
 
 
 @dataclass
