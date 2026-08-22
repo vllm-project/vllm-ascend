@@ -45,6 +45,10 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
+
+worker_debug_stat = get_worker_debug_stat()
+
 COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
@@ -1245,18 +1249,22 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     computed once in init, and select_moe_comm_method is just config lookups, so
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
+    worker_debug_stat.set_call_step(5, 1000001)
     if is_hierarchical_communication_enabled():
+        worker_debug_stat.set_call_step(5, 1000002)
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
     # This usually happens when main model is moe while eagle draft model is dense.
     is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
     if not is_context_moe_model:
+        worker_debug_stat.set_skip_step(5, 1000003)
         return True
 
     # Only applicable to MoE models on KV consumer ranks.
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
     if not is_kv_consumer:
+        worker_debug_stat.set_call_step(5, 1000004)
         return False
 
     from vllm_ascend.ascend_forward_context import select_moe_comm_method
@@ -1272,7 +1280,12 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+    rt: bool = decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+    if rt:
+        worker_debug_stat.set_skip_step(5, 1000023)
+    else:
+        worker_debug_stat.set_call_step(5, 1000024)
+    return rt
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
