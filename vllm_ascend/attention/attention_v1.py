@@ -23,7 +23,6 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -63,7 +62,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import is_950, weak_ref_tensors
+from vllm_ascend.utils import is_950, vllm_version_is, weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -1757,6 +1756,11 @@ class AscendAttentionPCPImpl(AscendAttentionBackendImpl):
     ):
         if len(kv_cache) <= 1:
             return query, key, value, output
+        if vllm_version_is("0.27.1"):
+            import vllm.model_executor.layers.attention.pcp as _pcp_ops  # type: ignore[import-not-found]
+        else:
+            import vllm.v1.attention.ops.pcp as _pcp_ops
+        _gather_prefill_cache_inputs = _pcp_ops._gather_prefill_cache_inputs
         expanded_slot_mapping = attn_metadata.slot_mapping
         local_num_input_tokens = attn_metadata.pcp_local_num_input_tokens
         if key.shape[0] < local_num_input_tokens:

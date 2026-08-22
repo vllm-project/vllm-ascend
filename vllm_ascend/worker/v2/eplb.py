@@ -12,6 +12,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 from vllm_ascend.distributed.eplb_state import AscendEplbState
+from vllm_ascend.utils import vllm_version_is
 
 
 def is_eplb_load_collection_phase_matched(
@@ -88,16 +89,25 @@ class AscendEPLBController(EPLBController):
         model: nn.Module,
         model_config: Any,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
+        old_num_physical_experts: int | None = None,
     ) -> None:
         model = _unwrap_moe(model)
         assert is_mixture_of_experts(model)
-        self.state = AscendEplbState.from_mapping(
-            model=model,
-            model_config=model_config,
-            device=self.device,
-            parallel_config=self.parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
-        )
+        if vllm_version_is("0.27.1"):
+            self.state = AscendEplbState.from_mapping(
+                model=model,
+                model_config=model_config,
+                device=self.device,
+                parallel_config=self.parallel_config,
+                expanded_physical_to_logical=expanded_physical_to_logical,
+                num_valid_physical_experts=old_num_physical_experts,
+            )
+        else:
+            self.state = AscendEplbState.from_mapping(
+                model=model,
+                model_config=model_config,
+                device=self.device,
+                parallel_config=self.parallel_config,
+                expanded_physical_to_logical=expanded_physical_to_logical,
+            )
         self._has_registered_models = True
