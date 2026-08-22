@@ -1,0 +1,66 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3.5-35B-w8a8c8-fp8"
+    model: "MA-AI/Qwen3.5-35B-w8a8c8-fp8"
+    envs:
+      VLLM_USE_MODELSCOPE: "true"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "2"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "64"
+      - "--quantization"
+      - "ascend"
+      - "--max-model-len"
+      - "133000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    benchmarks:
+      acc_aime2025:
+        case_type: accuracy
+        dataset_path: vllm-ascend/aime2025
+        request_conf: vllm_api_general_chat
+        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+        max_out_len: 128000
+        batch_size: 32
+        baseline: 93.33
+        threshold: 10
+        ignore_eos: false
+        thinking: true
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.03
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 140
+        max_out_len: 1500
+        batch_size: 35
+        request_rate: 0
+        baseline: 610.22
+        threshold: 0.97
