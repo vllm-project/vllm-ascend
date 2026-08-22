@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -19,20 +18,6 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
 )
-from vllm_ascend.ops.triton.fla import utils as fla_utils
-from vllm_ascend.ops.triton.fla.utils import (
-    prepare_chunk_indices as runtime_prepare_chunk_indices,
-)
-from vllm_ascend.ops.triton.fla.utils import (
-    prepare_chunk_offsets as runtime_prepare_chunk_offsets,
-)
-from vllm_ascend.ops.triton.fla.utils import (
-    prepare_final_chunk_indices as runtime_prepare_final_chunk_indices,
-)
-from vllm_ascend.ops.triton.fla.utils import (
-    prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
-)
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -44,19 +29,6 @@ def _patch_triton_cdiv(monkeypatch):
             lambda a, b: (a + b - 1) // b,
             raising=False,
         )
-
-
-@pytest.fixture(autouse=True)
-def _no_pin_memory():
-    # compute_causal_conv1d_metadata uses np_to_pinned_tensor which reads
-    # PIN_MEMORY.  Without physical NPU, t.pin_memory() raises
-    # "Please register PrivateUse1HooksInterface first".
-    with patch("vllm.utils.torch_utils.PIN_MEMORY", False):
-        if vllm_version_is("0.23.0"):
-            yield
-        else:
-            with patch("vllm.v1.attention.backends.utils.PIN_MEMORY", False):
-                yield
 
 
 @dataclass
@@ -230,71 +202,6 @@ def _build_attn_metadata(
     return builder, common_attn_metadata, attn_metadata
 
 
-def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
-    hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
-    if hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
-        gdn_num_heads = (
-            hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
-        )
-    else:
-        gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(builder.vllm_config.parallel_config)
-    cumsum_chunks = max(
-        1,
-        ascend_gdn_attn_builder._GDN_CUMSUM_WORKING_SET // (gdn_num_heads * ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
-    )
-    cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
-    sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-
-    assert chunk_meta.num_decodes == (sequence_lengths == 1).sum().item()
-    assert torch.equal(
-        chunk_meta.chunk_indices_chunk64,
-        runtime_prepare_chunk_indices(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
-    )
-    assert torch.equal(
-        chunk_meta.chunk_offsets_chunk64,
-        runtime_prepare_chunk_offsets(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
-    )
-    assert torch.equal(
-        chunk_meta.update_chunk_offsets_chunk64,
-        runtime_prepare_update_chunk_offsets(
-            cu_seqlens,
-            ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
-        ),
-    )
-    assert torch.equal(
-        chunk_meta.final_chunk_indices_chunk64,
-        runtime_prepare_final_chunk_indices(
-            cu_seqlens,
-            ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
-        ),
-    )
-    assert torch.equal(
-        chunk_meta.chunk_indices_large_block,
-        runtime_prepare_chunk_indices(
-            cu_seqlens,
-            ascend_gdn_attn_builder._GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
-        ),
-    )
-    assert torch.equal(
-        chunk_meta.block_indices_cumsum,
-        runtime_prepare_chunk_indices(
-            cu_seqlens,
-            cumsum_chunk_size,
-        ),
-    )
-
-
-def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
-    if hasattr(fla_utils.triton, "cdiv"):
-        return
-    monkeypatch.setattr(
-        fla_utils.triton,
-        "cdiv",
-        lambda x, y: (x + y - 1) // y,
-        raising=False,
-    )
-
-
 def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
@@ -366,14 +273,12 @@ def _assert_non_spec_conv1d_args_match_metadata(attn_metadata) -> None:
     ],
     ids=lambda case: case.name if isinstance(case, BatchSpec) else None,
 )
-def test_non_spec_prefill_metadata_matches_original_inputs_and_runtime_helpers(
+def test_non_spec_prefill_metadata_keeps_only_conv1d_inputs(
     batch_spec: BatchSpec,
     num_speculative_tokens: int,
     num_decode_draft_tokens_cpu: torch.Tensor | None,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    _patch_missing_runtime_cdiv(monkeypatch)
-    builder, _, attn_metadata = _build_attn_metadata(
+    _, _, attn_metadata = _build_attn_metadata(
         batch_spec,
         num_speculative_tokens=num_speculative_tokens,
         num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
@@ -382,27 +287,23 @@ def test_non_spec_prefill_metadata_matches_original_inputs_and_runtime_helpers(
     prefill_metadata = getattr(attn_metadata, "non_spec_prefill_metadata", None)
     assert prefill_metadata is not None
     assert prefill_metadata.causal_conv1d is not None
-    assert prefill_metadata.chunk is not None
+    assert not hasattr(prefill_metadata, "chunk")
 
     _assert_non_spec_conv1d_args_match_metadata(attn_metadata)
+    assert attn_metadata.chunk_indices is None
+    assert attn_metadata.chunk_offsets is None
+    assert attn_metadata.nums_dict is None
+    assert attn_metadata.batch_ptr is None
+    assert attn_metadata.token_chunk_offset_ptr is None
 
-    _assert_chunk_meta_matches_runtime(
-        builder,
-        prefill_metadata.chunk,
-        attn_metadata.prefill_query_start_loc,
-    )
 
-
-def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _patch_missing_runtime_cdiv(monkeypatch)
+def test_non_spec_prefill_metadata_uses_prefill_tail_for_fused_operator():
     batch_spec = BatchSpec(
         seq_lens=[5, 12, 9],
         query_lens=[1, 8, 4],
         name="decode_prefill_without_spec",
     )
-    builder, _, attn_metadata = _build_attn_metadata(
+    _, _, attn_metadata = _build_attn_metadata(
         batch_spec,
         num_speculative_tokens=0,
         num_decode_draft_tokens_cpu=None,
@@ -414,10 +315,7 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
         attn_metadata.non_spec_query_start_loc,
         torch.tensor([0, 1, 9, 13], dtype=torch.int32),
     )
-    assert torch.equal(
-        attn_metadata.prefill_query_start_loc,
-        torch.tensor([0, 8, 12], dtype=torch.int32),
-    )
+    assert attn_metadata.prefill_query_start_loc is None
     assert torch.equal(
         attn_metadata.non_spec_state_indices_tensor,
         torch.tensor([0, 1, 2], dtype=torch.int32),
@@ -439,42 +337,11 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
     assert torch.equal(conv1d_meta.query_start_loc, torch.tensor([0, 1, 9, 13], dtype=torch.int32))
     assert torch.equal(_cache_index_first_column(conv1d_meta.cache_indices), torch.tensor([0, 1, 2], dtype=torch.int32))
     assert torch.equal(conv1d_meta.initial_state_mode, torch.tensor([True, True, True]))
-    assert prefill_metadata.chunk.num_decodes == 0
-    _assert_chunk_meta_matches_runtime(
-        builder,
-        prefill_metadata.chunk,
-        attn_metadata.prefill_query_start_loc,
-    )
-
-
-def test_mixed_spec_prefill_chunk_metadata_preserves_single_token_count(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _patch_missing_runtime_cdiv(monkeypatch)
-    batch_spec = BatchSpec(
-        seq_lens=[1, 4, 8],
-        query_lens=[1, 4, 8],
-        name="mixed_spec_prefill_with_single_token_non_spec",
-    )
-    builder, _, attn_metadata = _build_attn_metadata(
-        batch_spec,
-        num_speculative_tokens=3,
-        num_decode_draft_tokens_cpu=torch.tensor([-1, 3, -1], dtype=torch.int32),
-    )
-
-    assert attn_metadata.num_decodes == 0
-    assert attn_metadata.num_prefills == 2
-    assert torch.equal(
-        attn_metadata.prefill_query_start_loc,
-        torch.tensor([0, 1, 9], dtype=torch.int32),
-    )
-    chunk_metadata = attn_metadata.non_spec_prefill_metadata.chunk
-    assert chunk_metadata.num_decodes == 1
-    _assert_chunk_meta_matches_runtime(
-        builder,
-        chunk_metadata,
-        attn_metadata.prefill_query_start_loc,
-    )
+    assert torch.equal(prefill_metadata.actual_seq_lengths, torch.tensor([8, 4], dtype=torch.int32))
+    assert prefill_metadata.non_empty_indices is None
+    assert not hasattr(prefill_metadata, "chunk")
+    assert attn_metadata.chunk_indices is None
+    assert attn_metadata.chunk_offsets is None
 
 
 def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
@@ -733,8 +600,7 @@ def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
     )
 
 
-def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.MonkeyPatch):
-    _patch_missing_runtime_cdiv(monkeypatch)
+def test_causal_conv1d_cache_indices_use_device_block_table():
     batch_spec = BatchSpec(
         seq_lens=[4, 4],
         query_lens=[4, 4],
@@ -767,40 +633,7 @@ def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.
     assert torch.equal(conv1d_meta.initial_state_mode, torch.tensor([False, False]))
 
 
-def test_pcp_prefill_initial_state_mode_is_built_in_metadata(monkeypatch: pytest.MonkeyPatch):
-    _patch_missing_runtime_cdiv(monkeypatch)
-    batch_spec = BatchSpec(
-        seq_lens=[1, 4],
-        query_lens=[1, 4],
-        name="pcp_decode_prefill",
-    )
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec=batch_spec,
-        block_size=16,
-        device=torch.device("cpu"),
-    )
-    builder = _make_builder(
-        device=torch.device("cpu"),
-        num_heads=32,
-        num_speculative_tokens=0,
-        prefill_context_parallel_size=2,
-    )
-
-    with patch(
-        "vllm_ascend.ops.gdn_attn_builder.get_pcp_group",
-        return_value=SimpleNamespace(world_size=2, rank_in_group=1),
-    ):
-        attn_metadata = builder.build(0, common_attn_metadata)
-
-    conv1d_meta = attn_metadata.non_spec_prefill_metadata.causal_conv1d
-    assert torch.equal(
-        conv1d_meta.initial_state_mode,
-        torch.tensor([False, True]),
-    )
-
-
-def test_mamba_align_cache_indices_follow_device_seq_lens(monkeypatch: pytest.MonkeyPatch):
-    _patch_missing_runtime_cdiv(monkeypatch)
+def test_mamba_align_cache_indices_follow_device_seq_lens():
     batch_spec = BatchSpec(
         seq_lens=[1, 9],
         query_lens=[1, 1],
@@ -831,8 +664,7 @@ def test_mamba_align_cache_indices_follow_device_seq_lens(monkeypatch: pytest.Mo
     )
 
 
-def test_builder_builds_prebuilt_chunk_metadata_with_prefill_query_start_loc(monkeypatch):
-    _patch_missing_runtime_cdiv(monkeypatch)
+def test_builder_keeps_only_fused_operator_metadata():
     batch_spec = BatchSpec(
         seq_lens=[8, 4, 0, 12],
         query_lens=[4, 4, 0, 8],
@@ -851,20 +683,16 @@ def test_builder_builds_prebuilt_chunk_metadata_with_prefill_query_start_loc(mon
         num_decode_draft_tokens_cpu=torch.tensor([-1, 3, -1, -1], dtype=torch.int32),
     )
 
-    chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
-    assert chunk_meta.chunk_indices_chunk64 is attn_metadata.chunk_indices
-    assert chunk_meta.chunk_offsets_chunk64 is attn_metadata.chunk_offsets
-    _assert_chunk_meta_matches_runtime(
-        builder,
-        chunk_meta,
-        attn_metadata.prefill_query_start_loc,
-    )
-    assert chunk_meta.cu_seqlens_host == tuple(attn_metadata.prefill_query_start_loc.to(torch.int64).tolist())
-    expected_chunk_indices = runtime_prepare_chunk_indices(
-        attn_metadata.prefill_query_start_loc,
-        ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
-    )
-    assert chunk_meta.chunk_indices_chunk64_host == tuple(expected_chunk_indices.to(torch.int64).reshape(-1).tolist())
+    assert not hasattr(ascend_gdn_attn_builder, "GDNChunkedPrefillMetadata")
+    assert not hasattr(ascend_gdn_attn_builder, "_build_non_spec_chunked_prefill_metadata")
+    assert attn_metadata.chunk_indices is None
+    assert attn_metadata.chunk_offsets is None
+    assert attn_metadata.nums_dict is None
+    assert attn_metadata.batch_ptr is None
+    assert attn_metadata.token_chunk_offset_ptr is None
+    prefill_metadata = attn_metadata.non_spec_prefill_metadata
+    assert torch.equal(prefill_metadata.actual_seq_lengths, torch.tensor([4, 0, 8], dtype=torch.int32))
+    assert torch.equal(prefill_metadata.non_empty_indices, torch.tensor([0, 2], dtype=torch.int64))
 
 
 @pytest.mark.parametrize(
