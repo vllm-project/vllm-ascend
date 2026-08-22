@@ -13,6 +13,7 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
@@ -191,6 +192,66 @@ class TestAscendModelSlimConfig(TestBase):
             "experts.0.up_proj",
             "experts.0.down_proj",
         ]
+
+    def test_per_channel_w4a8_shared_expert_enables_grouped_matmul(self):
+        prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+        config = AscendModelSlimConfig(
+            {
+                "group_size": 0,
+                f"{prefix}.weight": "W4A8_DYNAMIC",
+            }
+        )
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_config.model_type = "future_moe"
+        vllm_config.model_config.hf_text_config = MagicMock()
+        linear = MagicMock(spec=LinearBase)
+        scheme = MagicMock(spec=AscendW4A8DynamicLinearMethod)
+        scheme.is_per_channel_weight = True
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=scheme,
+            ),
+            patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            config.get_quant_method(linear, prefix)
+
+        scheme.enable_shared_expert_grouped_matmul.assert_called_once_with()
+
+    def test_per_group_w4a8_shared_expert_does_not_enable_grouped_matmul(self):
+        prefix = "model.layers.0.block_sparse_moe.shared_expert.down_proj"
+        config = AscendModelSlimConfig(
+            {
+                "group_size": 256,
+                f"{prefix}.weight": "W4A8_DYNAMIC",
+            }
+        )
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_config.model_type = "future_moe"
+        vllm_config.model_config.hf_text_config = MagicMock()
+        linear = MagicMock(spec=LinearBase)
+        scheme = MagicMock(spec=AscendW4A8DynamicLinearMethod)
+        scheme.is_per_channel_weight = False
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=scheme,
+            ),
+            patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            config.get_quant_method(linear, prefix)
+
+        scheme.enable_shared_expert_grouped_matmul.assert_not_called()
 
     def test_missing_linear_weight_without_gate_capability_does_not_fall_back(self):
         config = AscendModelSlimConfig({})
