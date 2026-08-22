@@ -213,7 +213,7 @@ jobs:
           uv pip install -e .
 
       - name: Uninstall Triton for 310P tests
-        if: ${{ inputs.soc_version == '310P' && inputs.request_id != '' }}
+        if: ${{ inputs.soc_version == '310P' }}
         run: |
           pip uninstall -y triton-ascend triton
 
