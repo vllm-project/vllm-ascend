@@ -67,7 +67,7 @@ def test_qwen3_inference_dp2(model, max_tokens):
         cmd.append("--quantization")
         cmd.append("ascend")
 
-    print(f"Running subprocess: {' '.join(cmd)}")
+    print(f"Running a subprocess: {' '.join(cmd)}")
     proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
     output = proc.stdout.decode(errors="ignore")
 
