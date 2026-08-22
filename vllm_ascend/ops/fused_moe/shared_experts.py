@@ -16,7 +16,7 @@
 #
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from functools import wraps
+from functools import cache, wraps
 
 import torch
 import torch.nn.functional as F
@@ -29,8 +29,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.activation import AscendSituAndMul
-from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
-from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -38,6 +36,15 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_experts_calculation_stream,
 )
+
+
+@cache
+def _get_dynamic_linear_method_types() -> tuple[type, type]:
+    # Defer quantization package initialization until routed_experts has loaded.
+    from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
+    from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+
+    return AscendW4A8DynamicLinearMethod, AscendW8A8DynamicLinearMethod
 
 
 def _linear_uses_quant_method(linear: torch.nn.Module, method_type: type) -> bool:
@@ -262,12 +269,13 @@ class AscendSharedExperts:
                 and hasattr(self.layer.down_proj, "weight_scale")
             )
             shared_uses_situ = isinstance(self.layer.act_fn, AscendSituAndMul)
+            w4a8_linear_method, w8a8_linear_method = _get_dynamic_linear_method_types()
             shared_is_w4a8 = all(
-                _linear_uses_quant_method(proj, AscendW4A8DynamicLinearMethod)
+                _linear_uses_quant_method(proj, w4a8_linear_method)
                 for proj in (self.layer.gate_up_proj, self.layer.down_proj)
             )
             shared_is_w8a8 = all(
-                _linear_uses_quant_method(proj, AscendW8A8DynamicLinearMethod)
+                _linear_uses_quant_method(proj, w8a8_linear_method)
                 for proj in (self.layer.gate_up_proj, self.layer.down_proj)
             )
             has_per_channel_w4a8_situ_shared = (
