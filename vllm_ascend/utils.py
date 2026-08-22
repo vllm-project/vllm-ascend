@@ -1311,29 +1311,13 @@ def singleton(cls):
 
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
-    from vllm.config import get_current_vllm_config
-
-    vllm_config = get_current_vllm_config()
-    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
-    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-        vllm_config.model_config.hf_text_config, "index_topk"
-    )
-    if not has_indexer:
-        return False
-
     # Read from the validated AscendConfig singleton instead of bypassing it
     # via additional_config["enable_dsa_cp"]. This converges the bypass read
     # (architecture debt #7) onto the canonical get_ascend_config() path, so
     # the value benefits from @config type validation (bool lax coercion).
     from vllm_ascend.ascend_config import get_ascend_config
 
-    dsa_cp_enable = get_ascend_config().enable_dsa_cp
-
-    # DSA-CP shards attention work with its own TP/CP collectives.  It used to
-    # be gated by ``enable_sp`` only because that helper represented the
-    # FlashComm switch.  Native MoE sequence parallelism is a separate layout
-    # contract and must not be required to enable attention context parallel.
-    return dsa_cp_enable
+    return get_ascend_config().enable_dsa_cp
 
 
 @lru_cache(maxsize=1)

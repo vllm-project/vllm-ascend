@@ -42,7 +42,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_sp, shared_expert_dp_enabled
+from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
 
 
 def test_config_modules_do_not_load_vllm_config():
@@ -1062,6 +1062,22 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         self.assertFalse(config.enable_dsa_cp)
         self.assertEqual(config.draft_window_size, 4096)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_dsa_cp_model_gate_is_resolved_during_init(self, mock_fix):
+        unsupported_vc = VllmConfig()
+        unsupported_vc.additional_config = {"enable_dsa_cp": True}
+        self.assertFalse(init_ascend_config(unsupported_vc).enable_dsa_cp)
+
+        supported_vc = VllmConfig()
+        supported_vc.model_config.hf_text_config.index_topk = 2048
+        supported_vc.additional_config = {"enable_dsa_cp": True}
+        self.assertTrue(init_ascend_config(supported_vc).enable_dsa_cp)
+
+        # init_ascend_config clears process caches after publishing the new
+        # singleton. This read must not require vLLM's temporary config context.
+        self.assertTrue(enable_dsa_cp())
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)

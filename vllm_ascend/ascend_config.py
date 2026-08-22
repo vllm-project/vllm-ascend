@@ -369,6 +369,15 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
 
+        # DSA CP is only applicable to models with an indexer (for example,
+        # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
+        # available so runtime reads do not depend on vLLM's temporary config
+        # context.
+        has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
+            vc.model_config.hf_text_config, "index_topk"
+        )
+        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer
+
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
