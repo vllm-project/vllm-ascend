@@ -12,12 +12,14 @@ from collections.abc import Iterable
 from copy import copy
 
 import torch
+import vllm.envs as envs
 from torch import nn
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -42,6 +44,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.models.kimi_k3.amd.linear import (
     KimiDecoderLayer as UpstreamKimiDecoderLayer,
 )
@@ -127,6 +135,7 @@ class AscendKimiMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         layer_idx: int = 0,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         hidden_size = config.hidden_size
@@ -220,6 +229,7 @@ class AscendKimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
+            is_sequence_parallel=use_sequence_parallel,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -347,12 +357,14 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         config,
         vllm_config: VllmConfig,
         prefix: str = "",
+        use_sequence_parallel: bool = False,
     ) -> None:
         """Select KDA or no-RoPE MLA and configure the layer residual path."""
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
         self.layer_idx = int(prefix.rsplit(".", 1)[1])
         self.is_moe = config.is_moe
+        self.use_sequence_parallel = use_sequence_parallel
         layer_idx = self.layer_idx
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -403,6 +415,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
+                use_sequence_parallel=use_sequence_parallel,
             )
             self.mlp = self.block_sparse_moe
         else:
@@ -454,7 +467,8 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 prefix=f"{prefix}.mlp_res_proj",
             )
 
-        self.is_vl_first_layer = self.self_attn.is_vl_first_layer
+        if self.use_sequence_parallel:
+            self.self_attn.o_proj.reduce_results = False
 
     def _run_self_attn(
         self,
@@ -495,7 +509,12 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             prefix_sum = None
 
         hidden_states = self.input_layernorm(hidden_states)
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)
+            hidden_states = hidden_states[: positions.shape[0]]
         hidden_states = self._run_self_attn(positions, hidden_states)
+        if self.use_sequence_parallel:
+            hidden_states = sp_reduce_scatter(hidden_states)
 
         prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
         mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
@@ -522,6 +541,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         config = vllm_config.model_config.hf_text_config
         self.config = config
         self.vocab_size = config.vocab_size
+        parallel_config = vllm_config.parallel_config
+        # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
+        # needs the same rank-local token layout for the TP/EP, DP=1 topology
+        # that FlashComm used before the standard SP operators were available.
+        self.use_sequence_parallel = (
+            parallel_config.pipeline_parallel_size == 1
+            and parallel_config.enable_expert_parallel
+            and parallel_config.tensor_parallel_size > 1
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -537,6 +565,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 config,
                 vllm_config,
                 prefix,
+                use_sequence_parallel=self.use_sequence_parallel,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -619,6 +648,17 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        full_num_tokens = positions.shape[0]
+        if self.use_sequence_parallel:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(
+                    forward_context.is_padding,
+                    hidden_states,
+                )
+            hidden_states = sp_shard(hidden_states)
+            assert residual is None, "Sequence parallelism is not supported with pipeline parallelism"
+
         aux_hidden_states = self._maybe_add_hidden_state(
             [],
             self.start_layer,
@@ -656,6 +696,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 )
 
         if not get_pp_group().is_last_rank:
+            assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -670,6 +711,22 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.output_attn_res_norm,
             attn_res_block_num,
         )
+        if self.use_sequence_parallel:
+            if aux_hidden_states:
+                hidden_size = hidden_states.shape[-1]
+                packed_hidden_states = torch.cat(
+                    [hidden_states, *aux_hidden_states],
+                    dim=-1,
+                )
+                packed_hidden_states = sp_all_gather(packed_hidden_states)
+                packed_hidden_states = packed_hidden_states[:full_num_tokens]
+                hidden_states, *aux_hidden_states = packed_hidden_states.split(
+                    hidden_size,
+                    dim=-1,
+                )
+            else:
+                hidden_states = sp_all_gather(hidden_states)
+                hidden_states = hidden_states[:full_num_tokens]
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
