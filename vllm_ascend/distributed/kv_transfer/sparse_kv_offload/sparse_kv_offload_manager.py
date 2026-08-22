@@ -1,5 +1,4 @@
 import contextlib
-import os
 import typing
 from dataclasses import dataclass
 from zlib import adler32
@@ -465,8 +464,6 @@ class SparseKVOffloadManager:
         )
         self._npu_runtime = torch_npu.npu
 
-        self._build_cpp()
-
         dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30))
         planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
         if planned_pool_size_bytes > dram_limit_bytes:
@@ -494,44 +491,6 @@ class SparseKVOffloadManager:
         config.scene = offload.Scene.SHARED
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
-
-    def _build_cpp(self):
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        ascend_home = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
-        npu_include_path = os.path.join(ascend_home, "include")
-        npu_lib_path = os.path.join(ascend_home, "lib64")
-        if not os.path.exists(npu_lib_path):
-            npu_lib_path = os.path.join(ascend_home, "lib")
-        torch_npu_path = os.path.dirname(torch_npu.__file__)
-        torch_npu_include = os.path.join(torch_npu_path, "include")
-        torch_npu_lib_path = os.path.join(torch_npu_path, "lib")
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        os.environ["CXX"] = "clang++"
-        os.environ["CC"] = "clang"
-        abs_path = os.path.dirname(os.path.abspath(__file__))
-        src_path = os.path.join(abs_path, "sparse_kv_offload.cpp")
-        logger.info_once(f"Sparse KV offload build cpp utils from src: {src_path}")
-        self.sparse_kv_offload_cpp = torch.utils.cpp_extension.load(
-            name="sparse_kv_offload",
-            sources=[src_path],
-            extra_cflags=[
-                "-O3",
-                "-std=c++20",
-                "-fopenmp",
-                "-march=armv8.2-a+sve+fp16+bf16",
-                "-fPIC",
-                f"-I{npu_include_path}",
-                f"-I{torch_npu_include}",
-            ],
-            extra_ldflags=[
-                "-fopenmp",
-                f"-L{npu_lib_path}",
-                "-lascendcl",
-                f"-L{torch_npu_lib_path}",
-                "-ltorch_npu",
-            ],
-            verbose=True,
-        )
 
     def _infer_group_block_sizes(
         self,
@@ -1139,7 +1098,7 @@ class SparseKVOffloadManager:
             num_tokens_buffer,
             layer_id,
         ) = args
-        self.sparse_kv_offload_cpp.lru_resident_compact(
+        torch.ops._C_ascend.sparse_kv_lru_resident_compact(
             lru_req_ids_ptr,
             lru_last_req_ids_ptr,
             lru_topk_indices_ptr,
@@ -1162,7 +1121,7 @@ class SparseKVOffloadManager:
             self.lru_workspace_threads,
             self.lru_workspace_threads,
         )
-        self.sparse_kv_offload_cpp.compute_lru_resident_addrs(
+        torch.ops._C_ascend.sparse_kv_compute_lru_resident_addrs(
             miss_count,
             miss_tokens,
             miss_slots,

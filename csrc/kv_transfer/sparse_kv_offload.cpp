@@ -1,23 +1,12 @@
-#include <torch/extension.h>
-#include <limits>
-#include <optional>
-#include <iostream>
-#include <chrono>
-#include <string>
-#include <stdexcept>
-#include <vector>
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <numeric>
-#include <ATen/Parallel.h>
-#include <torch/script.h>
-
-#include <acl/acl.h>
-#include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <vector>
 
 #include <omp.h>
-#include <assert.h>
-#include <torch/torch.h>
-#include <pthread.h>
+#include <torch/extension.h>
+#include <torch/library.h>
 
 #if defined(__GNUC__) || defined(__clang__)
   #define HOT_FUNCTION __attribute__((hot))
@@ -173,13 +162,13 @@ FORCE_INLINE void process_one_lru_resident_row(
   }
 }
 
-HOT_FUNCTION void lru_resident_compact(uintptr_t req_ids_ptr, uintptr_t last_req_ids_ptr, uintptr_t topk_indices_ptr,
-                                       uintptr_t stable_prefix_lens_ptr, uintptr_t slot_to_token_ptr,
-                                       uintptr_t lru_slots_ptr, uintptr_t current_slots_ptr, uintptr_t miss_count_ptr,
-                                       uintptr_t miss_tokens_ptr, uintptr_t miss_slots_ptr,
-                                       uintptr_t token_mark_workspace_ptr, uintptr_t token_pos_workspace_ptr,
-                                       uintptr_t slot_workspace_ptr, uintptr_t miss_position_workspace_ptr,
-                                       uintptr_t epochs_ptr, int64_t num_reqs, int64_t topk, int64_t capacity,
+HOT_FUNCTION void lru_resident_compact(int64_t req_ids_ptr, int64_t last_req_ids_ptr, int64_t topk_indices_ptr,
+                                       int64_t stable_prefix_lens_ptr, int64_t slot_to_token_ptr,
+                                       int64_t lru_slots_ptr, int64_t current_slots_ptr, int64_t miss_count_ptr,
+                                       int64_t miss_tokens_ptr, int64_t miss_slots_ptr,
+                                       int64_t token_mark_workspace_ptr, int64_t token_pos_workspace_ptr,
+                                       int64_t slot_workspace_ptr, int64_t miss_position_workspace_ptr,
+                                       int64_t epochs_ptr, int64_t num_reqs, int64_t topk, int64_t capacity,
                                        int64_t max_token, int64_t workspace_threads, int64_t requested_threads) {
   if (num_reqs <= 0 || topk <= 0 || capacity <= 0 || max_token <= 0) {
     return;
@@ -234,14 +223,29 @@ HOT_FUNCTION void lru_resident_compact(uintptr_t req_ids_ptr, uintptr_t last_req
   }
 }
 
-int32_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tensor& miss_tokens,
+int64_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tensor& miss_tokens,
                                    const at::Tensor& miss_slots, const at::Tensor& block_table,
-                                   const int32_t block_size, const int32_t token_size_bytes_k,
-                                   const int32_t token_size_bytes_v, const int64_t gvas_k_base,
+                                   const int64_t block_size_arg, const int64_t token_size_bytes_k_arg,
+                                   const int64_t token_size_bytes_v_arg, const int64_t gvas_k_base,
                                    const int64_t gvas_v_base, const int64_t addr_k_base, const int64_t addr_v_base,
-                                   const int32_t resident_capacity, const int32_t max_num_threads,
+                                   const int64_t resident_capacity_arg, const int64_t max_num_threads_arg,
                                    at::Tensor& gvas_buffer, at::Tensor& addr_buffer, at::Tensor& size_buffer,
                                    at::Tensor& num_tokens_buffer) {
+  TORCH_CHECK(block_size_arg > 0 && block_size_arg <= std::numeric_limits<int32_t>::max(),
+              "block_size is out of int32 range.");
+  TORCH_CHECK(token_size_bytes_k_arg > 0 && token_size_bytes_k_arg <= std::numeric_limits<int32_t>::max(),
+              "token_size_bytes_k is out of int32 range.");
+  TORCH_CHECK(token_size_bytes_v_arg > 0 && token_size_bytes_v_arg <= std::numeric_limits<int32_t>::max(),
+              "token_size_bytes_v is out of int32 range.");
+  TORCH_CHECK(resident_capacity_arg > 0 && resident_capacity_arg <= std::numeric_limits<int32_t>::max(),
+              "resident_capacity is out of int32 range.");
+  TORCH_CHECK(max_num_threads_arg > 0 && max_num_threads_arg <= std::numeric_limits<int32_t>::max(),
+              "max_num_threads is out of int32 range.");
+  const int32_t block_size = static_cast<int32_t>(block_size_arg);
+  const int32_t token_size_bytes_k = static_cast<int32_t>(token_size_bytes_k_arg);
+  const int32_t token_size_bytes_v = static_cast<int32_t>(token_size_bytes_v_arg);
+  const int32_t resident_capacity = static_cast<int32_t>(resident_capacity_arg);
+  const int32_t max_num_threads = static_cast<int32_t>(max_num_threads_arg);
   const int32_t num_reqs = miss_tokens.size(0);
   const int32_t topk = miss_tokens.size(1);
   const int32_t max_num_tokens_to_load = num_reqs * topk;
@@ -327,10 +331,20 @@ int32_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tenso
   return num_tokens_to_load_sum;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  namespace py = pybind11;
-  m.def("lru_resident_compact", &lru_resident_compact,
-        "CPU LRU resident compact miss prepare with OpenMP row-level parallelism");
-  m.def("compute_lru_resident_addrs", &compute_lru_resident_addrs,
-        "Compute sparse H2D metadata for compact LRU resident miss loads");
+TORCH_LIBRARY_FRAGMENT(_C_ascend, ops) {
+  ops.def("sparse_kv_lru_resident_compact(int req_ids_ptr, int last_req_ids_ptr, int topk_indices_ptr, "
+          "int stable_prefix_lens_ptr, int slot_to_token_ptr, int lru_slots_ptr, int current_slots_ptr, "
+          "int miss_count_ptr, int miss_tokens_ptr, int miss_slots_ptr, int token_mark_workspace_ptr, "
+          "int token_pos_workspace_ptr, int slot_workspace_ptr, int miss_position_workspace_ptr, "
+          "int epochs_ptr, int num_reqs, int topk, int capacity, int max_token, int workspace_threads, "
+          "int requested_threads) -> ()");
+  ops.impl("sparse_kv_lru_resident_compact", c10::DispatchKey::CompositeExplicitAutograd,
+           &lru_resident_compact);
+
+  ops.def("sparse_kv_compute_lru_resident_addrs(Tensor miss_count, Tensor miss_tokens, Tensor miss_slots, "
+          "Tensor block_table, int block_size, int token_size_bytes_k, int token_size_bytes_v, "
+          "int gvas_k_base, int gvas_v_base, int addr_k_base, int addr_v_base, int resident_capacity, "
+          "int max_num_threads, Tensor(a!) gvas_buffer, Tensor(b!) addr_buffer, Tensor(c!) size_buffer, "
+          "Tensor(d!) num_tokens_buffer) -> int");
+  ops.impl("sparse_kv_compute_lru_resident_addrs", torch::kCPU, &compute_lru_resident_addrs);
 }

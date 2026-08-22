@@ -122,24 +122,24 @@ supported.
     > Prefill and Decode nodes. Memcache Hybrid is required only on Prefill.
 
     Use the same MemFabric Hybrid build and installation commands shown above.
-    Decode also requires Clang and OpenMP. Prepare every Decode node:
+    The Sparse KV offload CPU helpers are compiled into the vLLM Ascend native
+    extension when the package is built; Decode does not compile them again at
+    service startup.
+
+    Follow the project [installation guide](../../installation.md) for the
+    standard compiler and source-build requirements. Sparse KV offload
+    additionally requires OpenMP when building vLLM Ascend for A3. Install the
+    OpenMP development package that matches the selected compiler before
+    building the package.
 
     ```bash
     source /usr/local/memfabric_hybrid/set_env.sh
     export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-    clang --version
-    ls "$(clang --print-resource-dir)/include/omp.h"
     ```
 
-    If Clang or OpenMP is missing:
-
-    ```bash
-    apt-get update
-    apt-get install -y clang libomp-dev
-    ```
-
-    If the image provides a specific Clang version, install the matching OpenMP
-    package, for example `libomp-17-dev` for Clang 17.
+    A prebuilt vLLM Ascend wheel does not require a compiler at service
+    startup, but the corresponding OpenMP runtime library must remain
+    installed.
 
 ## 2. Layerwise KV Cache Offload on Prefill
 
