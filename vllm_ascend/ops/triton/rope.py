@@ -277,7 +277,7 @@ def rope_forward_triton(
         BLOCK_SIZE_HEAD = 32
     # Large head_dim RoPE can overflow UB with the default tile on A2/A3.
     # Keep the original tile for common head_dim models.
-    large_head_dim_threshold, large_head_block_size = 256, 16
+    large_head_dim_threshold, large_head_block_size = 192, 16
     if head_dim >= large_head_dim_threshold:
         BLOCK_SIZE_HEAD = min(BLOCK_SIZE_HEAD, large_head_block_size)
     num_vectorcore = get_vectorcore_num()
