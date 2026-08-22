@@ -221,6 +221,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         router_logits=router_logits,
                         input_ids=input_ids,
                     )
+                shared_expert_input, shared_input_all_gather_done = (
+                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                )
                 if self.is_internal_router:
                     gate = self.gate
                     assert gate is not None
@@ -237,6 +240,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     before_routed_experts = torch.npu.current_stream().record_event()
                     after_routed_experts = None
 
+                if shared_input_all_gather_done is not None:
+                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
                 routed_out, fused_moe_events = self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -244,10 +249,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 fused_moe_events.before_routed_experts = before_routed_experts
                 fused_moe_events.after_routed_experts = after_routed_experts
+                if shared_input_all_gather_done is not None:
+                    fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
                 shared_out = self.ascend_shared_experts.forward(
-                    shared_hidden_states,
+                    shared_expert_input,
                     fused_moe_events,
+                    input_is_gathered=shared_input_all_gather_done is not None,
                 )
                 return shared_out, routed_out
 
@@ -276,6 +284,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         router_logits=router_logits,
                         input_ids=input_ids,
                     )
+                shared_expert_input, shared_input_all_gather_done = (
+                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                )
                 if self.is_internal_router:
                     gate = self.gate
                     assert gate is not None
@@ -296,6 +307,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     before_routed_experts = torch.npu.current_stream().record_event()
                     after_routed_experts = None
 
+                if shared_input_all_gather_done is not None:
+                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
                 routed_out, fused_moe_events = self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -303,9 +316,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 fused_moe_events.before_routed_experts = before_routed_experts
                 fused_moe_events.after_routed_experts = after_routed_experts
+                if shared_input_all_gather_done is not None:
+                    fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
                 shared_out = self.ascend_shared_experts.forward(
-                    shared_hidden_states,
+                    shared_expert_input,
                     fused_moe_events,
+                    input_is_gathered=shared_input_all_gather_done is not None,
                 )
                 return shared_out, routed_out
