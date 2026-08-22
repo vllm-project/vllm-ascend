@@ -29,20 +29,20 @@ public:
         buffer_ = bufferManager.template AllocBuffer<syncType>(size);
         buffer_.Init();
     }
-
+ 
     __aicore__ inline void Uninit(BufferManager<bufferType> &bufferManager){
         buffer_.UnInit();
         bufferManager.FreeBuffer(buffer_);
     }
-
+ 
     __aicore__ inline Buffer<bufferType, syncType> &Get(){
         return buffer_;
     }
-
+ 
     __aicore__ inline Buffer<bufferType, syncType> &GetPre(){
         return Get();
     }
-
+ 
     __aicore__ inline Buffer<bufferType, syncType> &GetReused(){
         return Get();
     }
@@ -94,12 +94,12 @@ public:
         if (flag2_ == 0) {
             flag2_ = 1;
             return pong_;
-        } else {
+        } else { 
             flag2_ = 0;
             return ping_;
         }
     }
-
+ 
     __aicore__ inline Buffer<bufferType, syncType> &GetReused(bool isNextS2IdxNoChange) {
         if (isNextS2IdxNoChange) {
             if (flag2_ == 0) {
@@ -111,7 +111,7 @@ public:
             return GetReused();
         }
     }
-
+ 
 private:
     Buffer<bufferType, syncType> ping_;
     Buffer<bufferType, syncType> pong_;
@@ -186,7 +186,7 @@ public:
     __aicore__ inline Buffer<bufferType, syncType> &GetPre() {
         if (flag1_ == 0) {
             return c_;
-        } else if (flag1_ == 1) {
+        } else if (flag1_ == 1) { 
             return a_;
         } else {
             return b_;
@@ -195,10 +195,10 @@ public:
 
     // KV复用
     __aicore__ inline Buffer<bufferType, syncType> &GetReused() {
-        if (flag2_ == 0) {
+        if (flag2_ == 0) { 
             flag2_ = 1;
             return a_;
-        } else if (flag2_ == 1){
+        } else if (flag2_ == 1){ 
             flag2_ = NUM_2;
             return b_;
         } else {

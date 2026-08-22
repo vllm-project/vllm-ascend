@@ -16,6 +16,7 @@
 #define VF_BASIC_BLOCK_UNALIGNED128_UPDATE_SFA_H
 
 #include "vf_basic_block_utils.h"
+#include "vf_basic_block_128_common_sfa.h"
 
 using namespace regbaseutil;
 
@@ -41,15 +42,6 @@ __simd_vf__ void ProcessVec1UpdateGeneralImpl128VF(
     AscendC::MicroAPI::RegTensor<float> vreg_exp_even;
     AscendC::MicroAPI::RegTensor<float> vreg_exp_odd;
 
-    // bfloat16_t
-    AscendC::MicroAPI::RegTensor<bfloat16_t> vreg_exp_even_bf16;
-    AscendC::MicroAPI::RegTensor<bfloat16_t> vreg_exp_odd_bf16;
-    AscendC::MicroAPI::RegTensor<bfloat16_t> vreg_exp_bf16;
-    // half
-    AscendC::MicroAPI::RegTensor<half> vreg_exp_even_fp16;
-    AscendC::MicroAPI::RegTensor<half> vreg_exp_odd_fp16;
-    AscendC::MicroAPI::RegTensor<half> vreg_exp_fp16;
-
     AscendC::MicroAPI::UnalignRegForStore ureg_max;
     AscendC::MicroAPI::UnalignRegForStore ureg_exp_sum;
 
@@ -63,19 +55,12 @@ __simd_vf__ void ProcessVec1UpdateGeneralImpl128VF(
     AscendC::MicroAPI::Duplicate(vreg_min, minValue);
     // x_max = max(src, axis=-1, keepdims=True); x_max = Max(x_max, inMax)
     for (uint16_t i = 0; i < m; ++i) {
-        AscendC::MicroAPI::LoadAlign(vreg_input_x, srcUb + i * s2BaseSize);
-        AscendC::MicroAPI::LoadAlign(vreg_input_x_unroll, srcUb + floatRepSize + i * s2BaseSize);
-        AscendC::MicroAPI::Muls(vreg_input_x, vreg_input_x, scale, preg_all);  // Muls(scale)
-        AscendC::MicroAPI::Muls(vreg_input_x_unroll, vreg_input_x_unroll, scale, preg_ori_tail_n);
-        AscendC::MicroAPI::Select(vreg_input_x_unroll_new, vreg_input_x_unroll, vreg_min, preg_ori_tail_n);
-        AscendC::MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM_B32>(
-            (__ubuf__ T *&)srcUb + i * s2BaseSize, vreg_input_x, preg_all);
-        AscendC::MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM_B32>(
-            (__ubuf__ T *&)srcUb + floatRepSize + i * s2BaseSize, vreg_input_x_unroll_new, preg_tail_n);
-        AscendC::MicroAPI::Max(vreg_max_tmp, vreg_input_x, vreg_input_x_unroll_new, preg_all);
+        TailScaleStoreMax128<T>(vreg_input_x, vreg_input_x_unroll,
+            vreg_input_x_unroll_new, vreg_min, vreg_max_tmp,
+            srcUb, i, s2BaseSize, scale, preg_all, preg_ori_tail_n, preg_tail_n);
         AscendC::MicroAPI::Reduce<MicroAPI::ReduceType::MAX, float, float, MicroAPI::MaskMergeMode::ZEROING>(
             vreg_cur_max, vreg_max_tmp, preg_all);
-
+        
         AscendC::MicroAPI::StoreUnAlign<float, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
             ((__ubuf__ T *&)tmpMaxUb), vreg_cur_max, ureg_max, 1);
     }
@@ -85,8 +70,8 @@ __simd_vf__ void ProcessVec1UpdateGeneralImpl128VF(
     AscendC::MicroAPI::LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
     AscendC::MicroAPI::LoadAlign(vreg_cur_max, tmpMaxUb2); // 获取新的max[s1, 1]
     AscendC::MicroAPI::Max(vreg_max_new, vreg_cur_max, vreg_in_max, preg_all); // 计算新、旧max的最大值
-    AscendC::MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM_B32>(
-        (__ubuf__ T *&)tmpMaxUb2, vreg_max_new, preg_all);
+    AscendC::MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM_B32>((__ubuf__ T *&)tmpMaxUb2,
+        vreg_max_new, preg_all);
     AscendC::MicroAPI::LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
     for (uint16_t i = 0; i < m; ++i) {
@@ -98,29 +83,11 @@ __simd_vf__ void ProcessVec1UpdateGeneralImpl128VF(
         AscendC::MicroAPI::ExpSub(vreg_exp_odd, vreg_input_x_unroll, vreg_max_brc, preg_all);
 
         // x_sum = sum(x_exp, axis=-1, keepdims=True)
-        AscendC::MicroAPI::Add(vreg_exp_sum, vreg_exp_even, vreg_exp_odd, preg_all);
-        AscendC::MicroAPI::Reduce<MicroAPI::ReduceType::SUM, float, float, MicroAPI::MaskMergeMode::ZEROING>(
-            vreg_exp_sum, vreg_exp_sum, preg_all);
-        AscendC::MicroAPI::StoreUnAlign<float, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-            ((__ubuf__ T *&)tmpExpSumUb), vreg_exp_sum, ureg_exp_sum, 1);
+        ExpSumReduceStore128<T>(vreg_exp_sum, vreg_exp_even, vreg_exp_odd,
+            ureg_exp_sum, tmpExpSumUb, preg_all);
 
-        if constexpr (IsSameType<T2, bfloat16_t>::value) {
-            AscendC::MicroAPI::Cast<T2, T, castTraitZero>(vreg_exp_even_bf16, vreg_exp_even, preg_all);
-            AscendC::MicroAPI::Cast<T2, T, castTraitOne>(vreg_exp_odd_bf16, vreg_exp_odd, preg_all);
-            AscendC::MicroAPI::Or((RegTensor<uint16_t>&)vreg_exp_bf16, (RegTensor<uint16_t>&)vreg_exp_even_bf16,
-                (RegTensor<uint16_t>&)vreg_exp_odd_bf16, preg_all_b16);
-            AscendC::MicroAPI::StoreAlign<T2, MicroAPI::DataCopyMode::DATA_BLOCK_COPY,
-                MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                ((__ubuf__ T2 *&)expUb), vreg_exp_bf16, blockStride, repeatStride, preg_n_b16);
-        } else if constexpr (IsSameType<T2, half>::value) {
-            AscendC::MicroAPI::Cast<T2, T, castTraitZero>(vreg_exp_even_fp16, vreg_exp_even, preg_all);
-            AscendC::MicroAPI::Cast<T2, T, castTraitOne>(vreg_exp_odd_fp16, vreg_exp_odd, preg_all);
-            AscendC::MicroAPI::Or((RegTensor<uint16_t>&)vreg_exp_fp16, (RegTensor<uint16_t>&)vreg_exp_even_fp16,
-                (RegTensor<uint16_t>&)vreg_exp_odd_fp16, preg_all_b16);
-            AscendC::MicroAPI::StoreAlign<T2, MicroAPI::DataCopyMode::DATA_BLOCK_COPY,
-                MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                ((__ubuf__ T2 *&)expUb), vreg_exp_fp16, blockStride, repeatStride, preg_n_b16);
-        }
+        CastStoreExp128<T, T2>(vreg_exp_even, vreg_exp_odd, expUb, blockStride, repeatStride,
+            preg_all, preg_n_b16);
     }
     AscendC::MicroAPI::StoreUnAlignPost<float, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
         ((__ubuf__ T *&)tmpExpSumUb), ureg_exp_sum, 0);

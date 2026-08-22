@@ -39,6 +39,7 @@
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/fused_infer_attention_score/fused_infer_attention_score_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
@@ -2615,6 +2616,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "npu_fused_infer_attention_score_v2(Tensor query, Tensor key, Tensor value, *,"
+        "                                    Tensor? query_rope=None, Tensor? key_rope=None,"
+        "                                    Tensor? pse_shift=None, Tensor? atten_mask=None,"
+        "                                    Tensor? learnable_sink=None,"
+        "                                    int[]? actual_seq_qlen=None, int[]? actual_seq_kvlen=None,"
+        "                                    Tensor? block_table=None, int num_query_heads=1,"
+        "                                    int num_key_value_heads=0, float softmax_scale=1.0,"
+        "                                    int pre_tokens=2147483647, int next_tokens=2147483647,"
+        "                                    str input_layout='BSH', int sparse_mode=0, int block_size=0,"
+        "                                    int query_quant_mode=0, int key_quant_mode=0,"
+        "                                    int value_quant_mode=0, int inner_precise=0,"
+        "                                    bool return_softmax_lse=False)"
+        " -> (Tensor output, Tensor softmax_lse)"
+    );
+    ops.impl("npu_fused_infer_attention_score_v2", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_infer_attention_score_v2);
 
     ops.def(
         "npu_kv_quant_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
