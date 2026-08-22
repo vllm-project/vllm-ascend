@@ -16,8 +16,6 @@ def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
     r.raise_for_status()
     body = r.json()
     return len(body.get("tokens") or body.get("token_ids", []))
-
-
 # def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
 #     single_count = _tokenize_count(server, seed, use_chat=use_chat)
 #     if single_count == 0:
@@ -44,6 +42,8 @@ def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
 #             actual = cand_count
 #
 #     return body, actual
+
+
 def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
     """Generate a prompt that tokenizes to exactly `target_tokens` tokens.
 
@@ -99,6 +99,7 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat:
             pad_hi = mid - 1
 
     return body + "a" * best_pad, best_pad_count
+
 
 def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None]:
     if isinstance(raw, dict):
