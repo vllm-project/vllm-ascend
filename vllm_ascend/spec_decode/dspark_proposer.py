@@ -52,10 +52,16 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "additional_config.finegrained_tp_config."
                 "lmhead_tensor_parallel_size=0."
             )
-        if vllm_config.speculative_config.draft_sample_method == "probabilistic":
+        draft_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        target_vocab_size = vllm_config.model_config.get_vocab_size()
+        draft_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None) or getattr(
+            draft_hf_config, "vocab_size", target_vocab_size
+        )
+        if draft_vocab_size != target_vocab_size:
             raise ValueError(
-                "DSpark probabilistic draft sampling is not supported on the v1 "
-                "model runner; use greedy (the default) instead."
+                "DSpark on the v1 model runner does not support reduced-vocabulary "
+                f"drafts: draft_vocab_size={draft_vocab_size}, "
+                f"target_vocab_size={target_vocab_size}."
             )
         super().__init__(vllm_config, device, runner=runner)
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
@@ -67,6 +73,17 @@ class AscendDSparkProposer(AscendDflashProposer):
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
+        self._dspark_draft_probs: torch.Tensor | None = None
+        if self._enable_probabilistic_draft_probs:
+            self._dspark_draft_probs = torch.empty(
+                (
+                    self.max_batch_size,
+                    self.num_speculative_tokens,
+                    vllm_config.model_config.get_vocab_size(),
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
         # DSpark is not supported in vllm v1, so related property needs to be reset here.
         del self.hidden_size, self.hidden_states, self._dflash_hidden_states  # type: ignore[has-type]
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
@@ -256,6 +273,53 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
+
+    def _sample_dspark_tokens(
+        self,
+        raw_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the Markov correction and sample one DSpark block."""
+        sampling_metadata = self.runner.input_batch.sampling_metadata
+        logits = raw_logits.view(
+            -1,
+            self.num_speculative_tokens,
+            raw_logits.shape[-1],
+        )
+        num_reqs = logits.shape[0]
+        draft_token_ids = self._dspark_draft_buffer[:num_reqs]
+        draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_reqs])
+
+        self._last_draft_probs = None
+        use_probabilistic = (
+            self._dspark_draft_probs is not None and sampling_metadata is not None and not sampling_metadata.all_greedy
+        )
+        draft_probs = None
+        if use_probabilistic:
+            assert self._dspark_draft_probs is not None
+            if logits.shape[-1] != self._dspark_draft_probs.shape[-1]:
+                raise RuntimeError(
+                    "DSpark draft/target vocabulary mismatch for probabilistic "
+                    f"sampling: draft={logits.shape[-1]}, "
+                    f"target={self._dspark_draft_probs.shape[-1]}"
+                )
+            draft_probs = self._dspark_draft_probs[:num_reqs]
+
+        for idx in range(self.num_speculative_tokens):
+            markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+            logits[:, idx].add_(self.model.markov_bias(markov_emb))
+            if draft_probs is None:
+                next_token_ids = logits[:, idx].argmax(dim=-1)
+            else:
+                next_token_ids, probs = self._sample_from_logits(
+                    logits[:, idx],
+                    sampling_metadata,
+                )
+                assert probs is not None
+                draft_probs[:, idx].copy_(probs)
+            draft_token_ids[:, idx + 1].copy_(next_token_ids)
+
+        self._last_draft_probs = draft_probs
+        return draft_token_ids
 
     def set_inputs_first_pass(
         self,
