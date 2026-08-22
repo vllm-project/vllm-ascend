@@ -399,6 +399,14 @@ class AscendConfig:
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config) -> bool:
+        # Ascend 950 (A5) MegaMoe is MXFP-only and uses a different intermediate-size
+        # constraint set, so it is validated separately. A2/A3 fall through to the
+        # original INT checks below unchanged.
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return AscendConfig._is_a5_megamoe_supported_by_config(vllm_config)
+
         hf_text_config = vllm_config.model_config.hf_text_config
         hidden_size = getattr(hf_text_config, "hidden_size", None)
         if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
@@ -442,6 +450,67 @@ class AscendConfig:
             "quanttype.w4a8",
         }
         return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
+
+    @staticmethod
+    def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
+        # Ascend 950 MegaMoe supports only MXFP quantization (dispatch_quant_mode
+        # == 4) and constrains hidden / intermediate to fixed discrete sets, per
+        # cann_ops_transformer docs/zh/mega_moe.md (Ascend 950 constraints).
+        hf_text_config = vllm_config.model_config.hf_text_config
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+            hidden_size = vllm_config.model_config.get_hidden_size()
+        if hidden_size is None:
+            return False
+        if int(hidden_size) not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}:
+            return False
+
+        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None:
+            return False
+        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
+        intermediate_hidden = 2 * int(moe_intermediate_size)
+        if intermediate_hidden not in {1024, 2048, 3072, 4096, 7168}:
+            return False
+
+        # num_experts must divide evenly across the EP group.
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp
+            // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        if ep_world_size < 2:
+            return False
+        if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
+            return False
+
+        num_topk = getattr(
+            hf_text_config,
+            "num_experts_per_tok",
+            getattr(hf_text_config, "top_k_experts", 1),
+        )
+        if not (1 <= int(num_topk) <= 32):
+            return False
+
+        # A5 MegaMoe is MXFP-only: the routed experts must be MXFP-quantized.
+        quant_type = getattr(
+            hf_text_config,
+            "moe_quantize",
+            getattr(hf_text_config, "quantize", None),
+        )
+        if quant_type is None:
+            return False
+        quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+        _A5_MEGAMOE_SUPPORTED_QUANT_NAMES = {
+            "w8a8_mxfp8",
+            "w4a8_mxfp",
+            "w4a4_mxfp4",
+            "mxfp8",
+            "modelopt_mxfp8",
+            "quanttype.w8a8mxfp",
+            "quanttype.w4a8mxfp",
+            "quanttype.w4a4mxfp",
+        }
+        return quant_name in _A5_MEGAMOE_SUPPORTED_QUANT_NAMES
 
     def _check_mix_placement(self):
         if self.mix_placement:

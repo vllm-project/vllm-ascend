@@ -385,7 +385,11 @@ class FusedMC2CommImpl(MoECommMethod):
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
-
+        logger.info(
+            "_apply_cann_mega_moe, mega_moe operator is going to execute: weight1_type=%s weight2_type=%s",
+            weight_type,
+            weight_type,
+        )
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),

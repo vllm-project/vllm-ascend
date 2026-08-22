@@ -264,6 +264,13 @@ def _select_a5_moe_comm_method(
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
+    # A5 MegaMoe is MXFP-only; the INT dispatch_ffn_combine fallback does not
+    # apply on A5. AscendConfig already resets enable_fused_mc2 to 0 for
+    # unsupported models, so a non-zero flag here implies the A5 MXFP config
+    # validation passed.
+    if get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
+        return MoECommType.FUSED_MC2
+
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
         "num_experts_per_tok",
