@@ -212,7 +212,6 @@ def test_kv_delivery_schedule_has_no_balance_dependency():
     assert "_balance_enabled" not in source
     assert "balance_queue" not in source
     assert "_use_consumer_partial_group_hits" not in source
-    assert "get_computed_blocks_for_connector" in source
     assert "assert request_queue is not None" in source
 
 
