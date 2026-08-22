@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -34,6 +34,12 @@ from vllm_ascend.ops.kimi_kda import (
     _load_a_log,
     _zero_padded_spec_output,
 )
+from vllm_ascend.quantization.methods.w4a8_mxfp4 import (
+    AscendW4A8MXFPDynamicLinearMethod,
+)
+from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 
 
 class _NoopQuantMethod(QuantizeMethodBase):
@@ -42,6 +48,17 @@ class _NoopQuantMethod(QuantizeMethodBase):
 
     def apply(self, layer: nn.Module, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError
+
+
+class _RecordingLinear(nn.Module):
+    def __init__(self, output: torch.Tensor) -> None:
+        super().__init__()
+        self.output = output
+        self.input: torch.Tensor | None = None
+
+    def forward(self, input_: torch.Tensor):
+        self.input = input_
+        return self.output, None
 
 
 def _make_conv_pack_attention(
@@ -169,6 +186,111 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.shape == output.shape
     assert masked.dtype == output.dtype
     assert masked.device == output.device
+
+
+def test_staged_bfg_projection_preserves_original_outputs():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.use_full_rank_gate = True
+    attention.head_dim = 3
+
+    hidden_states = torch.randn(4, 5)
+    beta_output = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    f_a_output = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    f_b_output = torch.arange(24, dtype=torch.float32).reshape(4, 6)
+    g_output = torch.arange(24, dtype=torch.float32).reshape(4, 6) + 100
+    attention.b_proj = _RecordingLinear(beta_output)
+    attention.f_a_proj = _RecordingLinear(f_a_output)
+    attention.f_b_proj = _RecordingLinear(f_b_output)
+    attention.g_proj = _RecordingLinear(g_output)
+
+    beta, raw_gate, output_gate = attention._project_bfg(hidden_states)
+
+    torch.testing.assert_close(beta, beta_output)
+    torch.testing.assert_close(attention.f_b_proj.input, f_a_output)
+    torch.testing.assert_close(raw_gate, f_b_output)
+    torch.testing.assert_close(output_gate, g_output)
+
+    beta, raw_gate, output_gate = attention._postprocess_bfg(
+        beta,
+        raw_gate,
+        output_gate,
+    )
+    torch.testing.assert_close(beta, beta_output.sigmoid().unsqueeze(0))
+    torch.testing.assert_close(
+        raw_gate,
+        f_b_output.reshape(4, 2, 3).unsqueeze(0),
+    )
+    torch.testing.assert_close(output_gate, g_output.reshape(4, 2, 3))
+
+
+@pytest.mark.parametrize(
+    "quant_method_type",
+    [
+        AscendW4A8MXFPDynamicLinearMethod,
+        AscendW8A8MXFP8DynamicLinearMethod,
+    ],
+)
+def test_fused_qkv_splits_mxfp_dynamic_quant_from_matmul(quant_method_type):
+    attention = AscendKimiGatedDeltaNetAttention.__new__(
+        AscendKimiGatedDeltaNetAttention,
+    )
+    nn.Module.__init__(attention)
+    inner_quant_method = quant_method_type.__new__(quant_method_type)
+    adapter = SimpleNamespace(
+        quant_method=inner_quant_method,
+        apply=MagicMock(return_value=torch.randn(4, 18)),
+    )
+    attention.fused_qkv = SimpleNamespace(quant_method=adapter)
+    hidden_states = torch.randn(4, 6, dtype=torch.bfloat16)
+    quantized = torch.empty(4, 6, dtype=torch.float8_e4m3fn)
+    dynamic_scale = torch.empty(4, 1, dtype=torch.uint8)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.torch_npu.npu_dynamic_mx_quant",
+        return_value=(quantized, dynamic_scale),
+    ) as dynamic_quant:
+        qkv_input = attention._quantize_fused_qkv(hidden_states)
+
+    assert isinstance(qkv_input, tuple)
+    assert qkv_input[0] is quantized
+    assert qkv_input[1] is dynamic_scale
+    dynamic_quant.assert_called_once_with(hidden_states, dst_type=torch.float8_e4m3fn)
+
+    output = attention._matmul_fused_qkv(qkv_input)
+
+    assert output is adapter.apply.return_value
+    adapter.apply.assert_called_once_with(attention.fused_qkv, qkv_input, bias=None)
+
+
+def test_fused_qkv_keeps_non_mxfp_quantization_in_linear_apply():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(
+        AscendKimiGatedDeltaNetAttention,
+    )
+    nn.Module.__init__(attention)
+    adapter = SimpleNamespace(
+        quant_method=object(),
+        apply=MagicMock(return_value=torch.randn(4, 18)),
+    )
+    attention.fused_qkv = SimpleNamespace(quant_method=adapter)
+    hidden_states = torch.randn(4, 6)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.torch_npu.npu_dynamic_mx_quant",
+    ) as dynamic_quant:
+        qkv_input = attention._quantize_fused_qkv(hidden_states)
+
+    assert qkv_input is hidden_states
+    dynamic_quant.assert_not_called()
+
+    output = attention._matmul_fused_qkv(qkv_input)
+
+    assert output is adapter.apply.return_value
+    adapter.apply.assert_called_once_with(
+        attention.fused_qkv,
+        hidden_states,
+        bias=None,
+    )
 
 
 def test_output_norm_gate_uses_kda_fused_triton_kernel():
