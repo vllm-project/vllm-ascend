@@ -1466,11 +1466,13 @@ vllm serve <MODEL_PATH> \
       "use_ascend_direct": true,
       "prefill": {
         "dp_size": 4,
-        "tp_size": 8
+        "tp_size": 8,
+        "dcp_size": 8
       },
       "decode": {
         "dp_size": 4,
-        "tp_size": 8
+        "tp_size": 8,
+        "dcp_size": 8
       }
     }
   }'
@@ -1539,11 +1541,13 @@ vllm serve <MODEL_PATH> \
       "use_ascend_direct": true,
       "prefill": {
         "dp_size": 4,
-        "tp_size": 8
+        "tp_size": 8,
+        "dcp_size": 8
       },
       "decode": {
         "dp_size": 4,
-        "tp_size": 8
+        "tp_size": 8,
+        "dcp_size": 8
       }
     }
   }'
@@ -1569,7 +1573,7 @@ Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#5113
 **Prefill nodes (1M):**
 
 - `--additional-config '{"recompute_scheduler_enable": true, ...}'`: The recompute scheduler is enabled on both prefill and decode nodes in this scenario.
-- `--kv-transfer-config`: Mooncake connector as `kv_producer` with `prefill: dp4 tp8` / `decode: dp4 tp8` (matching the 1M P/D topology, in contrast to `dp32 tp1` decode in the sub-1M PD scenario).
+- `--kv-transfer-config`: Mooncake connector as `kv_producer` with `prefill: dp4 tp8 dcp8` / `decode: dp4 tp8 dcp8` (matching the 1M P/D topology, in contrast to `dp32 tp1` decode in the sub-1M PD scenario). For SFA models, set `dcp_size` to the actual DCP size in both sections; prefill and decode must either both enable DCP or both disable it.
 
 **Decode nodes (1M):**
 
