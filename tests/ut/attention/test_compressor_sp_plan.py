@@ -387,3 +387,237 @@ def test_chunked_multi_request_positions_are_validated_per_request():
     assert plan.start_pos == (124,)
     assert plan.sp_row_counts_per_rank == (2, 2)
     assert max(plan.token_indices) < 8
+
+
+def _ref_sp_row_counts(num_tokens, ratio, tp_size):
+    """Per-token reference for the closed-form owned-row bucketing."""
+    num_tokens_pad = ((num_tokens + tp_size - 1) // tp_size) * tp_size
+    tokens_per_rank = num_tokens_pad // tp_size
+    counts = [0] * tp_size
+    for flat_index in range(num_tokens):
+        if (flat_index + 1) % ratio == 0:
+            counts[min(flat_index // tokens_per_rank, tp_size - 1)] += 1
+    return tuple(counts)
+
+
+@pytest.mark.parametrize("num_tokens", [4096, 8192, 12288])
+@pytest.mark.parametrize("ratio", [4, 128])
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+def test_closed_form_owned_counts_match_per_token_reference(num_tokens, ratio, tp_size):
+    """The specialized non-rotate owner pass must match the per-token walk."""
+    tokens_per_rank = (num_tokens + tp_size - 1) // tp_size
+    reference = _ref_sp_row_counts(num_tokens, ratio, tp_size)
+    for tp_rank in range(tp_size):
+        local_start = tp_rank * tokens_per_rank
+        local_end = min(local_start + tokens_per_rank, num_tokens)
+        plan = _plan(
+            tp_size=tp_size,
+            compress_ratio=ratio,
+            input_positions=list(range(num_tokens)),
+            query_start_loc=[0, num_tokens],
+            seq_lens=[num_tokens],
+            local_start=local_start,
+            local_end=local_end,
+            tp_rank=tp_rank,
+        )
+        assert plan.enabled, plan.reason
+        assert plan.sp_row_counts_per_rank == reference
+        # gather_compact must reindex the padded rank-major buffer back to the
+        # dense global row order (0..sum(counts)-1) exactly once.
+        assert sorted(plan.gather_compact_indices) == sorted(set(plan.gather_compact_indices))
+        assert len(plan.gather_compact_indices) == sum(reference)
+
+
+def test_endpoint_position_check_admits_middle_discontinuity_by_default():
+    """Fast path validates request endpoints only (positions contiguous by
+    vLLM invariant); the full O(N) scan is available behind validate_positions."""
+    positions = list(range(16))
+    positions[7] = 99  # interior corruption, endpoints still consistent
+
+    fast_plan = _plan(input_positions=positions)
+    assert fast_plan.enabled  # endpoints (0 and 15) still line up
+
+    checked_plan = _plan(input_positions=positions, validate_positions=True)
+    assert not checked_plan.enabled
+    assert checked_plan.reason == "noncontiguous_positions"
+
+
+def _reference_plan_selectors(*, num_tokens, ratio, tp_size, tp_rank, query_start_loc, seq_lens, positions):
+    """Per-token reference for the arithmetic output-row passes.
+
+    Mirrors the original scan: walk every token, emit a global compressed row
+    wherever ``(position + 1) % ratio == 0``, bucket it by owning rank, and build
+    the rank-major gather layout from those buckets.
+    """
+    tokens_per_rank = (((num_tokens + tp_size - 1) // tp_size) * tp_size) // tp_size
+    num_reqs = len(query_start_loc) - 1
+    query_lens = [query_start_loc[i + 1] - query_start_loc[i] for i in range(num_reqs)]
+    request_starts = [seq_lens[i] - query_lens[i] for i in range(num_reqs)]
+
+    owned_rows = [[] for _ in range(tp_size)]
+    flat_to_row = {}
+    row = 0
+    for flat_index, position in enumerate(positions):
+        if (position + 1) % ratio == 0:
+            flat_to_row[flat_index] = row
+            owned_rows[min(flat_index // tokens_per_rank, tp_size - 1)].append(row)
+            row += 1
+
+    max_rows = max(len(rows) for rows in owned_rows)
+    gather = [0] * row
+    for rank, rows in enumerate(owned_rows):
+        for local_row, global_row in enumerate(rows):
+            gather[global_row] = rank * max_rows + local_row
+
+    local_start = tp_rank * tokens_per_rank
+    local_end = min(local_start + tokens_per_rank, num_tokens)
+    owned_flat = [
+        flat_index
+        for req_index in range(num_reqs)
+        for flat_index in range(
+            max(query_start_loc[req_index], local_start),
+            min(query_start_loc[req_index + 1], local_end),
+        )
+    ]
+    keep_rows = [flat_to_row[flat_index] for flat_index in owned_flat if flat_index in flat_to_row]
+    return {
+        "sp_row_counts_per_rank": tuple(len(rows) for rows in owned_rows),
+        "gather_compact_indices": tuple(gather),
+        "num_keep_rows": len(keep_rows),
+        "request_starts": request_starts,
+    }
+
+
+@pytest.mark.parametrize("ratio", [4, 128])
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+@pytest.mark.parametrize(("num_tokens", "chunk_start"), [(4096, 0), (8192, 0), (8192, 8192), (5120, 4096), (60, 0)])
+def test_arithmetic_output_rows_match_per_token_reference(ratio, tp_size, num_tokens, chunk_start):
+    """Every rank's selectors must equal the per-token scan they replaced."""
+    positions = list(range(chunk_start, chunk_start + num_tokens))
+    query_start_loc = [0, num_tokens]
+    seq_lens = [chunk_start + num_tokens]
+    tokens_per_rank = (((num_tokens + tp_size - 1) // tp_size) * tp_size) // tp_size
+
+    for tp_rank in range(tp_size):
+        plan = _plan(
+            tp_size=tp_size,
+            compress_ratio=ratio,
+            input_positions=positions,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            local_start=tp_rank * tokens_per_rank,
+            local_end=min((tp_rank + 1) * tokens_per_rank, num_tokens),
+            tp_rank=tp_rank,
+        )
+        reference = _reference_plan_selectors(
+            num_tokens=num_tokens,
+            ratio=ratio,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            positions=positions,
+        )
+        assert plan.enabled, plan.reason
+        assert plan.sp_row_counts_per_rank == reference["sp_row_counts_per_rank"]
+        assert plan.gather_compact_indices == reference["gather_compact_indices"]
+        assert len(plan.output_keep_indices) == reference["num_keep_rows"]
+
+
+@pytest.mark.parametrize("ratio", [4, 128])
+@pytest.mark.parametrize("lens", [[2048, 2048], [1024, 2048, 1024], [16, 16]])
+def test_packed_requests_keep_per_request_output_phase(ratio, lens):
+    """Each request restarts the output phase at its own start position."""
+    num_tokens = sum(lens)
+    positions = [position for length in lens for position in range(length)]
+    query_start_loc = [0]
+    for length in lens:
+        query_start_loc.append(query_start_loc[-1] + length)
+    tp_size = 2
+    tokens_per_rank = (((num_tokens + tp_size - 1) // tp_size) * tp_size) // tp_size
+
+    for tp_rank in range(tp_size):
+        plan = _plan(
+            tp_size=tp_size,
+            compress_ratio=ratio,
+            input_positions=positions,
+            query_start_loc=query_start_loc,
+            seq_lens=list(lens),
+            local_start=tp_rank * tokens_per_rank,
+            local_end=min((tp_rank + 1) * tokens_per_rank, num_tokens),
+            tp_rank=tp_rank,
+        )
+        reference = _reference_plan_selectors(
+            num_tokens=num_tokens,
+            ratio=ratio,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            query_start_loc=query_start_loc,
+            seq_lens=list(lens),
+            positions=positions,
+        )
+        assert plan.enabled, plan.reason
+        assert plan.sp_row_counts_per_rank == reference["sp_row_counts_per_rank"]
+        assert plan.gather_compact_indices == reference["gather_compact_indices"]
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("offset", [0, 1])
+def test_rotated_owner_runs_match_per_token_reference(tp_size, offset):
+    """Rotating ownership must produce the same rank-major gather layout."""
+    num_tokens = 8192
+    chunk_start = 8192
+    positions = list(range(chunk_start, chunk_start + num_tokens))
+    tokens_per_rank = num_tokens // tp_size
+
+    for tp_rank in range(tp_size):
+        plan = _plan(
+            tp_size=tp_size,
+            input_positions=positions,
+            query_start_loc=[0, num_tokens],
+            seq_lens=[chunk_start + num_tokens],
+            local_start=tp_rank * tokens_per_rank,
+            local_end=(tp_rank + 1) * tokens_per_rank,
+            tp_rank=tp_rank,
+            request_ids=["request-0"],
+            request_continues=[True],
+            rank_offsets=[offset],
+            rotate_chunk_owners=True,
+        )
+        assert plan.enabled, plan.reason
+        assert plan.rotate_chunk_owners
+
+        # Per-token reference for the rotated owner assignment.
+        owned_rows = [[] for _ in range(tp_size)]
+        row = 0
+        for flat_index, position in enumerate(positions):
+            if (position + 1) % 4 == 0:
+                logical = min(flat_index // tokens_per_rank, tp_size - 1)
+                owned_rows[(logical + offset) % tp_size].append(row)
+                row += 1
+        max_rows = max(len(rows) for rows in owned_rows)
+        gather = [0] * row
+        for rank, rows in enumerate(owned_rows):
+            for local_row, global_row in enumerate(rows):
+                gather[global_row] = rank * max_rows + local_row
+
+        assert plan.sp_row_counts_per_rank == tuple(len(rows) for rows in owned_rows)
+        assert plan.gather_compact_indices == tuple(gather)
+
+
+def test_contiguous_slice_rejects_permuted_selectors():
+    """A ragged gather selector must not be collapsed into a narrow() slice."""
+    plan = _plan(
+        tp_size=3,
+        input_positions=list(range(20)),
+        query_start_loc=[0, 20],
+        seq_lens=[20],
+        local_start=0,
+        local_end=7,
+        tp_rank=0,
+    )
+
+    assert plan.enabled
+    # Same first/last value as range(0, 5) but permuted in the middle.
+    assert plan.gather_compact_indices == (0, 2, 3, 4, 5)
+    assert plan.gather_compact_slice is None

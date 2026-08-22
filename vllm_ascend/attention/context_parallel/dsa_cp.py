@@ -20,6 +20,7 @@ from vllm_ascend.attention.context_parallel.compressor_sp import (
     build_compressor_sp_plan,
     build_padded_destination_for_scatter,
     flatten_slot_mapping,
+    fused_gather_rows,
     is_block_offset_slot_mapping,
     select_block_cache_rows,
     update_block_cache_rows_,
@@ -1667,32 +1668,101 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )
         return gathered, padded_local, work
 
-    def _sync_compressor_sp_state_cache(
+    def _fused_gather_compressor_sp_rows(
+        self,
+        payloads: tuple[tuple[torch.Tensor, tuple[int, ...]], ...],
+    ) -> list[torch.Tensor] | None:
+        """Bind ``fused_gather_rows`` to this layer's TP process group."""
+        return fused_gather_rows(
+            payloads,
+            self.tp_size,
+            lambda gathered, local: dist.all_gather_into_tensor(
+                gathered,
+                local,
+                group=self.tp_group.device_group,
+            ),
+        )
+
+    def _read_compressor_sp_state_rows(
         self,
         state_cache: torch.Tensor,
         state_slot_mapping: torch.Tensor,
         state_block_size: int,
         plan: CompressorSPMetadata,
-    ) -> None:
-        if not plan.requires_state_sync:
-            return
-        local_token_indices = plan.state_sync_token_indices
-        global_token_indices = plan.state_sync_global_token_indices
-        row_counts = plan.state_sync_row_counts_per_rank
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Read this rank's partial Compressor state rows and their global slots.
 
+        Both reads happen before the collective: the local rows are the payload to
+        replicate and the global slots are where every rank writes the rebuilt rows
+        back afterwards.
+        """
         state_rows = state_cache.squeeze(-2)
-        local_mapping = state_slot_mapping.index_select(0, local_token_indices)
+        local_mapping = state_slot_mapping.index_select(0, plan.state_sync_token_indices)
         local_slots = flatten_slot_mapping(local_mapping, state_block_size)
         local_states = select_block_cache_rows(state_rows, local_slots, state_block_size)
-        gathered, _, _ = self._gather_compressor_sp_rows(
-            local_states,
-            row_counts,
-        )
-        compact_states = self._select_compressor_sp_rows(gathered, plan, "state_sync_gather_compact")
-
-        global_mapping = state_slot_mapping.index_select(0, global_token_indices)
+        global_mapping = state_slot_mapping.index_select(0, plan.state_sync_global_token_indices)
         global_slots = flatten_slot_mapping(global_mapping, state_block_size)
+        return state_rows, local_states, global_slots
+
+    def _write_compressor_sp_state_rows(
+        self,
+        state_rows: torch.Tensor,
+        global_slots: torch.Tensor,
+        gathered_states: torch.Tensor,
+        state_block_size: int,
+        plan: CompressorSPMetadata,
+    ) -> None:
+        """Write the replicated partial state rows into this rank's state cache."""
+        compact_states = self._select_compressor_sp_rows(gathered_states, plan, "state_sync_gather_compact")
         update_block_cache_rows_(state_rows, global_slots, compact_states, state_block_size)
+
+    def _sync_c128_state_and_gather_output(
+        self,
+        *,
+        local_compressed_kv: torch.Tensor,
+        state_cache: torch.Tensor,
+        state_slot_mapping: torch.Tensor,
+        state_block_size: int,
+        plan: CompressorSPMetadata,
+        expected_global: int,
+    ) -> torch.Tensor | None:
+        """Synchronize C128 partial state, folding in the output gather when possible.
+
+        A C128 step has to replicate two rank-local row blocks: the compressed
+        output rows and the unfinished compression block kept in the state cache.
+        Both are ready as soon as the local Compressor returns and neither depends
+        on the other, so they travel in one AllGather instead of two back-to-back
+        collectives whose cost is dominated by fixed launch and sync overhead.
+
+        Returns the gathered output rows when they were folded in, otherwise
+        ``None`` so the caller gathers them on its own.
+        """
+        if not plan.requires_state_sync:
+            return None
+        state_rows, local_states, global_slots = self._read_compressor_sp_state_rows(
+            state_cache,
+            state_slot_mapping,
+            state_block_size,
+            plan,
+        )
+        state_row_counts = plan.state_sync_row_counts_per_rank
+        fused = (
+            self._fused_gather_compressor_sp_rows(
+                (
+                    (local_compressed_kv, plan.sp_row_counts_per_rank),
+                    (local_states, state_row_counts),
+                )
+            )
+            if expected_global > 0
+            else None
+        )
+        if fused is None:
+            gathered_output = None
+            gathered_states, _, _ = self._gather_compressor_sp_rows(local_states, state_row_counts)
+        else:
+            gathered_output, gathered_states = fused
+        self._write_compressor_sp_state_rows(state_rows, global_slots, gathered_states, state_block_size, plan)
+        return gathered_output
 
     def _replay_c4_compressor_sp_state(
         self,
@@ -1813,6 +1883,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             and expected_global > 0
             and not torch.npu.is_current_stream_capturing()
         )
+        gathered: torch.Tensor | None = None
         if overlap_output_gather:
             comm_stream = _compressor_sp_comm_stream()
             gathered, gather_input, gather_work = self._gather_compressor_sp_rows(
@@ -1832,11 +1903,15 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 plan=plan,
             )
         else:
-            self._sync_compressor_sp_state_cache(
-                state_cache,
-                state_req_metadata.slot_mapping,
-                state_req_metadata.block_size,
-                plan,
+            # C128 has no state replay to overlap, so the output gather is folded
+            # into the state-sync collective instead of being issued separately.
+            gathered = self._sync_c128_state_and_gather_output(
+                local_compressed_kv=local_compressed_kv,
+                state_cache=state_cache,
+                state_slot_mapping=state_req_metadata.slot_mapping,
+                state_block_size=state_req_metadata.block_size,
+                plan=plan,
+                expected_global=expected_global,
             )
         if expected_global == 0:
             return True
@@ -1845,7 +1920,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             gather_work.wait()
             torch.npu.current_stream().wait_stream(comm_stream)
             del gather_input
-        else:
+        elif gathered is None:
             gathered, _, _ = self._gather_compressor_sp_rows(
                 local_compressed_kv,
                 row_counts,
