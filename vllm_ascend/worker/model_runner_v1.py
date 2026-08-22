@@ -1773,6 +1773,25 @@ class NPUModelRunner(GPUModelRunner):
         )
         return cut_tokens
 
+    @contextmanager
+    def synchronize_input_prep(self):
+        """Override to skip prepare_input_event synchronize/record after
+        a fault has been detected."""
+
+        if self.prepare_inputs_event is None:
+            yield
+            return
+
+        self.prepare_inputs_event.synchronize()
+        try:
+            yield
+        except Exception as e:
+            raise RuntimeError(
+                "prepare_inputs_event record skipped due to fault."
+            ) from e
+        else:
+            self.prepare_inputs_event.record()
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3666,7 +3685,7 @@ class NPUModelRunner(GPUModelRunner):
             block_size = (self.kernel_block_sizes[0] if isinstance(
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
-        
+
         if (
             self.speculative_config
             and self.speculative_config.uses_extract_hidden_states()
