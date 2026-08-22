@@ -26,6 +26,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.utils import compute_iteration_details
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -51,11 +52,10 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import set_potential_max_tokens, vllm_version_is
+from vllm_ascend.utils import enable_dsa_cp, set_potential_max_tokens, vllm_version_is
 
 if not vllm_version_is("0.27.1"):
     from vllm.v1.worker.gpu.model_runner import BatchReqState
-
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -79,6 +79,7 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self._use_dsa_decode_aclgraph = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -169,6 +170,19 @@ class NPUModelRunner(GPUModelRunner):
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
 
+            from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+
+            uses_dsa_backend = any(
+                isinstance(attn_group.backend, type) and issubclass(attn_group.backend, AscendDSABackend)
+                for kv_cache_groups in self.attn_groups
+                for attn_group in kv_cache_groups
+            )
+            self._use_dsa_decode_aclgraph = (
+                uses_dsa_backend
+                and not enable_dsa_cp()
+                and self.speculative_config is None
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            )
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
@@ -190,6 +204,13 @@ class NPUModelRunner(GPUModelRunner):
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
             )
+
+        if self._use_dsa_decode_aclgraph and not dummy_run:
+            iteration = compute_iteration_details(scheduler_output)
+            # FULL_DECODE_ONLY must keep fresh and continued prefills eager,
+            # including a final one-token chunk that otherwise looks like a
+            # uniform decode batch to graph dispatch.
+            is_profile = is_profile or iteration.num_ctx_requests > 0
         return super().execute_model(
             scheduler_output,
             intermediate_tensors=intermediate_tensors,
@@ -344,6 +365,16 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_buffers.positions,
                 self.input_buffers.seq_lens,
             )
+
+            if batch_desc.cg_mode == CUDAGraphMode.FULL and self._use_dsa_decode_aclgraph:
+                self._prepare_dsa_full_graph_padding_inputs(
+                    num_reqs=num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens=num_tokens,
+                    num_tokens_padded=num_tokens_after_padding,
+                    query_start_loc_np=query_start_loc_np,
+                )
+
             seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
             # Pad for full CUDA graph mode.
@@ -561,6 +592,16 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_buffers.positions,
                 self.input_buffers.seq_lens,
             )
+
+            if batch_desc.cg_mode == CUDAGraphMode.FULL and self._use_dsa_decode_aclgraph:
+                self._prepare_dsa_full_graph_padding_inputs(
+                    num_reqs=num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens=num_tokens,
+                    num_tokens_padded=num_tokens_after_padding,
+                    query_start_loc_np=query_start_loc_np,
+                )
+
             seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
             # Pad for full CUDA graph mode.
@@ -730,7 +771,8 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
         ):
-            num_reqs_padded = num_reqs
+            if not self._use_dsa_decode_aclgraph:
+                num_reqs_padded = num_reqs
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
 
@@ -751,6 +793,52 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs_padded = num_reqs_padded + 1
 
         return query_start_loc_np, num_reqs_padded
+
+    def _prepare_dsa_full_graph_padding_inputs(
+        self,
+        *,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens: int,
+        num_tokens_padded: int,
+        query_start_loc_np: np.ndarray,
+    ) -> None:
+        """Initialize inputs consumed by DSA's padded full-graph requests."""
+        assert 0 < num_reqs <= num_reqs_padded <= self.max_num_reqs
+        assert 0 < num_tokens <= num_tokens_padded <= self.max_num_tokens
+        assert query_start_loc_np.shape[0] == num_reqs_padded + 1
+
+        self.input_buffers.is_padding[:num_tokens].fill_(False)
+        self.input_buffers.is_padding[num_tokens:num_tokens_padded].fill_(True)
+        if num_reqs_padded == num_reqs:
+            assert num_tokens_padded == num_tokens
+            return
+
+        padding_start = int(query_start_loc_np[num_reqs])
+        padding_end = int(query_start_loc_np[num_reqs_padded])
+        assert padding_start == num_tokens
+        assert padding_end == num_tokens_padded
+
+        padding_query_lens_np = np.diff(query_start_loc_np[num_reqs : num_reqs_padded + 1]).astype(np.int32, copy=False)
+        assert np.all(padding_query_lens_np > 0)
+        self.input_buffers.seq_lens_np[num_reqs:num_reqs_padded] = padding_query_lens_np
+        async_copy_to_gpu(
+            padding_query_lens_np,
+            out=self.input_buffers.seq_lens[num_reqs:num_reqs_padded],
+        )
+
+        padding_positions_np = np.empty(num_tokens_padded - num_tokens, dtype=np.int64)
+        offset = 0
+        for query_len in padding_query_lens_np:
+            query_len_int = int(query_len)
+            padding_positions_np[offset : offset + query_len_int] = np.arange(query_len_int, dtype=np.int64)
+            offset += query_len_int
+        assert offset == padding_positions_np.size
+        async_copy_to_gpu(
+            padding_positions_np,
+            out=self.input_buffers.positions[num_tokens:num_tokens_padded],
+        )
+        self.input_buffers.input_ids[num_tokens:num_tokens_padded].zero_()
 
 
 @contextmanager
