@@ -1,0 +1,101 @@
+op0: SchedulerNode(ComputedBuffer)
+op0.writes = [MemoryDep('buf0', c0, {c0: 2})]
+op0.unmet_dependencies = []
+op0.met_dependencies = [MemoryDep('arg0_1', 2*c0, {c0: 2})]
+op0.outputs = [
+    buf0: ComputedBuffer
+    buf0.layout = FixedLayout('npu:0', torch.float32, size=[2, 1], stride=[1, 2])
+    buf0.users = [NodeUser(node=ExternKernelSchedulerNode(name='op3'), can_inplace=False, is_weak=False)]
+]
+op0.group.device = npu:0
+op0.group.iteration = (2, 1)
+op0.sizes = ((2,), ())
+arg0_1_layout = FixedLayout('npu:0', torch.float32, size=[2, 2], stride=[2, 1])
+buf0_layout = FixedLayout('npu:0', torch.float32, size=[2, 1], stride=[1, 2])
+class op0_loop_body:
+    var_ranges = {p0: 2}
+    index0 = 2*p0
+    index1 = p0
+    def body(self, ops):
+        get_index = self.get_index('index0')
+        load = ops.load('arg0_1', get_index)
+        get_index_1 = self.get_index('index1')
+        store = ops.store('buf0', get_index_1, load, None)
+        return store
+
+
+op1: SchedulerNode(ComputedBuffer)
+op1.writes = [MemoryDep('buf1', c0, {c0: 2})]
+op1.unmet_dependencies = []
+op1.met_dependencies = [MemoryDep('arg0_1', 2*c0 + 1, {c0: 2})]
+op1.outputs = [
+    buf1: ComputedBuffer
+    buf1.layout = FixedLayout('npu:0', torch.float32, size=[2, 1], stride=[1, 2])
+    buf1.users = [NodeUser(node=ExternKernelSchedulerNode(name='op3'), can_inplace=False, is_weak=False)]
+]
+op1.group.device = npu:0
+op1.group.iteration = (2, 1)
+op1.sizes = ((2,), ())
+arg0_1_layout = FixedLayout('npu:0', torch.float32, size=[2, 2], stride=[2, 1])
+buf1_layout = FixedLayout('npu:0', torch.float32, size=[2, 1], stride=[1, 2])
+class op1_loop_body:
+    var_ranges = {p0: 2}
+    index0 = 2*p0 + 1
+    index1 = p0
+    def body(self, ops):
+        get_index = self.get_index('index0')
+        load = ops.load('arg0_1', get_index)
+        get_index_1 = self.get_index('index1')
+        store = ops.store('buf1', get_index_1, load, None)
+        return store
+
+
+op2: SchedulerNode(ComputedBuffer)
+op2.writes = [MemoryDep('buf2', c0, {c0: 4})]
+op2.unmet_dependencies = []
+op2.met_dependencies = []
+op2.outputs = [
+    buf2: ComputedBuffer
+    buf2.layout = FixedLayout('npu:0', torch.float32, size=[2, 1, 2], stride=[2, 2, 1])
+    buf2.users = [NodeUser(node=ExternKernelSchedulerNode(name='op3'), can_inplace=False, is_weak=False)]
+]
+op2.group.device = npu:0
+op2.group.iteration = (4, 1)
+op2.sizes = ((4,), ())
+buf2_layout = FixedLayout('npu:0', torch.float32, size=[2, 1, 2], stride=[2, 2, 1])
+class op2_loop_body:
+    var_ranges = {p0: 4}
+    index0 = p0
+    def body(self, ops):
+        constant = ops.constant(0.0, torch.float32)
+        get_index = self.get_index('index0')
+        store = ops.store('buf2', get_index, constant, None)
+        return store
+
+
+op3: ExternKernelSchedulerNode(FallbackKernel)
+op3.writes = 
+    [   StarDep(name='buf3', mode=None),
+        StarDep(name='buf4', mode=None),
+        StarDep(name='buf5', mode=None)]
+op3.unmet_dependencies = 
+    [   StarDep(name='buf0', mode=None),
+        StarDep(name='buf1', mode=None),
+        StarDep(name='buf2', mode=None)]
+op3.met_dependencies = [StarDep(name='arg0_1', mode=None)]
+op3.outputs = [
+    buf3: FallbackKernel
+    buf3.layout = NoneLayout(device=device(type='npu', index=0), size=[0], stride=[0])
+    buf3.users = []
+    buf4: MutationOutput
+    buf4.layout = NoneLayout(device=device(type='npu', index=0), size=[0], stride=[0])
+    buf4.mutations = ['buf1']
+    buf4.users = []
+    buf5: MutationOutput
+    buf5.layout = NoneLayout(device=device(type='npu', index=0), size=[0], stride=[0])
+    buf5.mutations = ['buf2']
+    buf5.users = [NodeUser(node=OUTPUT, can_inplace=False, is_weak=False)]
+]
+op3.node.kernel = torch.ops.vllm.qwen_gdn_attention_core.default
+
+
