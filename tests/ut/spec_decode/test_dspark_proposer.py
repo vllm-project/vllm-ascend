@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -28,6 +29,9 @@ import pytest
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    copy_and_expand_dflash_and_dspark_inputs_kernel,
+)
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -62,7 +66,11 @@ class _DSparkProposerTestBase:
         """Build the minimal config consumed by the DSpark initializer."""
         draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
         return SimpleNamespace(
-            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config)
+            speculative_config=SimpleNamespace(
+                draft_sample_method="greedy",
+                draft_model_config=draft_model_config,
+                enforce_eager=True,
+            )
         )
 
     @classmethod
@@ -99,6 +107,8 @@ class _DSparkProposerTestBase:
                 if draft_attn_causal is not None
                 else SimpleNamespace()
             )
+            proposer.use_cuda_graph = not vllm_config.speculative_config.enforce_eager
+            proposer.maybe_eager_context = nullcontext()
 
         with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
             proposer = AscendDSparkProposer(vllm_config, device)
@@ -420,10 +430,12 @@ class TestDSparkInitValidation:
         max_num_tokens,
         draft_sample_method,
         hidden_size=8,
+        enforce_eager=True,
     ):
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             draft_sample_method=draft_sample_method,
+            enforce_eager=enforce_eager,
             draft_model_config=SimpleNamespace(
                 hf_config=SimpleNamespace(),
                 get_hidden_size=lambda: hidden_size
@@ -451,6 +463,8 @@ class TestDSparkInitValidation:
             self.dtype = dtype
             self.device = device
             self.draft_model_config = vllm_config.speculative_config.draft_model_config
+            self.use_cuda_graph = not vllm_config.speculative_config.enforce_eager
+            self.maybe_eager_context = nullcontext()
             # present so the ``del`` in DSpark.__init__ succeeds
             self.hidden_size = 0
             self.hidden_states = None
@@ -508,7 +522,7 @@ class TestDSparkInitValidation:
         assert proposer.hidden_size == hidden
         assert proposer.hidden_states.shape == (max_num_tokens, hidden)
         assert proposer._dflash_hidden_states.shape == (max_num_tokens, hidden)
-        # DSpark runs eager only (Ascend cudagraph unsupported on this path).
+        # The launch config requests eager execution for the draft model.
         assert proposer.use_cuda_graph is False
         # anchor-first: N query tokens per request, no bonus token (unlike
         # DFlash's 1+N).
@@ -520,6 +534,28 @@ class TestDSparkInitValidation:
         assert proposer._per_group_block_tables == {}
         assert proposer._per_group_slot_mappings == {}
         assert proposer._context_slot_mapping_buffers is None
+
+    def test_graph_mode_follows_speculative_config(self, monkeypatch):
+        device = torch.device("cpu")
+        self._stub_dflash_init(
+            monkeypatch,
+            num_speculative_tokens=5,
+            max_batch_size=16,
+            max_num_tokens=256,
+            dtype=torch.float32,
+            device=device,
+        )
+        vllm_config = self._make_vllm_config(
+            num_speculative_tokens=5,
+            max_batch_size=16,
+            max_num_tokens=256,
+            draft_sample_method="greedy",
+            enforce_eager=False,
+        )
+
+        proposer = AscendDSparkProposer(vllm_config, device)
+
+        assert proposer.use_cuda_graph is True
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
@@ -681,6 +717,19 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         assert kwargs["HAS_NUM_REJECTED"] is True
         assert kwargs["num_rejected_tokens_ptr"] is rejected
         assert kwargs["SAMPLE_FROM_ANCHOR"] is True
+        assert kwargs["block_table_num_cols"] == 16
+
+    def test_kernel_guards_fully_rejected_request(self):
+        """A zero-valid-token row must not read ``ctx_start - 1`` or write
+        rejected target tokens into the draft KV cache."""
+        kernel = copy_and_expand_dflash_and_dspark_inputs_kernel
+        source = inspect.getsource(getattr(kernel, "fn", kernel))
+
+        assert "num_rejected = tl.minimum(tl.maximum(num_rejected, 0), num_ctx)" in source
+        assert "last_valid_idx = tl.maximum(valid_ctx_end - 1, ctx_start)" in source
+        assert "tl.where(valid_ctx_end > ctx_start, last_pos, last_pos - 1)" in source
+        assert "tl.where(is_valid_context, slot, -1)" in source
+        assert "block_num_q < block_table_num_cols" in source
 
 
 class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):

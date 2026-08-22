@@ -144,6 +144,7 @@ class AscendDflashProposer(AscendEagleProposer):
             # Block table
             block_table_ptr=cad.block_table_tensor,
             block_table_stride=cad.block_table_tensor.stride(0),
+            block_table_num_cols=cad.block_table_tensor.shape[1],
             # Metadata
             query_start_loc_ptr=cad.query_start_loc,
             seq_lens_ptr=cad.seq_lens,
