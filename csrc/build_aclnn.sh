@@ -201,8 +201,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "indexer_compress_epilog_v2"
         "causal_conv1d"
         "recurrent_gated_delta_rule"
-        "chunk_fwd_o"
-        "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
         "store_kv_block_metadata"
         "k2q_csr"
