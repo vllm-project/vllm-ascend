@@ -429,7 +429,7 @@ aop_pipeline() {
     echo "=== AOP Pipeline (Pod) - END ==="
     return 1
 }
-
+# a
 clear_logs() {
     print_section "Clearing logs from previous runs"
     rm -fr "$HOME/ascend/log" || true
