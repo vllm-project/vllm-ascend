@@ -45,6 +45,8 @@ class MoEMlpComputeInput:
     weights: MoEWeights
     quant: MoEQuantParams
     fusion: bool
+    # Weight source for the gmm hooks (see MoEFusedExpertsInput.layer).
+    layer: torch.nn.Module | None = None
     activation: MoEActivation = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
@@ -73,6 +75,9 @@ def build_mlp_compute_input(
         if moe_config is None
         else getattr(moe_config, "activation", fused_experts_input.activation)
     )
+    # Prefer the per-layer swiglu params threaded through the fused-experts
+    # input when no moe_config is available (direct callers/tests); with a
+    # moe_config, upstream keeps reading the values from it.
     swiglu_limit = 0.0 if moe_config is None else getattr(moe_config, "swiglu_limit", 0.0) or 0.0
     swiglu_alpha = 1.0 if moe_config is None else getattr(moe_config, "swiglu_alpha", 1.0) or 1.0
     swiglu_beta = 0.0 if moe_config is None else getattr(moe_config, "swiglu_beta", 0.0) or 0.0
@@ -86,6 +91,7 @@ def build_mlp_compute_input(
         topk_scales=token_dispatch_output.topk_scales,
         weights=fused_experts_input.weights,
         quant=fused_experts_input.quant,
+        layer=fused_experts_input.layer,
         fusion=fused_experts_input.quant.quant_type
         in (
             QuantType.W8A8,
