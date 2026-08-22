@@ -17,23 +17,27 @@ from unittest import mock
 
 import torch
 
-from vllm_ascend import utils
 from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
 
 
 def test_register_customop_overrides_mm_encoder_attention_for_310p():
-    original_registered = utils._ASCEND_CUSTOMOP_IS_REIGISTERED
-    try:
-        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
-        with (
-            mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot"),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
-        ):
-            utils.register_ascend_customop()
+    import vllm.model_executor.custom_op as custom_op_module
 
-        assert utils.REGISTERED_ASCEND_OPS["MMEncoderAttention"] is AscendMMEncoderAttention310
-    finally:
-        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = original_registered
+    from vllm_ascend.ops import registry as ops_registry
+
+    with (
+        mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot") as mock_register_oot,
+        mock.patch("vllm_ascend.ops.registry.is_310p", return_value=True),
+        mock.patch("vllm_ascend.ops.registry._registered_all_custom_ops", False),
+        mock.patch.dict(custom_op_module.op_registry_oot, clear=True),
+    ):
+        mock_register_oot.side_effect = lambda _decorated_op_cls=None, name=None: (
+            custom_op_module.op_registry_oot.__setitem__(name, _decorated_op_cls)
+        )
+        ops_registry.register_all_custom_ops()
+
+        mock_register_oot.assert_any_call(_decorated_op_cls=AscendMMEncoderAttention310, name="MMEncoderAttention")
+        assert custom_op_module.op_registry_oot["MMEncoderAttention"] is AscendMMEncoderAttention310
 
 
 def test_mm_encoder_attention_310_forward_oot_with_padding():
