@@ -1430,7 +1430,11 @@ class MooncakeConnectorScheduler:
         if (
             params is None
             or not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
+            or request.status
+            not in (
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_STOPPED,
+            )
         ):
             return False, None
 
