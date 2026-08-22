@@ -64,10 +64,14 @@ class RForkWorker:
         self.rfork_seed = self.seed_protocol.get_seed()
         return self.rfork_seed is not None
 
-    def pre_transfer(self, model, processed_layout: bool) -> bool:
+    def pre_transfer(self, model, processed_layout: bool, *, copy_values: bool = False) -> bool:
         try:
             assert self.transfer_backend.is_initialized(), "transfer_backend is not initialized, cannot pre_transfer."
-            result = self.transfer_backend.register_memory_region(model, processed_layout)
+            result = self.transfer_backend.register_memory_region(
+                model,
+                processed_layout,
+                copy_values=copy_values,
+            )
             self.ready_to_start_seed_service = result
             return result
         except AssertionError as e:
@@ -114,7 +118,7 @@ class RForkWorker:
             return
 
         if not self.ready_to_start_seed_service:
-            if not self.pre_transfer(model, processed_layout):
+            if not self.pre_transfer(model, processed_layout, copy_values=True):
                 logger.warning(
                     "start_seed_service aborted for device_id=%s: pre_transfer failed",
                     self.device_id,

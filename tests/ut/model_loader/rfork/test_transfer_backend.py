@@ -19,6 +19,10 @@ from types import SimpleNamespace
 import torch
 
 import vllm_ascend.model_loader.rfork.transfer_backend as transfer_backend
+from vllm_ascend.model_loader.rfork.aligned_memory import (
+    AlignedStorageError,
+    materialize_aligned_storage,
+)
 from vllm_ascend.model_loader.rfork.transfer_backend import (
     RForkTransferBackend,
     _collect_checkpoint_layout_tensors,
@@ -145,3 +149,88 @@ def test_get_remote_instance_transfer_engine_info_non_200_returns_three_values(m
     )
 
     assert get_remote_instance_transfer_engine_info("http://seed", "seed-key") == (None, None, None)
+
+
+def test_materialize_aligned_storage_preserves_values_and_shared_storage():
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            source = torch.arange(8, dtype=torch.float32)
+            self.left = torch.nn.Parameter(source[:4])
+            self.right = torch.nn.Parameter(source[4:])
+
+    model = _Model()
+    left_values = model.left.detach().clone()
+    right_values = model.right.detach().clone()
+    storage = materialize_aligned_storage(
+        model,
+        [("left", model.left), ("right", model.right)],
+        copy_values=True,
+        alignment=256,
+    )
+
+    assert storage.backing_view.data_ptr() % 256 == 0
+    assert model.left.untyped_storage().data_ptr() == model.right.untyped_storage().data_ptr()
+    assert torch.equal(model.left, left_values)
+    assert torch.equal(model.right, right_values)
+    assert len(storage.registrations) == 1
+    assert storage.registrations[0].backing_addr == storage.backing_view.data_ptr()
+
+
+def test_materialize_aligned_storage_rejects_noncontiguous_tensor():
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(2, 3).transpose(0, 1))
+
+    model = _Model()
+    try:
+        materialize_aligned_storage(
+            model,
+            [("weight", model.weight)],
+            copy_values=True,
+            alignment=256,
+        )
+    except AlignedStorageError as error:
+        assert "contiguous" in str(error)
+    else:
+        raise AssertionError("noncontiguous RFork tensor should be rejected")
+
+
+def test_register_memory_region_uses_backing_aware_api_for_aligned_route(monkeypatch):
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4))
+
+    class _MemoryRegistration:
+        def __init__(self, logical_addr, logical_length, backing_addr, backing_length):
+            self.logical_addr = logical_addr
+            self.logical_length = logical_length
+            self.backing_addr = backing_addr
+            self.backing_length = backing_length
+
+    captured = []
+    result = SimpleNamespace(is_error=lambda: False)
+    engine = SimpleNamespace(
+        batch_register_memory_ex=lambda registrations, location: captured.extend(registrations) or result
+    )
+    model = _Model()
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = engine
+    backend._route_policy = "auto"
+    backend._memory_registration_type = _MemoryRegistration
+    backend._registered_transferable_tensors = None
+    backend._aligned_storage = None
+
+    monkeypatch.setattr(
+        transfer_backend,
+        "_iter_transferable_tensors",
+        lambda model, processed_layout: iter([("weight", model.weight)]),
+    )
+
+    assert backend.register_memory_region(model, False)
+    assert captured
+    assert captured[0].backing_addr % (2 * 1024 * 1024) == 0
+    assert captured[0].logical_addr == model.weight.data_ptr()
+    assert captured[0].logical_length == model.weight.numel() * model.weight.element_size()

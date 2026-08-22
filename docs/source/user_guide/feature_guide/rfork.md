@@ -6,7 +6,7 @@ This guide explains how to use **RFork** as a model-loader plugin in **vLLM Asce
 
 ## Overview
 
-RFork is a warm-start weight loading path for vLLM Ascend. Instead of always reading model weights from storage, a new instance can request a compatible **seed** instance from an external planner, then pull weights directly from that seed through `YuanRong TransferEngine`.
+RFork is a warm-start weight loading path for vLLM Ascend. Instead of always reading model weights from storage, a new instance can request a compatible **seed** instance from an external planner, then pull weights directly from that seed through the TransferEngine provided by the `openyuanrong-datasystem` package.
 
 The RFork loading flow in the current implementation is:
 
@@ -35,7 +35,7 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 
 ### RFork Prerequisites
 
-- Install the runtime dependency `YuanRong TransferEngine` on every RFork instance.
+- Install the `openyuanrong-datasystem` Python package on every RFork instance.
 - Run a planner service that implements the RFork seed protocol. A simple mock planner script is provided at [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py).
 
 ### Configuration Fields
@@ -96,11 +96,24 @@ The following table records models that have been explicitly tested with RFork w
 
 > Replace parts in `<...>` before running.
 
-### 1. Install YuanRong TransferEngine
+### 1. Install YuanRong DataSystem
 
 ```shell
-pip install openyuanrong-transfer-engine
+python -m pip install openyuanrong-datasystem
 ```
+
+If no compatible wheel is available from your configured pip index, build the YuanRong DataSystem package from source. RFork requires the Ascend/HIXL build, so keep `-X on` and initialize the CANN environment before compiling:
+
+```shell
+git clone https://gitcode.com/openeuler/yuanrong-datasystem.git
+cd yuanrong-datasystem
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+bash build.sh -X on -P on -j 8
+python -m pip install output/openyuanrong_datasystem-*.whl
+python -c "import yr.datasystem as yr_datasystem; print(yr_datasystem.TransferEngine)"
+```
+
+Replace the CANN environment path if the toolkit is installed elsewhere. The generated wheel contains the Python binding and the TransferEngine HIXL backend required by RFork.
 
 ### 2. Start the Planner
 
@@ -149,7 +162,7 @@ vllm serve <model_path> \
 
 ## Note & Caveats
 
-- RFork requires `YuanRong TransferEngine` at runtime. If the package is missing, RFork cannot initialize the transfer backend.
+- RFork requires the `openyuanrong-datasystem` package at runtime. If the package is missing, RFork cannot initialize the transfer backend.
 - If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.
 - RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.
