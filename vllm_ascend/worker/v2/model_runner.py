@@ -36,9 +36,9 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_prefill_inputs,
 )
 from vllm.v1.worker.gpu.model_runner import (
+    BatchReqState,
     ExecuteModelState,
     GPUModelRunner,
-    sort_batch_req_ids,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -206,6 +206,7 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
@@ -215,21 +216,23 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
-        num_tokens_per_req = scheduler_output.num_scheduled_tokens
-        num_reqs = len(num_tokens_per_req)
 
-        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+        req_ids = batch_req_state.req_ids
+        num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
+        idx_mapping_np = batch_req_state.idx_mapping_np
+        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        num_reqs = len(req_ids)
 
+        # NPU attention backends need seq_lens_cpu to work,
+        # so update it here before the inputs are consumed.
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
-        numtoks_iter = map(num_tokens_per_req.get, req_ids)
-        num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
-        num_valid_tokens = num_scheduled_tokens
+        num_valid_tokens = num_scheduled_tokens_np
         if scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = np.array(
                 [
-                    num_tokens - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                    for num_tokens, i in zip(num_scheduled_tokens, req_ids)
+                    num_tokens_per_req - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
+                    for num_tokens_per_req, i in zip(num_scheduled_tokens_np, req_ids)
                 ],
                 dtype=np.int32,
             )
@@ -237,13 +240,9 @@ class NPUModelRunner(GPUModelRunner):
             self.vllm_config,
             self.input_buffers.seq_lens_np,
             num_reqs,
-            num_scheduled_tokens,
+            num_scheduled_tokens_np,
             num_valid_tokens,
         )
-        idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
-        idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
-        idx_mapping_cpu = torch.from_numpy(idx_mapping_np)
-        idx_mapping = async_copy_to_gpu(idx_mapping_cpu, device=self.device)
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -282,7 +281,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
+        np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
@@ -302,10 +301,10 @@ class NPUModelRunner(GPUModelRunner):
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
-        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
-        num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
-        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
-        batch_has_prefill = bool(np.any(is_prefilling_np))
+        prefill_len_np = batch_req_state.prefill_len_np
+        num_computed_prefill_tokens_np = batch_req_state.num_computed_prefill_tokens_np
+        is_prefilling_np = batch_req_state.is_prefilling_np
+        batch_has_prefill = batch_req_state.has_prefill
         self.eplb.set_batch_phase(batch_has_prefill)
 
         # Get prefill tokens if any.
@@ -350,14 +349,14 @@ class NPUModelRunner(GPUModelRunner):
 
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
-            self.req_states.num_computed_tokens_np[idx_mapping_np],
-            num_scheduled_tokens,
+            num_computed_tokens_np,
+            num_scheduled_tokens_np,
             out=seq_lens_cpu_upper_bound_np[:num_reqs],
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
-        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
 
         max_seq_len_np = None
         if self.use_pp:
@@ -377,7 +376,7 @@ class NPUModelRunner(GPUModelRunner):
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
             expanded_local_pos=expanded_local_pos,
-            num_scheduled_tokens=num_scheduled_tokens,
+            num_scheduled_tokens=num_scheduled_tokens_np,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
@@ -388,6 +387,7 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             is_prefilling_np=is_prefilling_np,
+            has_prefill=batch_has_prefill,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
