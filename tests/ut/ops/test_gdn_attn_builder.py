@@ -304,9 +304,7 @@ def test_ascend_gdn_attention_uses_ascend_backend():
 def test_rocm_named_upstream_hook_delegates_to_ascend_implementation():
     tensors = [torch.empty(0) for _ in range(4)]
     captured = []
-    attention = SimpleNamespace(
-        _forward_core_ascend=lambda *args: captured.extend(args)
-    )
+    attention = SimpleNamespace(_forward_core_ascend=lambda *args: captured.extend(args))
 
     AscendGatedDeltaNetAttention._forward_core_rocm(attention, *tensors)
 
@@ -464,9 +462,7 @@ def test_qwen35_decode_pipeline_accepts_larger_batch_and_divisible_tp(
         num_k_heads=16,
         head_k_dim=128,
         tp_size=4,
-        conv1d=SimpleNamespace(
-            weight=torch.zeros((8192, 1, 4), dtype=torch.bfloat16)
-        ),
+        conv1d=SimpleNamespace(weight=torch.zeros((8192, 1, 4), dtype=torch.bfloat16)),
         kv_cache=(torch.empty(0), torch.empty(0)),
         A_log=torch.empty(0),
         dt_bias=torch.empty(0),

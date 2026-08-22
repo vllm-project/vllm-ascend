@@ -334,9 +334,7 @@ def gdn_decode_tile(
     }
     for name, tensor in model_dtype_tensors.items():
         if tensor.dtype != model_dtype:
-            raise ValueError(
-                f"expected {name} dtype {model_dtype}, got {tensor.dtype}"
-            )
+            raise ValueError(f"expected {name} dtype {model_dtype}, got {tensor.dtype}")
 
     output = torch.empty((batch, v_dim), dtype=projected_qkvz.dtype, device=projected_qkvz.device)
     use_descriptors = batch > 1
@@ -392,10 +390,7 @@ def qwen35_gdn_decode_tile(
     """Run the Qwen3.5-9B non-speculative one-token decode pipeline."""
     batch = projected_qkvz.shape[0] if projected_qkvz.ndim == 2 else 0
     if batch < 1 or projected_qkvz.shape != (batch, QWEN35_QKVZ_DIM):
-        raise ValueError(
-            f"expected projected_qkvz [B, {QWEN35_QKVZ_DIM}] with B >= 1, "
-            f"got {projected_qkvz.shape}"
-        )
+        raise ValueError(f"expected projected_qkvz [B, {QWEN35_QKVZ_DIM}] with B >= 1, got {projected_qkvz.shape}")
     return gdn_decode_tile(
         projected_qkvz=projected_qkvz,
         projected_ba=projected_ba,

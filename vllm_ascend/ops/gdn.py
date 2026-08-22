@@ -210,8 +210,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.tp_size <= 0
             or self.num_k_heads % self.tp_size != 0
             or self.num_v_heads % self.tp_size != 0
-            or self.num_v_heads // self.tp_size
-            != 2 * (self.num_k_heads // self.tp_size)
+            or self.num_v_heads // self.tp_size != 2 * (self.num_k_heads // self.tp_size)
         ):
             return None
 
