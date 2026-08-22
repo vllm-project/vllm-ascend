@@ -199,6 +199,7 @@ class NPUModelRunner(GPUModelRunner):
             context_len=context_len,
         )
 
+
     @torch.inference_mode()
     def profile_run(self) -> None:
         """Override GPUModelRunner.profile_run for Ascend NPUs.
