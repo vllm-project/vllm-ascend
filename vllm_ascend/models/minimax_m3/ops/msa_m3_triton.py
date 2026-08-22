@@ -820,13 +820,15 @@ def _gqa_sparse_fwd_kernel(
             safe_page = tl.maximum(page, 0)
             pos = c + off_n
             pos_mask = (pos < seq_len) & valid_page
+            tail_or_invalid = (~valid_page) | (c + BLOCK_SIZE_K > seq_len)
+            load_pos_mask = pos_mask | (~tail_or_invalid)
             k = tl.load(
                 k_cache_ptr
                 + safe_page * stride_k_blk
                 + off_n[None, :] * stride_k_pos
                 + pid_kh * stride_k_h
                 + off_d[:, None] * stride_k_d,
-                mask=d_mask[:, None],
+                mask=d_mask[:, None] & load_pos_mask[None, :],
                 other=0.0,
             )
             if USE_FP8:
@@ -850,7 +852,7 @@ def _gqa_sparse_fwd_kernel(
                 + off_n[:, None] * stride_v_pos
                 + pid_kh * stride_v_h
                 + off_d[None, :] * stride_v_d,
-                mask=d_mask[None, :],
+                mask=load_pos_mask[:, None] & d_mask[None, :],
                 other=0.0,
             )
             if USE_FP8:
@@ -1025,13 +1027,15 @@ def _gqa_sparse_decode_kernel(
         safe_page = tl.maximum(page, 0)
         pos = c + off_n
         pos_mask = (pos < kv_len) & valid_page
+        tail_or_invalid = (~valid_page) | (c + BLOCK_SIZE_K > kv_len)
+        load_pos_mask = pos_mask | (~tail_or_invalid)
         k = tl.load(
             k_cache_ptr
             + safe_page * stride_k_blk
             + off_n[None, :] * stride_k_pos
             + pid_kh * stride_k_h
             + off_d[:, None] * stride_k_d,
-            mask=d_mask[:, None],
+            mask=d_mask[:, None] & load_pos_mask[None, :],
             other=0.0,
         )
         if USE_FP8:
@@ -1051,7 +1055,7 @@ def _gqa_sparse_decode_kernel(
             + off_n[:, None] * stride_v_pos
             + pid_kh * stride_v_h
             + off_d[None, :] * stride_v_d,
-            mask=d_mask[None, :],
+            mask=load_pos_mask[:, None] & d_mask[None, :],
             other=0.0,
         )
         if USE_FP8:
@@ -1375,9 +1379,16 @@ def minimax_m3_index_decode(
 
     global_max_block_count = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
     if block_count is None:
-        max_block_count = global_max_block_count
+        max_block_count = min(global_max_block_count, int(block_table.shape[-1]))
     else:
-        max_block_count = max(0, min(block_count, global_max_block_count - block_offset))
+        max_block_count = max(
+            0,
+            min(
+                block_count,
+                global_max_block_count - block_offset,
+                int(block_table.shape[-1]),
+            ),
+        )
     score_block_stride = round_up(
         max_block_count,
         SCORE_BLOCK_STRIDE_ALIGNMENT,
