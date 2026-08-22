@@ -16,6 +16,7 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel
 from vllm_ascend.utils import is_310p
 
 
@@ -196,8 +197,10 @@ if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
     # Keep the existing Ascend postprocess precision fix. The shared copy
-    # helper and align pre-copy continue to use the upstream implementation.
+    # helper and align pre-copy use Ascend-safe implementations which hoist
+    # pointer casts out of copy loops.
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
+    mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
 else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
