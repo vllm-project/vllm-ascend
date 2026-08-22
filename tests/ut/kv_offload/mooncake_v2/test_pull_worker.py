@@ -200,6 +200,29 @@ def test_build_remote_layout_filters_kv_parallel_owners_and_keeps_mtp_replicas()
     assert thread._get_layer_remote_tp_rank_groups.call_count == 1
 
 
+def test_build_remote_layout_allows_local_dcp_with_remote_kv_parallel() -> None:
+    thread = make_thread(tp_size=2, dcp_size=2)
+    thread._get_layer_remote_tp_rank_groups = MagicMock(return_value=[[0, 1]])  # type: ignore[method-assign]
+    pp_metadata = make_pp_metadata(
+        tp_base_addrs={0: [[5000]], 1: [[]]},
+        tp_layer_indices={0: [0], 1: []},
+    )
+    groups = make_metadata_groups(tp_size=2, use_kv_pp=True, pp_metadata=pp_metadata)
+
+    rank_groups, pairs = thread._build_remote_transfer_layout(groups)
+
+    assert pairs == {0: [(0, 0)]}
+    assert rank_groups == {0: {(0, 0): [[0]]}}
+
+
+def test_build_remote_layout_rejects_remote_kv_parallel_with_remote_dcp() -> None:
+    thread = make_thread()
+    groups = replace(make_metadata_groups(use_kv_pp=True), dcp_size=2)
+
+    with pytest.raises(ValueError, match="producer cannot enable KV parallel and DCP together"):
+        thread._build_remote_transfer_layout(groups)
+
+
 def test_build_remote_layout_rejects_missing_local_layer() -> None:
     thread = make_thread(layer_names=["layer.0", "missing"], spec_indices=[0, 0])
     thread._get_layer_remote_tp_rank_groups = MagicMock(return_value=[[0]])  # type: ignore[method-assign]

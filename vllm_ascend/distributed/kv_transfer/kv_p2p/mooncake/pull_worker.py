@@ -225,8 +225,8 @@ class MooncakePullRecvingThread(threading.Thread):
         one outer entry per required remote head/TP piece and one inner list of
         replica candidates (DCP=1) or participating DCP shards (DCP>1).
         """
-        if remote_metadata.use_kv_pp and (self.dcp_size != 1 or remote_metadata.dcp_size != 1):
-            raise ValueError("Mooncake KV parallel cannot be combined with DCP")
+        if remote_metadata.use_kv_pp and remote_metadata.dcp_size != 1:
+            raise ValueError("Mooncake producer cannot enable KV parallel and DCP together")
         groups_by_pp_rank: dict[int, dict[tuple[int, int], list[list[int]]]] = {}
         layer_pairs_by_pp_rank: dict[int, list[tuple[int, int]]] = {}
         matched_local_layer_indices: set[int] = set()
