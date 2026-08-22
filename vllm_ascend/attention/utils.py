@@ -223,6 +223,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
+    # Optimistic host KV lengths for the current parallel-draft pass. The
+    # current rejected-token correction is deferred to the MLA forward entry
+    # so its D2H copy can overlap metadata construction and early draft work.
+    parallel_draft_seq_lens_cpu: torch.Tensor = None
+    parallel_draft_num_reject_cpu: torch.Tensor = None
+    parallel_draft_num_reject_event: Any = None
+    parallel_draft_num_reject_num_reqs: int = 0
+
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
