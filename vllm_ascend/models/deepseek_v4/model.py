@@ -960,6 +960,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self.quant_config = quant_config
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        # Upstream MRV2 uses hasattr() to detect this optional target-state
+        # capability and then slices its return value without a None check.
+        # Register the hook only for MTP instances that actually own the
+        # buffer. DSpark consumes auxiliary target-layer states and must not
+        # allocate or expose the MTP residual buffer.
+        self._register_mtp_target_hidden_states_hook()
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -996,6 +1002,14 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
         self.extract_moe_parameters(example_moe)
 
+    def _register_mtp_target_hidden_states_hook(self) -> None:
+        if self.model._mtp_hidden_buffer is not None:
+            object.__setattr__(
+                self,
+                "get_mtp_target_hidden_states",
+                self._get_mtp_target_hidden_states,
+            )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
@@ -1029,11 +1043,13 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             num_redundant_experts=0,
         )
 
-    def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
+    def _get_mtp_target_hidden_states(self) -> torch.Tensor:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
-        return getattr(self.model, "_mtp_hidden_buffer", None)
+        hidden_states = self.model._mtp_hidden_buffer
+        assert hidden_states is not None
+        return hidden_states
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model._set_aux_hidden_state_layers(layers)
