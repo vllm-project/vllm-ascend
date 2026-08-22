@@ -382,7 +382,7 @@ class NPUPlatform(Platform):
             vllm_config,
             compile_backend=cls.get_compile_backend(),
             enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
-            enable_dsa_cp=bool((vllm_config.additional_config or {}).get("enable_dsa_cp", False)),
+            enable_dsa_cp=ascend_config.enable_dsa_cp,
         )
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).

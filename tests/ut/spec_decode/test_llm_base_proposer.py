@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.config import CUDAGraphMode
@@ -95,6 +97,43 @@ class TestMultimodalImageTokenIndex:
         )
 
         assert image_token_index == 456
+
+
+def test_load_model_reads_validated_draft_window_size():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.vllm_config = SimpleNamespace(additional_config={"draft_window_size": 64})
+    proposer.maybe_eager_context = nullcontext()
+    proposer._get_model = MagicMock(return_value=MagicMock())
+    proposer.method = "eagle3"
+    proposer.num_speculative_tokens = 4
+    proposer.runner = SimpleNamespace(max_num_reqs=8)
+    proposer.device = "cpu"
+    proposer.parallel_drafting = False
+    proposer._maybe_share_embeddings = MagicMock()
+    proposer._maybe_share_topk_indices = MagicMock()
+    proposer._maybe_share_lm_head = MagicMock()
+
+    draft_layer = MagicMock()
+    draft_layer.get_kv_cache_spec.return_value = object()
+    draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [16]
+
+    with (
+        patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group,
+        patch(
+            "vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
+            side_effect=[{}, {"draft": draft_layer}, {}, {"draft": draft_layer}],
+        ),
+        patch("vllm_ascend.ascend_config.get_ascend_config") as mock_get_ascend_config,
+        patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
+        patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
+    ):
+        mock_pp_group.return_value.is_last_rank = True
+        mock_get_ascend_config.return_value.draft_window_size = 4096
+
+        proposer.load_model(MagicMock())
+
+    assert proposer.draft_window_size == 4096
+    mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:

@@ -171,19 +171,24 @@ class TestUtils(TestBase):
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
     def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
-        dsa_cp_config = SimpleNamespace(
-            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
-            additional_config={"enable_dsa_cp": True},
-            parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
-        )
+        ascend_config = SimpleNamespace(enable_dsa_cp=True)
 
         with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=dsa_cp_config),
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
             mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
         ):
             self.assertTrue(utils.enable_dsa_cp())
 
         mock_enable_sp.assert_not_called()
+
+    def test_enable_dsa_cp_reads_validated_ascend_config(self):
+        ascend_config = mock.MagicMock(enable_dsa_cp=False)
+
+        with (
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp())
 
     def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
         mock_vllm_config = mock.MagicMock()

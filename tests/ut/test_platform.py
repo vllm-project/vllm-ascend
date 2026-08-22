@@ -307,7 +307,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.platform.init_ascend_config")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     def test_check_and_update_config_preserves_platform_default_max_input(
         self,
@@ -317,8 +317,13 @@ class TestNPUPlatform(TestBase):
         _mock_device_type,
         _mock_refresh_block_size,
     ):
-        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.enable_dsa_cp = False
+        mock_init_ascend.return_value = ascend_config
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        # A raw string is truthy in Python, but the platform must pass the
+        # validated False value from AscendConfig to the compile backend.
+        vllm_config.additional_config = {"enable_dsa_cp": "false"}
         vllm_config.scheduler_config.max_num_seqs = 77
         vllm_config.compilation_config.max_cudagraph_capture_size = None
         vllm_config.compilation_config.cudagraph_capture_sizes = None
@@ -342,9 +347,11 @@ class TestNPUPlatform(TestBase):
             side_effect=lambda: observed_inputs.append(vllm_config.compilation_config.max_cudagraph_capture_size)
         )
 
-        self.platform.check_and_update_config(vllm_config)
+        with patch("vllm_ascend.platform._setup_compile_backend", wraps=_setup_compile_backend) as mock_setup:
+            self.platform.check_and_update_config(vllm_config)
 
         self.assertEqual(observed_inputs, [77])
+        self.assertIs(mock_setup.call_args.kwargs["enable_dsa_cp"], False)
 
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)

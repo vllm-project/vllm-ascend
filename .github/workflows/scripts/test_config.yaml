@@ -692,6 +692,7 @@
     - vllm_ascend/_version.py
     - vllm_ascend/ascend_config.py
     - vllm_ascend/ascend_forward_context.py
+    - vllm_ascend/config_utils.py
     - vllm_ascend/cpu_binding.py
     - vllm_ascend/envs.py
     - vllm_ascend/logger.py
@@ -949,4 +950,3 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
-
