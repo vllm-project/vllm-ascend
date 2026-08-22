@@ -1,5 +1,5 @@
-# Memcache支持DeepSeek V4 Flash 双机PD分离性能测试
-test_name: "DeepSeek-V4-Flash-Memcache-PD-perf"
+# Memcache supports DeepSeek V4 Flash dual-machine PD separation accuracy testing
+test_name: "DeepSeek-V4-Flash-Memcache-PD-acc"
 model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
 num_nodes: 2
 npu_per_node: 16
