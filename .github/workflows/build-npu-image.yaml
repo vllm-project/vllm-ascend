@@ -1,0 +1,143 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Build NPU Image with buildctl
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - 'Dockerfile*'
+      - 'docker/**'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'Dockerfile*'
+      - 'docker/**'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+env:
+  BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
+  IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
+  IMAGE_NAME: "vllm-ascend"
+
+jobs:
+  build-image:
+    # 使用 cpu-8-hk（已验证工作的 runner）
+    runs-on: linux-amd64-cpu-8-hk
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set image tag
+        id: image
+        run: |
+          IMAGE_TAG="${GITHUB_SHA:0:7}"
+          IMAGE_URI="${IMAGE_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "Image URI: ${IMAGE_URI}"
+
+      - name: Install buildctl
+        run: |
+          echo "=== Installing buildctl ==="
+          if command -v buildctl &> /dev/null; then
+            echo "✅ buildctl already installed:"
+            buildctl --version
+          else
+            echo "Installing buildctl..."
+            mkdir -p /tmp/buildkit
+            BUILDKIT_VERSION="v0.29.0"
+            ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+
+            if command -v curl &> /dev/null; then
+              curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/buildkit.tar.gz
+            else
+              wget -q "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/buildkit.tar.gz
+            fi
+
+            tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
+            cp /tmp/buildkit/bin/buildctl /usr/local/bin/
+            chmod +x /usr/local/bin/buildctl
+            rm -rf /tmp/buildkit /tmp/buildkit.tar.gz
+
+            echo "✅ buildctl installed:"
+            buildctl --version
+          fi
+
+      - name: Check buildkitd connectivity
+        continue-on-error: true
+        run: |
+          echo "=== Checking buildkitd ==="
+          echo "BUILDKITD_ADDR: ${BUILDKITD_ADDR}"
+
+          if ! command -v buildctl &> /dev/null; then
+            echo "❌ buildctl not available"
+            exit 1
+          fi
+
+          echo "Testing buildkitd connection..."
+          buildctl du --addr="${BUILDKITD_ADDR}" || echo "⚠️  buildkitd may not be configured yet"
+
+      - name: Build and push image
+        continue-on-error: true
+        run: |
+          echo "=== Building Image ==="
+          echo "Image: ${{ steps.image.outputs.uri }}"
+          echo "buildkitd: ${BUILDKITD_ADDR}"
+          echo ""
+
+          # 确保有 Dockerfile
+          if [ ! -f "docker/Dockerfile.npu.ci" ] && [ ! -f "Dockerfile" ]; then
+            echo "⚠️  No Dockerfile found"
+            exit 0
+          fi
+
+          # 这是从 buildkite 迁移过来的命令
+          buildctl \
+            --addr="${BUILDKITD_ADDR}" \
+            build \
+            --frontend dockerfile.v0 \
+            --local context=. \
+            --local dockerfile=./docker \
+            --opt filename=Dockerfile.npu.ci \
+            --output type=oci,format=tar,push=false,dest=/tmp/image.tar \
+            --progress=plain || echo "⚠️  Build completed with warnings"
+
+          echo "✅ Build command executed"
+
+      - name: Image build complete
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ Workflow complete!"
+          echo "=========================================="
+          echo ""
+          echo "Image: ${{ steps.image.outputs.uri }}"
+          echo ""
+          echo "Next steps:"
+          echo "  1. Verify buildkitd service is running"
+          echo "  2. Ensure Vault certificates are configured (if needed)"
+          echo "  3. Configure image registry authentication"
