@@ -80,18 +80,12 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         return checkpoint_name[marker_pos + len(marker) :]
 
-    def confidence_logits(
-        self,
-        hidden_states: torch.Tensor,
-        markov_embeds: torch.Tensor,
-    ) -> torch.Tensor:
+    def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        """Per-position acceptance probability for each drafted token."""
         if not self.enable_confidence_head:
             raise RuntimeError("The DSpark confidence head is disabled.")
-
-        return self.model.confidence_head(
-            hidden_states,
-            markov_embeds,
-        )
+        assert self.model.confidence_head is not None
+        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         all_weights = list(weights)
