@@ -242,6 +242,69 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             ],
         )
 
+    def test_batched_key_strings_match_scalar_path(self):
+        hashes = ["a", "b", "c", "d", "e"]
+        block_ids = [10, 0, 12, 13, 14]
+        kwargs = {
+            "mask_num": 16,
+            "skip_null_blocks": True,
+            "chunk_filter": lambda start: start != 48,
+            "shard_rank": 0,
+            "shard_size": 2,
+        }
+        scalar = list(
+            self.db.process_token_key_strings_with_block_ids(
+                80,
+                hashes,
+                block_ids,
+                **kwargs,
+            )
+        )
+
+        starts, ends, keys, batch_hashes, resolved_block_ids = self.db.process_token_key_batch_with_block_ids(
+            80,
+            hashes,
+            block_ids,
+            **kwargs,
+        )
+
+        self.assertEqual(
+            list(zip(starts, ends, keys, batch_hashes, resolved_block_ids, strict=True)),
+            scalar,
+        )
+
+    def test_batched_key_strings_preserve_tail_block_mapping(self):
+        hashes = [f"h{i}" for i in range(8)]
+        scalar = list(
+            self.db.process_token_key_strings_with_block_ids(
+                128,
+                hashes,
+                [90, 91],
+            )
+        )
+
+        starts, ends, keys, batch_hashes, block_ids = self.db.process_token_key_batch_with_block_ids(
+            128,
+            hashes,
+            [90, 91],
+        )
+
+        self.assertEqual(
+            list(zip(starts, ends, keys, batch_hashes, block_ids, strict=True)),
+            scalar,
+        )
+
+    def test_batched_layer_keys_match_pool_key_serialization(self):
+        hashes = ["aaa", b"\xaa\xbb"]
+        expected = [
+            self.db._make_key_by_hash(hash_value if isinstance(hash_value, str) else hash_value.hex())
+            .split_layers(2)[1]
+            .to_string()
+            for hash_value in hashes
+        ]
+
+        self.assertEqual(self.db.build_layer_key_strings(hashes, layer_id=1), expected)
+
     def test_direct_keys_preserve_multigroup_layerwise_key_semantics(self):
         group_metadata = [
             KeyMetadata("llama", 0, 0, 0, 0),
@@ -359,6 +422,26 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(size[0], 160)
         self.assertEqual(size[1], 320)
 
+    def test_prepare_values_matches_scalar_path(self):
+        starts = [0, 16, 32, 48]
+        ends = [16, 32, 40, 64]
+        block_ids = [5, 8, 13, 21]
+        expected = [
+            self.db.prepare_value(start, end, [], block_id=block_id)[:2]
+            for start, end, block_id in zip(starts, ends, block_ids, strict=True)
+        ]
+
+        addrs, sizes = self.db.prepare_values(starts, ends, block_ids)
+
+        self.assertEqual(list(zip(addrs, sizes, strict=True)), expected)
+
+    def test_prepare_values_rejects_misaligned_inputs(self):
+        with self.assertRaisesRegex(ValueError, "same length"):
+            self.db.prepare_values([0], [16, 32], [5])
+
+    def test_prepare_values_empty(self):
+        self.assertEqual(self.db.prepare_values([], [], []), ([], []))
+
     def test_prepare_value_layer(self):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
         self.assertEqual(block_id, 5)
@@ -366,6 +449,25 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         # layer_id=0, entries_per_layers=2 => group_addrs[0] and group_addrs[1]
         self.assertEqual(addr[0], 1000 + 5 * 160)
         self.assertEqual(addr[1], 2000 + 5 * 320)
+
+    def test_prepare_values_layer_matches_scalar_path(self):
+        self.db.set_group_buffers(
+            {0: [1000, 2000, 3000, 4000]},
+            {0: [160, 320, 160, 320]},
+            {0: [200, 400, 200, 400]},
+            group_num_layers={0: 2},
+        )
+        starts = [0, 16]
+        ends = [16, 24]
+        block_ids = [5, 6]
+        expected = [
+            self.db.prepare_value_layer(start, end, block_ids, layer_id=1)[:2]
+            for start, end in zip(starts, ends, strict=True)
+        ]
+
+        addrs, sizes = self.db.prepare_values(starts, ends, block_ids, layer_id=1)
+
+        self.assertEqual(list(zip(addrs, sizes, strict=True)), expected)
 
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])

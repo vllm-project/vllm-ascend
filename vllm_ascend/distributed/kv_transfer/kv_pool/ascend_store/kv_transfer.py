@@ -737,11 +737,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if not group_store_mask or not any(group_store_mask):
                     continue
 
-            starts: list[int] = []
-            ends: list[int] = []
-            keys: list[str] = []
-            block_hashes = []
-            key_block_ids: list[int] = []
             block_ids = req_meta.block_ids_by_group[group_id]
             skip_null_blocks = self._skip_null_blocks(req_meta, group_id)
             align_state_group = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
@@ -759,23 +754,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
             pre_shard = self.dcp_size <= 1 and not align_state_group
-            iterator = self.token_database.process_token_key_strings_with_block_ids(
-                token_len,
-                req_meta.block_hashes,
-                block_ids,
-                kv_cache_group_id=group_id,
-                skip_null_blocks=skip_null_blocks,
-                chunk_filter=chunk_filter,
-                shard_rank=self.tp_rank % self.put_step if pre_shard else None,
-                shard_size=self.put_step if pre_shard else None,
+            starts, ends, keys, block_hashes, key_block_ids = (
+                self.token_database.process_token_key_batch_with_block_ids(
+                    token_len,
+                    req_meta.block_hashes,
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                    skip_null_blocks=skip_null_blocks,
+                    chunk_filter=chunk_filter,
+                    shard_rank=self.tp_rank % self.put_step if pre_shard else None,
+                    shard_size=self.put_step if pre_shard else None,
+                )
             )
-            for start, end, key, block_hash, block_id in iterator:
-                starts.append(start)
-                ends.append(end)
-                keys.append(key)
-                if self.enable_kv_event:
-                    block_hashes.append(block_hash)
-                key_block_ids.append(block_id)
 
             if not keys:
                 continue
@@ -797,8 +787,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 req_id,
                 group_id,
             )
-            addrs = []
-            sizes = []
+            addrs, sizes = self.token_database.prepare_values(
+                starts,
+                ends,
+                key_block_ids,
+                kv_cache_group_id=group_id,
+            )
             stored_events: list[BlockStored] = []
             all_hashes = []
             if self.enable_kv_event:
@@ -817,15 +811,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 keys[:3],
             )
             for index, start in enumerate(starts):
-                addr, size, _ = self._prepare_value(
-                    start,
-                    ends[index],
-                    block_ids,
-                    kv_cache_group_id=group_id,
-                    block_id=key_block_ids[index],
-                )
-                addrs.append(addr)
-                sizes.append(size)
                 if self.enable_kv_event:
                     token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
                     block_size = (
@@ -929,27 +914,27 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 def chunk_filter(start: int, group_id=group_id) -> bool:
                     return self.token_database.mask_allows_chunk(load_masks, group_id, start)
 
-                token_iter = self.token_database.process_token_key_strings_with_block_ids(
-                    token_len,
-                    req_meta.block_hashes,
-                    block_ids,
-                    mask_num,
-                    kv_cache_group_id=group_id,
-                    skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
-                    chunk_filter=chunk_filter,
-                )
-                for start, end, key, _block_hash, block_id in token_iter:
-                    addr, size, block_id = self._prepare_value(
-                        start,
-                        end,
+                group_starts, group_ends, group_keys, _, group_block_ids = (
+                    self.token_database.process_token_key_batch_with_block_ids(
+                        token_len,
+                        req_meta.block_hashes,
                         block_ids,
+                        mask_num,
                         kv_cache_group_id=group_id,
-                        block_id=block_id,
+                        skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+                        chunk_filter=chunk_filter,
                     )
-                    key_list.append(key)
-                    addr_list.append(addr)
-                    size_list.append(size)
-                    block_id_list.append(block_id)
+                )
+                group_addrs, group_sizes = self.token_database.prepare_values(
+                    group_starts,
+                    group_ends,
+                    group_block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                key_list.extend(group_keys)
+                addr_list.extend(group_addrs)
+                size_list.extend(group_sizes)
+                block_id_list.extend(group_block_ids)
             if not key_list:
                 self.set_finished_request(req_id)
                 return
@@ -1042,33 +1027,49 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
 
-    def build_cached_process_tokens(self, task: LayerTransferTask) -> dict[int, list[tuple[int, int, list]]] | None:
+    def build_cached_process_tokens(
+        self, task: LayerTransferTask
+    ) -> dict[int, list[tuple[int, int, list[str], int]]] | None:
         """Pre-compute process_tokens results for all layers (Key path).
 
         Returns a dict mapping block_range index to a list of
-        (start, end, key_all_layers) tuples, where key_all_layers is the
-        result of key.split_layers().
+        (start, end, serialized_keys_by_layer, resolved_block_id) tuples.
         """
         if not task.block_ranges:
             return None
 
         group_block_size = self._get_block_size(0)
-        cache: dict[int, list[tuple[int, int, list]]] = {}
+        cache: dict[int, list[tuple[int, int, list[str], int]]] = {}
 
         for br_idx, block_range in enumerate(task.block_ranges):
             request = block_range.request
             mask_num = request.save_start_token // group_block_size * group_block_size
-            entries = []
-            for start, end, key in self.token_database.process_tokens(
+            starts, ends, _, hash_values, block_ids = self.token_database.process_token_key_batch_with_block_ids(
                 request.save_end_token,
                 request.block_hashes,
+                request.block_ids,
                 mask_num,
-            ):
+            )
+            selected_indices = []
+            for index, start in enumerate(starts):
                 block_index = start // group_block_size
                 if block_index < block_range.start_block or block_index >= block_range.end_block:
                     continue
-                key_all = key.split_layers(self.final_layer_id + 1)
-                entries.append((start, end, key_all))
+                selected_indices.append(index)
+            selected_hashes = [hash_values[index] for index in selected_indices]
+            keys_by_layer = [
+                self.token_database.build_layer_key_strings(selected_hashes, layer_id)
+                for layer_id in range(self.final_layer_id + 1)
+            ]
+            entries = [
+                (
+                    starts[index],
+                    ends[index],
+                    [layer_keys[position] for layer_keys in keys_by_layer],
+                    block_ids[index],
+                )
+                for position, index in enumerate(selected_indices)
+            ]
             cache[br_idx] = entries
 
         return cache
@@ -1100,46 +1101,56 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
             starts = []
             ends = []
             keys = []
+            resolved_block_ids = []
             group_block_size = self._get_block_size(0)
 
             if cached_tokens is not None:
-                # Fast path: reuse cached (start, end, key_all) tuples
-                for start, end, key_all in cached_tokens[br_idx]:
+                # Fast path: reuse cached batch key metadata.
+                for start, end, key_all, block_id in cached_tokens[br_idx]:
                     block_index = start // group_block_size
                     if block_index < block_range.start_block or block_index >= block_range.end_block:
                         continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(key_all[layer_id])
+                    resolved_block_ids.append(block_id)
             else:
                 mask_num = request.save_start_token // group_block_size * group_block_size
-                for start, end, key in self.token_database.process_tokens(
-                    request.save_end_token,
-                    request.block_hashes,
-                    mask_num,
-                ):
+                batch_starts, batch_ends, _, hash_values, batch_block_ids = (
+                    self.token_database.process_token_key_batch_with_block_ids(
+                        request.save_end_token,
+                        request.block_hashes,
+                        request.block_ids,
+                        mask_num,
+                    )
+                )
+                selected_hashes = []
+                for index, start in enumerate(batch_starts):
                     block_index = start // group_block_size
                     if block_index < block_range.start_block or block_index >= block_range.end_block:
                         continue
                     starts.append(start)
-                    ends.append(end)
-                    keys.append(key.split_layers(self.final_layer_id + 1)[layer_id])
+                    ends.append(batch_ends[index])
+                    selected_hashes.append(hash_values[index])
+                    resolved_block_ids.append(batch_block_ids[index])
+                keys = self.token_database.build_layer_key_strings(selected_hashes, layer_id)
 
             if not self.dcp_size > 1:
-                starts = starts[self.tp_rank % self.put_step :: self.put_step]
-                ends = ends[self.tp_rank % self.put_step :: self.put_step]
-                keys = keys[self.tp_rank % self.put_step :: self.put_step]
+                shard_start = self.tp_rank % self.put_step
+                starts = starts[shard_start :: self.put_step]
+                ends = ends[shard_start :: self.put_step]
+                keys = keys[shard_start :: self.put_step]
+                resolved_block_ids = resolved_block_ids[shard_start :: self.put_step]
 
-            for index, key in enumerate(keys):
-                key_list.append(key.to_string())
-                addr, size, _ = self.token_database.prepare_value_layer(
-                    starts[index],
-                    ends[index],
-                    request.block_ids,
-                    layer_id,
-                )
-                addr_list.append(addr)
-                size_list.append(size)
+            addrs, sizes = self.token_database.prepare_values(
+                starts,
+                ends,
+                resolved_block_ids,
+                layer_id=layer_id,
+            )
+            key_list.extend(keys)
+            addr_list.extend(addrs)
+            size_list.extend(sizes)
 
         for req_id in req_ids:
             self.dec_stored_request(req_id)
@@ -1227,26 +1238,28 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                 request = block_range.request
                 req_ids.append(request.req_id)
                 is_last_chunks.append(request.is_last_chunk)
+                starts = []
+                ends = []
+                hash_values = []
+                resolved_block_ids = []
+                group_block_size = self._get_block_size(0)
                 for block_index in range(block_range.start_block, block_range.end_block):
-                    if block_index >= len(request.block_hashes):
+                    if block_index >= len(request.block_hashes) or block_index >= len(request.block_ids):
                         continue
-                    block_hash = request.block_hashes[block_index]
-                    chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
-                    key = self.token_database._make_key_by_hash(
-                        chunk_hash,
-                    ).split_layers(self.final_layer_id + 1)[layer_id]
-                    group_block_size = self._get_block_size(0)
-                    start = block_index * group_block_size
-                    end = start + group_block_size
-                    addr, size, _ = self.token_database.prepare_value_layer(
-                        start,
-                        end,
-                        request.block_ids,
-                        layer_id,
-                    )
-                    key_list.append(key.to_string())
-                    addr_list.append(addr)
-                    size_list.append(size)
+                    starts.append(block_index * group_block_size)
+                    ends.append((block_index + 1) * group_block_size)
+                    hash_values.append(request.block_hashes[block_index])
+                    resolved_block_ids.append(request.block_ids[block_index])
+                keys = self.token_database.build_layer_key_strings(hash_values, layer_id)
+                addrs, sizes = self.token_database.prepare_values(
+                    starts,
+                    ends,
+                    resolved_block_ids,
+                    layer_id=layer_id,
+                )
+                key_list.extend(keys)
+                addr_list.extend(addrs)
+                size_list.extend(sizes)
 
         if key_list:
             shift = (self.tp_rank * len(key_list)) // self.tp_size

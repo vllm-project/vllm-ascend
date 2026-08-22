@@ -311,6 +311,7 @@ class ChunkedTokenDatabase:
         self.partitions = partitions
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
         self._key_prefix_cache: dict[tuple[int, str, str], str] = {}
+        self._layer_key_prefix_cache: dict[tuple[int, str, str, int], str] = {}
         self.cache_coordinator: Any | None = None
 
     def _get_key_prefix(
@@ -335,6 +336,33 @@ class ChunkedTokenDatabase:
                 f"@cache_family:{cache_family}@"
             )
             self._key_prefix_cache[cache_key] = prefix
+        return prefix
+
+    def _get_layer_key_prefix(
+        self,
+        kv_cache_group_id: int,
+        layer_id: int,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
+    ) -> str:
+        if cache_family is None:
+            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+        cache_key = (kv_cache_group_id, cache_role, cache_family, layer_id)
+        prefix = self._layer_key_prefix_cache.get(cache_key)
+        if prefix is None:
+            group_metadata = self.metadata[kv_cache_group_id]
+            # Preserve LayerPoolKey.to_string(), which intentionally omits
+            # pp_rank for compatibility with the key-based layerwise path.
+            prefix = (
+                f"{group_metadata.model_name}"
+                f"@pcp{group_metadata.pcp_rank}@dcp{group_metadata.dcp_rank}"
+                f"@head_or_tp_rank:{group_metadata.head_or_tp_rank}"
+                f"@group:{kv_cache_group_id}"
+                f"@cache_role:{cache_role}"
+                f"@cache_family:{cache_family}"
+                f"@layer_id:{layer_id}@"
+            )
+            self._layer_key_prefix_cache[cache_key] = prefix
         return prefix
 
     def store_mask(
@@ -420,6 +448,7 @@ class ChunkedTokenDatabase:
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
+            self._layer_key_prefix_cache.clear()
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
@@ -463,6 +492,50 @@ class ChunkedTokenDatabase:
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
+
+    def prepare_values(
+        self,
+        starts: Sequence[int],
+        ends: Sequence[int],
+        block_ids: Sequence[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        layer_id: int | None = None,
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        """Prepare addresses and sizes for a batch of resolved cache blocks."""
+        if not (len(starts) == len(ends) == len(block_ids)):
+            raise ValueError("starts, ends and block_ids must have the same length")
+        if not block_ids:
+            return [], []
+
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
+        if not group_addrs or not group_block_len:
+            empty_values = [[] for _ in block_ids]
+            return empty_values, [values.copy() for values in empty_values]
+
+        entry_indices = np.arange(len(group_addrs), dtype=np.int64)
+        if layer_id is not None:
+            num_layers = self.group_num_layers.get(cache_role, {}).get(kv_cache_group_id, 1)
+            entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
+            if layer_id >= num_layers or entries_per_layer == 0:
+                empty_values = [[] for _ in block_ids]
+                return empty_values, [values.copy() for values in empty_values]
+            start_index = layer_id * entries_per_layer
+            entry_indices = entry_indices[start_index : start_index + entries_per_layer]
+
+        layout_indices = entry_indices % len(group_block_len)
+        base_addrs = np.asarray(group_addrs, dtype=np.int64)[entry_indices]
+        block_lens = np.asarray(group_block_len, dtype=np.int64)[layout_indices]
+        block_strides = (
+            np.asarray(group_block_stride, dtype=np.int64)[layout_indices] if group_block_stride else block_lens
+        )
+        block_ids_array = np.asarray(block_ids, dtype=np.int64)
+        token_spans = np.asarray(ends, dtype=np.int64) - np.asarray(starts, dtype=np.int64)
+        group_block_size = self.get_block_size(kv_cache_group_id)
+
+        addrs = base_addrs[None, :] + block_ids_array[:, None] * block_strides[None, :]
+        sizes = token_spans[:, None] * block_lens[None, :] // group_block_size
+        return addrs.tolist(), sizes.tolist()
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)
@@ -614,6 +687,63 @@ class ChunkedTokenDatabase:
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
+
+    def process_token_key_batch_with_block_ids(
+        self,
+        token_len: int,
+        block_hashes: BlockHashList | list[str],
+        block_ids: list[int],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        skip_null_blocks: bool = False,
+        chunk_filter: Callable[[int], bool] | None = None,
+        shard_rank: int | None = None,
+        shard_size: int | None = None,
+    ) -> tuple[list[int], list[int], list[str], list[BlockHash | str], list[int]]:
+        """Build aligned transfer-key metadata for a group in one batch."""
+        chunks = list(
+            self._iter_token_chunks(
+                token_len,
+                block_hashes,
+                mask_num,
+                kv_cache_group_id,
+                block_ids=block_ids,
+                skip_null_blocks=skip_null_blocks,
+                chunk_filter=chunk_filter,
+                shard_rank=shard_rank,
+                shard_size=shard_size,
+            )
+        )
+        if not chunks:
+            return [], [], [], [], []
+
+        starts, ends, hash_values, resolved_block_ids = map(list, zip(*chunks, strict=True))
+        prefix = self._get_key_prefix(kv_cache_group_id)
+        keys = [prefix + block_hash_to_str(hash_value) for hash_value in hash_values]
+        return (
+            cast(list[int], starts),
+            cast(list[int], ends),
+            keys,
+            cast(list[BlockHash | str], hash_values),
+            cast(list[int], resolved_block_ids),
+        )
+
+    def build_layer_key_strings(
+        self,
+        block_hashes: Sequence[BlockHash | str],
+        layer_id: int,
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
+    ) -> list[str]:
+        """Serialize a batch of layerwise keys without PoolKey allocation."""
+        prefix = self._get_layer_key_prefix(
+            kv_cache_group_id,
+            layer_id,
+            cache_role,
+            cache_family,
+        )
+        return [prefix + block_hash_to_str(block_hash) for block_hash in block_hashes]
 
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:
@@ -1129,8 +1259,9 @@ class LayerTransferTask:
     # actual layer copy for the batch.
     write_finish_keys: list[str] = field(default_factory=list)
     # Cache for KVCacheStoreKeyLayerSendingThread:
-    # maps block_range index -> list of (start, end, key_all_layers)
-    cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
+    # maps block_range index ->
+    # list of (start, end, serialized_keys_by_layer, resolved_block_id)
+    cached_process_tokens: dict[int, list[tuple[int, int, list[str], int]]] | None = None
 
 
 @dataclass

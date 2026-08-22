@@ -635,8 +635,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        worker.start_load_kv(meta)
+        with patch.object(
+            worker.token_database,
+            "prepare_values",
+            wraps=worker.token_database.prepare_values,
+        ) as prepare_values:
+            worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
+        prepare_values.assert_called_once()
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
@@ -976,6 +982,23 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.head_or_tp_rank = 0
         worker.m_store = MagicMock()
         return worker
+
+    def test_batched_gva_keys_match_scalar_format(self):
+        for num_groups in (1, 2):
+            with self.subTest(num_groups=num_groups):
+                worker = self._make_gva_worker(num_groups)
+                hashes = ["h0", b"h1"]
+
+                self.assertEqual(
+                    worker._make_layerwise_gva_keys(0, hashes),
+                    [
+                        worker._make_layerwise_gva_key(
+                            0,
+                            hash_value if isinstance(hash_value, str) else hash_value.hex(),
+                        )
+                        for hash_value in hashes
+                    ],
+                )
 
     @staticmethod
     def _make_gva_request(num_groups=1, load_spec=None, can_save=None):
