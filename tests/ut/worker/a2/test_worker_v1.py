@@ -242,6 +242,7 @@ class TestNPUWorker(TestBase):
         mock_register_atb_extensions.assert_called_once()
         mock_register_ascend_customop.assert_called_once()
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
+        mock_init_ascend_config.return_value.validate_kv_offload_device_support.assert_called_once()
         mock_check_ascend_device_type.assert_called_once()
 
         # Verify cache_dtype setting
