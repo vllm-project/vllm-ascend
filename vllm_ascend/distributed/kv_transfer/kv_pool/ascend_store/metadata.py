@@ -481,10 +481,10 @@ class ChunkedTokenDatabase:
 
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         if not group_addrs or not group_block_len:
-            empty_values = [[] for _ in block_ids]
+            empty_values: list[list[int]] = [[] for _ in block_ids]
             return empty_values, [values.copy() for values in empty_values]
 
-        entry_indices = np.arange(len(group_addrs), dtype=np.int64)
+        entry_indices: np.ndarray = np.arange(len(group_addrs), dtype=np.int64)
         if layer_id is not None:
             num_layers = self.group_num_layers.get(cache_role, {}).get(kv_cache_group_id, 1)
             entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
@@ -494,7 +494,7 @@ class ChunkedTokenDatabase:
             start_index = layer_id * entries_per_layer
             entry_indices = entry_indices[start_index : start_index + entries_per_layer]
 
-        layout_indices = entry_indices % len(group_block_len)
+        layout_indices: np.ndarray = entry_indices % len(group_block_len)
         base_addrs = np.asarray(group_addrs, dtype=np.int64)[entry_indices]
         block_lens = np.asarray(group_block_len, dtype=np.int64)[layout_indices]
         block_strides = (

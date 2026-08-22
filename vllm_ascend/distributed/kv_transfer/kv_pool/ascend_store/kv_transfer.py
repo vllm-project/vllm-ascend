@@ -1086,7 +1086,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
 
         transfer_task = transfer_tasks[0]
         layer_id = transfer_task.layer_id
-        key_list = []
+        key_list: list[str] = []
         addr_list = []
         size_list = []
         req_ids = []
@@ -1144,8 +1144,8 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
                 resolved_block_ids,
                 layer_id=layer_id,
             )
-            addrs = [[] for _ in starts]
-            sizes = [[] for _ in starts]
+            addrs: list[list[int]] = [[] for _ in starts]
+            sizes: list[list[int]] = [[] for _ in starts]
             for position, addr, size in zip(valid_positions, valid_addrs, valid_sizes, strict=True):
                 addrs[position] = addr
                 sizes[position] = size
@@ -1265,8 +1265,8 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                     resolved_block_ids,
                     layer_id=layer_id,
                 )
-                addrs = [[] for _ in starts]
-                sizes = [[] for _ in starts]
+                addrs: list[list[int]] = [[] for _ in starts]
+                sizes: list[list[int]] = [[] for _ in starts]
                 for position, addr, size in zip(valid_positions, valid_addrs, valid_sizes, strict=True):
                     addrs[position] = addr
                     sizes[position] = size
