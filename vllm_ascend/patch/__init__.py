@@ -72,8 +72,8 @@
 #    How:
 #       Install `KVDeliveryScheduler` first with all affected scheduler methods
 #       and request/connector contracts. `BalanceScheduler` derives from it and
-#       keeps its own `d02df748bf9efd99022f1a062597dc3cb3808485`-based
-#       balance `schedule()`. When balance is disabled,
+#       keeps its own vLLM `v0.26.0`-based balance `schedule()`. When balance
+#       is disabled,
 #       that method delegates to `KVDeliveryScheduler.schedule()`; when enabled,
 #       it runs only the original balance scheduling logic.
 #    Related PR (if no, explain why):
