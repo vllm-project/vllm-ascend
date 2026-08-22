@@ -247,6 +247,28 @@ class TestAscendModelSlimConfig(TestBase):
 
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
 
+    def test_mtp_does_not_inherit_target_c8_layer_by_index(self):
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "model.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+
+        self.assertTrue(config.is_c8_quant_layer("model.layers.0.self_attn.attn"))
+        self.assertFalse(config.is_c8_quant_layer("mtp.layers.0.self_attn.attn"))
+
+    def test_mtp_c8_requires_its_own_kv_scale_metadata(self):
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "model.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+                "mtp.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+
+        self.assertTrue(config.is_c8_quant_layer("mtp.layers.0.self_attn.attn"))
+
     def test_is_layer_skipped_ascend(self):
         # Test non-fused layer that should be quantized
         self.assertFalse(self.ascend_config.is_layer_skipped_ascend("layer1"))
@@ -263,6 +285,20 @@ class TestAscendModelSlimConfig(TestBase):
         config = AscendModelSlimConfig(bad_config)
         with self.assertRaises(ValueError):
             config.is_layer_skipped_ascend("fused_layer", fused_mapping)
+
+    def test_qwen3_5_mtp_float_packed_layers_are_unquantized(self):
+        mapping = get_packed_modules_mapping("qwen3_5_mtp")
+        quant_description = {
+            "mtp.layers.0.self_attn.q_proj.weight": "FLOAT",
+            "mtp.layers.0.self_attn.k_proj.weight": "FLOAT",
+            "mtp.layers.0.self_attn.v_proj.weight": "FLOAT",
+            "mtp.layers.0.mlp.gate_proj.weight": "FLOAT",
+            "mtp.layers.0.mlp.up_proj.weight": "FLOAT",
+        }
+        config = AscendModelSlimConfig(quant_description)
+
+        self.assertTrue(config.is_layer_skipped_ascend("mtp.layers.0.self_attn.qkv_proj", mapping))
+        self.assertTrue(config.is_layer_skipped_ascend("mtp.layers.0.mlp.gate_up_proj", mapping))
 
     def test_missing_k_eq_v_v_proj_shard_uses_present_shards(self):
         prefix = "model.layers.5.self_attn.qkv_proj"
