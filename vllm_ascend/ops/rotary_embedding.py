@@ -126,6 +126,43 @@ def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
     _sin_cache = sin_cache.squeeze(1)
 
 
+def reload_cos_and_sin_after_restore(model: torch.nn.Module) -> bool:
+    """[snapshot] Rebind module-level RoPE caches to restored model buffers.
+
+    MLA/SFA metadata reads cos/sin through module globals. Those globals are
+    outside ``state_dict`` and may retain stale NPU storage after restore even
+    though the owning rotary module's persistent buffers have been refreshed.
+    """
+    global _cos_cache
+    global _sin_cache
+    global _cos_sin_cache
+    global _cos_slice
+    global _sin_slice
+
+    for module in model.modules():
+        cos_cached = getattr(module, "cos_cached", None)
+        sin_cached = getattr(module, "sin_cached", None)
+        cos_sin_cache = getattr(module, "cos_sin_cache", None)
+        if isinstance(cos_cached, torch.Tensor) and isinstance(sin_cached, torch.Tensor):
+            _cos_cache = cos_cached
+            _sin_cache = sin_cached
+            if isinstance(cos_sin_cache, torch.Tensor):
+                _cos_sin_cache = cos_sin_cache
+            _cos_slice = None
+            _sin_slice = None
+            return True
+        if isinstance(cos_sin_cache, torch.Tensor):
+            _cos_sin_cache = cos_sin_cache
+            hidden_dim = cos_sin_cache.shape[-1] // 2
+            cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
+            _cos_cache = cos_cache.squeeze(1)
+            _sin_cache = sin_cache.squeeze(1)
+            _cos_slice = None
+            _sin_slice = None
+            return True
+    return False
+
+
 def update_cos_sin(positions):
     global _cos
     global _sin
@@ -433,7 +470,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         )
         inv_freq_mask = 1.0 - self._yarn_linear_ramp_mask(low, high, dim // 2).to(device=device, dtype=torch.float32)
         inv_freq = freq_inter * (1 - inv_freq_mask) + freq_extra * inv_freq_mask
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", inv_freq, persistent=True)
 
         t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
 
@@ -443,9 +480,9 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         cos_cached = cos_cached.to(dtype)
         sin_cached = sin_cached.to(dtype)
         cache = torch.cat([freqs.cos() * self.mscale, freqs.sin() * self.mscale], dim=-1).to(dtype)
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
-        self.register_buffer("cos_cached", cos_cached, persistent=False)
-        self.register_buffer("sin_cached", sin_cached, persistent=False)
+        self.register_buffer("cos_sin_cache", cache, persistent=True)
+        self.register_buffer("cos_cached", cos_cached, persistent=True)
+        self.register_buffer("sin_cached", sin_cached, persistent=True)
         _record_cos_sin_cache(cache)
         _record_cos_and_sin_cache(cos_cached, sin_cached)
 
