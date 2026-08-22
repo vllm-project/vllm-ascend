@@ -1071,7 +1071,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertFalse(init_ascend_config(unsupported_vc).enable_dsa_cp)
 
         supported_vc = VllmConfig()
-        supported_vc.model_config.hf_text_config.index_topk = 2048
+        supported_vc.model_config = SimpleNamespace(
+            hf_text_config=SimpleNamespace(index_topk=2048),
+            hf_config=SimpleNamespace(),
+            enforce_eager=True,
+            architectures=[],
+        )
         supported_vc.additional_config = {"enable_dsa_cp": True}
         self.assertTrue(init_ascend_config(supported_vc).enable_dsa_cp)
 
