@@ -1,8 +1,8 @@
 from typing import Any
-
+import string
 import requests
 
-
+_PAD_ALPHABET = string.ascii_letters
 def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
 
     url = server.url_for("tokenize")
@@ -16,7 +16,45 @@ def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
     return len(body.get("tokens") or body.get("token_ids", []))
 
 
-def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
+# def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
+#     single_count = _tokenize_count(server, seed, use_chat=use_chat)
+#     if single_count == 0:
+#         raise ValueError(f"seed {seed!r} tokenizes to 0 tokens")
+#
+#     if target_tokens <= single_count:
+#         return seed, single_count
+#
+#     est = max(1, target_tokens // single_count)
+#     body = "\n".join([seed] * est)
+#     actual = _tokenize_count(server, body, use_chat=use_chat)
+#
+#     while actual > target_tokens and est > 1:
+#         est -= 1
+#         body = "\n".join([seed] * est)
+#         actual = _tokenize_count(server, body, use_chat=use_chat)
+#
+#     if actual == target_tokens:
+#         return body, actual
+#
+#     gap = target_tokens - actual
+#     if gap <= 0:
+#         return body, actual
+#
+#     lo, hi = 0, max(gap * 4, 1)
+#     best_pad, best_count = 0, actual
+#     while lo < hi:
+#         mid = (lo + hi + 1) // 2
+#         cand = body + "a" * mid
+#         cand_count = _tokenize_count(server, cand, use_chat=use_chat)
+#         if cand_count <= target_tokens:
+#             lo = mid
+#             best_pad, best_count = mid, cand_count
+#         else:
+#             hi = mid - 1
+#
+#     return body + "a" * best_pad, best_count
+def _generate_prompt_for_length(server, seed: str, target_tokens: int,
+                                use_chat: bool = False) -> tuple[str, int]:
     single_count = _tokenize_count(server, seed, use_chat=use_chat)
     if single_count == 0:
         raise ValueError(f"seed {seed!r} tokenizes to 0 tokens")
@@ -25,35 +63,23 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat:
         return seed, single_count
 
     est = max(1, target_tokens // single_count)
-    body = "\n".join([seed] * est)
+    body = seed + "\n" + (seed + "\n") * (est - 1)
     actual = _tokenize_count(server, body, use_chat=use_chat)
 
-    while actual > target_tokens and est > 1:
-        est -= 1
-        body = "\n".join([seed] * est)
+    while actual < target_tokens and (actual + single_count) <= target_tokens:
+        body += seed + "\n"
         actual = _tokenize_count(server, body, use_chat=use_chat)
 
-    if actual == target_tokens:
-        return body, actual
-
-    gap = target_tokens - actual
-    if gap <= 0:
-        return body, actual
-
-    lo, hi = 0, max(gap * 4, 1)
-    best_pad, best_count = 0, actual
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        cand = body + "a" * mid
-        cand_count = _tokenize_count(server, cand, use_chat=use_chat)
+    for ch in _PAD_ALPHABET:
+        if actual == target_tokens or actual > target_tokens:
+            break
+        candidate = body + ch
+        cand_count = _tokenize_count(server, candidate, use_chat=use_chat)
         if cand_count <= target_tokens:
-            lo = mid
-            best_pad, best_count = mid, cand_count
-        else:
-            hi = mid - 1
+            body = candidate
+            actual = cand_count
 
-    return body + "a" * best_pad, best_count
-
+    return body, actual
 
 def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None]:
 
