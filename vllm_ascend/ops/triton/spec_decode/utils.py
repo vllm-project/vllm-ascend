@@ -94,7 +94,12 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    total_cp_world_size: tl.constexpr = 1,
+    current_cp_rank: tl.constexpr = 0,
+    cp_kv_cache_interleave_size: tl.constexpr = 1,
+    PAD_ID: tl.constexpr = -1,
 ):
+    virtual_block = block_size * total_cp_world_size
     for req_idx in range(0, batch_size):
         ctx_start = tl.load(query_start_loc_ptr + req_idx)
         ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
@@ -126,9 +131,22 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
             tl.store(out_query_positions_ptr + query_out_idx, query_pos)
 
             query_cache_pos = effective_seq_len + q_idx
-            block_num_q = query_cache_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
-            slot_q = block_id_q * block_size + (query_cache_pos % block_size)
+            if total_cp_world_size > 1:
+                voff = query_cache_pos % virtual_block
+                owner = (voff // cp_kv_cache_interleave_size) % total_cp_world_size
+                local_off = (voff // (total_cp_world_size * cp_kv_cache_interleave_size)
+                             ) * cp_kv_cache_interleave_size + (voff % cp_kv_cache_interleave_size)
+                block_num_q = (query_cache_pos // virtual_block) + (local_off // block_size)
+                block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
+                slot_q = tl.where(
+                    owner == current_cp_rank,
+                    block_id_q * block_size + (local_off % block_size), 
+                    PAD_ID
+                )
+            else:
+                block_num_q = query_cache_pos // block_size
+                block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
+                slot_q = block_id_q * block_size + (query_cache_pos % block_size)
             tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
 
             if q_idx == 0:
