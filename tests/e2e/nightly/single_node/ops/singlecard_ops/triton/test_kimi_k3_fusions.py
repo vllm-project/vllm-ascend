@@ -33,12 +33,20 @@ pytestmark = [
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("block_capacity", [4, 7])
-def test_kimi_k3_attention_residual_triton_matches_reference(block_capacity):
+@pytest.mark.parametrize(
+    ("num_tokens", "num_blocks", "block_capacity"),
+    [
+        pytest.param(7, 4, 7, id="partial-capacity"),
+        pytest.param(512, 8, 8, id="profile-shape"),
+    ],
+)
+def test_kimi_k3_attention_residual_triton_matches_reference(
+    num_tokens,
+    num_blocks,
+    block_capacity,
+):
     torch.manual_seed(1)
-    num_tokens = 7
     hidden_size = 7168
-    num_blocks = 4
     eps = 1e-6
     prefix_sum = torch.randn(
         (num_tokens, hidden_size),
