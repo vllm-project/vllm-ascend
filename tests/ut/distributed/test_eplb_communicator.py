@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from contextlib import nullcontext
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import torch
@@ -27,6 +27,12 @@ def test_communicator_reuses_upstream_torch_distributed_transport(communicator):
 
 
 def test_send_and_recv_use_persistent_expert_tensors_directly(communicator, monkeypatch):
+    communicator._ep_group.size.return_value = 2
+    get_global_rank = MagicMock(side_effect=[3, 2])
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb_communicator.dist.get_global_rank",
+        get_global_rank,
+    )
     monkeypatch.setattr(
         upstream_communicator,
         "P2POp",
@@ -36,11 +42,24 @@ def test_send_and_recv_use_persistent_expert_tensors_directly(communicator, monk
     recv_tensor = torch.zeros(2)
 
     communicator.add_send([send_tensor], dst_rank=1, expert_id=3)
-    communicator.add_recv([recv_tensor], src_rank=1, expert_id=3)
+    communicator.add_recv([recv_tensor], src_rank=0, expert_id=3)
 
     assert communicator._p2p_ops[0][1] is send_tensor
     assert communicator._p2p_ops[1][1] is recv_tensor
+    assert communicator._p2p_ops[0][2] == 3
+    assert communicator._p2p_ops[1][2] == 2
     assert all(op[1].storage_offset() == 0 for op in communicator._p2p_ops)
+    assert get_global_rank.call_args_list == [
+        call(communicator._ep_group, 1),
+        call(communicator._ep_group, 0),
+    ]
+
+
+def test_peer_group_rank_must_be_in_range(communicator):
+    communicator._ep_group.size.return_value = 2
+
+    with pytest.raises(ValueError, match=r"group rank 2.*\[0, 2\)"):
+        communicator.add_send([torch.zeros(1)], dst_rank=2, expert_id=3)
 
 
 def test_set_stream_is_ready_for_async_transfer(communicator):
