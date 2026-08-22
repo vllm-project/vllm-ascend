@@ -52,11 +52,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "additional_config.finegrained_tp_config."
                 "lmhead_tensor_parallel_size=0."
             )
-        if vllm_config.speculative_config.draft_sample_method == "probabilistic":
-            raise ValueError(
-                "DSpark probabilistic draft sampling is not supported on the v1 "
-                "model runner; use greedy (the default) instead."
-            )
         super().__init__(vllm_config, device, runner=runner)
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
