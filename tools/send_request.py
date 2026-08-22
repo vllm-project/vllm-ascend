@@ -18,7 +18,44 @@ def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
     return len(body.get("tokens") or body.get("token_ids", []))
 
 
+# def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
+#     single_count = _tokenize_count(server, seed, use_chat=use_chat)
+#     if single_count == 0:
+#         raise ValueError(f"seed {seed!r} tokenizes to 0 tokens")
+#
+#     if target_tokens <= single_count:
+#         return seed, single_count
+#
+#     est = max(1, target_tokens // single_count)
+#     body = seed + "\n" + (seed + "\n") * (est - 1)
+#     actual = _tokenize_count(server, body, use_chat=use_chat)
+#
+#     while actual < target_tokens and (actual + single_count) <= target_tokens:
+#         body += seed + "\n"
+#         actual = _tokenize_count(server, body, use_chat=use_chat)
+#
+#     for ch in _PAD_ALPHABET:
+#         if actual == target_tokens or actual > target_tokens:
+#             break
+#         candidate = body + ch
+#         cand_count = _tokenize_count(server, candidate, use_chat=use_chat)
+#         if cand_count <= target_tokens:
+#             body = candidate
+#             actual = cand_count
+#
+#     return body, actual
 def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
+    """Generate a prompt that tokenizes to exactly `target_tokens` tokens.
+
+    Uses O(log n) tokenize API calls via two binary-search phases:
+      Phase 1: find the largest repetition count `k` such that
+               tokenize("\n".join([seed] * k)) <= target_tokens.
+               Upper bound is 2x the naive estimate to stay safe
+               against BPE boundary effects where joining seeds
+               *reduces* the token count.
+      Phase 2: fine-tune by appending "a" characters and binary-searching
+               the optimal count to reach exactly `target_tokens`.
+    """
     single_count = _tokenize_count(server, seed, use_chat=use_chat)
     if single_count == 0:
         raise ValueError(f"seed {seed!r} tokenizes to 0 tokens")
@@ -26,25 +63,42 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat:
     if target_tokens <= single_count:
         return seed, single_count
 
-    est = max(1, target_tokens // single_count)
-    body = seed + "\n" + (seed + "\n") * (est - 1)
-    actual = _tokenize_count(server, body, use_chat=use_chat)
+    lo, hi = 1, max(target_tokens // single_count * 2 + 2, 2)
+    best_k, best_count = 1, single_count
 
-    while actual < target_tokens and (actual + single_count) <= target_tokens:
-        body += seed + "\n"
-        actual = _tokenize_count(server, body, use_chat=use_chat)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        body = "\n".join([seed] * mid)
+        act = _tokenize_count(server, body, use_chat=use_chat)
+        if act <= target_tokens:
+            best_k, best_count = mid, act
+            lo = mid + 1
+        else:
+            hi = mid - 1
 
-    for ch in _PAD_ALPHABET:
-        if actual == target_tokens or actual > target_tokens:
-            break
-        candidate = body + ch
-        cand_count = _tokenize_count(server, candidate, use_chat=use_chat)
+    body = "\n".join([seed] * best_k)
+    if best_count == target_tokens:
+        return body, best_count
+
+    gap = target_tokens - best_count
+    if gap <= 0:
+        return body, best_count
+
+    # Fine padding: binary-search on the number of "a" characters appended.
+    pad_lo, pad_hi = 0, gap * 8 + 1
+    best_pad, best_pad_count = 0, best_count
+
+    while pad_lo < pad_hi:
+        mid = (pad_lo + pad_hi + 1) // 2
+        cand = body + "a" * mid
+        cand_count = _tokenize_count(server, cand, use_chat=use_chat)
         if cand_count <= target_tokens:
-            body = candidate
-            actual = cand_count
+            best_pad, best_pad_count = mid, cand_count
+            pad_lo = mid
+        else:
+            pad_hi = mid - 1
 
-    return body, actual
-
+    return body + "a" * best_pad, best_pad_count
 
 def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None]:
     if isinstance(raw, dict):
