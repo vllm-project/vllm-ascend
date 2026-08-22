@@ -68,8 +68,14 @@ docker run --rm \
 Before enabling Suffix Decoding speculative inference on Ascend, the Arctic Inference plugin must be installed. Arctic Inference is an open-source plugin launched by Snowflake specifically to optimize LLM inference speed. For detailed technical principles, please refer to the following article: [Fastest Speculative Decoding in vLLM with Arctic Inference and Arctic Training](https://www.snowflake.com/en/engineering-blog/fast-speculative-decoding-vllm-arctic/). Install it within the container using the following command:
 
 ```bash
-pip install arctic-inference
+pip install "arctic-inference==0.1.1"
 ```
+
+Normal vLLM Ascend NPU installations include `arctic-inference==0.1.1` through
+the general requirements, so the command above is only needed for custom
+environments where it is absent. CPU-only verification locally excludes this
+dependency because of a build compatibility issue; that exception does not
+affect normal NPU installations or suffix speculative decoding.
 
 ## **vLLM Instance Deployment**
 
