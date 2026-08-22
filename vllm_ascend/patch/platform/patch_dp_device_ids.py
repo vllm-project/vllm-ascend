@@ -37,8 +37,6 @@ if not vllm_version_is("0.23.0"):
     from vllm.platforms import current_platform
     from vllm.v1.engine import utils as _engine_utils
 
-    _original_get_physical_gpu_ids = _engine_utils.get_physical_gpu_ids_for_local_dp_rank
-
     def _patched_get_physical_gpu_ids_for_local_dp_rank(
         device_control_env_var,
         local_dp_rank,
@@ -69,4 +67,6 @@ if not vllm_version_is("0.23.0"):
             user_assigned_gpu_ids,
         )
 
-    _engine_utils.get_physical_gpu_ids_for_local_dp_rank = _patched_get_physical_gpu_ids_for_local_dp_rank
+    if hasattr(_engine_utils, "get_physical_gpu_ids_for_local_dp_rank"):
+        _original_get_physical_gpu_ids = _engine_utils.get_physical_gpu_ids_for_local_dp_rank
+        _engine_utils.get_physical_gpu_ids_for_local_dp_rank = _patched_get_physical_gpu_ids_for_local_dp_rank
