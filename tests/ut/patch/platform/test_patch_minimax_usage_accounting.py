@@ -195,7 +195,7 @@ def test_count_reasoning_tokens_accepts_minimax_unified_parser():
     parser = parser_cls(FakeTokenizer(), tools=[])
 
     assert not hasattr(parser, "count_reasoning_tokens")
-    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
+    assert usage_patch._count_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
 
 
 def test_count_reasoning_tokens_accepts_wrapped_minimax_parser():
@@ -203,11 +203,11 @@ def test_count_reasoning_tokens_accepts_wrapped_minimax_parser():
         reasoning_parser=MiniMaxM2ReasoningParser(FakeTokenizer()),
     )
 
-    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
-    assert usage_patch._is_minimax_reasoning_parser(parser)
+    assert usage_patch._count_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
+    assert usage_patch._is_reasoning_usage_parser(parser)
 
 
-def test_count_reasoning_tokens_skips_non_minimax_parser_manager_wrapper():
+def test_count_reasoning_tokens_accepts_deepseek_v3_parser_manager_wrapper():
     parser_cls = ParserManager.get_parser(
         tool_parser_name="deepseek_v4",
         reasoning_parser_name="deepseek_v4",
@@ -217,8 +217,8 @@ def test_count_reasoning_tokens_skips_non_minimax_parser_manager_wrapper():
     parser = parser_cls(FakeTokenizer(), tools=[])
 
     assert not hasattr(parser, "count_reasoning_tokens")
-    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11], parser) is None
-    assert not usage_patch._is_minimax_reasoning_parser(parser)
+    assert usage_patch._count_reasoning_tokens_for_usage([10, 11], parser) == 0
+    assert usage_patch._is_reasoning_usage_parser(parser)
 
 
 def test_non_minimax_parser_does_not_enable_tracking_by_default():
@@ -228,8 +228,8 @@ def test_non_minimax_parser_does_not_enable_tracking_by_default():
 
     parser = FakeReasoningParser()
 
-    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11], parser) is None
-    assert not usage_patch._is_minimax_reasoning_parser(parser)
+    assert usage_patch._count_reasoning_tokens_for_usage([10, 11], parser) is None
+    assert not usage_patch._is_reasoning_usage_parser(parser)
     assert usage_patch._sum_reasoning_tokens_for_usage([[10, 11]], parser) is None
 
 
