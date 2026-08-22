@@ -1,4 +1,3 @@
-import importlib.util
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -12,7 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config, is_megamoe_supported_by_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -31,16 +30,6 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
-_CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
-    "w8a8",
-    "w4a8",
-    "w8a8_dynamic",
-    "w4a8_dynamic",
-    "quanttype.w8a8",
-    "quanttype.w4a8",
-}
-
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -66,54 +55,17 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
-def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-    hf_text_config = vllm_config.model_config.hf_text_config
-    hidden_size = getattr(hf_text_config, "hidden_size", None)
-    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
-        hidden_size = vllm_config.model_config.get_hidden_size()
-    if hidden_size is None:
-        return False
-    hidden_size = int(hidden_size)
-    # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
-    # the dispatch / FFN / combine cube tiles require hidden in the closed
-    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
-    # outside this range (e.g. small Qwen variants with hidden=896, or any
-    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
-    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
-        return False
-
-    # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
-    # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
-    # range [1024, 3072] and a multiple of 512. This constraint may be removed
-    # in CANN 9.2.0
-    moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
-    if moe_intermediate_size is None:
-        return False
-    if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
-        return False
-
-    quant_type = getattr(
-        vllm_config.model_config.hf_text_config,
-        "moe_quantize",
-        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
-    )
-    if quant_type is None:
-        return True
-    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
-    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
-
-
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
-        _MEGA_MOE_SUPPORTED
+        _CANN_OPS_TRANSFORMER_AVAILABLE
         and get_ascend_device_type() == AscendDeviceType.A3
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
-        and _cann_megamoe_supported_by_config(vllm_config)
+        and is_megamoe_supported_by_config(vllm_config)
     )
 
 

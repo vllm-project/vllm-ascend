@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 import json
 import os
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,34 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+_CANN_OPS_TRANSFORMER_AVAILABLE = importlib.util.find_spec("cann_ops_transformer") is not None
+
+
+def is_megamoe_supported_by_config(vllm_config) -> bool:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    hidden_size = getattr(hf_text_config, "hidden_size", None)
+    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+        hidden_size = vllm_config.model_config.get_hidden_size()
+    if hidden_size is None:
+        return False
+    hidden_size = int(hidden_size)
+    # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
+    # the dispatch / FFN / combine cube tiles require hidden in the closed
+    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
+    # outside this range (e.g. small Qwen variants with hidden=896, or any
+    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
+    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+        return False
+
+    # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
+    # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
+    # range [1024, 3072] and a multiple of 512. This constraint may be removed
+    # in CANN 9.2.0
+    moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+    if moe_intermediate_size is None:
+        return False
+    return moe_intermediate_size >= 1024 and moe_intermediate_size <= 3072 and moe_intermediate_size % 512 == 0
 
 
 class AscendConfig:
@@ -168,6 +197,16 @@ class AscendConfig:
                 "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
+        if (
+            self.enable_fused_mc2 == 1
+            and _CANN_OPS_TRANSFORMER_AVAILABLE
+            and not is_megamoe_supported_by_config(vllm_config)
+        ):
+            self.enable_fused_mc2 = 0
+            logger.warning_once(
+                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+            )
+
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",
