@@ -255,7 +255,7 @@ def test_eagle_mixin_last_pp_rank_returns_complete_aux_states(monkeypatch):
     torch.testing.assert_close(output_hidden_states, hidden_states + 4.0 + residual + 4.0)
 
 
-def test_make_empty_intermediate_tensors_allocates_only_incoming_aux_layers():
+def test_make_empty_intermediate_tensors_allocates_incoming_boundary_aux_layers():
     model = _FakeDeepseekV2Model(start_layer=2, end_layer=4, aux_hidden_state_layers=(0, 2, 3))
 
     eagle3_pp_aux._patch_make_empty_intermediate_tensors(model)
@@ -265,9 +265,11 @@ def test_make_empty_intermediate_tensors_allocates_only_incoming_aux_layers():
         device=torch.device("cpu"),
     )
 
-    assert set(result.tensors) == {"hidden_states", "residual", "aux_layer_0"}
+    assert set(result.tensors) == {"hidden_states", "residual", "aux_layer_0", "aux_layer_1"}
     assert result["aux_layer_0"].shape == (3, 2)
     assert result["aux_layer_0"].dtype == torch.float32
+    assert result["aux_layer_1"].shape == (3, 2)
+    assert result["aux_layer_1"].dtype == torch.float32
 
 
 def test_patch_accepts_eagle_mixin_model():
@@ -283,7 +285,7 @@ def test_patch_accepts_eagle_mixin_model():
         device=torch.device("cpu"),
     )
 
-    assert set(result.tensors) == {"hidden_states", "residual", "aux_layer_0"}
+    assert set(result.tensors) == {"hidden_states", "residual", "aux_layer_0", "aux_layer_1"}
 
 
 def test_patch_rejects_unsupported_model():
