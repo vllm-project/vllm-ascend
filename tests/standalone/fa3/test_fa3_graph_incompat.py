@@ -35,7 +35,7 @@ import torch_npu
 _HAS_FA3 = False
 if importlib_util.find_spec("flash_attn_npu_v3") is not None:
     try:
-        from flash_attn_npu_v3 import (
+        from flash_attn_npu_3 import (
             flash_attn_with_kvcache as _fa3_kvcache,
             get_scheduler_metadata,
         )

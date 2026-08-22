@@ -1521,7 +1521,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
 
         if is_cache:
-            from flash_attn_npu_v3 import flash_attn_with_kvcache as fa3_kvcache
+            from flash_attn_npu_3 import flash_attn_with_kvcache as fa3_kvcache
 
             num_blocks, bs = key.shape[0], key.shape[1]
             k_fa = key.view(num_blocks, bs, self.num_kv_heads, self.head_size)
@@ -1553,7 +1553,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 scheduler_metadata=scheduler_metadata,
             )
         else:
-            from flash_attn_npu_v3 import flash_attn_varlen_func
+            from flash_attn_npu_3 import flash_attn_varlen_func
 
             cu_seqlens_q = attn_metadata.query_start_loc
             cu_seqlens_k = cu_seqlens_q

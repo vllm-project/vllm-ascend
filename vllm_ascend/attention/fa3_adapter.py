@@ -27,7 +27,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 try:
-    from flash_attn_npu_v3 import (
+    from flash_attn_npu_3 import (
         flash_attn_varlen_func,
         flash_attn_with_kvcache as fa3_kvcache,
         get_scheduler_metadata,
