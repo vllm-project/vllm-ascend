@@ -303,13 +303,6 @@ class AscendConfig:
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
                     "Please disable one of them."
                 )
-            kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-            kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_role == "kv_producer":
-                raise ValueError(
-                    "enable_reduce_sample is not supported on PD-disaggregated "
-                    "scenarios. Please disable enable_reduce_sample."
-                )
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
