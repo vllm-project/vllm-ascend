@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file test_aclnn_sparse_flash_attention.cpp
+ * \file test_aclnn_sparse_flash_attention_vllm.cpp
  * \brief
  */
 
@@ -19,7 +19,7 @@
 #include <cstring>
 #include "securec.h"
 #include "acl/acl.h"
-#include "aclnnop/aclnn_sparse_flash_attention.h"
+#include "aclnnop/aclnn_sparse_flash_attention_vllm.h"
 
 using namespace std;
 
@@ -230,11 +230,11 @@ int32_t ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stre
     bool returnSoftmaxLse = false;
     aclOpExecutor* executor;
 
-    int32_t ret = aclnnSparseFlashAttentionGetWorkspaceSize(resources.queryTensor, resources.keyTensor, resources.valueTensor, resources.sparseIndicesTensor, nullptr, nullptr, nullptr, resources.queryRopeTensor, resources.keyRopeTensor,
+    int32_t ret = aclnnSparseFlashAttentionVllmGetWorkspaceSize(resources.queryTensor, resources.keyTensor, resources.valueTensor, resources.sparseIndicesTensor, nullptr, nullptr, nullptr, resources.queryRopeTensor, resources.keyRopeTensor,
                                                     scaleValue, sparseBlockSize, layoutQuery, layoutKv, sparseMode, preTokens,
                                                     nextTokens, attentionMode, returnSoftmaxLse, resources.attentionOutTensor, resources.softmaxMaxTensor, resources.softmaxSumTensor, workspaceSize, &executor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
-        LOG_PRINT("aclnnSparseFlashAttentionGetWorkspaceSize failed. ERROR: %d\n", ret);
+        LOG_PRINT("aclnnSparseFlashAttentionVllmGetWorkspaceSize failed. ERROR: %d\n", ret);
         return ret;
     }
 
@@ -246,9 +246,9 @@ int32_t ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stre
         }
     }
 
-    ret = aclnnSparseFlashAttention(*workspaceAddr, *workspaceSize, executor, stream);
+    ret = aclnnSparseFlashAttentionVllm(*workspaceAddr, *workspaceSize, executor, stream);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
-        LOG_PRINT("aclnnSparseFlashAttention failed. ERROR: %d\n", ret);
+        LOG_PRINT("aclnnSparseFlashAttentionVllm failed. ERROR: %d\n", ret);
         return ret;
     }
 

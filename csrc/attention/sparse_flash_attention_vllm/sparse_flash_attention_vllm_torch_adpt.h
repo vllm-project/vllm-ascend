@@ -13,8 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
-#define SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H
+#define SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
@@ -90,7 +90,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_sparse_flash_attention_
 
 }  // namespace
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_vllm(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value,
     const c10::optional<at::Tensor> &block_table,
@@ -122,7 +122,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention(
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(
-        aclnnSparseFlashAttention,
+        aclnnSparseFlashAttentionVllm,
         query,
         key,
         value,
@@ -149,4 +149,4 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention(
 }
 }  // namespace vllm_ascend
 
-#endif  // SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
+#endif  // SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H
