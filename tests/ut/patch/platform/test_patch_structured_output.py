@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import vllm.v1.structured_output as structured_output
 from vllm.config.structured_outputs import StructuredOutputsConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output import StructuredOutputManager, backend_guidance, backend_xgrammar
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
@@ -93,7 +94,7 @@ def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
     assert getattr(config, patch_structured_output._BACKEND_ATTR) == "xgrammar"
 
     guidance_params = SamplingParams(structured_outputs=StructuredOutputsParams(json={"force_guidance": True}))
-    with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
+    with pytest.raises(VLLMValidationError, match="already using 'xgrammar'.*'guidance'"):
         validate_structured_outputs(guidance_params, config)
 
 
@@ -166,7 +167,7 @@ def test_manager_rejects_mixed_structured_output_backends(monkeypatch):
     )
 
     guidance_request = make_request("guidance")
-    with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
+    with pytest.raises(VLLMValidationError, match="already using 'xgrammar'.*'guidance'"):
         manager.grammar_init(guidance_request)
 
 
@@ -178,7 +179,7 @@ def test_manager_rejects_mixed_backend_after_subclassed_backend_is_initialized()
         manager.vllm_config.model_config.get_vocab_size(),
     )
 
-    with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
+    with pytest.raises(VLLMValidationError, match="already using 'xgrammar'.*'guidance'"):
         manager.grammar_init(make_request("guidance"))
 
 

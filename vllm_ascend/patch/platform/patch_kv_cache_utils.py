@@ -27,29 +27,27 @@ def _ascend_resolve_kv_cache_block_sizes(
     """Ascend-compatible resolve_kv_cache_block_sizes.
 
     vLLM PR #40860 added a restriction that hybrid KV cache groups with
-    multiple block sizes do not support context parallelism (dcp/pcp > 1).
+    multiple block sizes do not support DCP.
     This restriction is correct for CUDA but not for Ascend, which implements
     context parallelism for MLA and SWA-MLA layers independently.
 
     For multiple KV cache groups with CP, compute scheduler_block_size as
-    lcm(group_block_sizes) * dcp * pcp to maintain alignment, consistent
-    with the pre-PR-#40860 behavior of block_size * dcp * pcp.
+    lcm(group_block_sizes) * dcp to maintain alignment.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
-    pcp = vllm_config.parallel_config.prefill_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
-        bs = cache_config.block_size * dcp * pcp
+        bs = cache_config.block_size * dcp
         return bs, bs
 
-    if dcp != 1 or pcp != 1:
+    if dcp != 1:
         # Ascend supports CP with multiple KV cache groups; compute
         # scheduler_block_size using the LCM of all group block sizes
         # multiplied by the CP factors for proper alignment.
         group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
-        scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
+        scheduler_block_size = math.lcm(*group_block_sizes) * dcp
         if not cache_config.enable_prefix_caching:
             return scheduler_block_size, scheduler_block_size
         hash_block_size = math.gcd(*group_block_sizes)
@@ -68,17 +66,17 @@ def group_and_unify_kv_cache_specs(
     if not any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()):
         return None
 
-    ratio_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
+    logical_block_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     grouped_swa_mla_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     for name, spec in kv_cache_spec.items():
         if isinstance(spec, SlidingWindowMLASpec):
             grouped_swa_mla_specs[spec.block_size][name] = spec
         elif isinstance(spec, MLAAttentionSpec):
-            ratio_specs[spec.compress_ratio][name] = spec
+            logical_block_specs[spec.block_size][name] = spec
 
     mla_uniform_specs = []
-    for ratio in sorted(ratio_specs, key=lambda r: (r != 4, r)):
-        spec_dict = ratio_specs[ratio]
+    for block_size in sorted(logical_block_specs):
+        spec_dict = logical_block_specs[block_size]
         assert len(spec_dict) > 0
         mla_uniform_specs.append(UniformTypeKVCacheSpecs.from_specs(spec_dict))
     assert mla_uniform_specs is not None

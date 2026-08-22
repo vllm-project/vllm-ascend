@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import torch
 from transformers import DeepseekV2Config
@@ -52,6 +52,21 @@ class TestVllmAdaptor(unittest.TestCase):
         self.assertEqual(adaptor.expert_weight_key_per_layer[0], (QuantType.NONE, True))
         self.assertIs(adaptor.expert_param_per_layer[0][0][0], self.mock_layer.w13_weight_list[0])
         self.assertIs(adaptor.expert_param_per_layer[0][0][1], self.mock_layer.w2_weight_list[0])
+
+    @patch("torch.empty_like", return_value=torch.zeros(16, 32))
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_init_fp16_with_parameter_accessor(self, mock_get_config, mock_func):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 1
+        mock_get_config.return_value = mock_config
+        self.model.quant_config = None
+        self.mock_layer.get_eplb_parameter = MagicMock(side_effect=lambda name: getattr(self.mock_layer, name))
+
+        adaptor = VllmEplbAdaptor(self.model)
+
+        self.assertIs(adaptor.expert_param_per_layer[0][0][0], self.mock_layer.w13_weight_list[0])
+        self.assertIs(adaptor.expert_param_per_layer[0][0][1], self.mock_layer.w2_weight_list[0])
+        self.mock_layer.get_eplb_parameter.assert_has_calls([call("w13_weight_list"), call("w2_weight_list")])
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")

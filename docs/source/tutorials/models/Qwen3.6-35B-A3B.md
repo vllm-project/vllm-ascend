@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B Deployment Tutorial
+# Qwen3.6-35B-A3B
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
+Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
@@ -18,8 +18,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
-- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
+- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
+- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
 
 It is recommended to download the model weight to `/root/.cache/`.
 
@@ -27,7 +27,7 @@ It is recommended to download the model weight to `/root/.cache/`.
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` for Atlas inference products.
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` for Atlas 300I DUO.
 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
@@ -105,7 +105,7 @@ Refer to [using docker](../../installation.md#set-up-using-docker) for the compl
       -it $IMAGE bash
     ```
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     #### Standard container
 
@@ -150,17 +150,17 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 !!! note
 
-    For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
     ```bash
     pip uninstall -y triton-ascend triton
     ```
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas inference products. The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas 300I DUO. The W8A8 version needs `--quantization ascend`.
 
 === "Atlas A2 inference products / Atlas A3 inference products"
 
@@ -201,13 +201,22 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --gpu-memory-utilization 0.90 \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert": true}' \
-      --async-scheduling
+      --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
     ```
 
-=== "Atlas inference products"
+    **Key parameters:**
 
-    The following example follows the [hardware tutorial](../hardwares/310p.md#online-inference-on-npu) serving constraints for Atlas inference products and uses the same model variant as the Atlas A2 inference products / Atlas A3 inference products example. It uses port 8080 to match the Atlas inference products Docker port mapping in Section 4.1. Set `--dtype float16` and keep an explicit, conservative `--max-model-len`.
+    - `--data-parallel-size 1` and `--tensor-parallel-size 2` set DP and TP for the default single-node serving example.
+    - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
+    - `--max-model-len` is the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
+    - `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. For performance tests, set `--max-num-seqs * --data-parallel-size` greater than or equal to the test concurrency.
+    - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
+    - `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. A higher value increases KV cache size but can trigger OOM if runtime memory is higher than the profile run.
+    - `--enable-prefix-caching` enables prefix caching. For long-context serving, monitor memory usage because prefix caching can increase KV cache pressure.
+    - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
+    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
+
+=== "Atlas 300I DUO"
 
     ```shell
     export VLLM_USE_MODELSCOPE=True
@@ -221,28 +230,26 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --max-num-seqs 16 \
       --served-model-name qwen3.6 \
       --dtype float16 \
-      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+      --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
       --quantization ascend \
-      --max-model-len 16384 \
+      --max-model-len 20480 \
       --no-enable-prefix-caching
     ```
 
+    **Key parameters:**
+
+    - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
+    - `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
+    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
+    - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
+    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
+    - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
+    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
+
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
-
-**Key parameters:**
-
-- `--data-parallel-size 1` and `--tensor-parallel-size 2` set DP and TP for the default single-node serving example.
-- `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
-- `--max-model-len` is the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
-- `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. For performance tests, set `--max-num-seqs * --data-parallel-size` greater than or equal to the test concurrency.
-- `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
-- `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. A higher value increases KV cache size but can trigger OOM if runtime memory is higher than the profile run.
-- `--enable-prefix-caching` enables prefix caching. For long-context serving, monitor memory usage because prefix caching can increase KV cache pressure.
-- `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-- `--additional-config` enables Ascend-specific optimizations. `enable_flashcomm1` enables FlashComm1, `multistream_overlap_shared_expert` overlaps shared expert computation, and `enable_cpu_binding` enables Ascend-native CPU binding.
-- `--async-scheduling` enables asynchronous scheduling, which can improve high-concurrency throughput.
 
 ## 6 Functional Verification
 
@@ -268,6 +275,11 @@ Here are two accuracy evaluation methods.
 ### 7.1 Using AISBench
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details. After execution, you can get the accuracy result of `Qwen3.6-35B-A3B-w8a8`.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+| ------- | ------- | ------ | ---- | --------------------- |
+| mmmu | - | accuracy | gen | 83.3 |
+| gpqa | - | accuracy | gen | 83.3 |
 
 ### 7.2 Using Language Model Evaluation Harness
 
@@ -329,8 +341,8 @@ The following configurations are validated in specific test environments and are
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
-| Long context | Single node | 2 or more | 2 | 1 | 128 | 262144 | 16384 | On | FullGraph, FlashComm1, shared expert overlap, CPU binding |
-| High throughput | Single node | 8 or more | 2 | 4 or more | 32 per DP | 65536 | 8192 | On | FullGraph, FlashComm1, async scheduling, shared expert overlap |
+| Long context | Single node | 2 or more | 2 | 1 | 128 | 262144 | 16384 | On | FullGraph, sequence parallelism, shared expert overlap, CPU binding |
+| High throughput | Single node | 8 or more | 2 | 4 or more | 32 per DP | 65536 | 8192 | On | FullGraph, sequence parallelism, async scheduling, shared expert overlap |
 | Low latency | Single node | 2 or more | 2 | 1 | Tune by concurrency | 32768 or 65536 | 1024 to 4096 | Workload dependent | FullGraph, CPU binding, speculative decoding disabled |
 
 ### 9.2 Tuning Guidelines
@@ -344,7 +356,7 @@ Recommended tuning order:
 3. Tune `--max-num-batched-tokens`. Larger values usually improve prefill throughput but increase activation memory. Decode-heavy workloads usually need smaller values.
 4. Tune `--max-num-seqs` according to service concurrency. Requests above this value wait in the queue and the waiting time is counted in TTFT and TPOT.
 5. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation and expert imbalance.
-6. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With FlashComm1, use capture sizes that are multiples of TP size.
+6. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With sequence parallelism, use capture sizes that are multiples of TP size.
 
 ### 9.3 Model-Specific Optimizations
 
@@ -352,9 +364,7 @@ Recommended tuning order:
 | ------------ | ---------- | ------- | ----- |
 | Hybrid attention support | Enabled by model implementation | Supports Qwen3.6 long-context inference. | Tune context length based on KV cache capacity. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| FlashComm1 | `--additional-config '{"enable_flashcomm1": true}'` | Reduces communication overhead in TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
-| Asynchronous scheduling | `--async-scheduling` | Improves high-concurrency throughput by using non-blocking scheduling. | Disable it and compare if the workload is latency-sensitive. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads. |
 | Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Validate stability, TTFT, TPOT, and throughput for your workload. |
 
@@ -377,11 +387,3 @@ For common environment, installation, and general parameter issues, refer to [FA
 **Cause:** Prefix caching only helps when requests share reusable prefixes. For random prompts or low cache hit rates, it may add memory pressure without visible gains.
 
 **Solution:** Enable prefix caching for repeated-prefix workloads. For random benchmark datasets or memory-constrained long-context workloads, compare with `--no-enable-prefix-caching`.
-
-### Q3: How should I tune async scheduling for Qwen3.6?
-
-**Phenomenon:** Throughput improves in high-concurrency scenarios, but some latency-sensitive workloads may not benefit.
-
-**Cause:** Asynchronous scheduling reduces blocking overhead, but the benefit depends on concurrency, prompt/output length, and graph capture shape.
-
-**Solution:** Use `--async-scheduling` for high-throughput serving. For low-latency serving, compare TTFT and TPOT with and without this option.

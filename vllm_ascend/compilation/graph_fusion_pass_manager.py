@@ -61,19 +61,7 @@ class GraphFusionPassManager:
 
             self.passes.append(QKNormRopeFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
-            from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
-
-            self.passes.append(MatmulAllReduceAddRMSNormPass(config))
-
         if self.ascend_compilation_config.get("fuse_muls_add", True) and not is_310p():
             from .passes.muls_add_pass import MulsAddFusionPass
 
             self.passes.append(MulsAddFusionPass(config))
-
-        if config.compilation_config.pass_config.enable_sp:
-            from .passes.sequence_parallelism import SequenceParallelismPass
-            from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
-
-            self.passes.append(SequenceParallelismPass(config))
-            self.passes.append(SequenceParallelismMoePass(config))

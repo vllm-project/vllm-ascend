@@ -5,15 +5,12 @@
 test_cases:
   - name: "DeepSeek-V4-Flash-W8A8-A3"
     model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
-    special_dependencies:
-      transformers: "5.9.0"
     envs:
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       HCCL_BUFFSIZE: "1024"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       ASCEND_LAUNCH_BLOCKING: "0"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
@@ -76,5 +73,5 @@ test_cases:
         max_out_len: 1024
         batch_size: 16
         request_rate: 0
-        baseline: 1
+        baseline: 181.8813
         threshold: 0.97

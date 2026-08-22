@@ -28,7 +28,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
-    # For torch-npu dev version or x86 machine
+    # For TorchNPU dev version or x86 machine
     export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
     # src path
@@ -57,7 +57,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     python3 -m pip install -r requirements-dev.txt
     ```
 
-=== "Single card"
+=== "Single-card"
 
     ```bash
 
@@ -95,7 +95,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip install -r requirements-dev.txt
     ```
 
-=== "Multi cards"
+=== "Multi-cards"
 
     ```bash
     # Update the vllm-ascend image
@@ -237,9 +237,6 @@ You can run tests with `pytest` as well. Typical examples:
 
     ```bash
     cd /vllm-workspace/vllm-ascend/
-    # run all multi-card op tests on A2
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a2/
-
     # run all multi-card op tests on A3
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
     ```

@@ -8,12 +8,6 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, DSPARK, calculate_acceptance_per_pos
-from vllm_ascend.utils import vllm_version_is
-
-pytestmark = pytest.mark.skipif(
-    vllm_version_is("0.24.0"),
-    reason="The community has not yet incorporated the DSpark feature in vLLM v0.24.0",
-)
 
 
 @pytest.mark.parametrize("method", DSPARK.keys())
@@ -80,8 +74,4 @@ def test_dspark_acceptance(
     golden = BASELINES[method]
 
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

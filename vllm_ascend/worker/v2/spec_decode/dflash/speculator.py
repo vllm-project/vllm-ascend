@@ -22,14 +22,40 @@ logger = logging.getLogger(__name__)
 
 
 class AscendDFlashSpeculator(DFlashSpeculator):
+    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        with build_attn_metadata_wrapper():
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=self.input_batch.num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
+            )
+        self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        return [attn_metadata]
+
+    def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
+        """Rebuild ``actual_seq_lengths_q`` from the padded request count,
+        mirroring Eagle's ``_update_decode_attn_metadata``.
+
+        Upstream ``Speculator._build_draft_attn_metadata`` clamps
+        ``query_start_loc`` at the real ``num_reqs`` to keep the cumulative
+        series non-decreasing, so when a batch is padded to a capture size
+        (``num_reqs_padded > num_reqs``) the cumulative query lengths stop at
+        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
+        Ascend FIA operator requires, in TND layout, that the last element of
+        ``actual_seq_lengths_q`` equals the query token count of the graph
+        being replayed; otherwise tiling fails with
+        ``queryT != last element of actualSequenceLengthQ``.
+        """
+        query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
+        for metadata in attn_metadata.values():
+            metadata.actual_seq_lengths_q = query_lens_list
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
-
-        # we need to update full graph params in run_fullgraph,
-        # so create a stream to update full graph params.
-        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
-        if cudagraph_mode.has_full_cudagraphs():
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
@@ -37,14 +63,23 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         # created by super().init_cudagraph_manager without a speculator ref.
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
+        self.query_cudagraph_manager.update_stream = self.update_stream
 
     def set_attn(
         self,
         model_state: Any,
         kv_cache_config: Any,
         block_tables: Any,
+        target_input_buffers: Any,
+        target_attn_groups: Any,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         self._context_slot_mappings = torch.zeros(
             len(self.draft_kv_cache_group_ids),
             self.max_num_tokens,
@@ -67,19 +102,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
         self.attn_backends = attn_backends
 
-    # NOTE: upstream vLLM named this to _build_draft_attn_metadatas;
-    # keep the current name for now as upstream may change it again.
-    def build_draft_attn_metadatas(self, num_reqs_padded):
-        num_tokens_padded = num_reqs_padded * self.num_query_per_req
-        with build_attn_metadata_wrapper():
-            attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=num_reqs_padded,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
-                causal=self.dflash_causal,
-            )
-        return [attn_metadata]
-
     def propose(
         self,
         input_batch: InputBatch,
@@ -99,6 +121,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
+        self.input_batch = input_batch
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
@@ -120,6 +143,12 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             )
 
 
+# main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added four
+# ``temperature``/``seeds`` parameters and corresponding stores (see
+# vllm-project/vllm#50000). Ascend keeps its own kernel for NPU, matching
+# the upstream parameter layout.
+
+
 @triton.jit
 def _prepare_dflash_inputs_kernel_ascend(
     # Outputs
@@ -133,6 +162,8 @@ def _prepare_dflash_inputs_kernel_ascend(
     out_sample_indices_ptr,
     out_sample_pos_ptr,
     out_sample_idx_mapping_ptr,
+    out_temperature_ptr,
+    out_seeds_ptr,
     # Inputs from target batch
     target_positions_ptr,
     target_query_start_loc_ptr,
@@ -141,6 +172,9 @@ def _prepare_dflash_inputs_kernel_ascend(
     next_prefill_tokens_ptr,
     num_sampled_ptr,
     num_rejected_ptr,
+    # Sampling params
+    temperature_ptr,
+    seeds_ptr,
     # Block table for slot mapping lookup.
     block_table_ptr,
     block_table_stride,
@@ -228,6 +262,15 @@ def _prepare_dflash_inputs_kernel_ascend(
     # reads up to (context + query), not just the count of accepted
     # tokens this step.
     tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
+    # Copy sampling state (added upstream in vllm-project/vllm#50000).
+    tl.store(
+        out_temperature_ptr + req_state_idx,
+        tl.load(temperature_ptr + req_state_idx),
+    )
+    tl.store(
+        out_seeds_ptr + req_state_idx,
+        tl.load(seeds_ptr + req_state_idx),
+    )
 
     if req_idx == num_reqs - 1:
         # Pad per-request buffers to max_num_reqs for CUDA graph safety.

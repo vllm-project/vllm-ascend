@@ -320,7 +320,7 @@ python load_balance_proxy_server_example.py \
   --decoder-ports  \
     9000 9000 9000 9000 \
   --decoder-ports-inc \
-    16 16 16 16 \
+    16 16 16 16
 ```
 
 |Parameter  | meaning |
@@ -455,7 +455,7 @@ Add the following command to your configurations.
 
 ### Recommended Configuration Example
 
-For example, if the average input length is 3.5k, and the output length is 1.1k, the context length is 16k, the max length of the input dataset is 7K. In this scenario, we give a recommended configuration for distributed DP server with high EP. Here we use 4 nodes for prefill and 4 nodes for decode.
+For example, if the average input length is 3.5k, and the output length is 1.1k, the context length is 16k, the max length of the input dataset is 7k. In this scenario, we give a recommended configuration for distributed DP server with high EP. Here we use 4 nodes for prefill and 4 nodes for decode.
 
 | node     | DP | TP | EP | max-model-len | max-num-batched-tokens | max-num-seqs |  gpu-memory-utilization |
 |----------|----|----|----|---------------|------------------------|--------------|-----------|

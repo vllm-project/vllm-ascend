@@ -71,7 +71,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -95,7 +94,7 @@ templates:
       - --max-model-len
       - "65536"
       - --additional-config
-      - '{"multistream_overlap_shared_expert": true,"enable_dsa_cp": true}'
+      - '{"enable_dsa_cp": true}'
       - --max-num-batched-tokens
       - "4096"
       - --no-enable-prefix-caching
@@ -133,7 +132,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -157,7 +155,7 @@ templates:
       - --max-model-len
       - "65536"
       - --additional-config
-      - '{"multistream_overlap_shared_expert": true,"enable_dsa_cp": true}'
+      - '{"enable_dsa_cp": true}'
       - --max-num-batched-tokens
       - "4096"
       - --no-enable-prefix-caching
@@ -224,7 +222,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -288,7 +286,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"

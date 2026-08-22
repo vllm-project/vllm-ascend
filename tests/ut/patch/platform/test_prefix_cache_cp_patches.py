@@ -8,6 +8,7 @@ import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
@@ -20,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
@@ -28,6 +30,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
+    group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
@@ -63,7 +66,7 @@ def _make_hybrid_kv_cache_config(
 
 def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
     c4_spec = MLAAttentionSpec(
-        block_size=128,
+        block_size=128 * 4,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
@@ -71,7 +74,7 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         model_version="deepseek_v4",
     )
     c128_spec = MLAAttentionSpec(
-        block_size=128,
+        block_size=128 * 128,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
@@ -99,30 +102,28 @@ def _make_vllm_config(
     *,
     enable_prefix_caching: bool,
     dcp: int,
-    pcp: int,
     block_size: int = 16,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
+            prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
-            prefill_context_parallel_size=pcp,
         ),
+        kv_transfer_config=None,
     )
 
 
 def _make_coordinator_for_effective_block_size(
     *,
     dcp_world_size: int,
-    pcp_world_size: int,
     enable_caching: bool,
 ) -> AscendHybridKVCacheCoordinator:
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.dcp_world_size = dcp_world_size
-    coordinator.pcp_world_size = pcp_world_size
     coordinator.enable_caching = enable_caching
     return coordinator
 
@@ -130,8 +131,8 @@ def _make_coordinator_for_effective_block_size(
 @pytest.mark.parametrize(
     ("enable_prefix_caching", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2 * 2, id="cp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="cp-with-prefix-caching"),
+        pytest.param(False, math.lcm(16, 32) * 2, id="dcp-without-prefix-caching"),
+        pytest.param(True, math.gcd(16, 32), id="dcp-with-prefix-caching"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
@@ -142,7 +143,6 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     vllm_config = _make_vllm_config(
         enable_prefix_caching=enable_prefix_caching,
         dcp=2,
-        pcp=2,
     )
 
     scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
@@ -150,13 +150,70 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
         vllm_config,
     )
 
-    expected_scheduler_block_size = math.lcm(16, 32) * 2 * 2
+    expected_scheduler_block_size = math.lcm(16, 32) * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
 
 
+def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
+    c128_spec = MLAAttentionSpec(
+        block_size=128 * 128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=128,
+        model_version="deepseek_v4",
+    )
+    c4_spec = MLAAttentionSpec(
+        block_size=128 * 4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=512,
+    )
+
+    grouped_specs = group_and_unify_kv_cache_specs(
+        {
+            "c128": c128_spec,
+            "swa": swa_spec,
+            "c4": c4_spec,
+        }
+    )
+
+    assert grouped_specs is not None
+    assert [group.block_size for group in grouped_specs[:2]] == [512, 16384]
+    for group in grouped_specs[:2]:
+        spec = next(iter(group.kv_cache_specs.values()))
+        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+
+
+def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=1,
+        block_size=128,
+    )
+
+    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+        kv_cache_config,
+        vllm_config,
+    )
+
+    assert scheduler_block_size == 16384
+    assert hash_block_size == 512
+
+
 @pytest.mark.parametrize(
-    ("spec_factory", "dcp", "pcp", "enable_caching", "expected"),
+    ("spec_factory", "dcp", "enable_caching", "expected"),
     [
         pytest.param(
             lambda: FullAttentionSpec(
@@ -166,10 +223,9 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
                 dtype=torch.float16,
             ),
             2,
-            2,
             True,
-            64,
-            id="full-attention-scales-with-cp",
+            32,
+            id="full-attention-scales-with-dcp",
         ),
         pytest.param(
             lambda: MambaSpec(
@@ -178,7 +234,6 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
                 dtypes=(torch.float32,),
                 mamba_cache_mode="none",
             ),
-            2,
             2,
             True,
             16,
@@ -192,7 +247,6 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
                 dtype=torch.float16,
             ),
             1,
-            1,
             True,
             16,
             id="full-attention-no-cp",
@@ -202,13 +256,11 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
 def test_get_effective_block_size(
     spec_factory,
     dcp: int,
-    pcp: int,
     enable_caching: bool,
     expected: int,
 ) -> None:
     coordinator = _make_coordinator_for_effective_block_size(
         dcp_world_size=dcp,
-        pcp_world_size=pcp,
         enable_caching=enable_caching,
     )
 
@@ -267,7 +319,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
         enable_caching=False,
         enable_kv_cache_events=False,
         dcp_world_size=2,
-        pcp_world_size=2,
+        pcp_world_size=1,
         hash_block_size=16,
     )
 
@@ -329,7 +381,6 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.kv_cache_config = kv_cache_config
     coordinator.dcp_world_size = 1
-    coordinator.pcp_world_size = 1
     coordinator.enable_caching = True
     # The c128 group (index 1) carries the EAGLE/MTP layers.
     coordinator.eagle_group_ids = {1}
@@ -367,7 +418,6 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.kv_cache_config = kv_cache_config
     coordinator.dcp_world_size = 1
-    coordinator.pcp_world_size = 1
     coordinator.enable_caching = True
     # Only the MTP sibling (gid 2) is flagged, exactly as upstream does.
     coordinator.eagle_group_ids = {2}
@@ -419,7 +469,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         enable_caching=True,
         kv_cache_group_id=1,
         dcp_world_size=2,
-        pcp_world_size=2,
+        pcp_world_size=1,
     )
     manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
     manager = AscendMambaManager(**manager_kwargs)
@@ -455,7 +505,6 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         kv_cache_spec=spec,
         use_eagle=False,
         retention_interval=None,
-        num_prompt_tokens=None,
     )
 
     # Must produce a sparse mask, not None.

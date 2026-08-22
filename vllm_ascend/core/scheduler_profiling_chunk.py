@@ -22,6 +22,7 @@ method is refactored, this override should be updated accordingly.
 
 import inspect
 import time
+from typing import cast
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -494,9 +495,12 @@ class ProfilingChunkScheduler(Scheduler):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    computed_result = self.kv_cache_manager.get_computed_blocks(request)
+                    (
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                        request.shared_prefix_boundary,
+                    ) = cast(tuple[KVCacheBlocks, int, int], computed_result)
 
                     if self.connector is not None:
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(

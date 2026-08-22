@@ -115,8 +115,7 @@ Mooncake is pre-installed and functional in the {{vllm_ascend_version}} image.
 The following installation steps are optional.
 
 Mooncake is the serving platform for Kimi, a leading LLM service provided by
-Moonshot AI. Installation and compilation guide:
-<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
+Moonshot AI. Installation and compilation guide:[Installation and compilation guide](https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries).
 
 First, obtain the Mooncake project using the following command:
 
@@ -195,7 +194,7 @@ The template for the mooncake.json file is as follows:
 | metadata_server | P2PHANDSHAKE              | Point-to-point handshake mode  |
 | protocol              | ascend              | Ascend proprietary protocol    |
 | master_server_address | 90.90.100.188:50088(for example) | Master server address|
-| global_segment_size   | 107374182400    | Size per segment (100 GB)      |
+| global_segment_size   | 107374182400    | Size per segment (100GB)      |
 
 ## vLLM Instance Deployment
 
@@ -214,9 +213,8 @@ configuration.
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/\
 latest/python/site-packages:$LD_LIBRARY_PATH
 export MOONCAKE_CONFIG_PATH="/vllm-workspace/mooncake.json"
-# NPU buffer pool: quantity:size(MB)
-# Allocates 4 buffers of 8MB each for KV transfer
-export ASCEND_BUFFER_POOL=4:8
+# Enable RoCE path for A2 series
+export HCCL_INTRA_ROCE_ENABLE=1
 
 vllm serve <path_to_your_model>/Qwen2.5-72B-Instruct/ \
 --served-model-name qwen \

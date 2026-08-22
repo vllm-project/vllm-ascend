@@ -32,7 +32,12 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         decode_query_len: int,
         speculator: Any = None,
     ):
-        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+        )
 
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
         # because upstream's init_cudagraph_manager creates the manager without it.
@@ -57,7 +62,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        causal: bool | Mapping[int, bool],
+        causal: bool | Mapping[int, bool] = False,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
@@ -77,11 +82,12 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
 
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs)
-
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+            desc.num_reqs,
+            self.speculator.input_batch.seq_lens_cpu_upper_bound,
+        )
+        self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
-
-        positions = self.speculator.input_buffers.positions[:num_tokens]
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
@@ -106,12 +112,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],
-                self.speculator.update_stream,
+                self.update_stream,
                 forward_context,
                 num_tokens,
                 self.vllm_config,
                 self.speculator.speculative_config,
-                positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret

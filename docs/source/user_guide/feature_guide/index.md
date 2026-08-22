@@ -19,8 +19,9 @@ dynamic_batch
 epd_disaggregation
 kv_pool
 layerwise_kv_pool
+layerwise_and_sparse_kv_cache_offloading
 kv_cache_cpu_offload
-external_dp
+dyntra_lb
 large_scale_ep
 ucm_deployment
 Fine_grained_TP
