@@ -20,12 +20,9 @@ What is guarded here (everything reachable from CPU UT):
 * the module-level class swaps actually took effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
-* the 5 platform deltas remain present in ``schedule()`` (intent lock);
-* the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
-  at vllm-ascend's pinned vLLM release tag (read from
-  ``.github/vllm-release-tag.commit`` -- the same file CI uses), modulo exactly
-  those 5 deltas. Reading the tag from the pin file means a pin advance
-  auto-flips this guard to the new tag until the copy is re-synced.
+* the 2 balance deltas remain present in ``schedule()`` (intent lock);
+* the copied ``schedule()`` body stays a verbatim copy of the target vLLM
+  commit's ``schedule()``, modulo exactly those 2 deltas.
 
 What is NOT guarded here (structurally unreachable without a real engine):
 
@@ -255,18 +252,11 @@ def _schedule_body_ast(source: str) -> str:
     comments and whitespace, so the only differences that surface are real code
     drift (not the escape-quoting of a comment or reformatting).
 
-    The 5 deltas removed:
+    The 2 deltas removed:
       * delta 1 -- the disabled-path early return (``if not
         self._balance_enabled: ... super().schedule(...)``);
       * delta 2 -- the ``balance_flag`` gate (``max(t.item() for t in
         self.balance_queue) == self.max_num_running_reqs``);
-      * delta 3 -- the ``request_queue is None`` check, which exists in our
-        copy as ``if request_queue is None: break`` and in upstream as
-        ``assert request_queue is not None``. Both are stripped so the two
-        bodies align.
-      * delta 4 -- the consumer-only partial-group cache lookup gate.
-      * delta 5 -- the #48245/#50297 stale-output admission gate and
-        reliable-delivery preemption flag.
     """
     tree = ast.parse(textwrap.dedent(source))
     func = next(
@@ -294,19 +284,6 @@ def _schedule_body_ast(source: str) -> str:
                 return None
             # delta 2: the balance admission gate inside the WAITING loop.
             if "balance_queue" in test and "max_num_running_reqs" in test:
-                return None
-            # delta 3 (ours): if request_queue is None: break.
-            if "request_queue" in test and "None" in test and "Is" in test:
-                return None
-            # delta 5: wait for deliverable stale output before resuming.
-            if "num_stale_output_tokens" in test and "drop_stale_output" in test:
-                return None
-            return self.generic_visit(node)
-
-        def visit_Assert(self, node: ast.Assert):  # noqa: N802
-            test = ast.dump(node.test)
-            # delta 3 (upstream): assert request_queue is not None.
-            if "request_queue" in test and "None" in test and "IsNot" in test:
                 return None
             return self.generic_visit(node)
 
@@ -395,15 +372,7 @@ def test_balance_deltas_present_in_schedule():
     assert "max(t.item() for t in self.balance_queue)" in src
     assert "self.max_num_running_reqs" in src
 
-    # delta 3: `if request_queue is None: break` replaces upstream's assert.
-    assert "if request_queue is None:" in src
-
-    # delta 4: producer schedulers never use the consumer-only per-group lookup.
-    assert "self._use_consumer_partial_group_hits" in src
-
-    # delta 5: stale output is drained or dropped according to connector need.
-    assert "request.num_stale_output_tokens" in src
-    assert "drop_stale_output=self.requires_kv_delivery" in src
+    assert "assert request_queue is not None" in src
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +383,7 @@ def test_balance_deltas_present_in_schedule():
 def test_schedule_body_matches_pinned_release_tag():
     """The copied ``schedule()`` body must stay a verbatim copy of the
     ``schedule()`` at vllm-ascend's pinned vLLM release tag, modulo exactly the
-    5 platform deltas.
+    2 balance deltas.
 
     The tag is read dynamically from ``.github/vllm-release-tag.commit`` -- the
     same file CI uses to pick the tag, NOT a hardcoded string or a design doc
@@ -437,10 +406,9 @@ def test_schedule_body_matches_pinned_release_tag():
     theirs = _schedule_body_ast(pinned_src)
     assert ours == theirs, (
         f"BalanceScheduler.schedule body drifted from the pinned release tag "
-        f"({tag}) beyond the 5 platform deltas. Re-sync the copy against "
+        f"({tag}) beyond the 2 balance deltas. Re-sync the copy against "
         f"{tag} and re-apply only: (1) disabled-path early return, "
-        f"(2) balance_flag gate, (3) if request_queue is None: break, "
-        f"(4) producer partial-group lookup gate, (5) stale-output handling."
+        f"(2) balance_flag gate."
     )
 
 
