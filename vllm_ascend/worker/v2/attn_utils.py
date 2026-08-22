@@ -220,6 +220,9 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        # Upstream model states (e.g. MambaHybrid) pass is_prefilling per
+        # request through the extra kwargs; merge instead of passing it twice.
+        common_attn_metadata_extra_kwargs.setdefault("is_prefilling", is_prefilling)
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -235,7 +238,6 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
-            is_prefilling=is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,
