@@ -122,10 +122,15 @@ class MooncakePullRecvingThread(threading.Thread):
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
         self.remote_metadata: SizedDict[str, MooncakeTransferMetadataGroups] = SizedDict()
-        # Candidate producer TP ranks, cached independently for each engine:
-        # engine_id -> remote_pp_rank -> (local_layer_index, remote_layer_index) -> candidate_groups
+        # Candidate producer TP ranks cached independently for each engine:
+        # engine_id -> remote_pp_rank -> (local_layer_index, remote_layer_index)
+        # -> candidate_groups. Each outer candidate group represents one
+        # remote head/TP piece required by this local worker. With remote DCP=1,
+        # ranks inside a group are interchangeable replicas and one is selected;
+        # with remote DCP>1, they are the DCP shards that jointly provide it.
         self.remote_tp_rank_groups: SizedDict[str, dict[int, dict[tuple[int, int], list[list[int]]]]] = SizedDict()
-        # engine_id -> remote_pp_rank -> [[local_layer_index, remote_layer_index], ...]
+        # engine_id -> remote_pp_rank
+        # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
         self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
@@ -214,12 +219,19 @@ class MooncakePullRecvingThread(threading.Thread):
         dict[int, dict[tuple[int, int], list[list[int]]]],
         dict[int, list[tuple[int, int]]],
     ]:
-        """Build per-PP layer candidates and matching layer index pairs."""
+        """Build per-PP layer matches and producer TP candidates.
+
+        Candidate groups use the same layout as ``remote_tp_rank_groups``:
+        one outer entry per required remote head/TP piece and one inner list of
+        replica candidates (DCP=1) or participating DCP shards (DCP>1).
+        """
         if remote_metadata.use_kv_pp and (self.dcp_size != 1 or remote_metadata.dcp_size != 1):
             raise ValueError("Mooncake KV parallel cannot be combined with DCP")
         groups_by_pp_rank: dict[int, dict[tuple[int, int], list[list[int]]]] = {}
         layer_pairs_by_pp_rank: dict[int, list[tuple[int, int]]] = {}
         matched_local_layer_indices: set[int] = set()
+        # local_spec_index -> topology-derived candidate groups before the
+        # per-layer KVPP owner filter. Layers sharing one spec reuse this value.
         raw_tp_rank_groups_by_spec: dict[int, list[list[int]]] = {}
 
         for remote_pp_rank, pp_metadata in sorted(remote_metadata.metadata_by_pp_rank.items()):
@@ -228,11 +240,12 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_layer_index_by_name = {
                 layer_name: layer_index for layer_index, layer_name in enumerate(pp_metadata.layer_names)
             }
+            # remote_layer_index -> TP ranks that physically own this layer.
             owner_tp_ranks_by_layer_index: list[set[int]] = [set() for _ in pp_metadata.layer_names]
             if remote_metadata.use_kv_pp:
                 for remote_tp_rank, tp_metadata in pp_metadata.metadata_by_tp_rank.items():
-                    for remote_layer_index in tp_metadata.layer_indices:
-                        owner_tp_ranks_by_layer_index[remote_layer_index].add(remote_tp_rank)
+                    for owned_remote_layer_index in tp_metadata.layer_indices:
+                        owner_tp_ranks_by_layer_index[owned_remote_layer_index].add(remote_tp_rank)
 
             for local_layer_index, layer_name in enumerate(self.layer_names):
                 remote_layer_index = remote_layer_index_by_name.get(layer_name)
@@ -389,7 +402,12 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_dcp_size: int,
         total_num_kv_heads: int,
     ) -> list[list[int]]:
-        """Build remote TP groups from an already inferred head topology."""
+        """Build remote TP groups from an already inferred head topology.
+
+        Each result entry covers one intersection between this local rank's
+        head interval and a remote head shard. Its rank list contains either
+        interchangeable replicas or all DCP ranks for that remote head shard.
+        """
         local_head_tp_size = self.tp_size // local_dcp_size
         remote_head_tp_size = remote_tp_size // remote_dcp_size
         local_head_tp_rank = self.tp_rank // local_dcp_size
@@ -441,6 +459,13 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
         tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
         layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
+        # Cache block mappings for this producer-engine batch:
+        # request_id -> (local_spec_index, normalized_remote_tp_rank_groups) ->
+        # [(selected_remote_tp_rank, local_kernel_block_ids,
+        #   remote_kernel_block_ids), ...].
+        # Layers with the same spec and candidate topology share their block
+        # mapping across PP ranks. Candidate groups are part of the key because
+        # KVPP layers using the same spec can have different owner TP ranks.
         transfer_block_ids_by_spec: dict[
             str,
             dict[
@@ -448,6 +473,8 @@ class MooncakePullRecvingThread(threading.Thread):
                 list[tuple[int, list[int], list[int]]],
             ],
         ] = {}
+        # future -> (remote_pp_rank, remote_tp_rank, affected_request_ids).
+        # A failed TP task marks only the requests represented in that bucket.
         future_to_task: dict[Future[None], tuple[int, int, set[str]]] = {}
         submission_error: Exception | None = None
         try:
@@ -532,6 +559,8 @@ class MooncakePullRecvingThread(threading.Thread):
                 dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
             ],
         ] = {}
+        # remote_tp_rank -> requests with at least one transfer entry in its
+        # bucket; used to attribute a failed TP task to affected requests only.
         request_ids_by_remote_tp_rank: dict[int, set[str]] = {}
         for selection_index, (request_id, request_metadata) in enumerate(requests.items()):
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
@@ -687,6 +716,9 @@ class MooncakePullRecvingThread(threading.Thread):
                             )
                         remote_tp_ranks = candidate_tp_ranks
 
+                    # remote_tp_rank -> (local_kernel_block_ids,
+                    #                    remote_kernel_block_ids).
+                    # DCP remapping can split one logical request across ranks.
                     block_ids_by_remote_tp_rank: dict[int, tuple[list[int], list[int]]] = {}
                     if local_block_size != remote_block_size:
                         for local_kernel_block_id, virtual_kernel_block_idx in local_virtual_kernel_blocks:
@@ -1131,7 +1163,11 @@ class MooncakePullRecvingThread(threading.Thread):
             dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
         ],
     ) -> None:
-        """Calculate addresses and execute one remote PP/TP transfer bucket."""
+        """Calculate addresses and execute one remote PP/TP transfer bucket.
+
+        ``transfer_entries_by_spec`` maps local spec index to layer-index pairs,
+        then to ``(request_id, local_block_ids, remote_block_ids)`` records.
+        """
         src_list: list[int] = []
         dst_list: list[int] = []
         length_list: list[int] = []

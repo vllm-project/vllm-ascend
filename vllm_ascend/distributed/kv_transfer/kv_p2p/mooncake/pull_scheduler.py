@@ -109,6 +109,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         padded to the PP-union layer order, while ``layer_indices`` records the
         entries physically owned by each TP rank.
         """
+        # pp_rank -> tp_rank -> worker handshake metadata.
         workers_by_pp_rank: dict[int, dict[int, MooncakeTransferMetadata]] = {}
         for metadata_key, rank_metadata in metadata.items():
             if isinstance(metadata_key, int):
@@ -168,7 +169,12 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                         f"TP {tp_rank} mismatch in {mismatched_fields}"
                     )
 
+            # layer_name -> (first owning worker metadata, its local layer index).
+            # The source supplies PP-shared fields after all duplicate owners
+            # have been checked against the corresponding structural signature.
             layer_source_by_name: dict[str, tuple[MooncakeTransferMetadata, int]] = {}
+            # layer_name -> (group index, block size, strides, lengths, shapes,
+            #                block-size scales).
             layer_signature_by_name: dict[str, tuple[object, ...]] = {}
             tp_layer_names: list[set[str]] = []
             for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
@@ -236,6 +242,8 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata] = {}
             for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
                 layer_indices = sorted(layer_index_by_name[layer_name] for layer_name in worker_metadata.layer_names)
+                # PP-union layer index -> this TP's per-cache-tensor addresses;
+                # layers not owned by this TP retain an empty address list.
                 aligned_base_addrs: list[list[int]] = [[] for _ in layer_names]
                 for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
                     layer_index = layer_index_by_name[layer_name]
