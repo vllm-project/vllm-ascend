@@ -362,8 +362,9 @@ _PERF_METRIC_RENAME: dict[str, str] = {
 
 def _extract_dtype(config: SingleNodeConfig) -> str:
     """Determine weight dtype: w8a8 if model name contains 'w8a8' and --quantization ascend is set, else bf16."""
+    server_cmd: list[str] = config.server_cmd
     has_w8a8 = "w8a8" in config.model.lower()
-    has_quant_ascend = _extract_server_cmd_value(config.server_cmd, "--quantization") == "ascend"
+    has_quant_ascend = _extract_server_cmd_value(server_cmd, "--quantization") == "ascend"
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
 
 
