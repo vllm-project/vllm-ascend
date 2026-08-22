@@ -61,6 +61,11 @@ class GraphFusionPassManager:
 
             self.passes.append(QKNormRopeFusionPass(config))
 
+        if self.ascend_compilation_config.get("fuse_swiglu_dynamic_mx_quant", True):
+            from .passes.swiglu_dynamic_mx_quant_fusion_pass import SwiGluDynamicMXQuantFusionPass
+
+            self.passes.append(SwiGluDynamicMXQuantFusionPass(config))
+
         if self.ascend_compilation_config.get("fuse_muls_add", True) and not is_310p():
             from .passes.muls_add_pass import MulsAddFusionPass
 
