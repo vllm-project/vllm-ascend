@@ -23,4 +23,10 @@ build_bisect_extra_args() {
   BISECT_EXTRA_ARGS+=(--native-check since-build)
   [ -n "${BISECT_CONFIG_BASE_PATH:-}" ] &&
     BISECT_EXTRA_ARGS+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
+
+  # Always return 0: the last conditional above returns 1 when its env var is
+  # unset (the common case), which would become this function's exit status and
+  # trip ``set -e`` at the caller (aop_process.sh), aborting the bisect before
+  # it ever launches. This helper has no failure mode -- it only appends args.
+  return 0
 }
