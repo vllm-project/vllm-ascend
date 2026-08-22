@@ -29,6 +29,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp4_linear_available,
+    ensure_mxfp4_moe_available,
 )
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -103,6 +104,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W4A8MXFP
 
     def __init__(self, *, use_weight_packed: bool = False):
+        ensure_mxfp4_moe_available("W4A8_MXFP4 MoE quantization")
         self.use_weight_packed = use_weight_packed
         self.ep_group = get_ep_group()
 
