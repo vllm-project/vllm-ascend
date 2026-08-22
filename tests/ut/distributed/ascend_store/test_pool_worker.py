@@ -606,6 +606,108 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
         event.return_value.wait.assert_called()
 
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
+        autospec=True,
+    )
+    def test_starts_configured_receiver_pool_with_shared_queue(self, start_thread):
+        start_thread.side_effect = lambda thread: thread.ready_event.set()
+        env_path = (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.envs.VLLM_MOONCAKE_LOAD_RECV_THREADS"
+        )
+        with patch(env_path, 3):
+            worker = self._make_worker(kv_role="kv_consumer")
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+
+        worker._start_kv_transfer_threads()
+
+        self.assertEqual(len(worker.kv_recv_threads), 3)
+        self.assertIs(worker.kv_recv_thread, worker.kv_recv_threads[0])
+        shared_queue = worker.kv_recv_threads[0].request_queue
+        self.assertTrue(all(thread.request_queue is shared_queue for thread in worker.kv_recv_threads))
+        self.assertEqual(start_thread.call_count, 3)
+
+    def test_receiver_pool_parallelizes_synchronous_request_batch(self):
+        env_path = (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.envs.VLLM_MOONCAKE_LOAD_RECV_THREADS"
+        )
+        with patch(env_path, 2):
+            worker = self._make_worker(kv_role="kv_consumer")
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+        rendezvous = threading.Barrier(2)
+        receiver_names = []
+
+        def concurrent_get(keys, _addrs, _sizes):
+            receiver_names.append(threading.current_thread().name)
+            rendezvous.wait(timeout=5)
+            return [0] * len(keys)
+
+        worker.m_store.get.side_effect = concurrent_get
+        worker._start_kv_transfer_threads()
+        metadata = AscendConnectorMetadata(set())
+        for index in range(2):
+            metadata.add_request(
+                ReqMeta(
+                    req_id=f"r{index}",
+                    token_len_chunk=16,
+                    block_ids=[index],
+                    block_hashes=[f"h{index}"],
+                    load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+                )
+            )
+
+        worker.start_load_kv(metadata)
+
+        self.assertEqual(len(set(receiver_names)), 2)
+        self.assertEqual(worker.m_store.set_device.call_count, 2)
+        self.assertTrue(all(thread.is_alive() for thread in worker.kv_recv_threads))
+
+    def test_synchronous_receiver_pool_propagates_load_exception(self):
+        env_path = (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.envs.VLLM_MOONCAKE_LOAD_RECV_THREADS"
+        )
+        with patch(env_path, 2):
+            worker = self._make_worker(kv_role="kv_consumer")
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+        worker.m_store.get.side_effect = RuntimeError("get failed")
+        worker._start_kv_transfer_threads()
+        metadata = AscendConnectorMetadata(set())
+        metadata.add_request(
+            ReqMeta(
+                req_id="r1",
+                token_len_chunk=16,
+                block_ids=[0],
+                block_hashes=["h0"],
+                load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "get failed"):
+            worker.start_load_kv(metadata)
+
+        self.assertTrue(all(thread.is_alive() for thread in worker.kv_recv_threads))
+
+    def test_layerwise_ignores_receiver_pool_setting(self):
+        env_path = (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.envs.VLLM_MOONCAKE_LOAD_RECV_THREADS"
+        )
+        with patch(env_path, 4):
+            worker = self._make_worker(kv_role="kv_consumer", use_layerwise=True)
+
+        self.assertEqual(worker.num_load_recv_threads, 1)
+
+    def test_non_mooncake_backend_ignores_receiver_pool_setting(self):
+        env_path = (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.envs.VLLM_MOONCAKE_LOAD_RECV_THREADS"
+        )
+        with patch(env_path, 4):
+            worker = self._make_worker(
+                kv_role="kv_consumer",
+                extra_config={"backend": "memcache"},
+            )
+
+        self.assertEqual(worker.num_load_recv_threads, 1)
+
     def test_register_kv_caches_initializes_layerwise_memcache(self):
         worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
         fake_cache = MagicMock()
@@ -907,6 +1009,26 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker.get_finished(set(), meta)
         recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
 
+    def test_get_finished_merges_receiver_pool_results(self):
+        worker = self._make_worker(kv_role="kv_consumer")
+        first = MagicMock()
+        second = MagicMock()
+        first.get_and_clear_finished_requests.return_value = {"r1"}
+        second.get_and_clear_finished_requests.return_value = {"r2"}
+        worker.kv_recv_threads = [first, second]
+        worker.kv_recv_thread = first
+        loading_req_ids = {"r1", "r2"}
+        meta = AscendConnectorMetadata({"preempted"}, loading_req_ids=loading_req_ids)
+
+        done_sending, done_recving = worker.get_finished(set(), meta)
+
+        self.assertEqual(done_sending, set())
+        self.assertEqual(done_recving, loading_req_ids)
+        for recv_thread in (first, second):
+            recv_thread.raise_if_failed.assert_called_once()
+            recv_thread.discard_finished_requests.assert_called_once_with({"preempted"})
+            recv_thread.get_and_clear_finished_requests.assert_called_once_with(loading_req_ids)
+
     def test_get_finished_layerwise_send_thread(self):
         worker = self._make_worker(kv_role="kv_producer")
         worker.use_layerwise = True
@@ -934,6 +1056,7 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
     def test_start_load_kv_async(self):
         worker = self._make_worker()
         recv_thread = MagicMock()
+        worker.kv_recv_threads = [recv_thread]
         worker.kv_recv_thread = recv_thread
 
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
@@ -951,6 +1074,7 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
 
         recv_thread.reset_mock()
         worker = self._make_worker()
+        worker.kv_recv_threads = [recv_thread]
         worker.kv_recv_thread = recv_thread
         worker.start_load_kv(AscendConnectorMetadata(set()))
         recv_thread.add_request.assert_not_called()
