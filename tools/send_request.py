@@ -1,5 +1,5 @@
 import string
-from typing import Any, Optional
+from typing import Any
 
 import requests
 
@@ -109,7 +109,7 @@ def send_v1_completions(
 
 
 def send_v1_chat_completions(
-    prompt, model, server, request_args=None, expected: Optional[dict] = None, max_model_len: Optional[int] = None
+    prompt, model, server, request_args=None, expected: dict | None = None, max_model_len: int | None = None
 ):
     data: dict[str, Any] = {
         "model": model,
