@@ -136,6 +136,25 @@ class DCPImplMixin:
         )
 
 
+def _mask_empty_kv_shards(
+    attn_output: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    local_kv_seq_lens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Turn empty local KV shards into the online-softmax identity."""
+    local_kv_seq_lens = local_kv_seq_lens[: attn_output.shape[0]]
+    if local_kv_seq_lens.numel() != attn_output.shape[0]:
+        raise ValueError(
+            "local KV sequence lengths must match attention rows: "
+            f"{local_kv_seq_lens.numel()} != {attn_output.shape[0]}"
+        )
+    valid = local_kv_seq_lens.reshape((-1,) + (1,) * (attn_output.ndim - 1)) > 0
+    return (
+        torch.where(valid, attn_output, torch.zeros_like(attn_output)),
+        torch.where(valid, softmax_lse, torch.full_like(softmax_lse, float("-inf"))),
+    )
+
+
 def _process_attn_out_lse(
     attn_output: torch.Tensor,
     softmax_lse: torch.Tensor,
@@ -229,5 +248,9 @@ def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> torch
         lse_final: shape = [batch_size, num_heads, 1]
     """
     lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
-    out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list, dim=0)
+    all_empty = torch.isneginf(lse_final)
+    safe_lse_final = torch.where(all_empty, torch.zeros_like(lse_final), lse_final)
+    weights = torch.exp(lse_list - safe_lse_final)
+    weights = torch.where(all_empty, torch.zeros_like(weights), weights)
+    out_final = torch.sum(weights * out_list, dim=0)
     return out_final, lse_final

@@ -23,6 +23,11 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
+    _mask_empty_kv_shards,
+)
+from vllm_ascend.attention.context_parallel.fia_mla_heads import (
+    pad_fia_mla_query_heads,
+    trim_fia_mla_query_heads,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
@@ -51,6 +56,7 @@ class AscendMLADCPDecodeMetadata(AscendMLADecodeMetadata):
     """MLA decode metadata fields used only by DCP."""
 
     cp_seq_len: torch.Tensor = None
+    cp_seq_len_tensor: torch.Tensor = None
     dcp_mtp_attn_mask: torch.Tensor = None
 
 
@@ -77,6 +83,11 @@ class AscendMlaDCPMetadataBuilder(
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
             self.block_size,
             self.cp_virtual_block_size,
+        )
+        self.cp_seq_len_tensor = torch.zeros(
+            vllm_config.scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
         )
 
     def build_chunked_metadata(
@@ -148,12 +159,19 @@ class AscendMlaDCPMetadataBuilder(
         assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
         dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
         if dcp_metadata.draft_cp_seq_len is not None:
-            decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+            cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+            decode_metadata.cp_seq_len = cp_seq_len
         else:
-            decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
+            cp_seq_len = self._get_dcp_rank_context_lens(
                 common_attn_metadata,
                 end=self.num_decodes,
-            ).tolist()
+            )
+            decode_metadata.cp_seq_len = cp_seq_len.tolist()
+        mask_num_rows = max(self.num_decodes, self.graph_pad_size)
+        cp_seq_len_tensor = self.cp_seq_len_tensor[:mask_num_rows]
+        cp_seq_len_tensor.zero_()
+        cp_seq_len_tensor[: self.num_decodes].copy_(cp_seq_len, non_blocking=True)
+        decode_metadata.cp_seq_len_tensor = cp_seq_len_tensor
         decode_metadata.actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
         decode_metadata.dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask
         return decode_metadata
@@ -339,6 +357,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             sparse_mode = 0
             spec_attn_mask = None
 
+        original_num_heads = num_heads
+        q_nope, q_pe, num_heads = pad_fia_mla_query_heads(q_nope, q_pe, input_layout, num_heads)
+
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
@@ -422,6 +443,18 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 k_nope,
                 k_nope,
                 **common_kwargs,
+            )
+        attn_output, softmax_lse = _mask_empty_kv_shards(
+            attn_output,
+            softmax_lse,
+            decode_meta.cp_seq_len_tensor,
+        )
+        if num_heads != original_num_heads:
+            attn_output, softmax_lse = trim_fia_mla_query_heads(
+                attn_output,
+                softmax_lse,
+                input_layout,
+                original_num_heads,
             )
         if input_layout == "BSND":
             attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
