@@ -317,7 +317,7 @@
   tests:
     - tests/ut/models/minimax_m3
     - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
-    - tests/e2e/pull_request/eight_card/test_minimax_m3.py
+    - tests/e2e/pull_request/four_card/test_minimax_m3.py
 
 # Ops
 - name: ops_basic
@@ -876,7 +876,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py: 1800
   tests/e2e/pull_request/four_card/test_qwen3_32b_bf16_ll_performance.py: 1200
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
-  tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
+  tests/e2e/pull_request/four_card/test_minimax_m3.py: 630
   tests/ut/attention/a2/test_attention_cp.py: 30
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
