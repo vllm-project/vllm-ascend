@@ -311,55 +311,159 @@ def test_rocm_named_upstream_hook_delegates_to_ascend_implementation():
     assert captured == tensors
 
 
-def test_qwen35_decode_forward_keeps_runtime_dispatch_behind_custom_op(
+@pytest.mark.parametrize(
+    (
+        "gqa_interleaved_layout",
+        "request_kind",
+        "expected_fused_calls",
+        "expected_stock_core_calls",
+        "expected_norm_calls",
+    ),
+    [
+        # A compatible packed-layout decode must use the fused kernel.
+        pytest.param(False, "decode", 1, 0, 0, id="packed-layout-decode"),
+        # Prefill passes the static layout gate but must fall back at runtime.
+        pytest.param(False, "prefill", 0, 1, 1, id="packed-layout-prefill"),
+        # An incompatible projection layout must stay on the stock path.
+        pytest.param(True, "decode", 0, 1, 1, id="interleaved-layout-decode"),
+    ],
+)
+def test_qwen35_fused_dispatch_requires_packed_layout_and_decode(
     monkeypatch: pytest.MonkeyPatch,
+    gqa_interleaved_layout: bool,
+    request_kind: str,
+    expected_fused_calls: int,
+    expected_stock_core_calls: int,
+    expected_norm_calls: int,
 ):
-    """A metadata-free compile/profile pass must still trace the custom op."""
-    calls = []
-
-    def fake_attention_core(qkvz, ba, z_scratch, output, **kwargs):
-        calls.append((qkvz, ba, z_scratch, kwargs))
-        output.fill_(2)
-
-    monkeypatch.setattr(
-        torch.ops.vllm,
-        "qwen_gdn_attention_core",
-        fake_attention_core,
+    """Only a compatible packed-layout decode may invoke the fused kernel."""
+    is_prefill = request_kind == "prefill"
+    query_len = 4 if is_prefill else 1
+    seq_len = query_len if is_prefill else 5
+    _, _, layer_metadata = _build_attn_metadata(
+        BatchSpec(
+            seq_lens=[seq_len],
+            query_lens=[query_len],
+            name=f"qwen35_{request_kind}_layout_{gqa_interleaved_layout}",
+        ),
+        num_speculative_tokens=0,
+        num_decode_draft_tokens_cpu=None,
     )
+    assert layer_metadata.num_prefills == int(is_prefill)
+    assert layer_metadata.num_decodes == int(not is_prefill)
+    monkeypatch.setattr(
+        gdn_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer0": layer_metadata}),
+    )
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE", "1")
     monkeypatch.setattr(
         gdn_module,
         "maybe_save_kv_layer_to_connector",
         lambda *args, **kwargs: None,
     )
 
+    # Count calls at the fused and stock boundaries to verify dispatch only;
+    # the underlying NPU kernel numerics are covered by operator tests.
+    calls = {"custom_op_modes": [], "fused": 0, "stock_core": 0, "norm": 0}
+    num_tokens = layer_metadata.num_actual_tokens
+    projected_qkvz = torch.zeros((num_tokens, 12288), dtype=torch.bfloat16)
+    projected_qkvz[:, 8192:] = 2
+    projected_ba = torch.zeros((num_tokens, 64), dtype=torch.bfloat16)
+    mixed_qkv = projected_qkvz[:, :8192]
+    z = projected_qkvz[:, 8192:].reshape(num_tokens, 32, 128)
+    b, a = projected_ba.chunk(2, dim=-1)
+
+    class RecordingNorm:
+        def __init__(self):
+            self.weight = torch.empty(0)
+            self.eps = 1e-6
+
+        def __call__(self, core_attn_out, gate):
+            calls["norm"] += 1
+            return core_attn_out + gate
+
+    def fake_fused_decode(**kwargs):
+        calls["fused"] += 1
+        return torch.full(
+            (kwargs["projected_qkvz"].shape[0], kwargs["num_v_heads"], kwargs["head_dim"]),
+            6,
+            dtype=torch.bfloat16,
+        )
+
+    def record_stock_core(_mixed_qkv, _b, _a, core_attn_out):
+        # This is a routing spy; stock-kernel numerics are covered separately.
+        calls["stock_core"] += 1
+        core_attn_out.fill_(3)
+
+    def supports_packed_dispatch(hidden_states):
+        return AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(attention, hidden_states)
+
+    def try_fused_decode(qkvz, ba):
+        return AscendGatedDeltaNetAttention._try_qwen35_decode_tile(attention, qkvz, ba)
+
+    def fake_attention_core(*args, **kwargs):
+        # Mirror the upstream custom-op callback selection on CPU.
+        use_packed_callback = kwargs.get("use_aiter", args[5] if len(args) > 5 else False)
+        calls["custom_op_modes"].append(use_packed_callback)
+        if use_packed_callback:
+            AscendGatedDeltaNetAttention._forward_core_ascend(attention, *args[:4])
+        else:
+            attention._forward_core(*args[:4])
+
+    monkeypatch.setattr(gdn_module, "gdn_decode_tile", fake_fused_decode)
+    monkeypatch.setattr(
+        gdn_module,
+        "fused_qkvzba_split_reshape_cat",
+        lambda *_args, **_kwargs: (mixed_qkv, z, b, a),
+    )
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "qwen_gdn_attention_core",
+        fake_attention_core,
+    )
+
     attention = SimpleNamespace(
-        _supports_qwen35_decode_tile_pipeline=lambda hidden_states: True,
-        in_proj_qkvz=lambda hidden_states: (
-            torch.zeros((hidden_states.shape[0], 12288), dtype=hidden_states.dtype),
-            None,
-        ),
-        in_proj_ba=lambda hidden_states: (
-            torch.zeros((hidden_states.shape[0], 64), dtype=hidden_states.dtype),
-            None,
-        ),
+        _supports_qwen35_decode_tile_pipeline=supports_packed_dispatch,
+        _try_qwen35_decode_tile=try_fused_decode,
+        _split_ba_for_tp=lambda ba: ba.chunk(2, dim=-1),
+        _forward_core=record_stock_core,
+        in_proj_qkvz=lambda hidden_states: (projected_qkvz, None),
+        in_proj_ba=lambda hidden_states: (projected_ba, None),
         out_proj=lambda hidden_states: (hidden_states, None),
+        norm=RecordingNorm(),
+        conv1d=SimpleNamespace(weight=torch.zeros((8192, 1, 4), dtype=torch.bfloat16)),
+        kv_cache=(torch.empty(0), torch.empty(0)),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        key_dim=2048,
+        value_dim=4096,
+        num_k_heads=16,
         num_v_heads=32,
-        tp_size=1,
+        head_k_dim=128,
         head_v_dim=128,
+        conv_kernel_size=4,
+        activation="silu",
+        tp_size=1,
+        gqa_interleaved_layout=gqa_interleaved_layout,
         prefix="layer0",
     )
-    hidden_states = torch.zeros((2, 4096), dtype=torch.bfloat16)
+    hidden_states = torch.zeros((num_tokens, 4096), dtype=torch.bfloat16)
     output = torch.empty_like(hidden_states)
+
+    is_packed_dispatch_supported = AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+        attention, hidden_states
+    )
+    assert is_packed_dispatch_supported == (not gqa_interleaved_layout)
 
     AscendGatedDeltaNetAttention.forward(attention, hidden_states, output)
 
-    assert len(calls) == 1
-    qkvz, ba, z_scratch, kwargs = calls[0]
-    assert qkvz.shape == (2, 12288)
-    assert ba.shape == (2, 64)
-    assert z_scratch.shape == (2, 32, 128)
-    assert kwargs == {"layer_name": "layer0", "use_aiter": True}
-    assert torch.equal(output, torch.full_like(output, 2))
+    assert calls["custom_op_modes"] == [not gqa_interleaved_layout]
+    assert calls["fused"] == expected_fused_calls
+    assert calls["stock_core"] == expected_stock_core_calls
+    assert calls["norm"] == expected_norm_calls
+    expected_output = 6 if expected_fused_calls == 1 else 5
+    assert torch.equal(output, torch.full_like(output, expected_output))
 
 
 def test_qwen35_piecewise_decode_uses_real_metadata_prefix(
