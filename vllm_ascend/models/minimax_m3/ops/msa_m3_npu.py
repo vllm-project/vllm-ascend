@@ -442,10 +442,11 @@ def minimax_m3_index_tp_block_parallel_decode(
                 metadata.block_size,
                 rounding_mode="floor",
             )
-            - block_offset
-        ).clamp(
-            min=0,
-            max=score_block_table.shape[-1] - 1,
+            .sub(block_offset)
+            .clamp(
+                min=0,
+                max=score_block_table.shape[-1] - 1,
+            )
         )
         local_topk, local_scores = _minimax_m3_index_decode(
             full_idx_q,
@@ -454,7 +455,7 @@ def minimax_m3_index_tp_block_parallel_decode(
             metadata.cu_seqlens_q,
             score_k_lens,
             local_context_lens,
-            score_start_loc.to(dtype=torch.int32),
+            score_start_loc,
             None if metadata.decode_query_len == 1 else causal_mask,
             topk=topk,
             init_blocks=init_blocks,

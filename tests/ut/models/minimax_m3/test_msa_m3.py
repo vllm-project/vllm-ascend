@@ -1098,6 +1098,7 @@ def test_tp_single_token_decode_uses_dense_mode(
     )
     assert torch.equal(decode_args[3], torch.tensor([0, 1], dtype=torch.int32))
     assert torch.equal(decode_args[4], torch.tensor([256], dtype=torch.int32))
+    assert decode_args[6].dtype == torch.int32
 
 
 @pytest.mark.parametrize(
