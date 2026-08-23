@@ -1435,18 +1435,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
 
-        aux_stream = dsv4_dsa_overlap_stream()
-        hs_local_ready_evt = torch.npu.current_stream().record_event()
-        with npu_stream_switch(aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
-            torch.npu.current_stream().wait_event(hs_local_ready_evt)
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
-        cos = req_metadata.cos[layer_name]
-        sin = req_metadata.sin[layer_name]
         local_cos = cp_metadata.local_cos[layer_name]
         local_sin = cp_metadata.local_sin[layer_name]
         actual_seq_lengths_query = req_metadata.query_start_loc
@@ -1454,6 +1446,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = common_attn_metadata.num_prefills > 0
         swa_req_metadata = swa_metadata.req_metadata
+
+        hs_local_ready_evt = torch.npu.current_stream().record_event()
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
@@ -1486,25 +1480,34 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
+        aux_stream = dsv4_dsa_overlap_stream()
+        with npu_stream_switch(aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+            torch.npu.current_stream().wait_event(hs_local_ready_evt)
+            if self.compress_ratio > 1:
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
+                hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
+            kv = self.wkv(hidden_states_local)
+            kv = self.kv_norm(kv)
+            assert self.rope_head_dim is not None
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                local_cos[: kv.shape[0]],
+                local_sin[: kv.shape[0]],
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
+            kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv, need_gather_q_kv)[
+                : common_attn_metadata.num_actual_tokens
+            ]
+            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+
         if self.multistream_dsv4_dsa_overlap:
             torch.npu.current_stream().wait_stream(aux_stream)
-            hidden_states.record_stream(torch.npu.current_stream())
+            if self.compress_ratio > 1:
+                hidden_states_cache.record_stream(torch.npu.current_stream())
 
         o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
-
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
-        kv = self.wkv(hidden_states_cache)
-        kv = self.kv_norm(kv)
-        assert self.rope_head_dim is not None
-        kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos[: kv.shape[0]],
-            sin[: kv.shape[0]],
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
