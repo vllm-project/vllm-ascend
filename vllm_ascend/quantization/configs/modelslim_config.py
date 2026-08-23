@@ -911,12 +911,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             # metadata, even when the checkpoint contains no MTP KV scales.
             # Require namespace-local metadata for MTP, while retaining the
             # legacy index fallback for target model layers.
-            if prefix.startswith("mtp."):
-                layer_prefix = f"mtp.layers.{int(layer_id_str)}."
-                return any(
-                    key.startswith(layer_prefix) and key.endswith("k_proj.kv_cache_scale")
-                    for key in self.quant_description
-                )
+            if "mtp.layers." in prefix:
+                layer_sub = f"mtp.layers.{int(layer_id_str)}."
+                return any(layer_sub in key and key.endswith("k_proj.kv_cache_scale") for key in self.quant_description)
 
             if int(layer_id_str) in self.c8_quant_layers:
                 return True

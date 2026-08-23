@@ -257,6 +257,8 @@ class TestAscendModelSlimConfig(TestBase):
 
         self.assertTrue(config.is_c8_quant_layer("model.layers.0.self_attn.attn"))
         self.assertFalse(config.is_c8_quant_layer("mtp.layers.0.self_attn.attn"))
+        self.assertFalse(config.is_c8_quant_layer("model.mtp.layers.0.self_attn.attn"))
+        self.assertFalse(config.is_c8_quant_layer("language_model.mtp.layers.0.self_attn.attn"))
 
     def test_mtp_c8_requires_its_own_kv_scale_metadata(self):
         config = AscendModelSlimConfig(
@@ -264,10 +266,12 @@ class TestAscendModelSlimConfig(TestBase):
                 "kv_cache_type": "C8",
                 "model.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
                 "mtp.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+                "language_model.mtp.layers.1.self_attn.k_proj.kv_cache_scale": "C8",
             }
         )
 
         self.assertTrue(config.is_c8_quant_layer("mtp.layers.0.self_attn.attn"))
+        self.assertTrue(config.is_c8_quant_layer("language_model.mtp.layers.1.self_attn.attn"))
 
     def test_is_layer_skipped_ascend(self):
         # Test non-fused layer that should be quantized
