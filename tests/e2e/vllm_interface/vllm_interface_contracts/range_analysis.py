@@ -53,6 +53,8 @@ from .call_contracts import (
     return_use_compatible,
 )
 from .generator import (
+    _KNOWN_TRANSPARENT_SIGNATURE_DECORATORS,
+    _KNOWN_WRAPS_SIGNATURE_DECORATORS,
     _TRITON_JIT_DECORATOR,
     _TRITON_KERNEL_PROTOCOL,
     GENERATOR_VERSION,
@@ -194,7 +196,7 @@ def _signature_status(
         "contextlib.contextmanager",
         "typing.override",
         "typing_extensions.override",
-    }
+    } | _KNOWN_TRANSPARENT_SIGNATURE_DECORATORS
     builtin_descriptors = {"builtins.classmethod", "builtins.property", "builtins.staticmethod"}
     for item in node.decorator_list:
         raw = _decorator_name(item)
@@ -203,6 +205,7 @@ def _signature_status(
             resolved in builtin_descriptors
             or (resolver is None and raw in {"classmethod", "property", "staticmethod"})
             or resolved in known
+            or (resolved in _KNOWN_WRAPS_SIGNATURE_DECORATORS and not isinstance(item, ast.Call))
         ):
             continue
         return "unknown"

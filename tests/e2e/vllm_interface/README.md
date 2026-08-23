@@ -45,6 +45,9 @@ calls to vLLM. Inheritance and C3 MRO are resolved lazily only to prove override
 inheritance-only findings, and broad generator reviews are intentionally outside this upstream PR check; their
 collector and report implementations are not included in this directory.
 
+Known wrapper semantics are matched only after the decorator resolves to an exact canonical symbol. They are not
+pinned to whole-repository commits, and this check does not require or build an external PyTorch source index.
+
 ### Old/new contract comparison
 
 Each proven dependency is resolved independently against the old and new vLLM snapshots. The analyzer compares symbol

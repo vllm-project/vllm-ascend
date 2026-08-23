@@ -115,6 +115,37 @@ def test_range_classifies_compatible_to_incompatible_override(tmp_path: Path) ->
     assert report["summary"]["introduced_break"] >= 1
 
 
+def test_inference_mode_override_break_does_not_require_torch_source(
+    tmp_path: Path,
+) -> None:
+    roots = _call_repositories(
+        tmp_path,
+        old_source="class Base:\n    def run(self, value): return value\n",
+        new_source="class Base:\n    def run(self, value, required): return value\n",
+        consumer_source=(
+            "import torch\n"
+            "from vllm.api import Base\n\n"
+            "class Child(Base):\n"
+            "    @torch.inference_mode()\n"
+            "    def run(self, value): return value\n"
+        ),
+    )
+
+    report = _run(*roots)
+
+    overrides = [
+        item
+        for item in report["findings"]
+        if item["relation"] == "override" and item["contract_kind"] == "call_arguments"
+    ]
+    assert len(overrides) == 1
+    assert overrides[0]["classification"] == "introduced_break"
+    assert overrides[0]["action"] == "modify"
+    assert overrides[0]["compatibility"]["old"]["compatible"] is True
+    assert overrides[0]["compatibility"]["new"]["compatible"] is False
+    assert overrides[0]["downstream"]["signature_status"] == "exact"
+
+
 def test_range_separates_preexisting_incompatibility(tmp_path: Path) -> None:
     roots = _repositories(
         tmp_path,
@@ -648,6 +679,30 @@ def test_direct_call_required_parameter_is_an_introduced_break(tmp_path: Path) -
     assert calls[0]["details"]["call_shape"]["positional_count"] == 1
 
 
+def test_instrumented_direct_call_break_does_not_require_a_pinned_vllm_sha(
+    tmp_path: Path,
+) -> None:
+    roots = _call_repositories(
+        tmp_path,
+        old_source=("from vllm.tracing import instrument\n\n@instrument\ndef helper(value): return value\n"),
+        new_source=("from vllm.tracing import instrument\n\n@instrument\ndef helper(value, required): return value\n"),
+        consumer_source="from vllm.api import helper\n\ndef use():\n    helper(1)\n",
+    )
+
+    report = _run(*roots)
+
+    calls = [
+        item
+        for item in report["findings"]
+        if item["relation"] == "direct_call" and item["contract_kind"] == "call_arguments"
+    ]
+    assert len(calls) == 1
+    assert calls[0]["classification"] == "introduced_break"
+    assert calls[0]["action"] == "modify"
+    assert calls[0]["upstream"]["old"]["signature_status"] == "exact"
+    assert calls[0]["upstream"]["new"]["signature_status"] == "exact"
+
+
 def test_triton_kernel_launch_required_parameter_is_an_introduced_break(
     tmp_path: Path,
 ) -> None:
@@ -677,6 +732,32 @@ def test_triton_kernel_launch_required_parameter_is_an_introduced_break(
     assert calls[0]["compatibility"]["new"]["compatible"] is False
     assert calls[0]["details"]["invocation_kind"] == "triton_kernel_launch"
     assert calls[0]["evidence"][0]["callee"] == "kernel[2,]"
+
+
+def test_triton_signature_contract_does_not_require_pinned_repository_shas(
+    tmp_path: Path,
+) -> None:
+    roots = _call_repositories(
+        tmp_path,
+        old_source=("from vllm.triton_utils import triton\n\n@triton.jit\ndef kernel(value): pass\n"),
+        new_source=("from vllm.triton_utils import triton\n\n@triton.jit\ndef kernel(value, BLOCK_SIZE): pass\n"),
+        consumer_source="VALUE = 1\n",
+    )
+    engine = InterfaceBoundaryGenerator(
+        roots[0],
+        roots[1],
+        source_versions={"vllm": roots[3], "vllm_ascend": roots[4]},
+    )
+    callable_info = engine.upstream.find_callable("vllm.api.kernel")
+    assert callable_info is not None
+
+    contract = engine._signature_contract(callable_info)
+
+    assert contract.status == "exact"
+    assert contract.protocol == "triton_kernel_launch"
+    assert contract.runtime_entry_signature == callable_info.signature
+    assert contract.reported_signature is None
+    assert contract.provenance[-1] == "vllm.triton_utils.triton.jit:kernel_launch"
 
 
 def test_direct_call_keyword_rename_is_an_introduced_break(tmp_path: Path) -> None:

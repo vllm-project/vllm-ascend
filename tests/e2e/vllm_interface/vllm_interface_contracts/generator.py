@@ -45,7 +45,7 @@ from typing import Any
 
 from .analysis_plans import VLLM_INTERFACE_PLAN, AnalysisPlan
 
-GENERATOR_VERSION = "0.41.0"
+GENERATOR_VERSION = "0.42.0"
 REPOSITORY_INDEX_CACHE_SCHEMA_VERSION = 1
 REPOSITORY_FILE_FRAGMENT_CACHE_SCHEMA_VERSION = 1
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
@@ -73,48 +73,20 @@ _TRANSPARENT_DESCRIPTOR_DECORATORS = frozenset(
         "typing_extensions.override",
     }
 )
-_PINNED_ORDINARY_DESCRIPTOR_DECORATORS: dict[
-    tuple[str, str],
-    frozenset[str],
-] = {
-    (
-        "torch",
-        "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
-    ): frozenset({"torch.inference_mode"}),
-    (
-        "vllm",
-        "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
-    ): frozenset({"vllm.tracing.instrument"}),
-}
-_PINNED_TRANSPARENT_SIGNATURE_DECORATORS: dict[
-    tuple[str, str],
-    frozenset[str],
-] = {
-    (
-        "torch",
-        "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
-    ): frozenset({"torch.inference_mode"}),
-    (
-        "vllm",
-        "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
-    ): frozenset({"vllm.tracing.instrument"}),
-}
-_PINNED_WRAPS_SIGNATURE_DECORATORS: dict[
-    tuple[str, str],
-    frozenset[str],
-] = {
-    (
-        "torch",
-        "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
-    ): frozenset({"torch.compiler.disable"}),
-}
-_STDLIB_WRAPS_SIGNATURE_DECORATORS = frozenset({"contextlib.contextmanager"})
-_PINNED_TRITON_KERNEL_SOURCES = frozenset(
+_KNOWN_ORDINARY_DESCRIPTOR_DECORATORS = frozenset(
     {
-        ("vllm", "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9"),
-        ("vllm_ascend", "81d3450128528be2c343232fcc28220814a15fd6"),
+        "torch.inference_mode",
+        "vllm.tracing.instrument",
     }
 )
+_KNOWN_TRANSPARENT_SIGNATURE_DECORATORS = frozenset(
+    {
+        "torch.inference_mode",
+        "vllm.tracing.instrument",
+    }
+)
+_KNOWN_WRAPS_SIGNATURE_DECORATORS = frozenset({"torch.compiler.disable"})
+_STDLIB_WRAPS_SIGNATURE_DECORATORS = frozenset({"contextlib.contextmanager"})
 _TRITON_JIT_DECORATOR = "vllm.triton_utils.triton.jit"
 _TRITON_HEURISTICS_DECORATOR = "vllm.triton_utils.triton.heuristics"
 _TRITON_KERNEL_PROTOCOL = "triton_kernel_launch"
@@ -4250,15 +4222,7 @@ class InterfaceBoundaryGenerator:
         index_workers: int = 1,
     ):
         source_versions = source_versions or {}
-        self.source_versions = dict(source_versions)
-        ordinary_descriptor_decorators = {
-            decorator
-            for package, version in source_versions.items()
-            for decorator in _PINNED_ORDINARY_DESCRIPTOR_DECORATORS.get(
-                (package, version),
-                (),
-            )
-        }
+        ordinary_descriptor_decorators = _KNOWN_ORDINARY_DESCRIPTOR_DECORATORS
         self.repository_index_timings: dict[str, float] = {}
         index_started = time.perf_counter()
         if upstream_file_index_cache_dir is not None or index_workers > 1:
@@ -4652,22 +4616,16 @@ class InterfaceBoundaryGenerator:
             forwarded_target_variants = captured_targets
 
         repository = self._repository_for_callable(callable_info)
-        repository_source = (
-            (repository.package_name, self.source_versions.get(repository.package_name))
-            if repository is not None
-            else None
-        )
-        pinned_triton_source = repository_source in _PINNED_TRITON_KERNEL_SOURCES
         for decorator, reference, captured in reversed(tuple(zip(decorators, references, forwarded_target_variants))):
             expression = _expression_name(decorator.func if isinstance(decorator, ast.Call) else decorator)
             label = reference or expression or "<dynamic-decorator>"
-            if reference == _TRITON_JIT_DECORATOR and pinned_triton_source:
+            if reference == _TRITON_JIT_DECORATOR:
                 runtime_entry_signature = definition_signature
                 reported_signature = None
                 protocol = _TRITON_KERNEL_PROTOCOL
-                provenance.append(f"{label}:kernel_launch@{repository_source[1]}")
+                provenance.append(f"{label}:kernel_launch")
                 continue
-            if reference == _TRITON_HEURISTICS_DECORATOR and pinned_triton_source:
+            if reference == _TRITON_HEURISTICS_DECORATOR:
                 generated_names = self._triton_heuristic_names(decorator)
                 transformed_signature = (
                     self._triton_heuristics_signature(
@@ -4681,10 +4639,10 @@ class InterfaceBoundaryGenerator:
                     runtime_entry_signature = None
                     reported_signature = None
                     status = "unknown"
-                    provenance.append(f"{label}:unresolved_kernel_heuristics@{repository_source[1]}")
+                    provenance.append(f"{label}:unresolved_kernel_heuristics")
                 else:
                     runtime_entry_signature = transformed_signature
-                    provenance.append(f"{label}:generated={','.join(generated_names)}@{repository_source[1]}")
+                    provenance.append(f"{label}:generated={','.join(generated_names)}")
                 continue
             if reference in _STDLIB_WRAPS_SIGNATURE_DECORATORS and not isinstance(decorator, ast.Call):
                 runtime_entry_signature = ["sync", [], [], "args", [], "kwargs"]
@@ -4725,38 +4683,14 @@ class InterfaceBoundaryGenerator:
                 provenance.append(label)
                 continue
 
-            pinned_version = next(
-                (
-                    version
-                    for package, version in self.source_versions.items()
-                    if reference
-                    in _PINNED_TRANSPARENT_SIGNATURE_DECORATORS.get(
-                        (package, version),
-                        (),
-                    )
-                ),
-                None,
-            )
-            if pinned_version is not None:
-                provenance.append(f"{label}@{pinned_version}")
+            if reference in _KNOWN_TRANSPARENT_SIGNATURE_DECORATORS:
+                provenance.append(label)
                 continue
 
-            pinned_wrapper_version = next(
-                (
-                    version
-                    for package, version in self.source_versions.items()
-                    if reference
-                    in _PINNED_WRAPS_SIGNATURE_DECORATORS.get(
-                        (package, version),
-                        (),
-                    )
-                ),
-                None,
-            )
-            if pinned_wrapper_version is not None and not isinstance(decorator, ast.Call):
+            if reference in _KNOWN_WRAPS_SIGNATURE_DECORATORS and not isinstance(decorator, ast.Call):
                 runtime_entry_signature = ["sync", [], [], "args", [], "kwargs"]
                 forwarded_targets.append(callable_info.qualified_name)
-                provenance.append(f"{label}:sha_wrapped@{pinned_wrapper_version}")
+                provenance.append(f"{label}:wrapped")
                 continue
 
             if expression is not None and expression.rsplit(".", 1)[-1] in {
