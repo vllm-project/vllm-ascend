@@ -98,6 +98,42 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
+**enable_fused_mc2 (CANN MegaMoe / dispatch_ffn_combine)**
+
+When `enable_fused_mc2=1`, MoE communication may be replaced by the fused
+`dispatch_ffn_combine` or `mega_moe` operator. On A5 the MegaMoe path is
+selected from the instantiated MoE layer capabilities instead of checkpoint
+metadata; unsupported layer layouts keep the decomposed MC2/AllToAll path.
+
+| Item | A2 / A3 | A5 (Ascend 950PR / 950DT) |
+| ---- | ------- | ------------------------- |
+| Quantization | W8A8 / W4A8 (INT) and bf16 | W4A8 MXFP only, `group_size=32` |
+| Activation | SwiGLU | SwiGLU and SiTU (`activation_params={beta, linear_beta}`) |
+| Max routed experts | 1024 | 2048 (must be divisible by EP size) |
+| Max EP world size | 64 | 1024 |
+| Max top-k | 16 | 32 |
+| Hidden size | [1024, 8192], multiple of 512 | [1024, 8192], multiple of 512 |
+
+Notes for A5:
+
+- Requires a `cann_ops_transformer` build with SiTUGLU support and the
+  `mega_moe` custom operator package. If the package is installed under
+  `${ASCEND_HOME_PATH}/opp/vendors`, make sure `ASCEND_CUSTOM_OPP_PATH` also
+  contains that vendor directory — vLLM Ascend prepends its own bundled
+  vendors path at startup, which otherwise shadows the installed package and
+  the call falls back to the built-in (older) operator.
+- The symmetric buffer receive capacity uses the operator's automatic mode
+  (`max_recv_token_num=0`); `mega_moe_max_tokens` is not used on A5.
+- The MegaMoe path is mutually exclusive with
+  `multistream_overlap_shared_expert`; the latter is force-disabled when
+  `enable_fused_mc2=1`.
+
+```bash
+vllm serve <model> \
+    --tensor-parallel-size 8 --enable-expert-parallel \
+    --additional-config '{"enable_fused_mc2": 1}'
+```
+
 **xlite_graph_config**
 
 | Name | Type | Default | Description |
