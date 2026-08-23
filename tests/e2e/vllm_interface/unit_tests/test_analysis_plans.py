@@ -17,4 +17,3 @@ def test_vllm_interface_plan_has_one_fixed_ci_scope() -> None:
     assert capabilities["direct_import"]["state"] == "analyzed"
     assert capabilities["direct_call"]["state"] == "analyzed"
     assert capabilities["monkey_patch"]["state"] == "skipped"
-    assert capabilities["generator_findings"]["state"] == "skipped"

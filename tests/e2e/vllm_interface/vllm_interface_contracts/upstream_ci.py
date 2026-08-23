@@ -89,7 +89,6 @@ def build_analysis_command(
         ascend_sha,
         "--fail-on",
         "introduced",
-        "--stdout-summary",
         "--analysis-workers",
         str(analysis_workers),
         "--index-workers",

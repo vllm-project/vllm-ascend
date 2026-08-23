@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import ast
 import copy
-import csv
 import hashlib
 import json
 import os
@@ -37,10 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .analysis_plans import (
-    AnalysisPlan,
-    resolve_analysis_plan,
-)
+from .analysis_plans import resolve_analysis_plan
 from .call_contracts import (
     DirectCallDependency,
     DirectCallDetector,
@@ -77,8 +73,8 @@ from .models import (
     SourceEndpoint,
 )
 
-RANGE_SCHEMA_VERSION = 10
-RANGE_ANALYZER_VERSION = "2.0.0"
+RANGE_SCHEMA_VERSION = 11
+RANGE_ANALYZER_VERSION = "2.1.0"
 CLASSIFICATIONS = (
     "introduced_break",
     "compatibility_warning",
@@ -2609,111 +2605,6 @@ def _verified_historical_override_relations(
     return relations
 
 
-def validate_current_contracts(
-    engine: InterfaceBoundaryGenerator,
-    relations: Iterable[Relation],
-    snapshot: GitSnapshot,
-    plan: AnalysisPlan | None = None,
-) -> tuple[list[DirectCallDependency], list[dict[str, Any]]]:
-    """Validate exact call/return contracts for one checked-out source pair."""
-
-    plan = plan or resolve_analysis_plan()
-    discovered_dependencies = DirectCallDetector(engine).discover()
-    dependencies: list[DirectCallDependency] = []
-    findings: list[dict[str, Any]] = []
-    for dependency in discovered_dependencies:
-        upstream = snapshot.call_endpoint(
-            dependency.target,
-            dependency.access_kind,
-            receiver_type=dependency.receiver_type,
-            member=dependency.member,
-            invocation_kind=dependency.invocation_kind,
-        )
-        dependencies.append(dependency)
-        argument_state = _direct_call_state(upstream, dependency)
-        if argument_state.compatible is not True:
-            findings.append(
-                {
-                    "relation": "direct_call",
-                    "contract_kind": "call_arguments",
-                    "status": "risk" if argument_state.compatible is False else "review",
-                    "upstream": upstream.as_dict(),
-                    "downstream": {
-                        "file": dependency.file,
-                        "owner": dependency.owner,
-                        "name": dependency.callee,
-                        "line": dependency.line,
-                    },
-                    "reason": argument_state.reason,
-                    "evidence": dependency.as_dict(),
-                }
-            )
-        if dependency.return_use.constrains_return:
-            return_state = _return_use_state(upstream, dependency)
-            if return_state.compatible is not True:
-                findings.append(
-                    {
-                        "relation": "direct_call",
-                        "contract_kind": "return_usage",
-                        "status": "risk" if return_state.compatible is False else "review",
-                        "upstream": upstream.as_dict(),
-                        "downstream": {
-                            "file": dependency.file,
-                            "owner": dependency.owner,
-                            "name": dependency.callee,
-                            "line": dependency.line,
-                        },
-                        "reason": return_state.reason,
-                        "evidence": dependency.as_dict(),
-                    }
-                )
-
-    for relation in relations:
-        if (
-            relation.upstream_package != "vllm"
-            or relation.relation != "override"
-            or relation.relation not in plan.relation_types
-        ):
-            continue
-        upstream = snapshot.endpoint(
-            relation.upstream_file,
-            relation.upstream_owner,
-            relation.upstream_name,
-        )
-        downstream = _relation_downstream_endpoint(relation, engine)
-        upstream_contract = return_contract_from_dict(upstream.return_contract)
-        downstream_contract = return_contract_from_dict(downstream.return_contract)
-        if upstream_contract is None or downstream_contract is None or upstream_contract.status == "bottom":
-            continue
-        state = _replacement_return_state(upstream, downstream)
-        if state.compatible is True:
-            continue
-        findings.append(
-            {
-                "relation": relation.relation,
-                "contract_kind": "replacement_return",
-                "status": "risk" if state.compatible is False else "review",
-                "upstream": upstream.as_dict(),
-                "downstream": downstream.as_dict(),
-                "reason": state.reason,
-                "evidence": [item.as_dict() for item in relation.evidence]
-                or [{"file": relation.evidence_file, "line": relation.evidence_line}],
-            }
-        )
-
-    ordered = sorted(
-        findings,
-        key=lambda item: (
-            item["status"],
-            item["relation"],
-            item["contract_kind"],
-            item["downstream"]["file"] or "",
-            item["downstream"]["line"] or 0,
-        ),
-    )
-    return dependencies, ordered
-
-
 def analyze_range(
     *,
     vllm_root: Path,
@@ -2721,8 +2612,6 @@ def analyze_range(
     old: str,
     new: str,
     expect_ascend_sha: str,
-    external_roots: dict[str, Path] | None = None,
-    external_shas: dict[str, str] | None = None,
     analysis_workers: int = 3,
     downstream_index_cache_dir: Path | None = None,
     upstream_file_index_cache_dir: Path | None = None,
@@ -2740,19 +2629,12 @@ def analyze_range(
     old_sha, new_sha = verify_range(vllm_root, old, new)
     verify_head("vLLM new", vllm_root, new_sha)
     ascend_sha = verify_head("vllm-ascend", ascend_root, expect_ascend_sha)
-    external_roots = external_roots or {}
-    external_shas = external_shas or {}
-    if set(external_roots) != set(external_shas):
-        raise ValueError("external roots and SHAs must name the same packages")
-    for package, root in external_roots.items():
-        verify_head(f"external {package}", root, external_shas[package])
     phase_started = _diagnostic_timing("input_verification", phase_started, timings)
 
     generator = InterfaceBoundaryGenerator(
         vllm_root,
         ascend_root,
-        external_roots,
-        source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha, **external_shas},
+        source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha},
         downstream_index_cache_dir=downstream_index_cache_dir,
         upstream_file_index_cache_dir=upstream_file_index_cache_dir,
         index_workers=index_workers,
@@ -2761,7 +2643,7 @@ def analyze_range(
     timings.update(
         {f"repository_indexing.{name}": duration for name, duration in generator.repository_index_timings.items()}
     )
-    relations, _generator_findings = generator.generate(plan)
+    relations = generator.generate(plan)
     timings.update({f"relation_generation.{name}": duration for name, duration in generator.phase_timings.items()})
     phase_started = time.perf_counter()
     old_snapshot = GitSnapshot(vllm_root, old_sha)
@@ -2897,7 +2779,6 @@ def analyze_range(
             "vllm_old_sha": old_sha,
             "vllm_new_sha": new_sha,
             "vllm_ascend_sha": ascend_sha,
-            "external_sources": dict(sorted(external_shas.items())),
             "execution": {
                 "analysis_workers_requested": analysis_workers,
                 "analysis_workers_used": effective_workers,
@@ -2915,7 +2796,6 @@ def analyze_range(
             "relations": analyzed_relation_count,
             "relations_collected": len(relations),
             "direct_call_dependencies": len(direct_call_dependencies),
-            "generator_findings": 0,
             "total": len(ordered),
             "by_relation": dict(sorted(relation_counts.items())),
             "by_contract": dict(sorted(contract_counts.items())),
@@ -2927,71 +2807,6 @@ def analyze_range(
         },
         "findings": [item.as_dict() for item in ordered],
     }
-
-
-def _csv_rows(findings: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-    for item in findings:
-        old = item["upstream"]["old"]
-        new = item["upstream"]["new"]
-        downstream = item["downstream"]
-        yield {
-            "classification": item["classification"],
-            "priority": item["priority"],
-            "action": item["action"],
-            "relation": item["relation"],
-            "contract_kind": item.get("contract_kind", ""),
-            "direction": item.get("direction", ""),
-            "upstream_old": ":".join(str(value or "") for value in (old["file"], old["owner"], old["name"])),
-            "upstream_new": ":".join(str(value or "") for value in (new["file"], new["owner"], new["name"])),
-            "downstream": ":".join(
-                str(value or "") for value in (downstream["file"], downstream["owner"], downstream["name"])
-            ),
-            "downstream_line": downstream["line"],
-            "change": item["change"],
-            "old_compatible": item["compatibility"]["old"]["compatible"],
-            "new_compatible": item["compatibility"]["new"]["compatible"],
-            "confidence": item["confidence"],
-            "suggestion": item["suggestion"],
-            "call_shape": json.dumps(item.get("details", {}).get("call_shape"), ensure_ascii=False),
-            "return_use": json.dumps(item.get("details", {}).get("return_use"), ensure_ascii=False),
-            "override_paths": json.dumps(item.get("details", {}).get("override_paths"), ensure_ascii=False),
-            "upstream_old_return": json.dumps(old.get("return_contract"), ensure_ascii=False),
-            "upstream_new_return": json.dumps(new.get("return_contract"), ensure_ascii=False),
-            "downstream_return": json.dumps(downstream.get("return_contract"), ensure_ascii=False),
-        }
-
-
-CSV_FIELDS = [
-    "classification",
-    "priority",
-    "action",
-    "relation",
-    "contract_kind",
-    "direction",
-    "upstream_old",
-    "upstream_new",
-    "downstream",
-    "downstream_line",
-    "change",
-    "old_compatible",
-    "new_compatible",
-    "confidence",
-    "suggestion",
-    "call_shape",
-    "return_use",
-    "override_paths",
-    "upstream_old_return",
-    "upstream_new_return",
-    "downstream_return",
-]
-
-
-def _write_csv(path: Path, findings: list[dict[str, Any]]) -> None:
-    rows = list(_csv_rows(findings))
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def _upstream_pr_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3150,47 +2965,3 @@ def render_upstream_pr_summary(report: dict[str, Any]) -> str:
     """Render the upstream PR Markdown summary without writing report files."""
 
     return _upstream_pr_markdown(_upstream_pr_payload(report))
-
-
-def _write_upstream_pr_reports(
-    report: dict[str, Any],
-    output_dir: Path,
-) -> dict[str, str]:
-    payload = _upstream_pr_payload(report)
-    json_path = output_dir / "vllm-interface-pr-report.json"
-    introduced_csv = output_dir / "vllm-interface-introduced-breaks.csv"
-    markdown_path = output_dir / "vllm-interface-pr-summary.md"
-    metadata_path = output_dir / "vllm-interface-analysis-metadata.json"
-    json_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    _write_csv(introduced_csv, payload["findings"])
-    markdown_path.write_text(render_upstream_pr_summary(report), encoding="utf-8")
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "schema_version": report["schema_version"],
-                "metadata": report["metadata"],
-                "introduced_breaks": payload["summary"]["introduced_breaks"],
-                "root_causes": payload["summary"]["root_causes"],
-                "review_findings": payload["summary"]["review_findings"],
-                "review_root_causes": payload["summary"]["review_root_causes"],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return {
-        "json": str(json_path),
-        "introduced_csv": str(introduced_csv),
-        "markdown": str(markdown_path),
-        "metadata_json": str(metadata_path),
-    }
-
-
-def write_reports(report: dict[str, Any], output_dir: Path) -> dict[str, str]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return _write_upstream_pr_reports(report, output_dir)

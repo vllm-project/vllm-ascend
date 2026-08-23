@@ -1,6 +1,8 @@
 # vLLM upstream interface compatibility
 
-This directory is collected by vLLM's existing Ascend NPU job. In addition to the hardware sampler smoke test,
+This directory is collected by vLLM's existing Ascend NPU job. Recursive E2E collection excludes `unit_tests/` through
+the repository pytest configuration, while explicitly targeting that directory still runs the analyzer unit suite. In
+addition to the hardware sampler smoke test,
 `test_upstream_interface_compatibility.py` performs a source-only compatibility check between the checked-out vLLM PR
 and the vllm-ascend revision installed by that job. The analysis does not import either project and does not require NPU
 execution.
@@ -100,8 +102,8 @@ introduced break fails this test while a valid report with no introduced break p
 
 ### Current CI presentation
 
-The upstream CI entry uses `--stdout-summary`: it renders the same Markdown content previously written to
-`vllm-interface-pr-summary.md` and sends it directly to standard output. It does not create JSON, CSV, Markdown, or
+The upstream CI entry renders the same Markdown content previously written to `vllm-interface-pr-summary.md` and sends
+it directly to standard output. It does not create JSON, CSV, Markdown, or
 metadata report files, upload Buildkite artifacts, or create a separate Buildkite annotation. The selected revisions
 and phase timings appear before the summary in separate collapsible log sections. The upstream Ascend NPU job is
 currently soft-fail, so this integration provides early awareness rather than a required merge gate. The analysis
@@ -134,6 +136,5 @@ python -m tests.e2e.vllm_interface.vllm_interface_contracts analyze-range \
   --analysis-workers 1 \
   --index-workers 4 \
   --upstream-file-index-cache-dir ~/.cache/vllm-interface/file-fragments \
-  --downstream-index-cache-dir ~/.cache/vllm-interface/repository-index \
-  --stdout-summary
+  --downstream-index-cache-dir ~/.cache/vllm-interface/repository-index
 ```

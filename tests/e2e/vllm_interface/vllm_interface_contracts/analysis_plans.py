@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-ANALYSIS_PLAN_VERSION = 3
+ANALYSIS_PLAN_VERSION = 4
 VLLM_INTERFACE_SCENARIO = "vllm-interface"
 
 
@@ -54,10 +54,6 @@ class AnalysisPlan:
             "direct_call": {
                 "state": "analyzed",
                 "produces_findings": True,
-            },
-            "generator_findings": {
-                "state": "skipped",
-                "produces_findings": False,
             },
         }
 

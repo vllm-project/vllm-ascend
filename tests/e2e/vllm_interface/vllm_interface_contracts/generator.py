@@ -45,10 +45,9 @@ from typing import Any
 
 from .analysis_plans import VLLM_INTERFACE_PLAN, AnalysisPlan
 
-GENERATOR_VERSION = "0.42.0"
+GENERATOR_VERSION = "0.43.0"
 REPOSITORY_INDEX_CACHE_SCHEMA_VERSION = 1
 REPOSITORY_FILE_FRAGMENT_CACHE_SCHEMA_VERSION = 1
-FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
     {
         "ordinary",
@@ -1238,53 +1237,6 @@ def _canonical_guard_text(text: str) -> tuple[str, bool, str]:
     return _canonical_guard(node)
 
 
-def _main_expression_calls(
-    node: ast.AST | None,
-    tag_guard_names: set[str],
-) -> Iterable[ast.Call]:
-    """Walk calls that may be evaluated on the main-version path.
-
-    Function and lambda bodies are deferred scopes. Boolean operands and
-    conditional-expression arms may be skipped at the current call site, so
-    apply an exact release-tag result before attributing a helper call to main.
-    """
-    if node is None:
-        return
-
-    def walk(current: ast.AST) -> Iterable[ast.Call]:
-        if isinstance(
-            current,
-            (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
-        ):
-            return
-        if isinstance(current, ast.BoolOp):
-            for value in current.values:
-                yield from walk(value)
-                condition = _main_condition_value(value, tag_guard_names)
-                if isinstance(current.op, ast.And) and condition is False:
-                    break
-                if isinstance(current.op, ast.Or) and condition is True:
-                    break
-            return
-        if isinstance(current, ast.IfExp):
-            yield from walk(current.test)
-            condition = _main_condition_value(current.test, tag_guard_names)
-            if condition is True:
-                yield from walk(current.body)
-            elif condition is False:
-                yield from walk(current.orelse)
-            else:
-                yield from walk(current.body)
-                yield from walk(current.orelse)
-            return
-        if isinstance(current, ast.Call):
-            yield current
-        for child in ast.iter_child_nodes(current):
-            yield from walk(child)
-
-    yield from walk(node)
-
-
 def _lazy_getattr_names(node: ast.AST) -> set[str]:
     if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
         return set()
@@ -2203,58 +2155,6 @@ class HistoricalOverrideCandidate:
     evidence_line: int
 
 
-@dataclass(frozen=True)
-class CandidateFinding:
-    relation: str
-    downstream_file: str
-    downstream_owner: str | None
-    downstream_name: str
-    target_expression: str
-    evidence_line: int
-    reason: str
-    status: str = "review"
-    reason_code: str = "analysis_gap"
-    generator_issue: bool = True
-    evidence_scope: str | None = None
-    evidence_guards: tuple[str, ...] = ()
-    supplemental: bool = False
-    upstream_descriptor_kind: str | None = None
-    downstream_descriptor_kind: str | None = None
-    installed_descriptor_kind: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        if self.status not in FINDING_STATUSES:
-            raise ValueError(f"unsupported finding status: {self.status}")
-        payload = {
-            "relation": self.relation,
-            "downstream": {
-                "file": self.downstream_file,
-                "owner": self.downstream_owner,
-                "name": self.downstream_name,
-            },
-            "target_expression": self.target_expression,
-            "evidence": {
-                "file": self.downstream_file,
-                "line": self.evidence_line,
-                **({"scope": self.evidence_scope} if self.evidence_scope else {}),
-                **({"guards": list(self.evidence_guards)} if self.evidence_guards else {}),
-            },
-            "status": self.status,
-            "reason_code": self.reason_code,
-            "generator_issue": self.generator_issue,
-            "reason": self.reason,
-        }
-        if self.supplemental:
-            payload["supplemental"] = True
-        if self.upstream_descriptor_kind is not None:
-            payload["upstream_descriptor_kind"] = self.upstream_descriptor_kind
-        if self.downstream_descriptor_kind is not None:
-            payload["downstream_descriptor_kind"] = self.downstream_descriptor_kind
-        if self.installed_descriptor_kind is not None:
-            payload["installed_descriptor_kind"] = self.installed_descriptor_kind
-        return payload
-
-
 class RepositoryIndex:
     """AST-only symbol and import index for one Python package."""
 
@@ -2341,37 +2241,6 @@ class RepositoryIndex:
             serialized = state.pop(f"__serialized{name}")
             state[name] = {id(node): value for node, value in serialized}
         self.__dict__.update(state)
-
-    @classmethod
-    def _from_serial_file_fragments(
-        cls,
-        repo_root: Path,
-        package_name: str,
-        *,
-        ordinary_descriptor_decorators: set[str] | frozenset[str] = frozenset(),
-    ) -> RepositoryIndex:
-        """Build an index through isolated file fragments for parity tests."""
-
-        package_root = repo_root.resolve() / package_name
-        paths = sorted(package_root.rglob("*.py"))
-        combined = cls(
-            repo_root,
-            package_name,
-            ordinary_descriptor_decorators=ordinary_descriptor_decorators,
-            _source_paths=(),
-            _finalize=False,
-        )
-        for path in paths:
-            fragment = cls(
-                repo_root,
-                package_name,
-                ordinary_descriptor_decorators=ordinary_descriptor_decorators,
-                _source_paths=(path,),
-                _finalize=False,
-            )
-            combined._merge_pre_final_fragment(fragment)
-        combined._finalize_index()
-        return combined
 
     def _parse(self) -> None:
         """Parse repository modules and build the static symbol indexes."""
@@ -4058,7 +3927,7 @@ def _repository_index_from_file_fragments(
         combined._merge_pre_final_fragment(fragments[relative_file])
     combined._finalize_index()
     status["merge_finalize_seconds"] = round(time.perf_counter() - merge_started, 6)
-    if status["status"] not in {"bypassed", "unavailable", "write_error"}:
+    if status["enabled"] and status["status"] not in {"bypassed", "unavailable", "write_error"}:
         hits = int(status["cache_hits"])
         status["status"] = "hit" if hits == len(relative_files) else "partial_hit" if hits else "miss"
     return combined, status
@@ -4214,7 +4083,6 @@ class InterfaceBoundaryGenerator:
         self,
         vllm_root: Path,
         ascend_root: Path,
-        external_roots: dict[str, Path] | None = None,
         *,
         source_versions: dict[str, str] | None = None,
         downstream_index_cache_dir: Path | None = None,
@@ -4260,26 +4128,13 @@ class InterfaceBoundaryGenerator:
             "upstream_file_fragments": upstream_file_cache,
             "downstream": downstream_cache,
         }
-        index_started = time.perf_counter()
-        self.externals = {
-            package: RepositoryIndex(
-                root,
-                package,
-                ordinary_descriptor_decorators=ordinary_descriptor_decorators,
-            )
-            for package, root in sorted((external_roots or {}).items())
-        }
-        self.repository_index_timings["external"] = round(time.perf_counter() - index_started, 6)
-        parse_errors = (
-            [("vLLM", error) for error in self.upstream.parse_errors]
-            + [("vllm-ascend", error) for error in self.downstream.parse_errors]
-            + [(package, error) for package, index in self.externals.items() for error in index.parse_errors]
-        )
+        parse_errors = [("vLLM", error) for error in self.upstream.parse_errors] + [
+            ("vllm-ascend", error) for error in self.downstream.parse_errors
+        ]
         if parse_errors:
             details = "; ".join(f"{repository}:{error['file']}: {error['error']}" for repository, error in parse_errors)
             raise ValueError(f"Python source parsing failed: {details}")
         self.relations: list[Relation] = []
-        self.findings: list[CandidateFinding] = []
         self.historical_override_candidates: list[HistoricalOverrideCandidate] = []
         self._mro_cache: dict[str, MroResult] = {}
         self._override_root_path_cache: dict[
@@ -4292,13 +4147,12 @@ class InterfaceBoundaryGenerator:
     def generate(
         self,
         plan: AnalysisPlan = VLLM_INTERFACE_PLAN,
-    ) -> tuple[list[Relation], list[CandidateFinding]]:
+    ) -> list[Relation]:
         """Generate verified overrides using lazily resolved inheritance MROs."""
 
         if plan != VLLM_INTERFACE_PLAN:
             raise ValueError("only the vllm-interface analysis plan is supported")
         self.relations = []
-        self.findings = []
         self.historical_override_candidates = []
         self._override_root_path_cache = {}
         self._mro_resolution_seconds = 0.0
@@ -4357,17 +4211,15 @@ class InterfaceBoundaryGenerator:
                 for field_name, kinds in descriptor_sets.items()
             }
             merged_signature_contracts: dict[str, SignatureContract | None] = {}
-            conditional_signature_contract = False
             for field_name in (
                 "upstream_signature_contract",
                 "downstream_signature_contract",
                 "installed_signature_contract",
             ):
-                merged_contract, conditional = _merge_signature_contracts(
+                merged_contract, _ = _merge_signature_contracts(
                     [getattr(relation, field_name) for relation in occurrences]
                 )
                 merged_signature_contracts[field_name] = merged_contract
-                conditional_signature_contract = conditional_signature_contract or conditional
             override_paths = tuple(sorted({path for relation in occurrences for path in relation.override_paths}))
             merged_relation = replace(
                 first,
@@ -4389,46 +4241,6 @@ class InterfaceBoundaryGenerator:
                 override_paths=override_paths,
             )
             deduplicated[key] = merged_relation
-            if any(len(kinds) > 1 for kinds in descriptor_sets.values()):
-                first_evidence = merged_relation.evidence[0] if merged_relation.evidence else None
-                self._append_descriptor_finding(
-                    merged_relation,
-                    target_expression=(
-                        first_evidence.target_expression
-                        if first_evidence and first_evidence.target_expression
-                        else f"{merged_relation.upstream_owner or ''}.{merged_relation.upstream_name}".lstrip(".")
-                    ),
-                    evidence_line=merged_relation.evidence_line,
-                    conditional=True,
-                    evidence_scope=(first_evidence.scope if first_evidence else None),
-                    evidence_guards=(first_evidence.guards if first_evidence else ()),
-                )
-            if conditional_signature_contract:
-                first_evidence = merged_relation.evidence[0] if merged_relation.evidence else None
-                self.findings.append(
-                    CandidateFinding(
-                        relation=merged_relation.relation,
-                        downstream_file=merged_relation.downstream_file,
-                        downstream_owner=merged_relation.downstream_owner,
-                        downstream_name=merged_relation.downstream_name,
-                        target_expression=(
-                            first_evidence.target_expression
-                            if first_evidence and first_evidence.target_expression
-                            else f"{merged_relation.upstream_owner or ''}.{merged_relation.upstream_name}".lstrip(".")
-                        ),
-                        evidence_line=merged_relation.evidence_line,
-                        reason=(
-                            "different reachable branches install different runtime "
-                            "signature contracts for the same dependency edge"
-                        ),
-                        status="review",
-                        reason_code="conditional_signature_contract",
-                        generator_issue=False,
-                        evidence_scope=(first_evidence.scope if first_evidence else None),
-                        evidence_guards=(first_evidence.guards if first_evidence else ()),
-                        supplemental=True,
-                    )
-                )
         self.relations = sorted(
             deduplicated.values(),
             key=lambda relation: (
@@ -4436,66 +4248,17 @@ class InterfaceBoundaryGenerator:
                 relation.downstream_key(),
             ),
         )
-        unique_findings: dict[object, CandidateFinding] = {}
-        for finding in set(self.findings):
-            key: object = finding
-            if finding.supplemental:
-                key = (
-                    finding.relation,
-                    finding.downstream_file,
-                    finding.downstream_owner,
-                    finding.downstream_name,
-                    finding.target_expression,
-                    finding.reason,
-                    finding.status,
-                    finding.reason_code,
-                    finding.generator_issue,
-                    finding.supplemental,
-                    finding.upstream_descriptor_kind,
-                    finding.downstream_descriptor_kind,
-                    finding.installed_descriptor_kind,
-                )
-            previous = unique_findings.get(key)
-            if previous is None or (
-                finding.evidence_line,
-                finding.evidence_scope or "",
-                finding.evidence_guards,
-            ) < (
-                previous.evidence_line,
-                previous.evidence_scope or "",
-                previous.evidence_guards,
-            ):
-                unique_findings[key] = finding
-        self.findings = sorted(
-            unique_findings.values(),
-            key=lambda relation: (
-                relation.status,
-                relation.reason_code,
-                relation.relation,
-                relation.downstream_file,
-                relation.downstream_owner or "",
-                relation.downstream_name,
-                relation.target_expression,
-                relation.evidence_line,
-                relation.evidence_scope or "",
-                relation.evidence_guards,
-                relation.reason,
-            ),
-        )
         self.phase_timings["relation_finalization"] = round(
             time.perf_counter() - phase_started,
             6,
         )
-        return self.relations, self.findings
+        return self.relations
 
     def _canonical_reference(self, qualified_name: str) -> str:
         if qualified_name.startswith("vllm."):
             return self.upstream.canonical_name(qualified_name)
         if qualified_name.startswith("vllm_ascend."):
             return self.downstream.canonical_name(qualified_name)
-        for package, index in self.externals.items():
-            if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return index.canonical_name(qualified_name)
         return qualified_name
 
     def _class_info(self, qualified_name: str) -> ClassInfo | None:
@@ -4503,9 +4266,6 @@ class InterfaceBoundaryGenerator:
             return self.downstream.find_class(qualified_name)
         if qualified_name.startswith("vllm."):
             return self.upstream.find_class(qualified_name)
-        for package, index in self.externals.items():
-            if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return index.find_class(qualified_name)
         return None
 
     def _callable_info(self, qualified_name: str) -> CallableInfo | None:
@@ -4513,9 +4273,6 @@ class InterfaceBoundaryGenerator:
             return self.downstream.find_callable(qualified_name)
         if qualified_name.startswith("vllm."):
             return self.upstream.find_callable(qualified_name)
-        for package, index in self.externals.items():
-            if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return index.find_callable(qualified_name)
         return None
 
     def _callable_variants(
@@ -4526,9 +4283,6 @@ class InterfaceBoundaryGenerator:
             return self.downstream.find_final_callable_variants(qualified_name)
         if qualified_name.startswith("vllm."):
             return self.upstream.find_final_callable_variants(qualified_name)
-        for package, index in self.externals.items():
-            if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return index.find_final_callable_variants(qualified_name)
         return ()
 
     def _aggregate_descriptor_kinds(
@@ -4554,9 +4308,6 @@ class InterfaceBoundaryGenerator:
             return self.downstream
         if callable_info.qualified_name.startswith("vllm."):
             return self.upstream
-        for package, index in self.externals.items():
-            if callable_info.qualified_name == package or callable_info.qualified_name.startswith(f"{package}."):
-                return index
         return None
 
     def _bound_call_signature(
@@ -4884,272 +4635,6 @@ class InterfaceBoundaryGenerator:
             for child in _function_scope_nodes(node)
         )
 
-    def _statement_expressions(
-        self,
-        node: ast.stmt,
-    ) -> tuple[ast.AST | None, ...]:
-        if isinstance(node, ast.Expr):
-            return (node.value,)
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-            return (node.value,)
-        if isinstance(node, (ast.If, ast.While)):
-            return (node.test,)
-        if isinstance(node, (ast.For, ast.AsyncFor)):
-            return (node.iter,)
-        if isinstance(node, ast.Return):
-            return (node.value,)
-        if isinstance(node, ast.Raise):
-            return (node.exc,)
-        if isinstance(node, ast.Assert):
-            return (node.test, node.msg)
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            return tuple(item.context_expr for item in node.items)
-        return ()
-
-    def _append_signature_finding(
-        self,
-        relation: Relation,
-        *,
-        target_expression: str,
-        evidence_line: int,
-        evidence_scope: str | None = None,
-        evidence_guards: tuple[str, ...] = (),
-    ) -> None:
-        contracts = (
-            relation.upstream_signature_contract,
-            relation.downstream_signature_contract,
-            relation.installed_signature_contract,
-        )
-        if not any(contract is not None and contract.status != "exact" for contract in contracts):
-            return
-        invalid_binding = any(contract is not None and contract.status == "invalid" for contract in contracts)
-        unknown_binding = any(
-            contract is not None and "unknown_descriptor_binding" in contract.provenance for contract in contracts
-        )
-        unknown_transform = any(
-            contract is not None
-            and contract.status == "unknown"
-            and "unknown_descriptor_binding" not in contract.provenance
-            for contract in contracts
-        )
-        known_descriptor_mismatch = (
-            relation.upstream_descriptor_kind is not None
-            and relation.installed_descriptor_kind is not None
-            and relation.upstream_descriptor_kind != relation.installed_descriptor_kind
-        )
-        if invalid_binding and known_descriptor_mismatch:
-            # The invalid binding is derived from the already reported change
-            # in descriptor protocol. Keep an independent decorator unknown,
-            # but do not report the same binding break twice.
-            if not unknown_transform:
-                return
-            invalid_binding = False
-        if unknown_binding and not invalid_binding and not unknown_transform:
-            # The descriptor finding already owns this uncertainty. Emitting a
-            # second signature finding for the same unknown binding would add
-            # noise without providing independent evidence.
-            return
-        self.findings.append(
-            CandidateFinding(
-                relation=relation.relation,
-                downstream_file=relation.downstream_file,
-                downstream_owner=relation.downstream_owner,
-                downstream_name=relation.downstream_name,
-                target_expression=target_expression,
-                evidence_line=evidence_line,
-                reason=(
-                    "descriptor binding requires a receiver but the callable has no positional slot"
-                    if invalid_binding
-                    else (
-                        (
-                            "a decorator changes the runtime callable contract and "
-                            "its exact signature effect is not proven for this source version"
-                        )
-                        if unknown_transform
-                        else (
-                            "the descriptor kind is conditional or unknown, so the "
-                            "bound runtime signature cannot be proven"
-                        )
-                    )
-                ),
-                status="risk" if invalid_binding else "review",
-                reason_code=(
-                    "invalid_receiver_binding"
-                    if invalid_binding
-                    else ("unknown_signature_transform" if unknown_transform else "unknown_signature_binding")
-                ),
-                generator_issue=False,
-                evidence_scope=evidence_scope,
-                evidence_guards=evidence_guards,
-                supplemental=True,
-            )
-        )
-
-    def _append_signature_compatibility_finding(
-        self,
-        relation: Relation,
-        *,
-        target_expression: str,
-        evidence_line: int,
-        evidence_scope: str | None = None,
-        evidence_guards: tuple[str, ...] = (),
-    ) -> None:
-        upstream = relation.upstream_signature_contract
-        installed = relation.installed_signature_contract
-        if (
-            upstream is None
-            or installed is None
-            or upstream.status != "exact"
-            or installed.status != "exact"
-            or upstream.bound_call_signature is None
-            or installed.bound_call_signature is None
-        ):
-            return
-        if (
-            relation.upstream_descriptor_kind is not None
-            and relation.installed_descriptor_kind is not None
-            and relation.upstream_descriptor_kind != relation.installed_descriptor_kind
-        ):
-            # A known descriptor mismatch already reports the access-protocol
-            # break. Do not duplicate it as a derived signature failure.
-            return
-
-        incompatible_views: list[str] = []
-        compared_signatures: set[str] = set()
-
-        def compare_view(
-            label: str,
-            upstream_signature: list[object] | None,
-            installed_signature: list[object] | None,
-        ) -> None:
-            if upstream_signature is None or installed_signature is None:
-                return
-            comparison_key = json.dumps(
-                [upstream_signature, installed_signature],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            if comparison_key in compared_signatures:
-                return
-            compared_signatures.add(comparison_key)
-            if not _accepts_signature_contract(
-                upstream_signature,
-                installed_signature,
-            ):
-                incompatible_views.append(label)
-
-        compare_view(
-            "runtime entry",
-            upstream.bound_call_signature,
-            installed.bound_call_signature,
-        )
-        binds_receiver = relation.upstream_owner is not None
-        extra_views = ()
-        if _TRITON_KERNEL_PROTOCOL not in {upstream.protocol, installed.protocol}:
-            extra_views = (
-                ("reported", "reported_signature"),
-                ("definition", "definition_signature"),
-            )
-        for label, attribute in extra_views:
-            upstream_signature, upstream_status = self._bound_call_signature(
-                getattr(upstream, attribute),
-                descriptor_kind=relation.upstream_descriptor_kind,
-                binds_receiver=binds_receiver,
-            )
-            installed_signature, installed_status = self._bound_call_signature(
-                getattr(installed, attribute),
-                descriptor_kind=relation.installed_descriptor_kind,
-                binds_receiver=binds_receiver,
-            )
-            if upstream_status == "exact" and installed_status == "exact":
-                compare_view(
-                    label,
-                    upstream_signature,
-                    installed_signature,
-                )
-
-        if upstream.protocol != installed.protocol:
-            incompatible_views.insert(0, "access protocol")
-        if not incompatible_views:
-            return
-        self.findings.append(
-            CandidateFinding(
-                relation=relation.relation,
-                downstream_file=relation.downstream_file,
-                downstream_owner=relation.downstream_owner,
-                downstream_name=relation.downstream_name,
-                target_expression=target_expression,
-                evidence_line=evidence_line,
-                reason=(
-                    "the installed downstream callable does not accept every "
-                    "call shape allowed by the upstream contract; incompatible "
-                    f"views: {', '.join(incompatible_views)}"
-                ),
-                status="risk",
-                reason_code="signature_incompatible",
-                generator_issue=False,
-                evidence_scope=evidence_scope,
-                evidence_guards=evidence_guards,
-                supplemental=True,
-            )
-        )
-
-    def _append_descriptor_finding(
-        self,
-        relation: Relation,
-        *,
-        target_expression: str,
-        evidence_line: int,
-        conditional: bool,
-        evidence_scope: str | None = None,
-        evidence_guards: tuple[str, ...] = (),
-    ) -> None:
-        kinds = (
-            relation.upstream_descriptor_kind,
-            relation.downstream_descriptor_kind,
-            relation.installed_descriptor_kind,
-        )
-        if kinds == (None, None, None):
-            return
-        if conditional:
-            reason_code = "conditional_descriptor_kind"
-            reason = (
-                "the callable has different descriptor kinds on normally "
-                "completing source paths; no single binding kind was guessed"
-            )
-        elif "unknown" in kinds:
-            reason_code = "unknown_descriptor_kind"
-            reason = "a dynamic decorator or binding prevents an exact descriptor kind from being proven statically"
-        elif relation.upstream_descriptor_kind != relation.installed_descriptor_kind:
-            reason_code = "descriptor_kind_mismatch"
-            reason = "the downstream binding installs a different callable kind from the upstream member"
-        elif None in kinds:
-            reason_code = "unknown_descriptor_kind"
-            reason = "a dynamic decorator or binding prevents an exact descriptor kind from being proven statically"
-        else:
-            return
-        status = "risk" if reason_code == "descriptor_kind_mismatch" else "review"
-        self.findings.append(
-            CandidateFinding(
-                relation=relation.relation,
-                downstream_file=relation.downstream_file,
-                downstream_owner=relation.downstream_owner,
-                downstream_name=relation.downstream_name,
-                target_expression=target_expression,
-                evidence_line=evidence_line,
-                reason=reason,
-                status=status,
-                reason_code=reason_code,
-                generator_issue=False,
-                evidence_scope=evidence_scope,
-                evidence_guards=evidence_guards,
-                supplemental=True,
-                upstream_descriptor_kind=relation.upstream_descriptor_kind,
-                downstream_descriptor_kind=relation.downstream_descriptor_kind,
-                installed_descriptor_kind=relation.installed_descriptor_kind,
-            )
-        )
-
     def _final_bindings(
         self,
         qualified_name: str,
@@ -5159,9 +4644,6 @@ class InterfaceBoundaryGenerator:
             return self.downstream.find_final_bindings(qualified_name)
         if qualified_name.startswith("vllm."):
             return self.upstream.find_final_bindings(qualified_name)
-        for package, index in self.externals.items():
-            if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return index.find_final_bindings(qualified_name)
         return ()
 
     def _final_binding_kinds(
@@ -5169,22 +4651,6 @@ class InterfaceBoundaryGenerator:
         qualified_name: str,
     ) -> set[str]:
         return {binding.kind for binding in self._final_bindings(qualified_name)}
-
-    def _source_package(self, qualified_name: str) -> str:
-        if qualified_name == "vllm" or qualified_name.startswith("vllm."):
-            return "vllm"
-        for package in self.externals:
-            if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return package
-        raise ValueError(f"interface source package was not indexed: {qualified_name}")
-
-    def _class_defines_method(
-        self,
-        qualified_name: str,
-        method_name: str,
-    ) -> bool:
-        class_info = self._class_info(qualified_name)
-        return class_info is not None and method_name in class_info.methods
 
     def _class_bases(
         self,
@@ -5197,15 +4663,6 @@ class InterfaceBoundaryGenerator:
             index = self.downstream
         elif qualified_name.startswith("vllm."):
             index = self.upstream
-        else:
-            index = next(
-                (
-                    candidate
-                    for package, candidate in self.externals.items()
-                    if qualified_name == package or qualified_name.startswith(f"{package}.")
-                ),
-                None,
-            )
         if index is not None and qualified_name in index.class_base_conflicts:
             return [], [f"conditional class variants have different bases: {qualified_name}"]
         info = self._class_info(qualified_name)
@@ -5362,25 +4819,6 @@ class InterfaceBoundaryGenerator:
                     *resolution.blocking_owners,
                 )
                 if downstream_callable_kinds and downstream_other_kinds and upstream_target_owners:
-                    target_owner = upstream_target_owners[0]
-                    self.findings.append(
-                        CandidateFinding(
-                            relation="override",
-                            downstream_file=class_info.file,
-                            downstream_owner=class_info.name,
-                            downstream_name=method_name,
-                            target_expression=f"{target_owner}.{method_name}",
-                            evidence_line=getattr(method_node, "lineno", 0),
-                            reason=(
-                                "downstream member is callable only on some "
-                                "normally completing class paths; other final "
-                                f"bindings: {', '.join(sorted(downstream_other_kinds))}"
-                            ),
-                            status="review",
-                            reason_code="conditional_callable_presence",
-                            generator_issue=False,
-                        )
-                    )
                     continue
                 effective_owners = resolution.callable_owners if resolution.is_total_callable else ()
                 if not effective_owners:
@@ -5389,24 +4827,6 @@ class InterfaceBoundaryGenerator:
                         *resolution.blocking_owners,
                     )
                     if conditional_owners:
-                        target_owner = conditional_owners[0]
-                        self.findings.append(
-                            CandidateFinding(
-                                relation="override",
-                                downstream_file=class_info.file,
-                                downstream_owner=class_info.name,
-                                downstream_name=method_name,
-                                target_expression=f"{target_owner}.{method_name}",
-                                evidence_line=getattr(method_node, "lineno", 0),
-                                reason=(
-                                    "the effective upstream member is callable only on "
-                                    "some normally completing lookup paths"
-                                ),
-                                status="review",
-                                reason_code="conditional_callable_presence",
-                                generator_issue=False,
-                            )
-                        )
                         continue
                     historical_lookup_root = (
                         next(
@@ -5432,68 +4852,6 @@ class InterfaceBoundaryGenerator:
                                 evidence_line=getattr(method_node, "lineno", 0),
                             )
                         )
-                    super_target = (
-                        next(
-                            (owner for owner in mro[1:] if owner.startswith("vllm.")),
-                            None,
-                        )
-                        if mro_result.complete
-                        and not hasattr(object, method_name)
-                        and self._calls_same_method_on_super(
-                            method_node,
-                            method_name,
-                        )
-                        else None
-                    )
-                    if super_target is not None:
-                        self.findings.append(
-                            CandidateFinding(
-                                relation="override",
-                                downstream_file=class_info.file,
-                                downstream_owner=class_info.name,
-                                downstream_name=method_name,
-                                target_expression=f"{super_target}.{method_name}",
-                                evidence_line=getattr(method_node, "lineno", 0),
-                                reason=(
-                                    "downstream method directly calls the same "
-                                    "method through super(), but no upstream "
-                                    "implementation exists in the complete MRO"
-                                ),
-                                status="risk",
-                                reason_code="missing_upstream_super_target",
-                                generator_issue=False,
-                            )
-                        )
-                        continue
-                    candidates = (
-                        self._candidate_upstream_method_owners(
-                            class_info.qualified_name,
-                            method_name,
-                        )
-                        if not mro_result.complete
-                        else ()
-                    )
-                    if candidates:
-                        self.findings.append(
-                            CandidateFinding(
-                                relation="override",
-                                downstream_file=class_info.file,
-                                downstream_owner=class_info.name,
-                                downstream_name=method_name,
-                                target_expression=", ".join(candidates),
-                                evidence_line=getattr(
-                                    method_node,
-                                    "lineno",
-                                    0,
-                                ),
-                                reason=(
-                                    f"incomplete MRO ({mro_result.reason}); candidate upstream owner was not selected"
-                                ),
-                                status="review",
-                                reason_code="ambiguous_mro",
-                                generator_issue=False,
-                            )
-                        )
                     continue
                 for effective_owner in effective_owners:
                     for root_owner, owner_path in self._override_root_paths(
@@ -5505,7 +4863,6 @@ class InterfaceBoundaryGenerator:
                             method_name,
                             method_node,
                             root_owner,
-                            mro,
                             override_path=(downstream_name, *owner_path),
                         )
 
@@ -5533,9 +4890,7 @@ class InterfaceBoundaryGenerator:
             return self._override_root_path_cache[cache_key]
 
         qualified_method = f"{effective_owner}.{method_name}"
-        if effective_owner.startswith("vllm.") or self._is_external_owner(
-            effective_owner,
-        ):
+        if effective_owner.startswith("vllm."):
             result = ((effective_owner, (qualified_method,)),)
         elif not effective_owner.startswith("vllm_ascend."):
             result = ()
@@ -5565,93 +4920,17 @@ class InterfaceBoundaryGenerator:
         self._override_root_path_cache[cache_key] = result
         return result
 
-    def _calls_same_method_on_super(
-        self,
-        method_node: ast.AST,
-        method_name: str,
-    ) -> bool:
-        """Whether this method directly evaluates ``super().<same-name>(...)``."""
-
-        if not isinstance(
-            method_node,
-            (ast.AsyncFunctionDef, ast.FunctionDef),
-        ):
-            return False
-        tag_guard_names = _tag_guard_names(method_node.body)
-        for statement in _main_module_statements(
-            method_node.body,
-            tag_guard_names,
-        ):
-            for expression in self._statement_expressions(statement):
-                for candidate in _main_expression_calls(
-                    expression,
-                    tag_guard_names,
-                ):
-                    function = candidate.func
-                    if not (
-                        isinstance(function, ast.Attribute)
-                        and function.attr == method_name
-                        and isinstance(function.value, ast.Call)
-                    ):
-                        continue
-                    super_call = function.value
-                    if (
-                        isinstance(super_call.func, ast.Name)
-                        and super_call.func.id == "super"
-                        and not super_call.args
-                        and not super_call.keywords
-                    ):
-                        return True
-        return False
-
     def _record_verified_override_owner(
         self,
         class_info: ClassInfo,
         method_name: str,
         method_node: ast.AST,
         effective_owner: str,
-        mro: Sequence[str],
         *,
         override_path: tuple[str, ...],
     ) -> None:
         """Record one override after validating its owner and installed contract."""
-        is_external = self._is_external_owner(effective_owner)
-        if not effective_owner.startswith("vllm.") and not is_external:
-            return
-        if is_external:
-            shadowed = next(
-                (
-                    owner
-                    for owner in mro[1:]
-                    if owner.startswith("vllm.")
-                    and self._class_defines_method(
-                        owner,
-                        method_name,
-                    )
-                ),
-                None,
-            )
-            target_expression = f"{effective_owner}.{method_name}"
-            reason = f"the effective overridden method is owned by external package class {effective_owner}, not vLLM"
-            reason_code = "external_only_override"
-            if shadowed is not None:
-                target_expression = f"{shadowed}.{method_name}"
-                reason = f"external owner {effective_owner} defines the effective method before this vLLM candidate"
-                reason_code = "external_override_owner"
-            self.findings.append(
-                CandidateFinding(
-                    relation="override",
-                    downstream_file=class_info.file,
-                    downstream_owner=class_info.name,
-                    downstream_name=method_name,
-                    target_expression=target_expression,
-                    evidence_line=getattr(method_node, "lineno", 0),
-                    reason=reason,
-                    status="excluded",
-                    reason_code=reason_code,
-                    generator_issue=False,
-                )
-            )
+        if not effective_owner.startswith("vllm."):
             return
         upstream_name = f"{effective_owner}.{method_name}"
         downstream_name = f"{class_info.qualified_name}.{method_name}"
@@ -5674,20 +4953,6 @@ class InterfaceBoundaryGenerator:
             for candidate in downstream_variants
         }
         if len(upstream_signatures) > 1 or len(downstream_signatures) > 1:
-            self.findings.append(
-                CandidateFinding(
-                    relation="override",
-                    downstream_file=class_info.file,
-                    downstream_owner=class_info.name,
-                    downstream_name=method_name,
-                    target_expression=upstream_name,
-                    evidence_line=getattr(method_node, "lineno", 0),
-                    reason=("conditional upstream or downstream callable has incompatible signature variants"),
-                    status="review",
-                    reason_code="conditional_callable_variants",
-                    generator_issue=False,
-                )
-            )
             return
 
         upstream_callable = upstream_variants[0] if upstream_variants else self._callable_info(upstream_name)
@@ -5696,15 +4961,11 @@ class InterfaceBoundaryGenerator:
         downstream_callable = (
             downstream_variants[0] if downstream_variants else self.downstream.find_callable(downstream_name)
         )
-        upstream_descriptor_kind, upstream_descriptor_conditional = self._aggregate_descriptor_kinds(
-            upstream_variants or (upstream_callable,)
-        )
+        upstream_descriptor_kind, _ = self._aggregate_descriptor_kinds(upstream_variants or (upstream_callable,))
         downstream_candidates = downstream_variants or (
             (downstream_callable,) if downstream_callable is not None else ()
         )
-        downstream_descriptor_kind, downstream_descriptor_conditional = self._aggregate_descriptor_kinds(
-            downstream_candidates
-        )
+        downstream_descriptor_kind, _ = self._aggregate_descriptor_kinds(downstream_candidates)
         evidence_line = (
             downstream_callable.binding_line
             if downstream_callable and downstream_callable.binding_line is not None
@@ -5736,7 +4997,7 @@ class InterfaceBoundaryGenerator:
             ),
             evidence_file=class_info.file,
             evidence_line=evidence_line,
-            upstream_package=self._source_package(upstream_callable.qualified_name),
+            upstream_package="vllm",
             upstream_descriptor_kind=upstream_descriptor_kind,
             downstream_descriptor_kind=downstream_descriptor_kind,
             installed_descriptor_kind=downstream_descriptor_kind,
@@ -5753,22 +5014,6 @@ class InterfaceBoundaryGenerator:
             override_paths=(override_path,),
         )
         self.relations.append(relation)
-        self._append_descriptor_finding(
-            relation,
-            target_expression=upstream_name,
-            evidence_line=evidence_line,
-            conditional=(upstream_descriptor_conditional or downstream_descriptor_conditional),
-        )
-        self._append_signature_finding(
-            relation,
-            target_expression=upstream_name,
-            evidence_line=evidence_line,
-        )
-        self._append_signature_compatibility_finding(
-            relation,
-            target_expression=upstream_name,
-            evidence_line=evidence_line,
-        )
 
     def _effective_method_resolution(
         self,
@@ -5835,39 +5080,6 @@ class InterfaceBoundaryGenerator:
     ) -> str | None:
         owners = self._effective_method_owners(mro, method_name)
         return owners[0] if owners else None
-
-    def _is_external_owner(self, qualified_name: str) -> bool:
-        return any(qualified_name == package or qualified_name.startswith(f"{package}.") for package in self.externals)
-
-    def _candidate_upstream_method_owners(
-        self,
-        qualified_name: str,
-        method_name: str,
-        seen: frozenset[str] = frozenset(),
-    ) -> tuple[str, ...]:
-        if qualified_name in seen:
-            return ()
-        class_info = self._class_info(qualified_name)
-        if class_info is None:
-            return ()
-
-        candidates: set[str] = set()
-        next_seen = (*seen, qualified_name)
-        for base in class_info.resolved_bases:
-            base = self._canonical_reference(base)
-            base_info = self._class_info(base)
-            if base_info is None:
-                continue
-            if base.startswith("vllm.") and method_name in base_info.methods:
-                candidates.add(base)
-            candidates.update(
-                self._candidate_upstream_method_owners(
-                    base,
-                    method_name,
-                    frozenset(next_seen),
-                )
-            )
-        return tuple(sorted(candidates))
 
     def _class_line(self, class_info: ClassInfo) -> int:
         node = self.downstream.find_callable(class_info.qualified_name)

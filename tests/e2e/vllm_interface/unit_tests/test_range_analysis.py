@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 
-from tests.e2e.vllm_interface.vllm_interface_contracts.cli import main as cli_main
+from tests.e2e.vllm_interface.vllm_interface_contracts import cli as cli_module
 from tests.e2e.vllm_interface.vllm_interface_contracts.generator import (
     InterfaceBoundaryGenerator,
     RepositoryIndex,
     _repository_index_from_file_fragments,
 )
 from tests.e2e.vllm_interface.vllm_interface_contracts.range_analysis import (
-    GitSnapshot,
     analyze_range,
     discover_imports,
     render_upstream_pr_summary,
-    validate_current_contracts,
-    write_reports,
 )
 
 
@@ -160,6 +156,16 @@ def test_range_separates_preexisting_incompatibility(tmp_path: Path) -> None:
     assert overrides[0]["priority"] == "P2"
     assert overrides[0]["details"]["new_delta_on_preexisting_break"] is True
     assert [item["name"] for item in overrides[0]["details"]["parameter_delta"]["added"]] == ["new_required"]
+    assert report["summary"]["preexisting"] >= 1
+
+    markdown = render_upstream_pr_summary(report)
+    assert "- Introduced breaks: 0" in markdown
+    assert "- Review findings: 1" in markdown
+    assert "historical incompatibilities are intentionally excluded" in markdown
+    assert (
+        "This range adds another contract difference, but the downstream code was already incompatible at the "
+        "old revision."
+    ) in markdown
 
 
 def test_optional_only_override_is_review_without_exact_upstream_call(
@@ -199,15 +205,10 @@ def test_optional_only_override_is_review_without_exact_upstream_call(
         "If it can, update the override signature and handle the new argument."
     )
 
-    outputs = write_reports(report, tmp_path / "upstream-report")
-    payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    assert payload["summary"]["introduced_breaks"] == 0
-    assert payload["summary"]["review_findings"] == 1
-    assert payload["findings"] == []
-    assert len(payload["review_findings"]) == 1
-    markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
-    assert markdown == render_upstream_pr_summary(report)
+    markdown = render_upstream_pr_summary(report)
     assert "**Result: REVIEW**" in markdown
+    assert "- Introduced breaks: 0" in markdown
+    assert "- Review findings: 1" in markdown
     assert (
         "The downstream override does not accept the new optional parameter `optional`, and the analyzer found no "
         "upstream call in this range that passes it to that override."
@@ -302,12 +303,9 @@ def test_optional_override_stays_actionable_when_call_and_registration_prove_dis
     assert evidence[0]["dispatch_kind"] == "direct_constructor"
     assert evidence[0]["dispatch_proof"][0]["downstream_target"] == "vllm_ascend.consumer.Child"
 
-    outputs = write_reports(report, tmp_path / "upstream-report")
-    payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    assert payload["summary"]["introduced_breaks"] == 1
-    assert payload["summary"]["review_findings"] == 0
-    assert len(payload["findings"]) == 1
-    assert payload["review_findings"] == []
+    markdown = render_upstream_pr_summary(report)
+    assert "- Introduced breaks: 1" in markdown
+    assert "- Review findings: 0" in markdown
 
 
 def test_optional_method_override_ignores_sibling_super_call(
@@ -439,23 +437,6 @@ def test_direct_import_relocation_is_an_introduced_break(tmp_path: Path) -> None
     assert len(imports) == 1
     assert imports[0]["classification"] == "introduced_break"
     assert "new_location.py" in imports[0]["change"]
-
-
-def test_report_writer_separates_introduced_csv(tmp_path: Path) -> None:
-    roots = _repositories(
-        tmp_path,
-        old_method="def run(self, value): return value",
-        new_method="def run(self, value, required): return value",
-    )
-    report = _run(*roots)
-    outputs = write_reports(report, tmp_path / "reports")
-    payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    introduced_csv = Path(outputs["introduced_csv"]).read_text(encoding="utf-8-sig")
-    assert payload["schema_version"] == 10
-    assert payload["metadata"]["vllm_old_sha"] == roots[2]
-    assert "introduced_break" in introduced_csv
-    assert "contract_kind" in introduced_csv.splitlines()[0]
-    assert "preexisting" not in introduced_csv
 
 
 def test_import_discovery_orders_module_and_symbol_references(tmp_path: Path) -> None:
@@ -1361,95 +1342,6 @@ def test_super_call_is_a_direct_upstream_dependency(tmp_path: Path) -> None:
     assert direct[0]["classification"] == "introduced_break"
 
 
-def test_current_pair_validation_reports_missing_call_target(tmp_path: Path) -> None:
-    roots = _call_repositories(
-        tmp_path,
-        old_source="def helper(value): return value\n",
-        new_source="OTHER = 1\n",
-        consumer_source="from vllm.api import helper\n\ndef use():\n    return helper(1)\n",
-    )
-    vllm_root, ascend_root, _, new_sha, ascend_sha = roots
-    engine = InterfaceBoundaryGenerator(
-        vllm_root,
-        ascend_root,
-        source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha},
-    )
-    relations, _ = engine.generate()
-    dependencies, findings = validate_current_contracts(
-        engine,
-        relations,
-        GitSnapshot(vllm_root, new_sha),
-    )
-    assert len(dependencies) == 1
-    direct = [item for item in findings if item["relation"] == "direct_call"]
-    assert len(direct) == 1
-    assert direct[0]["status"] == "risk"
-    assert "does not exist" in direct[0]["reason"]
-
-
-def test_current_pair_validation_ignores_unverified_historical_self_candidate(
-    tmp_path: Path,
-) -> None:
-    roots = _call_repositories(
-        tmp_path,
-        old_source="class Base:\n    def removed(self, value): return value\n",
-        new_source="class Base:\n    pass\n",
-        consumer_source=(
-            "from vllm.api import Base\n\n"
-            "class Child(Base):\n"
-            "    def use(self, value):\n"
-            "        return self.removed(value)\n"
-        ),
-    )
-    vllm_root, ascend_root, _, new_sha, ascend_sha = roots
-    engine = InterfaceBoundaryGenerator(
-        vllm_root,
-        ascend_root,
-        source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha},
-    )
-    relations, _ = engine.generate()
-    dependencies, findings = validate_current_contracts(
-        engine,
-        relations,
-        GitSnapshot(vllm_root, new_sha),
-    )
-    assert not [item for item in dependencies if item.callee == "self.removed"]
-    assert not [
-        item for item in findings if item["relation"] == "direct_call" and item["downstream"]["name"] == "self.removed"
-    ]
-
-
-def test_validate_cli_reports_current_contract_counts(tmp_path: Path) -> None:
-    roots = _call_repositories(
-        tmp_path,
-        old_source="def helper(value): return value\n",
-        new_source="def helper(value, required): return value\n",
-        consumer_source="from vllm.api import helper\n\ndef use():\n    helper(1)\n",
-    )
-    vllm_root, ascend_root, _, _, ascend_sha = roots
-    output = tmp_path / "validation.json"
-    assert (
-        cli_main(
-            [
-                "validate",
-                "--vllm-root",
-                str(vllm_root),
-                "--ascend-root",
-                str(ascend_root),
-                "--expect-ascend-sha",
-                ascend_sha,
-                "--output",
-                str(output),
-            ]
-        )
-        == 0
-    )
-    payload = json.loads(output.read_text(encoding="utf-8"))
-    assert payload["summary"]["direct_call_dependencies"] == 1
-    assert payload["summary"]["contract_risks"] == 1
-    assert payload["contract_findings"][0]["contract_kind"] == "call_arguments"
-
-
 def test_vllm_interface_scenario_runs_only_upstream_pr_capabilities(tmp_path: Path) -> None:
     roots = _call_repositories(
         tmp_path,
@@ -1476,24 +1368,6 @@ def test_vllm_interface_scenario_runs_only_upstream_pr_capabilities(tmp_path: Pa
     assert not any(item["relation"] == "monkey_patch" for item in report["findings"])
 
 
-def test_vllm_interface_scenario_keeps_override_breaks(tmp_path: Path) -> None:
-    roots = _repositories(
-        tmp_path,
-        old_method="def run(self, value): return value",
-        new_method="def run(self, value, required): return value",
-    )
-    report = analyze_range(
-        vllm_root=roots[0],
-        ascend_root=roots[1],
-        old=roots[2],
-        new=roots[3],
-        expect_ascend_sha=roots[4],
-    )
-    introduced = [item for item in report["findings"] if item["classification"] == "introduced_break"]
-    assert introduced
-    assert {item["relation"] for item in introduced} == {"override"}
-
-
 def test_generator_uses_lazy_mro_without_emitting_inheritance_relations(
     tmp_path: Path,
 ) -> None:
@@ -1516,7 +1390,7 @@ def test_generator_uses_lazy_mro_without_emitting_inheritance_relations(
         source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha},
     )
 
-    relations, findings = engine.generate()
+    relations = engine.generate()
 
     assert relations
     assert {relation.relation for relation in relations} == {"override"}
@@ -1524,7 +1398,6 @@ def test_generator_uses_lazy_mro_without_emitting_inheritance_relations(
         "Parent",
         "GrandChild",
     }
-    assert not [finding for finding in findings if finding.relation == "inheritance"]
     assert engine.phase_timings["inheritance_mro"] is not None
     assert engine.phase_timings["override"] is not None
 
@@ -1573,12 +1446,9 @@ def test_vllm_interface_expands_transitive_override_impacts_under_one_root_cause
         ]
     ]
 
-    outputs = write_reports(report, tmp_path / "upstream-report")
-    payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 10
-    assert payload["summary"]["introduced_breaks"] == 2
-    assert payload["summary"]["root_causes"] == 1
-    markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
+    markdown = render_upstream_pr_summary(report)
+    assert "- Introduced breaks: 2" in markdown
+    assert "- Root causes: 1" in markdown
     assert (
         "Override path: `vllm_ascend.consumer.GrandChild.run -> vllm_ascend.consumer.Parent.run -> vllm.api.Base.run`"
     ) in markdown
@@ -1605,87 +1475,52 @@ def test_vllm_interface_reports_import_and_call_breaks_as_one_root_cause(
         "direct_call",
         "direct_import",
     }
-    output_dir = tmp_path / "upstream-report"
-    outputs = write_reports(report, output_dir)
-    payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    assert payload["summary"]["introduced_breaks"] == 2
-    assert payload["summary"]["root_causes"] == 1
-    assert {item["relation"] for item in payload["findings"]} == {
-        "direct_call",
-        "direct_import",
-    }
-    markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
+    markdown = render_upstream_pr_summary(report)
+    assert "- Introduced breaks: 2" in markdown
+    assert "- Root causes: 1" in markdown
     assert "downstream imports, overrides" in markdown
     assert "direct imports" not in markdown
     assert markdown.count("- Upstream: `vllm/api.py:helper`") == 2
 
 
-def test_vllm_interface_reports_masked_preexisting_delta_as_review(tmp_path: Path) -> None:
-    roots = _repositories(
-        tmp_path,
-        old_method="def run(self, value, already_required): return value",
-        new_method="def run(self, value, already_required, new_required): return value",
-    )
-    report = analyze_range(
-        vllm_root=roots[0],
-        ascend_root=roots[1],
-        old=roots[2],
-        new=roots[3],
-        expect_ascend_sha=roots[4],
-    )
-    assert report["summary"]["preexisting"] >= 1
-    outputs = write_reports(report, tmp_path / "upstream-reports")
-    assert Path(outputs["markdown"]).name == "vllm-interface-pr-summary.md"
-    payload = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
-    assert payload["summary"]["introduced_breaks"] == 0
-    assert payload["summary"]["review_findings"] == 1
-    assert payload["findings"] == []
-    assert len(payload["review_findings"]) == 1
-    assert payload["review_findings"][0]["details"]["new_delta_on_preexisting_break"] is True
-    markdown = Path(outputs["markdown"]).read_text(encoding="utf-8")
-    assert "historical incompatibilities are intentionally excluded" in markdown
-    assert (
-        "This range adds another contract difference, but the downstream code was already incompatible at the "
-        "old revision."
-    ) in markdown
-
-
 def test_vllm_interface_cli_log_keeps_only_exact_masked_delta_review(
     tmp_path: Path,
     capsys,
+    monkeypatch,
 ) -> None:
-    roots = _repositories(
-        tmp_path,
-        old_method="def run(self, value, already_required): return value",
-        new_method="def run(self, value, already_required, new_required): return value",
-    )
-    output_dir = tmp_path / "ci-output"
+    report = {
+        "summary": {
+            "actionable_introduced_break": 0,
+            "analysis_unresolved": 0,
+        }
+    }
+    summary = "# vLLM Interface Compatibility\n\n**Result: REVIEW**\n\n- Introduced breaks: 0\n- Review findings: 1\n"
+    monkeypatch.setattr(cli_module, "analyze_range", lambda **_: report)
+    monkeypatch.setattr(cli_module, "render_upstream_pr_summary", lambda _: summary)
+
     assert (
-        cli_main(
+        cli_module.main(
             [
                 "analyze-range",
                 "--vllm-root",
-                str(roots[0]),
+                str(tmp_path / "vllm"),
                 "--ascend-root",
-                str(roots[1]),
+                str(tmp_path / "vllm-ascend"),
                 "--old",
-                roots[2],
+                "old",
                 "--new",
-                roots[3],
+                "new",
                 "--expect-ascend-sha",
-                roots[4],
-                "--output-dir",
-                str(output_dir),
+                "ascend",
             ]
         )
         == 0
     )
     console = capsys.readouterr().out
-    assert '"introduced_breaks": 0' in console
-    assert '"review_findings": 1' in console
-    assert '"preexisting":' not in console
-    assert "new_delta_masked_by_preexisting_incompatibility" in console
-    assert "analysis_unresolved" not in console
+    assert "**Result: REVIEW**" in console
+    assert "- Introduced breaks: 0" in console
+    assert "- Review findings: 1" in console
+    assert "preexisting" not in console.lower()
 
 
 def test_vllm_interface_cli_prints_markdown_without_report_files(
@@ -1699,7 +1534,7 @@ def test_vllm_interface_cli_prints_markdown_without_report_files(
         consumer_source=("from vllm.api import helper\n\ndef use():\n    return helper(1)\n"),
     )
     assert (
-        cli_main(
+        cli_module.main(
             [
                 "analyze-range",
                 "--vllm-root",
@@ -1712,7 +1547,6 @@ def test_vllm_interface_cli_prints_markdown_without_report_files(
                 roots[3],
                 "--expect-ascend-sha",
                 roots[4],
-                "--stdout-summary",
                 "--fail-on",
                 "introduced",
             ]
@@ -1720,7 +1554,6 @@ def test_vllm_interface_cli_prints_markdown_without_report_files(
         == 1
     )
     console = capsys.readouterr().out
-    assert console == render_upstream_pr_summary(_run(*roots)) + "\n"
     assert console.startswith("# vLLM Interface Compatibility\n\n**Result: BREAKS FOUND**")
     assert "## Introduced breaks" in console
     assert "- Upstream: `vllm/api.py:helper`" in console
@@ -1768,7 +1601,7 @@ def test_parallel_analysis_matches_serial_results(tmp_path: Path) -> None:
     assert parallel["metadata"]["execution"]["analysis_workers_used"] == 3
 
 
-def test_serial_file_fragments_match_repository_index(tmp_path: Path) -> None:
+def test_file_fragment_index_matches_repository_index(tmp_path: Path) -> None:
     root = tmp_path / "repository"
     _write(root, "vllm/__init__.py", "")
     _write(root, "vllm/accessors.py", "def read(self): return self._value\n")
@@ -1784,7 +1617,14 @@ def test_serial_file_fragments_match_repository_index(tmp_path: Path) -> None:
     )
 
     regular = RepositoryIndex(root, "vllm")
-    fragmented = RepositoryIndex._from_serial_file_fragments(root, "vllm")
+    fragmented, cache_status = _repository_index_from_file_fragments(
+        root,
+        "vllm",
+        ordinary_descriptor_decorators=frozenset(),
+        source_version=None,
+        cache_dir=None,
+        index_workers=1,
+    )
 
     def snapshot(index: RepositoryIndex) -> dict[str, object]:
         return {
@@ -1807,6 +1647,7 @@ def test_serial_file_fragments_match_repository_index(tmp_path: Path) -> None:
             "symbols": sorted(index.unconditional_symbols),
         }
 
+    assert cache_status["status"] == "disabled"
     assert snapshot(fragmented) == snapshot(regular)
 
 
