@@ -869,10 +869,12 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
     """Non-GELU activations must NOT enter the GELU path (no regression)."""
 
     def _run_non_gelu(self, activation):
+        gate_up = torch.zeros(1, 16 if activation == MoEActivation.SWIGLUSTEP else 8)
         with (
-            _mock_w8a8_gelu_compute(torch.zeros(1, 8)),
+            _mock_w8a8_gelu_compute(gate_up),
             patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
             patch(f"{MOE_MLP}.HAS_TRITON", False),
+            patch("vllm.triton_utils.HAS_TRITON", False),
             patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4), create=True) as mock_swiglu,
             patch("torch.nn.functional.gelu") as mock_gelu,
         ):

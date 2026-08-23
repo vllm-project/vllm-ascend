@@ -8,6 +8,7 @@ from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 
 from vllm_ascend.models.llama_eagle3 import get_rotation_matrix, get_rotation_path
+from vllm_ascend.utils import vllm_version_is
 
 
 # Process the first linear weight with rotation matrix, if the target model uses rotary quantization
@@ -59,7 +60,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        if self.enable_confidence_head:
+        if vllm_version_is("0.27.1") and self.enable_confidence_head:
             model_prefix = maybe_prefix(prefix, "model")
             self.model.confidence_head = DSparkConfidenceHead(
                 config=config,
@@ -102,6 +103,13 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     loaded_weight = process_weight(loaded_weight, rotation_weight)
                 processed_weights.append((name, loaded_weight))
             all_weights = processed_weights
+
+        if not vllm_version_is("0.27.1"):
+            # main (cdc4824a21): upstream load_weights already manages
+            # confidence_head (vllm#47808).
+            super().load_weights(all_weights)
+            return
+
         base_weights: list[tuple[str, torch.Tensor]] = []
         confidence_weights: list[tuple[str, torch.Tensor]] = []
 

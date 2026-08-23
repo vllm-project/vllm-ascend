@@ -22,10 +22,19 @@
 # passes eps=0.0 it works fine upstream, but fails on vllm-ascend with
 # "batch_norm eps must be positive" on Ascend. This patch replaces eps to avoid
 # the error.
+#
+# Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to use
+# a broadcast multiply-add (x * weight + bias) instead of F.batch_norm, removing
+# running_mean/running_var. This commit is included in the target 16cfe728.
+# On those versions FusedInputNorm.forward works correctly without patching, so
+# this patch is gated to v0.27.1 only (where FusedInputNorm does not exist at
+# all, so the import gracefully fails under contextlib.suppress).
 
 import contextlib
 
 import torch
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def _patched_fused_input_norm_forward(self, grid_thw, visual_dtype):
@@ -56,4 +65,5 @@ def install_patch():
 
 
 with contextlib.suppress(ImportError):
-    install_patch()
+    if vllm_version_is("0.27.1"):
+        install_patch()

@@ -69,7 +69,6 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "logprobs",
         "mixed_lengths",
         "long_sequence",
-        "flashcomm1",
         "eplb",
         "dynamic_eplb",
         "multistream_moe",

@@ -838,7 +838,7 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch("torch_npu._npu_paged_attention_get_workspace", return_value=MagicMock())
     @patch("vllm_ascend.attention.attention_v1.get_graph_params")
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
-    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
     @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
     @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
     def test_update_graph_params_handles_captured_paged_attention_params(

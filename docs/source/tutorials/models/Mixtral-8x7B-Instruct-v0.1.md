@@ -78,7 +78,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 ```
 
 ``` bash

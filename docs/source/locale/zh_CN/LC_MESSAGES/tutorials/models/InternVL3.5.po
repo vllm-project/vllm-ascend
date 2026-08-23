@@ -18,9 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# InternVL3.5(InternVL3_5-38B/241B-A28B)"
-msgstr "# InternVL3.5（InternVL3_5-38B/241B-A28B）"
-
 msgid "## 1 Introduction"
 msgstr "## 1 简介"
 
@@ -257,3 +254,6 @@ msgid ""
 msgstr ""
 "请参阅[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。\n"
 "请参阅[功能指南](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+
+msgid "# InternVL3.5(38B/241B-A28B)"
+msgstr "# InternVL3.5（38B/241B-A28B）"

@@ -245,8 +245,16 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
-        output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
-        return output
+        tp_group = get_tp_group()
+        if tp_group.world_size == 1:
+            return output_parallel
+        # vLLM 0.26 model forwards expect the first decoder layer to receive
+        # the complete token sequence. Sequence parallelism starts only after
+        # that layer's attention output, so reducing-scattering the embedding
+        # here would feed each TP rank only a token shard. The dedicated
+        # embedding-TP path above owns its complete gather/scatter protocol;
+        # the regular TP embedding path must keep upstream all-reduce semantics.
+        return torch.ops.vllm.all_reduce(output_parallel, tp_group.unique_name)
 
 
 class AscendParallelLMHead(ParallelLMHead):
