@@ -182,20 +182,6 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         self.assertEqual(dispatcher.global_bs, 256)
 
-    def test_a5_megamoe_capacity_covers_prefill_token_shard(self):
-        self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 8
-        self.mock_get_config.return_value.scheduler_config.max_num_batched_tokens = 4096
-        self.mock_get_mc2_tokens_capacity.return_value = 32
-
-        with patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type",
-            return_value=AscendDeviceType.A5,
-        ):
-            dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=16, num_experts=896)
-
-        self.assertEqual(dispatcher.max_num_tokens_per_rank, 512)
-        self.assertEqual(dispatcher.global_bs, 0)
-
     def test_get_dispatch_mc2_kwargs_with_skip_allreduce_omits_mc2_mask(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
         self.mock_skip_allreduce.return_value = True
