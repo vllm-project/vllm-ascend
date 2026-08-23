@@ -139,6 +139,21 @@ def test_use_cann_megamoe_is_disabled_for_mtp_draft(monkeypatch):
     assert afc.use_cann_megamoe(vllm_config, is_draft_model=True)
 
 
+def test_select_moe_comm_method_avoids_fused_mc2_for_mtp_draft(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=16,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(quant_type="w8a8")
+    vllm_config.speculative_config = SimpleNamespace(method="qwen3_5_mtp")
+
+    assert afc.select_moe_comm_method(128, vllm_config, is_draft_model=True) == MoECommType.MC2
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.FUSED_MC2
+
+
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,

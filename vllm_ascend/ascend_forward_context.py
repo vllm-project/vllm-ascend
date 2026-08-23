@@ -61,8 +61,8 @@ def use_cann_megamoe(vllm_config: VllmConfig, is_draft_model: bool = False) -> b
     # buffer and performs a collective handshake, so invoking it from both
     # target and draft paths can leave the draft waiting in the collective
     # and make the target's sample_tokens RPC time out.  Keep MegaMoe on the
-    # target path and use the existing FusedMC2 fallback for the MTP draft
-    # path. Other speculative drafters keep their existing behavior.
+    # target path and use the regular MC2/AlltoAll path for the MTP draft.
+    # Other speculative drafters keep their existing behavior.
     speculative_config = getattr(vllm_config, "speculative_config", None)
     speculative_method = getattr(speculative_config, "method", None)
     if is_draft_model and speculative_method in {"mtp", "qwen3_5_mtp"}:
@@ -125,6 +125,7 @@ def set_ascend_forward_context(
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            is_draft_model=is_draft_model,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -300,12 +301,13 @@ def _select_a3_moe_comm_method(
     num_tokens: int,
     mc2_tokens_capacity: int,
     vllm_config: VllmConfig,
+    is_draft_model: bool = False,
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
         # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
-        if use_cann_megamoe(vllm_config):
+        if use_cann_megamoe(vllm_config, is_draft_model=is_draft_model):
             return MoECommType.FUSED_MC2
-        if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        if not is_draft_model and get_ep_group().world_size <= 32:
             return MoECommType.FUSED_MC2
 
     if num_tokens <= mc2_tokens_capacity:
@@ -332,7 +334,11 @@ def _select_a5_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model: bool = False,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
 
@@ -341,8 +347,8 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
        and the DP size is large enough; otherwise use all-gather.
     4. On A3 with expert parallel, prefer fused MC2 when enabled and the EP
-       group size is small enough; otherwise use MC2 within capacity or
-       all-to-all.
+       group size is small enough; draft models use MC2 within capacity or
+       all-to-all when the fused path is not applicable.
     5. On 310P, always use all-gather.
     6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
        and the EP size is large enough; otherwise use all-gather when
@@ -380,6 +386,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             num_tokens,
             mc2_tokens_capacity,
             vllm_config,
+            is_draft_model=is_draft_model,
         )
     elif soc_version == AscendDeviceType.A5:
         moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
