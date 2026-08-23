@@ -33,7 +33,7 @@ import torch_npu
 # ---------------------------------------------------------------------------
 
 _HAS_FA3 = False
-if importlib_util.find_spec("flash_attn_npu_v3") is not None:
+if importlib_util.find_spec("flash_attn_npu_3") is not None:
     try:
         from flash_attn_npu_3 import (
             flash_attn_with_kvcache as _fa3_kvcache,
@@ -92,7 +92,9 @@ def _make_tensors(batch: int = _BATCH, causal: bool = True):
     kv_seqlens = torch.tensor(kv_lens, dtype=torch.int32, device="npu")
     cu_seqlens_q = torch.tensor([0] + cu_q, dtype=torch.int32, device="npu")
     max_seqlen_q = max(q_lens)
-    max_seqlen_k = max(kv_lens)
+    # Paged capacity bake: the scheduler-metadata fingerprint requires
+    # max_seqlen_k == page_size * page_table width, NOT the real KV length.
+    max_seqlen_k = bt.shape[1] * _BLOCK_SIZE
 
     scheduler_metadata = get_scheduler_metadata(
         batch_size=batch,

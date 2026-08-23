@@ -70,6 +70,38 @@ def _max_seqlen(cumulative: List[int]) -> int:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def strip_padding_dummy(
+    actual_seq_lengths_q: List[int],
+    seq_lens_list: List[int],
+):
+    """Drop the padding dummy segment from a (possibly padded) batch.
+
+    vllm-ascend pads cudagraph batches by appending ONE dummy request whose
+    query spans all padding tokens and whose KV length is 0.  Passing that
+    segment to FA3 as a real request both corrupts the metadata fingerprint
+    (max_seqlen_q explodes) and makes the kernel allocate a query workspace
+    sized by the padding (multi-GiB -> OOM).
+
+    Returns ``(real_cu_q, real_seq_lens, max_seqlen_q)`` where ``real_cu_q``
+    is the cumulative query layout (WITH leading zero) of the REAL requests.
+    Real requests keep their original order and occupy the query tensor
+    contiguously from row 0, so the rebuilt cu stays valid.
+    """
+    cu = [0] + list(actual_seq_lengths_q)
+    real_cu = [0]
+    real_kv = []
+    for i, kv in enumerate(seq_lens_list):
+        q_i = cu[i + 1] - cu[i]
+        if kv == 0 and q_i > 1:
+            continue  # padding dummy
+        real_kv.append(kv)
+        real_cu.append(real_cu[-1] + q_i)
+    max_q = 0
+    for i in range(1, len(real_cu)):
+        max_q = max(max_q, real_cu[i] - real_cu[i - 1])
+    return real_cu, real_kv, max_q
+
+
 def fa3_forward(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -111,6 +143,11 @@ def fa3_forward(
             f"flash-attention-npu supports head_dim <= {FA3_MAX_HEAD_DIM}, "
             f"got {head_size}"
         )
+    if num_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"FA3 requires num_heads divisible by num_kv_heads, "
+            f"got {num_heads} vs {num_kv_heads}"
+        )
 
     device = query.device
     actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -134,9 +171,15 @@ def fa3_forward(
         k_fa = key.view(num_blocks, bs, num_kv_heads, head_size)
         v_fa = value.view(num_blocks, bs, num_kv_heads, head_size)
 
-        cache_seqlens = torch.tensor(seq_lens_list, dtype=torch.int32, device=device)
-        cu_seqlens_q = _to_cu_seqlens(actual_seq_lengths_q, device)
-        max_seqlen_q = _max_seqlen(actual_seq_lengths_q)
+        # Strip the padding dummy segment (KV len 0, query spanning all
+        # padding tokens); see strip_padding_dummy.
+        from vllm_ascend.attention.fa3_adapter import strip_padding_dummy
+
+        real_cu, real_kv, max_seqlen_q = strip_padding_dummy(
+            actual_seq_lengths_q, seq_lens_list,
+        )
+        cache_seqlens = torch.tensor(real_kv, dtype=torch.int32, device=device)
+        cu_seqlens_q = torch.tensor(real_cu, dtype=torch.int32, device=device)
 
         out = fa3_kvcache(
             query,

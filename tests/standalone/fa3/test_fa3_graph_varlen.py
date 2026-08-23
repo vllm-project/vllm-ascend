@@ -35,7 +35,7 @@ _HAS_FA3 = False
 _fa3_kvcache = None
 _get_scheduler_metadata = None
 
-for _mod_name in ("flash_attn_npu_v3", "flash_attn_npu_3"):
+for _mod_name in ("flash_attn_npu_3", "flash_attn_npu_3"):
     if importlib_util.find_spec(_mod_name) is not None:
         try:
             _mod = __import__(

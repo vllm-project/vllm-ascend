@@ -71,7 +71,7 @@ def predicted_ws_bytes(batch: int, maxk: int) -> int:
 
 
 def load_fa3():
-    for mod_name in ("flash_attn_npu_v3", "flash_attn_npu_3"):
+    for mod_name in ("flash_attn_npu_3", "flash_attn_npu_3"):
         if importlib_util.find_spec(mod_name) is not None:
             try:
                 mod = __import__(

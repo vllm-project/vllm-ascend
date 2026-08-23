@@ -81,7 +81,7 @@ def manual_ref(q_seq, k, v, page_row, seq_len):
 
 
 def load_fa3():
-    for mod_name in ("flash_attn_npu_v3", "flash_attn_npu_3"):
+    for mod_name in ("flash_attn_npu_3", "flash_attn_npu_3"):
         if importlib_util.find_spec(mod_name) is not None:
             mod = __import__(
                 mod_name,
