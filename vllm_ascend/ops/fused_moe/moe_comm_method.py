@@ -46,6 +46,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_CANN_MEGA_MOE_MAX_TOKENS_PER_CALL = 4096
 
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
@@ -386,22 +387,51 @@ class FusedMC2CommImpl(MoECommMethod):
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
 
-        out, expert_tokens = self.mega_moe(
-            fused_experts_input.hidden_states,
-            fused_experts_input.topk_ids.to(torch.int32),
-            fused_experts_input.topk_weights.to(torch.float32),
-            weight1,
-            weight2,
-            self.mega_moe_symm_buffer,
-            l1_weights_sf=weight_scales1,
-            l2_weights_sf=weight_scales2,
-            l1_bias=l1_bias,
-            l2_bias=l2_bias,
-            x_active_mask=x_active_mask,
-            activation_clamp=activation_clamp,
-            weight1_type=weight_type,
-            weight2_type=weight_type,
-        )
+        activation_kwargs = {}
+        if getattr(fused_experts_input.activation, "value", fused_experts_input.activation) == "swigluoai_uninterleave":
+            activation_kwargs = {
+                "activation": "swigluoai",
+                "activation_params": {
+                    "alpha": self.swiglu_alpha,
+                    "beta": self.swiglu_beta,
+                },
+            }
+
+        hidden_states = fused_experts_input.hidden_states
+        topk_ids = fused_experts_input.topk_ids.to(torch.int32)
+        topk_weights = fused_experts_input.topk_weights.to(torch.float32)
+        num_tokens = hidden_states.shape[0]
+
+        out = torch.empty_like(hidden_states) if num_tokens > _CANN_MEGA_MOE_MAX_TOKENS_PER_CALL else None
+        expert_tokens = None
+        for start in range(0, num_tokens, _CANN_MEGA_MOE_MAX_TOKENS_PER_CALL):
+            end = min(start + _CANN_MEGA_MOE_MAX_TOKENS_PER_CALL, num_tokens)
+            chunk_mask = None if x_active_mask is None else x_active_mask[start:end]
+            chunk_out, chunk_expert_tokens = self.mega_moe(
+                hidden_states[start:end],
+                topk_ids[start:end],
+                topk_weights[start:end],
+                weight1,
+                weight2,
+                self.mega_moe_symm_buffer,
+                l1_weights_sf=weight_scales1,
+                l2_weights_sf=weight_scales2,
+                l1_bias=l1_bias,
+                l2_bias=l2_bias,
+                x_active_mask=chunk_mask,
+                activation_clamp=activation_clamp,
+                **activation_kwargs,
+                weight1_type=weight_type,
+                weight2_type=weight_type,
+            )
+            if out is None:
+                out = chunk_out
+            else:
+                out[start:end].copy_(chunk_out)
+            expert_tokens = chunk_expert_tokens if expert_tokens is None else expert_tokens + chunk_expert_tokens
+
+        assert out is not None, "MegaMoe requires at least one input token."
+        assert expert_tokens is not None, "MegaMoe requires at least one input token."
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
         # pre-allocated in/out buffer. The MegaMoe op returns a fresh
