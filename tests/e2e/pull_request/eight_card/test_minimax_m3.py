@@ -87,11 +87,12 @@ def test_minimax_m3_gsm8k_one_case() -> None:
     example_prompts = [GSM8K_PROMPT_TEMPLATE.format(question=GSM8K_QUESTION)]
     with VllmRunner(
         MINIMAX_M3_MODEL_PATH,
-        max_model_len=10240,
+        max_model_len=8192,
         max_num_seqs=8,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=2048,
         dtype="auto",
-        tensor_parallel_size=8,
+        data_parallel_size=2,
+        tensor_parallel_size=4,
         enable_expert_parallel=True,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.95,
