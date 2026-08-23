@@ -835,6 +835,8 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
             seq_lens,
             start_loc,
             causal_mask,
+            init_blocks=2,
+            local_blocks=3,
         )
 
     assert actual is expected
@@ -920,6 +922,8 @@ def test_ascendc_index_prefill_wraps_score_and_topk() -> None:
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=1,
+        local_blocks=1,
     )
     mock_topk.assert_called_once_with(
         score,
@@ -1021,7 +1025,10 @@ def test_decode_applies_forced_blocks_only_in_topk(decode_query_len: int) -> Non
 
     assert actual_indices is expected_indices
     assert actual_scores is expected_scores
-    assert mock_score.call_args.kwargs == {}
+    assert mock_score.call_args.kwargs == {
+        "init_blocks": 1,
+        "local_blocks": 1,
+    }
     assert mock_topk.call_args.kwargs["init_blocks"] == 1
     assert mock_topk.call_args.kwargs["local_blocks"] == 1
 

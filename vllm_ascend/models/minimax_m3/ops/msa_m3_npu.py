@@ -151,6 +151,9 @@ def _minimax_m3_index_score(
     seq_lens: torch.Tensor,
     start_loc: torch.Tensor,
     causal_mask: torch.Tensor | None,
+    *,
+    init_blocks: int = 0,
+    local_blocks: int = 0,
 ) -> torch.Tensor:
     """Compute MSA index scores with the bundled AscendC operator.
 
@@ -160,6 +163,8 @@ def _minimax_m3_index_score(
 
     A causal mask selects sparse mode 3. Passing no mask selects dense mode 0
     for a TP chunk that is entirely before the current query positions.
+    ``init_blocks`` and ``local_blocks`` are kept for parity with the index
+    scoring interface; candidate forcing is applied by the TopK stage.
     """
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     return torch.ops._C_ascend.npu_msa_index_score(
@@ -200,6 +205,8 @@ def minimax_m3_index_prefill(
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
     )
     return _minimax_m3_index_prefill_topk(
         score,
@@ -318,6 +325,8 @@ def _minimax_m3_index_decode(
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
     )
     if block_count is None:
         block_count = block_table.shape[-1]
