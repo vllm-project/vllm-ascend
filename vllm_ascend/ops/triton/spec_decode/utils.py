@@ -166,7 +166,11 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
             local_off = (voff // (total_cp_world_size * cp_kv_cache_interleave_size)
                             ) * cp_kv_cache_interleave_size + (voff % cp_kv_cache_interleave_size)
             block_num_q = (query_kv_slot_pos // virtual_block) + (local_off // block_size)
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(tl.int64)
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_num_q,
+                mask=mask,
+                other=0,
+            ).to(tl.int64)
             slot_q = tl.where(
                 owner == current_cp_rank,
                 block_id_q * block_size + (local_off % block_size), 
@@ -174,7 +178,11 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
                 )
         else:
             block_num_q = query_kv_slot_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(tl.int64)
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_num_q, 
+                mask=mask, 
+                other=0,
+            ).to(tl.int64)
             slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 

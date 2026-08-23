@@ -291,7 +291,11 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
                 input_layout = "TND"
                 if _EXTRA_CTX.is_draft_model and speculative_config is not None:
                     input_layout = "BSND"
-                    if actual_seq_lengths_q_is_cumulative and isinstance(actual_seq_lengths_q, list) and actual_seq_lengths_q:
+                    if (
+                        actual_seq_lengths_q_is_cumulative
+                        and isinstance(actual_seq_lengths_q, list)
+                        and actual_seq_lengths_q
+                    ):
                         actual_seq_lengths_q = [actual_seq_lengths_q[0]]+ [
                             actual_seq_lengths_q[i] - actual_seq_lengths_q[i-1]
                             for i in range(1, len(actual_seq_lengths_q))
