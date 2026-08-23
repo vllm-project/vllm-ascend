@@ -95,6 +95,10 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
     TILE_SIZE: tl.constexpr = 256,
+    total_cp_world_size: tl.constexpr = 1,
+    current_cp_rank: tl.constexpr = 0,
+    cp_kv_cache_interleave_size: tl.constexpr = 1,
+    PAD_ID: tl.constexpr = -1,
 ):
     # Grid-stride kernel: launch grid is capped at the vector-core count by
     # the caller (grid = min(cdiv(total_work, TILE_SIZE), num_vectorcore)),
@@ -104,6 +108,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     pid = tl.program_id(axis=0)
     num_programs = tl.num_programs(axis=0)
     block_start_step = num_programs * TILE_SIZE
+    virtual_block = block_size * total_cp_world_size
 
     # --- Part 1: context positions / slot_mapping copy ---
     # query_start_loc is a contiguous partition of [0, total_input_tokens),
@@ -155,11 +160,22 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         # rather than from query_pos. For text-only inputs the two values are
         # identical, so this only changes behaviour for multimodal inputs.
         query_kv_slot_pos = effective_seq_len + q_idx
-        block_num_q = query_kv_slot_pos // block_size
-        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
-            tl.int64
-        )
-        slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
+        if total_cp_world_size > 1:
+            voff = query_kv_slot_pos % virtual_block
+            owner = (voff // cp_kv_cache_interleave_size) % total_cp_world_size
+            local_off = (voff // (total_cp_world_size * cp_kv_cache_interleave_size)
+                            ) * cp_kv_cache_interleave_size + (voff % cp_kv_cache_interleave_size)
+            block_num_q = (query_kv_slot_pos // virtual_block) + (local_off // block_size)
+            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(tl.int64)
+            slot_q = tl.where(
+                owner == current_cp_rank,
+                block_id_q * block_size + (local_off % block_size), 
+                PAD_ID
+                )
+        else:
+            block_num_q = query_kv_slot_pos // block_size
+            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(tl.int64)
+            slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
