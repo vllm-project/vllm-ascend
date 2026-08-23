@@ -1267,9 +1267,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if use_probabilistic and dspark_probs_list:
                     # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
                     # [num_blk * K, V] to match early_exit view logic.
-                    draft_probs_step0 = (
-                        torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
-                    )
+                    draft_probs_step0 = torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
 
                 # Dynamic verify-length path, implemented in DynamicSpecScheduler
                 # Only the dspark method is handled here since it relies on
