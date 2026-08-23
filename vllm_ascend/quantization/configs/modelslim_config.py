@@ -901,20 +901,20 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def is_c8_quant_layer(self, prefix):
         if self.enable_c8_quant:
-            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
-            if not layer_id_str.isdigit():
-                return False
-
             # MTP layer indices restart at zero and overlap the target model's
             # decoder indices. Looking only at ``layers.<n>`` therefore marks
             # an MTP attention layer as C8 whenever target layer ``n`` has C8
             # metadata, even when the checkpoint contains no MTP KV scales.
             # Require namespace-local metadata for MTP, while retaining the
             # legacy index fallback for target model layers.
-            if "mtp.layers." in prefix:
-                layer_sub = f"mtp.layers.{int(layer_id_str)}."
+            mtp_layer_match = re.search(r"(?:^|\.)mtp\.layers\.(\d+)(?:\.|$)", prefix)
+            if mtp_layer_match:
+                layer_sub = f"mtp.layers.{mtp_layer_match.group(1)}."
                 return any(layer_sub in key and key.endswith("k_proj.kv_cache_scale") for key in self.quant_description)
 
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if not layer_id_str.isdigit():
+                return False
             if int(layer_id_str) in self.c8_quant_layers:
                 return True
         return False

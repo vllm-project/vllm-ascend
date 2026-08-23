@@ -273,6 +273,24 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertTrue(config.is_c8_quant_layer("mtp.layers.0.self_attn.attn"))
         self.assertTrue(config.is_c8_quant_layer("language_model.mtp.layers.1.self_attn.attn"))
 
+    def test_mtp_layer_id_ignores_nested_numeric_segments(self):
+        layer_zero_config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "language_model.mtp.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+        layer_three_config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "language_model.mtp.layers.3.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+        nested_prefix = "language_model.mtp.layers.0.blocks.3.self_attn.attn"
+
+        self.assertTrue(layer_zero_config.is_c8_quant_layer(nested_prefix))
+        self.assertFalse(layer_three_config.is_c8_quant_layer(nested_prefix))
+
     def test_is_layer_skipped_ascend(self):
         # Test non-fused layer that should be quantized
         self.assertFalse(self.ascend_config.is_layer_skipped_ascend("layer1"))
