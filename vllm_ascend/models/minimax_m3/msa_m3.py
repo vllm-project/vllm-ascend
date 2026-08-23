@@ -265,12 +265,19 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
         decode_query_len: int,
     ) -> MiniMaxM3TPDecodeScoreMetadata:
         """Package graph-stable inputs; derive TP tensors in model forward."""
+        tp_rank = get_tp_group().rank_in_group
+        max_block_count = (max_seq_len + self.block_size - 1) // self.block_size
+        blocks_per_tp = (max_block_count + self.tp_size - 1) // self.tp_size
+        block_offset = tp_rank * blocks_per_tp
+        block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
         return MiniMaxM3TPDecodeScoreMetadata(
             block_table=block_table,
             cu_seqlens_q=cu_seqlens_q,
             context_lens=context_lens,
-            max_seq_len=max_seq_len,
+            max_block_count=max_block_count,
             block_size=self.block_size,
+            block_offset=block_offset,
+            block_count=block_count,
             decode_query_len=decode_query_len,
         )
 

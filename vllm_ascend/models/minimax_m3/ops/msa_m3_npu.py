@@ -77,8 +77,10 @@ class MiniMaxM3TPDecodeScoreMetadata:
     block_table: torch.Tensor
     cu_seqlens_q: torch.Tensor
     context_lens: torch.Tensor
-    max_seq_len: int
+    max_block_count: int
     block_size: int
+    block_offset: int
+    block_count: int
     decode_query_len: int
 
 
@@ -389,13 +391,9 @@ def minimax_m3_index_tp_block_parallel_decode(
 ) -> torch.Tensor:
     """Run packed-query scoring and TopK over TP-sharded KV blocks."""
     full_idx_q = tp_group.all_gather(idx_q.contiguous(), dim=1).contiguous()
-    tp_size = tp_group.world_size
     tp_rank = tp_group.rank_in_group
-
-    max_block_count = (metadata.max_seq_len + metadata.block_size - 1) // metadata.block_size
-    blocks_per_tp = (max_block_count + tp_size - 1) // tp_size
-    block_offset = tp_rank * blocks_per_tp
-    block_count = max(0, min(blocks_per_tp, max_block_count - block_offset))
+    block_offset = metadata.block_offset
+    block_count = metadata.block_count
     if block_count == 0:
         # MsaIndexScore requires a non-empty block-table width. Ranks without
         # logical blocks contribute neutral candidates to the collectives.
@@ -423,7 +421,7 @@ def minimax_m3_index_tp_block_parallel_decode(
         halo_blocks = (metadata.decode_query_len - 1 + metadata.block_size - 1) // metadata.block_size
         score_block_end = min(
             block_offset + block_count + halo_blocks,
-            max_block_count,
+            metadata.max_block_count,
         )
         score_block_table = metadata.block_table[:, block_offset:score_block_end].contiguous()
         local_context_lens = metadata.context_lens - block_offset * metadata.block_size
