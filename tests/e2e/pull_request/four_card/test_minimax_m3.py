@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import regex as re
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
 
 MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8-0626")
 GSM8K_QUESTION = "Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
@@ -85,7 +85,7 @@ def test_minimax_m3_gsm8k_one_case() -> None:
     _configure_jemalloc()
 
     example_prompts = [GSM8K_PROMPT_TEMPLATE.format(question=GSM8K_QUESTION)]
-    with VllmRunner(
+    with DPVllmRunner(
         MINIMAX_M3_MODEL_PATH,
         max_model_len=8192,
         max_num_seqs=8,
