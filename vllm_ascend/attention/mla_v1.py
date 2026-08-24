@@ -11,7 +11,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
 )
-from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import (
@@ -58,8 +57,17 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
     maybe_trans_nz,
+    vllm_version_is,
     weak_ref_tensors,
 )
+
+if vllm_version_is("0.27.1"):
+    from importlib import import_module
+
+    _gather_prefill_cache_inputs = import_module("vllm.model_executor.layers.attention.pcp")._gather_prefill_cache_inputs
+else:
+    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
