@@ -168,7 +168,7 @@ def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_sec
             
             model_cache.clear()
             # Clean up non-NPU resources in the main process
-            cleanup_dist_env_and_memory()
+            cleanup_dist_env_and_memory)
 
             # Use a spawned subprocess to check NPU memory to avoid initializing NPU in the main process
             ctx = multiprocessing.get_context("spawn")
