@@ -39,9 +39,8 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
         del vllm_model
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_qwen3_next_w8a8dynamic_distributed_mp_flash_comm_tp4():
+def test_qwen3_next_w8a8dynamic_distributed_mp_tp4():
     example_prompts = [
         "Hello, my name is",
     ] * 4
