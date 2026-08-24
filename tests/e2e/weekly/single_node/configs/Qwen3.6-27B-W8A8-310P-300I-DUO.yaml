@@ -13,6 +13,8 @@ test_cases:
       - "20480"
       - "--gpu_memory_utilization"
       - "0.80"
+      - "--dtype"
+      - "float16"
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
       - "--compilation-config"
