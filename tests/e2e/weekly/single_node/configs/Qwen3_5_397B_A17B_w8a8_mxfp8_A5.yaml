@@ -37,7 +37,7 @@ _server_cmd: &server_cmd
   - "--enable-auto-tool-choice"
   - "--tool-call-parser"
   - "qwen3_coder"
-  - "enable-prefix-caching"
+  - "--enable-prefix-caching"
   - "--speculative-config"
   - '{"method":"qwen3_5_mtp","num_speculative_tokens": 3, "enforce_eager":"true"}'
   - "--compilation-config"
