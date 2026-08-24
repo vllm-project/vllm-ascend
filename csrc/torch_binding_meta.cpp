@@ -1469,6 +1469,92 @@ void store_kv_block(
 
 }
 
+at::Tensor mhc_post_meta(const at::Tensor &x, const at::Tensor &hRes,
+                    const at::Tensor &hOut, const at::Tensor &hPost)
+{
+    at::Tensor out = at::empty_like(x);
+
+    return out;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+construct_mhc_pre_clamp_sinkhorn_output_tensor(const at::Tensor& x, int64_t hc_mult, int64_t num_iters)
+{
+    auto xDims = x.dim();
+    c10::SymDimVector hin_size;
+    c10::SymDimVector h_post_size;
+    c10::SymDimVector h_res_size;
+    c10::SymDimVector h_pre_size;
+    c10::SymDimVector hc_before_norm_size;
+    c10::SymDimVector inv_rms_size;
+    c10::SymDimVector sum_out_size;
+    c10::SymDimVector norm_out_size;
+    c10::SymDimVector h_res_logits_size;
+    c10::SymInt hc_mix = c10::SymInt(hc_mult) * c10::SymInt(hc_mult) + c10::SymInt(2 * hc_mult);
+    c10::SymInt hc_mult_sq = c10::SymInt(hc_mult) * c10::SymInt(hc_mult);
+    c10::SymInt num_iters_double = c10::SymInt(num_iters * 2);
+    if (xDims == 4) {
+        auto batch = x.sym_size(0);
+        auto size = x.sym_size(1);
+        auto c = x.sym_size(3);
+        hin_size = {batch, size, c};
+        h_post_size = {batch, size, c10::SymInt(hc_mult)};
+        h_res_size = {batch, size, hc_mult_sq};
+        h_pre_size = {batch, size, c10::SymInt(hc_mult)};
+        hc_before_norm_size = {batch, size, hc_mix};
+        inv_rms_size = {batch, size, 1};
+        sum_out_size = {num_iters_double, batch, size, c10::SymInt(hc_mult)};
+        norm_out_size = {num_iters_double, batch, size, c10::SymInt(hc_mult), c10::SymInt(hc_mult)};
+        h_res_logits_size = {num_iters_double, batch, size, c10::SymInt(hc_mult), c10::SymInt(hc_mult)};
+    } else if (xDims == 3) {
+        auto bs = x.sym_size(0);
+        auto c = x.sym_size(2);
+        hin_size = {bs, c};
+        h_post_size = {bs, c10::SymInt(hc_mult)};
+        h_res_size = {bs, hc_mult_sq};
+        h_pre_size = {bs, c10::SymInt(hc_mult)};
+        hc_before_norm_size = {bs, hc_mix};
+        inv_rms_size = {bs, 1};
+        sum_out_size = {num_iters_double, bs, c10::SymInt(hc_mult)};
+        norm_out_size = {num_iters_double, bs, c10::SymInt(hc_mult), c10::SymInt(hc_mult)};
+        h_res_logits_size = {num_iters_double, bs, c10::SymInt(hc_mult), c10::SymInt(hc_mult)};
+    }
+
+    at::Tensor hin = at::empty_symint(hin_size, x.options().dtype(at::kBFloat16));
+    at::Tensor h_post = at::empty_symint(h_post_size, x.options().dtype(at::kFloat));
+    at::Tensor h_res = at::empty_symint(h_res_size, x.options().dtype(at::kFloat));
+    at::Tensor h_pre = at::empty_symint(h_pre_size, x.options().dtype(at::kFloat));
+    at::Tensor hc_before_norm = at::empty_symint(hc_before_norm_size, x.options().dtype(at::kFloat));
+    at::Tensor inv_rms = at::empty_symint(inv_rms_size, x.options().dtype(at::kFloat));
+    at::Tensor sum_out = at::empty_symint(sum_out_size, x.options().dtype(at::kFloat));
+    at::Tensor norm_out = at::empty_symint(norm_out_size, x.options().dtype(at::kFloat));
+    at::Tensor h_res_logits = at::empty_symint(h_res_logits_size, x.options().dtype(at::kFloat));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>(
+        hin, h_post, h_res, h_pre, hc_before_norm, inv_rms, sum_out, norm_out, h_res_logits);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+mhc_pre_clamp_sinkhorn_meta(
+    const at::Tensor& x, const at::Tensor& phi, const at::Tensor& alpha, const at::Tensor& bias,
+    int64_t hc_mult, int64_t num_iters, double hc_eps, double norm_eps, bool need_backward,
+    double clamp_min, double clamp_max)
+{
+    auto output_tensors = construct_mhc_pre_clamp_sinkhorn_output_tensor(x, hc_mult, num_iters);
+    at::Tensor hin = std::get<0>(output_tensors);
+    at::Tensor h_post = std::get<1>(output_tensors);
+    at::Tensor h_res = std::get<2>(output_tensors);
+    at::Tensor h_pre = std::get<3>(output_tensors);
+    at::Tensor hc_before_norm = std::get<4>(output_tensors);
+    at::Tensor inv_rms = std::get<5>(output_tensors);
+    at::Tensor sum_out = std::get<6>(output_tensors);
+    at::Tensor norm_out = std::get<7>(output_tensors);
+    at::Tensor h_res_logits = std::get<8>(output_tensors);
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>(
+        hin, h_post, h_res, h_pre, hc_before_norm, inv_rms, sum_out, norm_out, h_res_logits);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1573,6 +1659,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+    // mhc ops
+    ops.impl("mhc_post", &vllm_ascend::meta::mhc_post_meta);
+    ops.impl("mhc_pre_clamp_sinkhorn", &vllm_ascend::meta::mhc_pre_clamp_sinkhorn_meta);
 }
 }
 #endif
