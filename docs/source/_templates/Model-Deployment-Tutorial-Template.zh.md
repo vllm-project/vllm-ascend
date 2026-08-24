@@ -59,8 +59,8 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **示例：**
 
-- `DeepSeek-V3.2-Exp-W8A8`（量化版）：需要 1 台 Atlas 800 A3（64G × 16）节点或 2 台 Atlas 800 A2（64G × 8）节点。 [模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8`（量化版）：需要 1 台 Atlas 800 A3（64G × 16）节点或 2 台 Atlas 800 A2（64G × 8）节点。 [模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+- `DeepSeek-V3.2-Exp-W8A8`（量化版）：需要 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点。 [模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+- `DeepSeek-V3.2-w8a8`（量化版）：需要 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点。 [模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 建议将模型权重下载至多节点共享目录。
 

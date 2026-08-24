@@ -54,6 +54,7 @@ export PYTHONHASHSEED=0
         ```bash
         cat /etc/hccn.conf
         ```
+
         For Ascend 950 Products, additionally mount:
         * devices: `/dev/ummu`, `/dev/uburma`
         * commands: `/usr/bin/urma_admin`
@@ -141,9 +142,9 @@ Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and 
 #!/bin/bash
 
 # prefill / decode
-ROLE="prefill"  
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)            
-HARDWARE_SERIES="A2"        
+ROLE="prefill"
+# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -311,7 +312,7 @@ Content of pd_mix.sh:
 
 ```shell
 # A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
-HARDWARE_SERIES="A2"        
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -424,7 +425,7 @@ The following environment variables control disk space usage for SSD offload (bu
 
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
-| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | `1342177280` (1280 MB) | Per-rank SSD read/write buffer size in bytes. **Not** configurable in `mooncake.json`. If you hit `BUFFER_OVERFLOW`, increase this value — see [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). **On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, must be aligned to 1GB and counts toward per-rank fabric mem quota (see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3-ascend_enable_use_fabric_mem=1))**. |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | `1342177280` (1280 MB) | Per-rank SSD read/write buffer size in bytes. **Not** configurable in `mooncake.json`. If you hit `BUFFER_OVERFLOW`, increase this value — see [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). **On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, must be aligned to 1GB and counts toward per-rank fabric mem quota (see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1))**. |
 | `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | `0` | Eviction threshold in bytes. When set to `0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely. |
 | `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | `none` | Eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
 | `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | **Per-rank** maximum disk usage reported to Mooncake master. Master aggregates this across clients (roughly **2 TB × rank count** in the `SSD Storage` total). **Always override** to match real disk capacity — the default often exceeds available space. |
@@ -476,7 +477,7 @@ ock.mmc.meta_service.config_store_url = tcp://xx.xx.xx.xx:6000
 ock.mmc.meta_service.metrics_url = http://xx.xx.xx.xx:8000
 ock.mmc.log_level = info
 # If SSD is enabled, modify the following parameters to improve SSD cache hit rate
-ock.mmc.evict_threshold_high = 70  
+ock.mmc.evict_threshold_high = 70
 ock.mmc.evict_threshold_low = 60
 ock.mmc.rewarm.dram_watermark = 95
 ```
@@ -541,9 +542,9 @@ Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and 
 #!/bin/bash
 
 # prefill / decode
-ROLE="prefill"  
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)           
-HARDWARE_SERIES="A2"        
+ROLE="prefill"
+# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -673,7 +674,7 @@ Refer to [Run Inference](#step-233-run-inference) in the MooncakeStore deploymen
 #!/bin/bash
 
 # A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
-HARDWARE_SERIES="A2"        
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -819,7 +820,7 @@ ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 600GB
 ock.mmc.local_service.max.dram.size = 1024GB
 # SSD feature related parameters below
-ock.mmc.local_service.storage.enabled = true 
+ock.mmc.local_service.storage.enabled = true
 ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
 ubsio.mem.size_in_gb = 50
 ubsio.standalone.device_count = 1
@@ -1100,7 +1101,7 @@ This section describes hardware-specific environment variables required by both 
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
 | 950PR/DT Ascend 950 Products series | HDK >=25.6 with mooncake >= v0.3.11 <br>CANN >= 9.1.0 | # UBOE<br> `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'` <br> # UB<br>`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use. |
-| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3-ascend_enable_use_fabric_mem=1) — memory sizes must be aligned to 1GB. |
+| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### 5.2. Memcache Prerequisites
@@ -1227,7 +1228,7 @@ If client logs show `OffloadObjectHeartbeat failed, error code is SEGMENT_NOT_FO
 
 Also restart Master together with vLLM to avoid stale `segment_already_exists` state when debugging restarts.
 
-##### 5.3.2.2. Fabric memory size alignment (A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1`)
+##### 5.3.2.2. Fabric memory size alignment (A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1`) {: #5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1}
 
 On A3 with fabric memory enabled, **each** fabric mem allocation must be an integer multiple of **1 GB** (1073741824 bytes). Mooncake does not round sizes up automatically.
 
