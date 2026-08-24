@@ -1176,7 +1176,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         draft_probs_step0: torch.Tensor | None = None
         if getattr(self, "use_dflash2_selector", False):
-            draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+            # DFlash2 always drafts greedily (probabilistic is rejected in
+            # its __init__), so draft_probs_step0 is always None here.
+            draft_token_ids, draft_probs_step0 = self.compute_draft_token_ids(sample_hidden_states, sampling_metadata)
             if lmhead_tp_enable():
                 draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
                     draft_token_ids,
