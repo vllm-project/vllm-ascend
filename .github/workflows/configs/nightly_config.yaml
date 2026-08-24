@@ -171,6 +171,10 @@ a3:
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
+      - name: DeepSeek-V4-Flash-w4a8-DSpark-PD
+        config_file_path: DeepSeek-V4-Flash-w4a8-DSpark-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
