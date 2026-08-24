@@ -196,8 +196,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
-        connector_worker = getattr(self, "connector_worker", None)
-        if connector_worker is None or not connector_worker.use_gva_layerwise:
+        connector_worker = self.connector_worker
+        if not connector_worker.use_gva_layerwise:
             return False
         connector_worker.set_external_slot_release_waiter(waiter)
         return True

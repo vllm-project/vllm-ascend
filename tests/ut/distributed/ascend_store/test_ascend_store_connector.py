@@ -363,8 +363,6 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
         connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
         waiter = MagicMock()
 
-        self.assertFalse(connector.set_external_slot_release_waiter(waiter))
-
         connector.connector_worker = MagicMock(use_gva_layerwise=False)
         self.assertFalse(connector.set_external_slot_release_waiter(waiter))
         connector.connector_worker.set_external_slot_release_waiter.assert_not_called()
