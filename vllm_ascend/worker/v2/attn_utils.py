@@ -227,7 +227,6 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
-
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,

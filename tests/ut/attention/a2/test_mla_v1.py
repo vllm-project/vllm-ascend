@@ -1,5 +1,4 @@
 import os
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -16,9 +15,6 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
-    AscendMLAPCPImpl,
-    AscendMLAPCPMetadata,
-    AscendMLAPCPMetadataBuilder,
     AscendMLAPrefillMetadata,
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
@@ -34,17 +30,11 @@ class TestAscendMLABackend(TestBase):
         mock_parallel_config = MagicMock()
         mock_parallel_config.prefill_context_parallel_size = 1
         mock_parallel_config.decode_context_parallel_size = 1
-        self.mock_parallel_config = mock_parallel_config
 
         self.mock_config.parallel_config = mock_parallel_config
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
-        self.mla_config_patcher = patch(
-            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
-            return_value=self.mock_config,
-        )
-        self.mla_config_patcher.start()
 
         from vllm_ascend.attention.utils import enable_dcp
 
@@ -53,23 +43,16 @@ class TestAscendMLABackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_get_builder_cls(self, mock_enable_pcp):
-        mock_enable_pcp.return_value = False
+    def test_get_builder_cls(self):
         self.assertEqual(AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder)
-        mock_enable_pcp.return_value = True
-        self.assertIs(AscendMLABackend.get_builder_cls(), AscendMLAPCPMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
         result = AscendMLABackend.get_kv_cache_shape(2, 4, 8, 128)
         self.assertEqual(result, (2, 4, 8, 128))
 
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_get_impl_cls(self, mock_enable_pcp):
-        mock_enable_pcp.return_value = False
-        self.assertEqual(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
-        mock_enable_pcp.return_value = True
-        self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAPCPImpl)
+    def test_get_impl_cls(self):
+        result = AscendMLABackend.get_impl_cls()
+        self.assertEqual(result, AscendMLAImpl)
 
     def test_get_supported_kernel_block_sizes(self):
         result = AscendMLABackend.get_supported_kernel_block_sizes()
@@ -86,128 +69,6 @@ class TestAscendMLABackend(TestBase):
         mock_enable_dcp.return_value = True
         impl_cls = AscendMLABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
-
-    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_pcp_and_dcp_are_rejected(self, mock_enable_pcp, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
-        mock_enable_pcp.return_value = True
-
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_builder_cls()
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_impl_cls()
-
-
-def _make_pcp_metadata(
-    *,
-    num_actual_tokens: int,
-    num_decode_tokens: int,
-    attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill,
-) -> AscendMLAPCPMetadata:
-    return AscendMLAPCPMetadata(
-        num_actual_tokens=num_actual_tokens,
-        slot_mapping=torch.empty(0, dtype=torch.int64),
-        query_start_loc=torch.tensor([0, num_actual_tokens], dtype=torch.int32),
-        seq_lens=torch.tensor([num_actual_tokens], dtype=torch.int32),
-        seq_lens_cpu=torch.tensor([num_actual_tokens], dtype=torch.int32),
-        block_tables=torch.zeros(1, 1, dtype=torch.int32),
-        num_decodes=int(num_decode_tokens > 0),
-        num_decode_tokens=num_decode_tokens,
-        num_prefills=int(num_actual_tokens > num_decode_tokens),
-        attn_state=attn_state,
-    )
-
-
-def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
-    expanded_slots = torch.tensor(
-        [5, 10, 11, -1, -1, 20, 21, -1],
-        dtype=torch.int64,
-    )
-    common_metadata = SimpleNamespace(slot_mapping=expanded_slots)
-    metadata = _make_pcp_metadata(
-        num_actual_tokens=3,
-        num_decode_tokens=1,
-        attn_state=AscendAttentionState.PrefillCacheHit,
-    )
-    builder = AscendMLAPCPMetadataBuilder.__new__(AscendMLAPCPMetadataBuilder)
-    builder.pcp_size = 2
-    builder.pcp_rank = 1
-
-    with patch.object(AscendMLAMetadataBuilder, "build", return_value=metadata):
-        result = builder.build(0, common_metadata)
-
-    assert result.slot_mapping is expanded_slots
-    assert result.pcp_local_num_input_tokens == 4
-    assert result.pcp_local_prefill_start == 3
-    assert result.pcp_local_prefill_end == 5
-    assert result.attn_state == AscendAttentionState.ChunkedPrefill
-
-
-def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
-    impl = AscendMLAPCPImpl.__new__(AscendMLAPCPImpl)
-    captured: dict[str, torch.Tensor] = {}
-
-    def fake_gather(tensors, slot_mapping, num_decode_tokens):
-        assert num_decode_tokens == 0
-        captured["local_kv"] = tensors[0]
-        captured["local_cos"] = tensors[1]
-        captured["slots"] = slot_mapping
-        return (
-            tuple(torch.cat((tensor + 100, tensor), dim=0) for tensor in tensors),
-            slot_mapping,
-        )
-
-    def fake_exec_kv_prefill(self, kv, cos, sin, kv_cache, slots):
-        captured["gathered_kv"] = kv
-        captured["cache_slots"] = slots
-        return cos, kv[:, :2]
-
-    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
-    metadata = _make_pcp_metadata(num_actual_tokens=3, num_decode_tokens=1)
-    metadata.slot_mapping = torch.tensor(
-        [5, 10, 11, -1, -1, 20, 21, -1],
-        dtype=torch.int64,
-    )
-    metadata.pcp_local_num_input_tokens = 4
-    metadata.pcp_local_prefill_start = 3
-    metadata.pcp_local_prefill_end = 5
-    kv = torch.arange(9, dtype=torch.float32).view(3, 3)
-    cos = torch.tensor([[1.0], [2.0], [1.0]])
-    sin = torch.tensor([[3.0], [4.0], [0.0]])
-
-    with (
-        patch(
-            "vllm_ascend.attention.mla_v1.get_pcp_group",
-            return_value=pcp_group,
-        ),
-        patch(
-            "vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs",
-            side_effect=fake_gather,
-        ),
-        patch.object(
-            AscendMLAImpl,
-            "exec_kv_prefill",
-            fake_exec_kv_prefill,
-        ),
-    ):
-        k_pe, k_nope = impl.exec_kv_prefill(
-            kv,
-            cos,
-            sin,
-            (torch.empty(0), torch.empty(0)),
-            torch.empty(0, dtype=torch.int64),
-            attn_metadata=metadata,
-        )
-
-    expected_slots = torch.tensor([10, 11, -1, 20, 21, -1])
-    torch.testing.assert_close(captured["slots"], expected_slots)
-    assert captured["local_kv"] is kv
-    assert captured["local_cos"] is cos
-    assert captured["gathered_kv"].shape[0] == 6
-    torch.testing.assert_close(captured["cache_slots"], expected_slots)
-    torch.testing.assert_close(k_pe, cos[:2])
-    torch.testing.assert_close(k_nope, kv[:2, :2])
 
 
 class TestDecodeMLAPreprocessResult(TestBase):
@@ -510,8 +371,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
-        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
-        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_device = "cpu"
         torch.Tensor.pin_memory = lambda x: x  # noqa
 
@@ -719,8 +578,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         mock_scheduler_config.chunked_prefill_enabled = True
         mock_scheduler_config.enable_chunked_prefill = True
         self.mock_vllm_config.scheduler_config = mock_scheduler_config
-        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
-        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         self.mock_vllm_config.speculative_config = None
         self.mock_device = torch.device("cpu")
         fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "..", "_fake_weight")
