@@ -1,3 +1,4 @@
+import importlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
@@ -11,7 +12,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
 )
-from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import (
@@ -58,9 +58,16 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
     maybe_trans_nz,
+    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+
+if vllm_version_is("0.27.1"):
+    pcp_module = importlib.import_module("vllm.model_executor.layers.attention.pcp")
+else:
+    pcp_module = importlib.import_module("vllm.v1.attention.ops.pcp")
+_gather_prefill_cache_inputs = pcp_module._gather_prefill_cache_inputs
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
