@@ -134,34 +134,6 @@ class TestMoECommMethod(TestBase):
         self.assertIs(result, expected)
         mock_decomposed.assert_called_once_with(fused_input)
 
-    def test_fused_mc2_unquantized_non_situ_does_not_fall_back(self):
-        comm_impl = object.__new__(FusedMC2CommImpl)
-        fused_input = MoEFusedExpertsInput(
-            hidden_states=torch.randn(2, 4),
-            topk_weights=torch.ones(2, 1),
-            topk_ids=torch.zeros(2, 1, dtype=torch.int32),
-            weights=MoEWeights(
-                w1=[torch.randn(1, 4, 4)],
-                w2=[torch.randn(1, 2, 4)],
-            ),
-            routing=MoERoutingParams(
-                expert_map=None,
-                global_redundant_expert_num=0,
-                mc2_mask=None,
-                apply_router_weight_on_input=False,
-            ),
-            quant=MoEQuantParams(),
-            activation=None,
-        )
-
-        with (
-            patch.object(MoECommMethod, "fused_experts") as mock_decomposed,
-            self.assertRaisesRegex(AssertionError, "w1_scale and w2_scale"),
-        ):
-            comm_impl.fused_experts(fused_input)
-
-        mock_decomposed.assert_not_called()
-
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather")

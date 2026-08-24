@@ -32,7 +32,8 @@
 # =================
 # Entries are listed in alphabetical order by file name.
 #
-# ** 1. File: platform/patch_balance_schedule.py**
+# ** 1. Files: platform/patch_async_scheduler.py, platform/patch_balance_schedule.py,
+#              platform/patch_kv_delivery_preemption.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
 #      `vllm.v1.core.sched.scheduler.Scheduler`
@@ -47,6 +48,39 @@
 #       https://github.com/vllm-project/vllm/pull/29721
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
+#
+#   2. `vllm.v1.core.sched.async_scheduler.AsyncScheduler._update_request_with_output`
+#    Why:
+#       vLLM #48245 adds lossless stale-output handling for async scheduling.
+#       AsyncScheduler owns placeholder accounting, so this method cannot
+#       inherit the implementation from the scheduler patch.
+#    How:
+#       Replace only `_update_request_with_output` with the #48245 version.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/48245
+#    Future Plan:
+#       Remove this patch when the supported vLLM version includes PR #48245.
+#
+#   3. `vllm.v1.core.sched.scheduler.Scheduler`
+#      `vllm.v1.request.Request`
+#      `vllm.distributed.kv_transfer.kv_connector.v1.*`
+#    Why:
+#       vLLM #48245/#50297 prevent preemption from losing or reordering
+#       in-flight output while a producer connector still requires reliable KV
+#       delivery. This correctness requirement is independent of balance
+#       scheduling.
+#    How:
+#       Install `KVDeliveryScheduler` first with all affected scheduler methods
+#       and request/connector contracts. `BalanceScheduler` derives from it and
+#       keeps its own vLLM `v0.26.0`-based balance `schedule()`. When balance
+#       is disabled,
+#       that method delegates to `KVDeliveryScheduler.schedule()`; when enabled,
+#       it runs only the original balance scheduling logic.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/48245
+#       https://github.com/vllm-project/vllm/pull/50297
+#    Future Plan:
+#       Remove this patch when the supported vLLM version includes both PRs.
 #
 # ** 2. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

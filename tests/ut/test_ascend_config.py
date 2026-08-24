@@ -318,9 +318,11 @@ class TestAscendConfig(TestBase):
         )
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.is_megamoe_supported_by_config")
     @patch("vllm_ascend.ascend_config.logger.info_once")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once):
+    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once, mock_is_megamoe):
+        mock_is_megamoe.return_value = True
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         with patch.dict(
@@ -432,7 +434,22 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_flashcomm1_does_not_enable_shared_expert_dp(self, mock_check_and_update_config):
+    def test_flashcomm1_defaults_to_shared_expert_dp(self, mock_check_and_update_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 2
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.additional_config = {
+            "enable_flashcomm1": True,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_flashcomm1)
+        self.assertTrue(ascend_config.enable_shared_expert_dp)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_explicit_shared_expert_tp_overrides_flashcomm_default(self, mock_check_and_update_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 2
         test_vllm_config.parallel_config.enable_expert_parallel = True
