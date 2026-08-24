@@ -46,6 +46,7 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "mtp",
         "eagle3",
         "sfa_dsa",
+        "sfa_pcp",
         "dsa_cp",
         "prefix_caching",
         "chunked_prefill",
@@ -80,6 +81,7 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "EP",
         "DP",
         "DCP",
+        "PCP",
         "SP",
     },
     "deploy": {
