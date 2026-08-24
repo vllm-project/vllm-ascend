@@ -134,6 +134,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
+        # TODO: Replace the 310P Triton fallback hook with triton_dispatch after
+        # vLLM RFC #45133 lands.
         request_state_cls = getattr(self, "request_state_cls", AscendRequestState)
         self.req_states: AscendRequestState = request_state_cls(
             max_num_reqs=self.max_num_reqs,
@@ -272,6 +274,8 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping_np: np.ndarray,
         query_start_loc_np: np.ndarray,
     ) -> None:
+        # TODO: Route platform overrides through triton_dispatch after vLLM
+        # RFC #45133 lands.
         del idx_mapping_np, query_start_loc_np
         prepare_prefill_inputs(
             input_ids,
@@ -295,6 +299,8 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np: np.ndarray,
         num_scheduled_tokens: np.ndarray,
     ) -> None:
+        # TODO: Route platform overrides through triton_dispatch after vLLM
+        # RFC #45133 lands.
         del idx_mapping_np, query_start_loc_np, num_scheduled_tokens
         prepare_pos_seq_lens(
             idx_mapping,
@@ -322,6 +328,8 @@ class NPUModelRunner(GPUModelRunner):
         seq_lens_np: np.ndarray,
         prefill_len_np: np.ndarray,
     ) -> torch.Tensor:
+        # TODO: Route platform overrides through triton_dispatch after vLLM
+        # RFC #45133 lands.
         del idx_mapping_np, query_start_loc_np, seq_lens_np, prefill_len_np
         return combine_sampled_and_draft_tokens(
             input_ids,
