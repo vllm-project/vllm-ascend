@@ -26,6 +26,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -723,4 +729,83 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         kv_cache_config = SimpleNamespace(kv_cache_groups=[non_overlapping_group])
         with pytest.raises(RuntimeError, match="registered draft attention groups"):
             proposer.initialize_attn_backend(kv_cache_config)
+    @pytest.mark.parametrize("draft_uses_mla", [False, True], ids=["gqa", "mla"])
+    def test_mixed_target_and_dspark_group_creates_one_draft_attention_group(
+        self, monkeypatch, draft_uses_mla: bool
+    ):
+        page_size = 488448
+        target_layer = "language_model.model.layers.3.self_attn.attn"
+        draft_layers = [
+            f"model.layers.{layer_idx}.self_attn.attn"
+            for layer_idx in range(93, 98)
+        ]
+        target_spec = MLAAttentionSpec(
+            block_size=384,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+        )
+        if draft_uses_mla:
+            draft_spec = MLAAttentionSpec(
+                block_size=384,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                page_size_padded=page_size,
+                non_causal_multi_token_decode=True,
+            )
+        else:
+            draft_spec = FullAttentionSpec(
+                block_size=384,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.bfloat16,
+                page_size_padded=page_size,
+            )
+        mixed_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                target_layer: target_spec,
+                **{layer_name: draft_spec for layer_name in draft_layers},
+            }
+        )
+        assert mixed_spec is not None
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.gqa.backend"
+        layers = {}
+        for layer_name in draft_layers:
+            layer = MagicMock()
+            layer.get_attn_backend.return_value = backend
+            layers[layer_name] = layer
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *args, **kwargs: layers,
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: set(draft_layers)
+        )
+        proposer.max_query_tokens = 16
+        proposer.max_num_tokens = 32
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[target_layer, *draft_layers],
+                    kv_cache_spec=mixed_spec,
+                )
+            ]
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128],
+            )
+
+        assert len(proposer.draft_attn_groups) == 1
+        assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_layers)
+        assert proposer.draft_attn_groups[0].kv_cache_group_id == 0
+        assert proposer._layer_group_idx == [0] * 5
 # fmt: on
