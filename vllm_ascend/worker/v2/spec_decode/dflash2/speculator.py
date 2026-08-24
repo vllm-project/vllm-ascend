@@ -38,15 +38,20 @@ def _selector_walk_kernel_ascend(
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    SAMPLE_PROBABILISTIC: tl.constexpr,
     USE_FP64: tl.constexpr,
 ):
     """Ascend variant of upstream ``_selector_walk_kernel``.
 
     triton-ascend cannot lower ``tldevice.log1p`` (AST parse fails even for
     the greedy path), so the Gumbel noise uses the algebraically equivalent
-    ``log(1 - u)`` transform; fp64 noise is unavailable on NPU, so USE_FP64
-    is accepted for signature compatibility but ignored.
+    ``log(1 - u)`` transform. The signature mirrors upstream exactly so the
+    inherited ``DFlash2Speculator._sample_path`` can call it unmodified:
+    ``SAMPLE_PROBABILISTIC`` gates greedy vs. probabilistic, and ``USE_FP64``
+    is rejected via ``tl.static_assert`` (NPU Triton has no fp64
+    philox/rand path), matching the other vllm_ascend gumbel kernels.
     """
+    tl.static_assert(not USE_FP64, "fp64 gumbel is not supported on NPU")
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_K)
     mask = offsets < top_k
@@ -54,6 +59,9 @@ def _selector_walk_kernel_ascend(
     valid = req_state >= 0
     temperature = tl.load(temperature_ptr + req_state, mask=valid, other=0.0)
     seed = tl.load(seeds_ptr + req_state, mask=valid, other=0)
+    # Match upstream: a non-probabilistic draft is always greedy, regardless
+    # of the request temperature
+    effective_temp = temperature if SAMPLE_PROBABILISTIC else 0.0
     previous = 0
     for step in range(num_steps):
         flat = row * num_steps + step
@@ -70,7 +78,7 @@ def _selector_walk_kernel_ascend(
             other=0,
         )
 
-        if temperature == 0.0:
+        if effective_temp == 0.0:
             best = tl.max(scores, axis=0)
             index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
         else:
@@ -84,7 +92,7 @@ def _selector_walk_kernel_ascend(
                 gumbel_seed, candidates.to(tl.int32), includes_zero=False
             )
             noise = -tl.log(-tl.log(1.0 - uniform))
-            sampled_scores = tl.where(mask, scores / temperature + noise, -float("inf"))
+            sampled_scores = tl.where(mask, scores / effective_temp + noise, -float("inf"))
             best = tl.max(sampled_scores, axis=0)
             index = tl.min(tl.where(sampled_scores == best, offsets, BLOCK_K), axis=0)
 
