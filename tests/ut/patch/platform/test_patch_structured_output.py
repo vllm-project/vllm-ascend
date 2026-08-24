@@ -12,6 +12,7 @@ from vllm.v1.structured_output import StructuredOutputManager, backend_guidance,
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 
@@ -22,8 +23,15 @@ class FakeBackend:
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
 
-    def compile_grammar(self, request_type, grammar_spec):
-        return (type(self).__name__, request_type, grammar_spec)
+    if vllm_version_is("0.27.1"):
+
+        def compile_grammar(self, request_type, grammar_spec):
+            return (type(self).__name__, request_type, grammar_spec)
+
+    else:
+        # main (cdc4824a21): _create_grammar passes stop_token_ids kwarg
+        def compile_grammar(self, request_type, grammar_spec, stop_token_ids=None):  # type: ignore[misc]
+            return (type(self).__name__, request_type, grammar_spec)
 
 
 class FakeXgrammarBackend(FakeBackend):
@@ -44,8 +52,14 @@ def make_manager() -> StructuredOutputManager:
 
 
 def make_request(backend: str):
+    sampling_params = SimpleNamespace(
+        structured_outputs=SimpleNamespace(_backend=backend),
+    )
+    if not vllm_version_is("0.27.1"):
+        # main (cdc4824a21): _create_grammar reads sampling_params.all_stop_token_ids
+        sampling_params.all_stop_token_ids = None
     return SimpleNamespace(
-        sampling_params=SimpleNamespace(structured_outputs=SimpleNamespace(_backend=backend)),
+        sampling_params=sampling_params,
         structured_output_request=SimpleNamespace(
             structured_output_key=(StructuredOutputOptions.JSON, "{}"),
             grammar=None,

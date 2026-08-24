@@ -402,9 +402,8 @@ class DynamicSpecScheduler:
     ) -> torch.Tensor:
         """Estimate DSpark token acceptance probabilities.
 
-        The DSpark confidence head produces logits for each speculative
-        position. Sigmoid converts them to conditional token acceptance
-        probabilities.
+        ``compute_confidence`` already returns per-position acceptance
+        probabilities (sigmoid of the confidence-head logits).
 
         Output:
             token_probs: [B, D]
@@ -433,7 +432,7 @@ class DynamicSpecScheduler:
             markov_embs.shape[-1],
         ).to(flat_hidden.dtype)
 
-        confidence_logits = model.confidence_logits(
+        confidence = model.compute_confidence(
             flat_hidden,
             flat_markov,
         )
@@ -441,13 +440,12 @@ class DynamicSpecScheduler:
         token_probs = self._token_probs_buffer[:num_reqs]
 
         token_probs.copy_(
-            confidence_logits.reshape(
+            confidence.reshape(
                 num_reqs,
                 num_draft_tokens,
             )
         )
 
-        token_probs.sigmoid_()
         token_probs.clamp_(
             min=1e-6,
             max=1.0,

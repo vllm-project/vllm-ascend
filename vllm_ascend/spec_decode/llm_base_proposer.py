@@ -310,9 +310,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         # Sliding-window draft attention adapter.
-        self.draft_window_size = (
-            self.vllm_config.additional_config.get("draft_window_size") if self.vllm_config.additional_config else None
-        )
+        # Read from the validated AscendConfig singleton instead of bypassing it
+        # via additional_config["draft_window_size"] (architecture debt #7).
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        self.draft_window_size = get_ascend_config().draft_window_size
         if self.draft_window_size is not None:
             # EAGLE3: seq_lens is context-only, K draft positions lie beyond it
             #   -> future_offset = K.

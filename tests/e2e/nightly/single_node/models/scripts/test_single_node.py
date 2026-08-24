@@ -14,6 +14,9 @@ import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
+from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import (
+    create_single_node_kv_pool_manager,
+)
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
@@ -491,9 +494,14 @@ async def test_single_node(config: SingleNodeConfig) -> None:
                 f"{k}=={v}",
             ]
             subprocess.call(command)
+    kv_pool_manager = create_single_node_kv_pool_manager(config.kv_pool, config.name)
     if config.service_mode == "epd":
         with (
-            RemoteEPDServer(vllm_serve_args=config.epd_server_cmds, env_dict=config.envs) as _,
+            kv_pool_manager,
+            RemoteEPDServer(
+                vllm_serve_args=config.epd_server_cmds,
+                env_dict={**config.envs, **kv_pool_manager.server_envs},
+            ) as _,
             DisaggEpdProxy(proxy_args=config.epd_proxy_args, env_dict=config.envs) as proxy,
         ):
             await _dispatch_tests(config, proxy)
@@ -501,12 +509,15 @@ async def test_single_node(config: SingleNodeConfig) -> None:
         return
 
     # Standard OpenAI service mode
-    with RemoteOpenAIServer(
-        model=config.model,
-        vllm_serve_args=config.server_cmd,
-        server_port=config.server_port,
-        env_dict=config.envs,
-        auto_port=False,
-    ) as server:
+    with (
+        kv_pool_manager,
+        RemoteOpenAIServer(
+            model=config.model,
+            vllm_serve_args=config.server_cmd,
+            server_port=config.server_port,
+            env_dict={**config.envs, **kv_pool_manager.server_envs},
+            auto_port=False,
+        ) as server,
+    ):
         await _dispatch_tests(config, server)
         _run_benchmarks(config, config.server_port)

@@ -1023,12 +1023,17 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
     """
     try:
         if vllm_config is None:
-            try:
-                from vllm.config import get_current_vllm_config
+            # No caller-provided config: fall back to the upstream runtime
+            # context (non-raising). Previously this used the reach-through
+            # `get_ascend_config().vllm_config` as a second fallback, but
+            # vllm_config is no longer a member of AscendConfig (Plan B).
+            # get_current_vllm_config_or_none returns None outside an engine
+            # context — which is the exact case where the old fallback also
+            # could not supply a usable runtime config, so `vllm_config is None`
+            # below handles it identically.
+            from vllm.config import get_current_vllm_config_or_none
 
-                vllm_config = get_current_vllm_config()
-            except AssertionError:
-                vllm_config = get_ascend_config().vllm_config
+            vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
             return False
         kv_cfg = vllm_config.kv_transfer_config
@@ -1306,26 +1311,13 @@ def singleton(cls):
 
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
-    from vllm.config import get_current_vllm_config
+    # Read from the validated AscendConfig singleton instead of bypassing it
+    # via additional_config["enable_dsa_cp"]. This converges the bypass read
+    # (architecture debt #7) onto the canonical get_ascend_config() path, so
+    # the value benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
 
-    vllm_config = get_current_vllm_config()
-    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
-    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-        vllm_config.model_config.hf_text_config, "index_topk"
-    )
-    if not has_indexer:
-        return False
-
-    dsa_cp_enable = False
-    additional_config = getattr(vllm_config, "additional_config", None)
-    if additional_config is not None and "enable_dsa_cp" in additional_config:
-        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
-
-    # DSA-CP shards attention work with its own TP/CP collectives.  It used to
-    # be gated by ``enable_sp`` only because that helper represented the
-    # FlashComm switch.  Native MoE sequence parallelism is a separate layout
-    # contract and must not be required to enable attention context parallel.
-    return dsa_cp_enable
+    return get_ascend_config().enable_dsa_cp
 
 
 @lru_cache(maxsize=1)

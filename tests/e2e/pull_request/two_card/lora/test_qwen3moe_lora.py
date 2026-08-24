@@ -84,6 +84,7 @@ def test_qwen3moe_lora_ep(qwen3moe_lora_files):
         generate_and_test(vllm_model.model, qwen3moe_lora_files, lora_id=1)
 
 
+@wait_until_npu_memory_free()
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
     """Test multiple different LoRA IDs (-1, 1, 2) in a single batch on EP path.

@@ -1014,17 +1014,15 @@
 #
 # ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.PrefillSpeculatorCudaGraphManager`,
-#      `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.DecodeSpeculatorCudaGraphManager`
+#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
 #    Why:
-#       The v2 Eagle spec-decode path uses upstream CUDA graph managers for
-#       prefill/decode spec decoding, which are not usable on Ascend.
+#       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
+#       an upstream CUDA graph manager, which is not usable on Ascend.
 #    How：
-#       Replace the prefill/decode speculator graph managers on the upstream
-#       module with `PrefillEagleAclGraphManager` / `DecodeEagleAclGraphManager`
+#       Replace the shared upstream manager with `AutoRegressiveAclGraphManager`
 #       (ACL graph).
 #    Related PR (if no, explain why):
-#       No, vllm-ascend v2 spec-decode ACL graph integration.
+#       https://github.com/vllm-project/vllm-ascend/pull/14310
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
@@ -1050,6 +1048,22 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
+#
+# ** 27a. File: worker/patch_v2/patch_spec_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. PPHandler sampled-token broadcast methods
+#    Why:
+#       Target-driven speculative decoding generates next-step draft tokens
+#       after target sampling. Non-last PP ranks need both results for the same
+#       delayed request-state update.
+#    How:
+#       Defer the target-token broadcast until drafting finishes, then carry
+#       accepted target tokens and next-step draft tokens in the same V2 PP
+#       queue slot.
+#    Related PR (if no, explain why):
+#       No, this enables the Ascend MRV2 implementation.
+#    Future Plan:
+#       Remove when vLLM natively transports draft tokens through PP.
 #
 # ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1149,8 +1163,14 @@
 #       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
 #       The patch is guarded with contextlib.suppress(ImportError) so it does
 #       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
+#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
+#       removing running_mean/running_var. That commit is included in the target
+#       16cfe728, so the patch is gated to v0.27.1 only via vllm_version_is;
+#       on newer versions FusedInputNorm.forward is used as-is (multiply-add).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50411
+#       https://github.com/vllm-project/vllm/pull/51734
 #    Future Plan:
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
