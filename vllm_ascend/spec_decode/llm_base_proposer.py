@@ -197,10 +197,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             self.use_cuda_graph = False
 
-        # Probabilistic draft sampling (draft_sample_method="probabilistic")
-        # uses Gumbel/exponential noise that is not ACLGraph-safe. Force eager
-        # mode for the draft model when it is enabled, and reject incompatible
-        # option combinations early to avoid silent fallback to greedy.
         # NOTE: _enable_probabilistic_draft_probs is set by the upstream
         # SpecDecodeBaseProposer.__init__.
         if self._enable_probabilistic_draft_probs:
