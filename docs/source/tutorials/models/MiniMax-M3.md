@@ -10,9 +10,9 @@ This document is written based on the latest vLLM-Ascend version. This model is 
 
 ## 2 Supported Features
 
-Refer to [supported models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
-Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
+Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 
 ## 3 Prerequisites
 
@@ -33,11 +33,13 @@ For multi-node deployment, verify the communication environment by following [Ve
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
 
 - Step 1: Download the latest Docker image
+
   ```bash
   docker pull quay.io/ascend/vllm-ascend:{tag}
   ```
 
 - Step 2: Start Docker container
+
   ```bash
   # Set the vLLM Ascend image name.
   export IMAGE=quay.io/ascend/vllm-ascend:{tag}
@@ -80,6 +82,7 @@ You can use the official all-in-one Docker image. For the available image tags a
   ```
 
 - Step 3: compile Rust frontend
+
   ```bash
   cd /vllm-workspace/vllm
 
@@ -104,7 +107,7 @@ You can use the official all-in-one Docker image. For the available image tags a
 
   Expected result: The version information is displayed, matching the pulled image version.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Start the online serving service with the following command:
 
@@ -745,7 +748,7 @@ The recommended configurations are the same as those specified in Chapter 5, “
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 

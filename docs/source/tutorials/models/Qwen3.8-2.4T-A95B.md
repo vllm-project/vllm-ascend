@@ -20,7 +20,7 @@ current model (Qwen3.8-2.4T-A95B) is first supported in this version.
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md)
 to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 configuration details.
 
 :::{note}
@@ -47,7 +47,7 @@ This guide includes the following validated A3 deployment configuration:
 
 | Platform | Deployment | Topology |
 | --- | --- | --- |
-| 4 × Atlas 800 A3 (64G × 16) | Mixed Prefill/Decode deployment | DP4/TP16/EP64 |
+| 4 × Atlas 800 A3 (64GB × 16) | Mixed Prefill/Decode deployment | DP4/TP16/EP64 |
 
 The checkpoint and tokenizer directories must be available at the same paths
 on all serving nodes. The W8A8 deployment uses the lazy Safetensors strategy to
@@ -121,11 +121,11 @@ You can also build and install `vllm-ascend` from source. Refer to
 If you want to deploy a multi-node service, install the same version of vLLM
 and vLLM-Ascend on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Atlas 800 A3 Multi-Node Deployment
 
-The validated mixed deployment uses four Atlas 800 A3 (64G × 16) nodes. Data
+The validated mixed deployment uses four Atlas 800 A3 (64GB × 16) nodes. Data
 parallelism spans the four nodes, each node runs one DP rank, and tensor
 parallelism uses all 16 NPUs in the node. The resulting topology is
 DP4/TP16/EP64.
@@ -306,7 +306,7 @@ a proxy forwards requests between them.
 
 The current validated configuration covers mixed Prefill/Decode deployment.
 The following PD topology is based on the Kimi-K3 reference and has not been
-validated with Qwen3.8: 16 Atlas 800 A3 (64G × 16) nodes, with eight Prefill
+validated with Qwen3.8: 16 Atlas 800 A3 (64GB × 16) nodes, with eight Prefill
 nodes and eight Decode nodes. Both sides use DP8/TP16/PP1.
 
 Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for
@@ -478,14 +478,14 @@ Use the deployment values above as a baseline. Adjust `max-model-len`,
 for the target workload.
 
 Refer to the
-[performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
-and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for
+[Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
+and the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for
 additional guidance.
 
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to
-the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
 - **Q: Which inputs are supported by the open-weight model?**
 
