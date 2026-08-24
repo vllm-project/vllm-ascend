@@ -293,6 +293,39 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        from vllm.config.utils import replace as vllm_replace
+
+        # The drafter inherits the main engine's kv_transfer_config, including
+        # the "prefill"/"decode" sub-configs that declare PD parallelism
+        # (dp_size/tp_size). Reconstructing the draft config via replace()
+        # re-runs check_kv_extra_config, which compares those declared dp_size
+        # values against the drafter's own (per-rank) data_parallel_size and
+        # raises a false "conflicting data parallel size" error. The drafter
+        # never owns a KV connector (it is built from the main worker's
+        # vllm_config, not the draft config), so temporarily strip these
+        # sub-configs from the worker config around the super() call. This
+        # defers the kernel/attention overrides to the base implementation and
+        # stays compatible with proposer subclasses that wrap super() themselves.
+        orig_vllm_config = self.vllm_config
+        kvtc = orig_vllm_config.kv_transfer_config
+        if kvtc is not None:
+            extra = {
+                k: v
+                for k, v in kvtc.kv_connector_extra_config.items()
+                if k not in ("prefill", "decode")
+            }
+            self.vllm_config = vllm_replace(
+                orig_vllm_config,
+                kv_transfer_config=vllm_replace(
+                    kvtc, kv_connector_extra_config=extra
+                ),
+            )
+        try:
+            return super()._create_draft_vllm_config()
+        finally:
+            self.vllm_config = orig_vllm_config
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
