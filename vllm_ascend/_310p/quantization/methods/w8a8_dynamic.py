@@ -22,8 +22,6 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
-from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 
 from vllm_ascend._310p.fused_moe.experts_selector import select_experts
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -34,8 +32,6 @@ from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
-
-_W8A8_DYNAMIC_MATMUL_CHUNK_SIZE = 1024
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -176,9 +172,6 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
       - This scheme is discovered via 310P local registry.
     """
 
-    _dflash_piecewise_graph_safe = False
-    _dflash_full_decode_graph_safe = False
-
     def get_perchannel_param(
         self,
         output_size: int,
@@ -207,66 +200,14 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
 
         # NOTE(310P):
         # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
-        full_decode_profile_run = False
-        if self._dflash_full_decode_graph_safe:
-            full_decode_profile_run = bool(getattr(get_forward_context(), "in_profile_run", False))
-        if self._dflash_piecewise_graph_safe or full_decode_profile_run:
-            # DFlash graph compilation keeps the token dimension dynamic. A
-            # Python range over quantized_x.shape[0] specializes that dimension
-            # to the 1280-token profile input and violates Dynamo's dynamic
-            # shape contract. Two tensor chunks keep the split in the graph;
-            # with max_num_batched_tokens=1280 each matmul stays below the
-            # 310P-safe 1024-token limit.
-            quantized_chunks = torch.chunk(quantized_x, 2, dim=0)
-            scale_chunks = torch.chunk(pertoken_scale, 2, dim=0)
-            output = torch.cat(
-                (
-                    torch_npu.npu_quant_matmul(
-                        quantized_chunks[0],
-                        layer.weight.data,
-                        layer.weight_scale,
-                        pertoken_scale=scale_chunks[0],
-                        bias=bias,
-                        output_dtype=x.dtype,
-                    ),
-                    torch_npu.npu_quant_matmul(
-                        quantized_chunks[1],
-                        layer.weight.data,
-                        layer.weight_scale,
-                        pertoken_scale=scale_chunks[1],
-                        bias=bias,
-                        output_dtype=x.dtype,
-                    ),
-                ),
-                dim=0,
-            )
-        elif quantized_x.shape[0] <= _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE:
-            output = torch_npu.npu_quant_matmul(
-                quantized_x,
-                layer.weight.data,
-                layer.weight_scale,
-                pertoken_scale=pertoken_scale,
-                bias=bias,
-                output_dtype=x.dtype,
-            )
-        else:
-            # QuantBatchMatmulV3 on 310P can raise an AI Core exception for
-            # large token dimensions. Split only affected prefills into a size
-            # known to use the stable kernel.
-            output = torch.cat(
-                [
-                    torch_npu.npu_quant_matmul(
-                        quantized_x[start : start + _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE],
-                        layer.weight.data,
-                        layer.weight_scale,
-                        pertoken_scale=pertoken_scale[start : start + _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE],
-                        bias=bias,
-                        output_dtype=x.dtype,
-                    )
-                    for start in range(0, quantized_x.shape[0], _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE)
-                ],
-                dim=0,
-            )
+        output = torch_npu.npu_quant_matmul(
+            quantized_x,
+            layer.weight.data,
+            layer.weight_scale,
+            pertoken_scale=pertoken_scale,
+            bias=bias,
+            output_dtype=x.dtype,
+        )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
         return output
@@ -276,19 +217,3 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
         layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_offset.data = layer.weight_offset.data.flatten()
-
-
-def _enable_dflash_graph_safe_w8a8(scope: str) -> None:
-    """Enable dynamic-shape-safe W8A8 chunks in an exact-scope worker."""
-
-    AscendW8A8DynamicLinearMethod310._dflash_piecewise_graph_safe = scope == "piecewise"
-    AscendW8A8DynamicLinearMethod310._dflash_full_decode_graph_safe = scope == "full_decode_only"
-    logger.debug("[310p-dflash-graph/compile] scope=%s enabled graph-safe W8A8 dynamic chunks", scope)
-
-
-def enable_dflash_piecewise_graph_safe_w8a8() -> None:
-    _enable_dflash_graph_safe_w8a8("piecewise")
-
-
-def enable_dflash_full_decode_graph_safe_w8a8() -> None:
-    _enable_dflash_graph_safe_w8a8("full_decode_only")

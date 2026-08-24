@@ -62,10 +62,6 @@ from vllm_ascend._310p.piecewise_size_nodes import (
     install_full_decode_size_node_compat,
     install_piecewise_size_node_compat,
 )
-from vllm_ascend._310p.quantization.methods.w8a8_dynamic import (
-    enable_dflash_full_decode_graph_safe_w8a8,
-    enable_dflash_piecewise_graph_safe_w8a8,
-)
 from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -205,10 +201,8 @@ class NPUModelRunner310(NPUModelRunner):
         super().__init__(*args, **kwargs)
         if is_310p_dflash_piecewise(self.vllm_config):
             install_piecewise_size_node_compat()
-            enable_dflash_piecewise_graph_safe_w8a8()
         elif is_310p_dflash_full_decode_only(self.vllm_config):
             install_full_decode_size_node_compat()
-            enable_dflash_full_decode_graph_safe_w8a8()
             self._fdo_position_base_i32 = torch.empty(
                 self.max_num_tokens,
                 dtype=torch.int32,
