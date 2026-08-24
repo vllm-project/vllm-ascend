@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
+from zlib import adler32
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MLAAttentionSpec,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
@@ -35,6 +37,74 @@ from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+def test_mrv2_sparse_mla_spec_is_host_resident(monkeypatch):
+    class FakeMLAAttention:
+        kv_sharing_target_layer_name = None
+        impl = SimpleNamespace(
+            fa_quant_layer=False,
+            enable_sparse_sfa_c8=False,
+        )
+
+        def get_kv_cache_spec(self, _vllm_config):
+            return MLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            )
+
+    fake_ascend_config = SimpleNamespace(
+        sparse_kv_offload_config=SimpleNamespace(enabled=True),
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+    monkeypatch.setattr(attn_utils, "MLAAttention", FakeMLAAttention)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.0.self_attn.attn": FakeMLAAttention()},
+    )
+    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: fake_ascend_config)
+
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+
+    spec = specs["model.layers.0.self_attn.attn"]
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.store_on_host is True
+
+
+def test_mrv2_sparse_metadata_maps_requests_and_tokens():
+    model_state = AscendModelState.__new__(AscendModelState)
+    model_state.sparse_kv_offload_enabled = True
+    model_state._offload_req_ids_cpu = torch.zeros(4, dtype=torch.int64)
+    model_state._offload_token_to_req_cpu = torch.zeros(8, dtype=torch.int32)
+    model_state._offload_req_ids_tensor = torch.zeros(4, dtype=torch.int64)
+    model_state._offload_token_to_req = torch.zeros(8, dtype=torch.int32)
+    input_batch = SimpleNamespace(
+        req_ids=["request-a", "request-b"],
+        num_reqs=2,
+        num_tokens=3,
+        query_start_loc_np=np.array([0, 2, 3], dtype=np.int32),
+    )
+
+    req_ids, token_to_req = model_state._prepare_sparse_kv_offload_metadata(
+        input_batch,
+        num_reqs=4,
+        num_tokens=5,
+    )
+
+    assert req_ids is not None
+    assert token_to_req is not None
+    assert req_ids[:2].tolist() == [
+        adler32(b"request-a"),
+        adler32(b"request-b"),
+    ]
+    assert req_ids[2:].tolist() == [0, 0]
+    assert token_to_req.tolist() == [0, 0, 1, 0, 0]
 
 
 @pytest.mark.parametrize(

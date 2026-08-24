@@ -249,7 +249,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             "cudagraph_runtime_mode",
             CUDAGraphMode.NONE,
         )
-        return forward_context.capturing or runtime_mode not in (
+        # ``ForwardContext.capturing`` was removed in vLLM 0.27.1. The
+        # runtime mode remains the authoritative signal for graph replay on
+        # current vLLM, while older versions may still expose ``capturing``
+        # during graph capture.
+        return getattr(forward_context, "capturing", False) or runtime_mode not in (
             None,
             CUDAGraphMode.NONE,
         )

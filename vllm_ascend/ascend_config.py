@@ -1312,7 +1312,10 @@ class SparseKVOffloadConfig:
                     "you can enable keep_device_kv_cache."
                 )
         if vllm_config.use_v2_model_runner:
-            raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
+            if not vllm_config.model_config.enforce_eager:
+                raise ValueError("Sparse KV offload with model_runner_v2 currently requires enforce_eager=True.")
+            if vllm_config.speculative_config is not None:
+                raise ValueError("Sparse KV offload with model_runner_v2 does not support speculative decoding yet.")
 
         self.topk = vllm_config.model_config.hf_text_config.index_topk
         if self.topk_buffer_size < self.topk:
