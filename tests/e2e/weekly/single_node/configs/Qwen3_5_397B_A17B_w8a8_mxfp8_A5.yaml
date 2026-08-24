@@ -73,7 +73,7 @@ _benchmarks_per3: &benchmarks_acc
 # ==========================================
 test_cases:
   - name: "Qwen35_397B_PCP_MTP_A5_perf_01"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/vllm-ascend/Qwen3.5-397B-A17B-w8a8-mxfp8"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -87,7 +87,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_per
   - name: "pcp_qwen3_5_acc_001"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/vllm-ascend/Qwen3.5-397B-A17B-w8a8-mxfp8"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
