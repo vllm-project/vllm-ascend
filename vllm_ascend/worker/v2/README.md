@@ -33,7 +33,7 @@ to get specific plans.
 
 - [ ] `speculator.graph_manager_wrapper`
 
-    Why: EagleAclGraphManager needs speculator's input_buffers and model_state.attn_metadata to update_full_graph_params, so speculator should be passed into __init
-    __ of EagleAclGraphManager.
+    Why: AutoRegressiveAclGraphManager needs speculator's input_buffers and model_state.attn_metadata to update_full_graph_params, so speculator should be passed into __init
+    __ of AutoRegressiveAclGraphManager.
 
     Location: `speculator.AscendEagleSpeculator.init_cudagraph_manager`.

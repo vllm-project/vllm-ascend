@@ -343,9 +343,6 @@ msgid ""
 "Considerations |"
 msgstr "| 场景 | 部署模式 | *NPU总数 | 权重版本 | 关键考量 |"
 
-msgid "# Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B, W8A8, W4A4, W8A8SC-310)"
-msgstr "# Qwen3-Dense（Qwen3-0.6B/1.7B/4B/8B/14B/32B，W8A8，W4A4，W8A8SC-310）"
-
 msgid ""
 "Qwen3 is the latest generation of large language models in Qwen series, "
 "offering a comprehensive suite of dense and mixture-of-experts (MoE) models."
@@ -525,3 +522,6 @@ msgid ""
 "| Scenario | Configuration | NPUs | TP | DP | FUSED_MC2 | EP Switch | Async "
 "Scheduling |"
 msgstr "| 场景 | 配置 | NPU | TP | DP | FUSED_MC2 | EP 开关 | 异步调度 |"
+
+msgid "# Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B)"
+msgstr "# Qwen3-Dense（Qwen3-0.6B/1.7B/4B/8B/14B/32B）"

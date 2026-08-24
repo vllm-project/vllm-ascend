@@ -359,6 +359,10 @@ CASE_DS_ACLGRAPH = {
     "tensor_parallel_size": 2,
     "data_parallel_size": 2,
     "enable_expert_parallel": True,
+    # Keep this ACL graph regression on the non-SP path used to generate its
+    # golden answers. Upstream SP has dedicated DP2/TP2 functional and
+    # precision coverage in test_sequence_parallel_linear.py.
+    "all2all_backend": "flashinfer_all2allv",
     "golden_answers": {
         "short": DEEPSEEK_V2_LITE_PROMPTS_SHORT_BASELINE,
         "long": DEEPSEEK_V2_LITE_PROMPTS_LONG_BASELINE,
@@ -502,32 +506,35 @@ def _run_worker_process(
     for key, value in cur_case.get("env_vars", {}).items():
         os.environ[key] = str(value)
 
-    # Apply hooks and run inference
-    with _install_spies(metrics):
-        short_prompts = cur_case["prompts"]["short"]
-        chunk_size = len(short_prompts) // world_size
-        short_start_idx = rank * chunk_size
-        short_end_idx = short_start_idx + chunk_size if rank < world_size - 1 else len(short_prompts)
-        local_short_prompts = short_prompts[short_start_idx:short_end_idx]
+    llm = None
+    try:
+        # Apply hooks and run inference
+        with _install_spies(metrics):
+            short_prompts = cur_case["prompts"]["short"]
+            chunk_size = len(short_prompts) // world_size
+            short_start_idx = rank * chunk_size
+            short_end_idx = short_start_idx + chunk_size if rank < world_size - 1 else len(short_prompts)
+            local_short_prompts = short_prompts[short_start_idx:short_end_idx]
 
-        long_prompts = cur_case["prompts"]["long"]
-        chunk_size = len(long_prompts) // world_size
-        long_start_idx = rank * chunk_size
-        long_end_idx = long_start_idx + chunk_size if rank < world_size - 1 else len(long_prompts)
-        local_long_prompts = long_prompts[long_start_idx:long_end_idx]
+            long_prompts = cur_case["prompts"]["long"]
+            chunk_size = len(long_prompts) // world_size
+            long_start_idx = rank * chunk_size
+            long_end_idx = long_start_idx + chunk_size if rank < world_size - 1 else len(long_prompts)
+            local_long_prompts = long_prompts[long_start_idx:long_end_idx]
 
-        llm = LLM(
-            model=cur_case["model"],
-            max_model_len=1024,
-            compilation_config=cur_case["compilation_config"],
-            quantization=cur_case["quantization"],
-            tensor_parallel_size=cur_case["tensor_parallel_size"],
-            enable_expert_parallel=cur_case["enable_expert_parallel"],
-            trust_remote_code=True,
-        )
+            llm = LLM(
+                model=cur_case["model"],
+                max_model_len=1024,
+                compilation_config=cur_case["compilation_config"],
+                quantization=cur_case["quantization"],
+                tensor_parallel_size=cur_case["tensor_parallel_size"],
+                enable_expert_parallel=cur_case["enable_expert_parallel"],
+                all2all_backend=cur_case.get("all2all_backend", "allgather_reducescatter"),
+                trust_remote_code=True,
+            )
 
-        compiled_outputs_short = llm.generate(local_short_prompts, _SAMPLING_PARAMS)
-        compiled_outputs_long = llm.generate(local_long_prompts, _SAMPLING_PARAMS)
+            compiled_outputs_short = llm.generate(local_short_prompts, _SAMPLING_PARAMS)
+            compiled_outputs_long = llm.generate(local_long_prompts, _SAMPLING_PARAMS)
 
         def extract_outputs(outputs):
             extracted = []
@@ -553,6 +560,14 @@ def _run_worker_process(
             "long": {"prompt_idx": long_start_idx, "outputs": extract_outputs(compiled_outputs_long)},
         }
         result_queue.put(result_data)
+    finally:
+        try:
+            if llm is not None:
+                llm.llm_engine.engine_core.shutdown()
+        finally:
+            if llm is not None:
+                del llm
+            _exit()
 
 
 def _exit():

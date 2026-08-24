@@ -9,7 +9,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "1800"
   SERVER_PORT: "DEFAULT_PORT"
 
@@ -33,7 +32,7 @@ _server_cmd: &server_cmd
   - "16384"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "--enable-expert-parallel "
+  - "--enable-expert-parallel"
   - "--port"
   - "$SERVER_PORT"
   - "--no-enable-prefix-caching"
