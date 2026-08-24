@@ -67,6 +67,7 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     maybe_trans_nz,
+    parse_layer_idx,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -109,6 +110,19 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
         if config is not None and hasattr(config, attr):
             return bool(getattr(config, attr))
     return False
+
+
+def _is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
 
 
 class AscendSFABackend(AttentionBackend):
@@ -556,7 +570,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         self.q_b_proj = kwargs["q_b_proj"]
-        self.skip_topk = kwargs.get("skip_topk", False)
+        self._skip_topk = bool(kwargs.get("skip_topk", False))
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
@@ -580,6 +594,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
         self.use_index_cache = self.skip_topk or self.index_cache_enabled
+        self._is_mtp_layer = _is_mtp_layer(hf_config, self.layer_name)
+        self.skip_indexer_pre_process = self.skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
             raise ValueError(
@@ -650,6 +666,20 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
+
+    @property
+    def skip_topk(self) -> bool:
+        return self._skip_topk
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self._skip_topk = bool(value)
+        if hasattr(self, "_is_mtp_layer"):
+            self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
+
+    @property
+    def runtime_has_indexer(self) -> bool:
+        return self.has_indexer and not self.skip_indexer_pre_process
 
     @property
     def kv_cache_indexer_k_idx(self) -> int:
@@ -1788,7 +1818,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # separate cache specs, while the current kernel path still expects the
         # legacy combined tuple layout.
         main_cache = kv_cache
-        if main_cache is None or not self.has_indexer:
+        if main_cache is None or not self.runtime_has_indexer:
             return main_cache
 
         # Sparse KV offload registers the main MLA cache as a 6-tuple
@@ -1881,7 +1911,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     "SFA Prolog V3 requires one cache index per input token, "
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
                 )
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
             else:
                 k_li, k_li_scale = None, None
@@ -1919,7 +1949,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(
                     x=hidden_states,
                     cos=cos,
@@ -1974,11 +2004,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 full_gather_o_proj_enabled,
             )
 
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 assert k_li is not None
                 k_li = self._get_full_kv(k_li, attn_metadata)
 
-        if kv_cache is not None and self.has_indexer:
+        if kv_cache is not None and self.runtime_has_indexer:
             assert k_li is not None
             use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
             dsa_k_cache_idx = self.kv_cache_indexer_k_idx
