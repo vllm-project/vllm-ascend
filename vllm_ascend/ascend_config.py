@@ -461,16 +461,12 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        # sparse c8 + reshape optim derivation
-        from vllm_ascend.utils import model_uses_sfa_sparse
-
-        use_sparse = model_uses_sfa_sparse(vc.model_config)
-        self.enable_sparse_sfa_c8 = self.enable_sparse_sfa_c8 and use_sparse
-        self.enable_sparse_li_c8 = self.enable_sparse_li_c8 and use_sparse
-        # c8_enable_reshape_optim is a user input field now; keep the original
-        # semantics: only meaningful when enable_sparse_li_c8 is true.
-        self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and self.c8_enable_reshape_optim
-        quant_config = getattr(vc, "quant_config", None)
+        # self.enable_sparse_sfa_c8 = additional_config.get("enable_sparse_sfa_c8", False) and use_sparse
+        # self.enable_sparse_li_c8 = additional_config.get("enable_sparse_li_c8", False) and use_sparse
+        self.c8_enable_reshape_optim = self.vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and additional_config.get(
+            "c8_enable_reshape_optim", False
+        )
+        quant_config = getattr(vllm_config, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
@@ -536,7 +532,8 @@ class AscendConfig:
             )
 
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
+        # 还需要加一个对模型的判断
+        if self.sparse_kv_offload_config.enabled and self.vllm_config.cache_config.cache_dtype in ["fp8", "int8"]:
             raise NotImplementedError(
                 "Sparse KV offload does not support the sparse SFA C8 main "
                 "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
@@ -669,7 +666,7 @@ class AscendConfig:
         return layer_ids, layer_names
 
     def is_sparse_li_c8_layer(self, layer_name: str | None) -> bool:
-        if not self.enable_sparse_li_c8:
+        if self.vllm_config.attention_config.indexer_kv_dtype not in ["fp8", "int8"]:
             return False
         if not self._sparse_li_c8_layer_filter_enabled:
             return True

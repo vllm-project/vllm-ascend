@@ -37,6 +37,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
@@ -92,9 +93,6 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
@@ -289,8 +287,9 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
+        k_dtype = kv_cache_dtype_str_to_dtype(
+            self.vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
+        )
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
