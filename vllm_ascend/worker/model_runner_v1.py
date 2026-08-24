@@ -3595,6 +3595,9 @@ class NPUModelRunner(GPUModelRunner):
         if cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
+            if self.drafter is not None:
+                self.drafter.update_stream = self.update_stream
+
         with _torch_cuda_wrapper():
             if (
                 breakable_cudagraph.is_breakable_cudagraph_enabled()

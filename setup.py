@@ -522,7 +522,6 @@ setup(
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
             "ascend_model = vllm_ascend:register_model",
-            # "ascend_register = vllm_ascend:register",
         ],
         "ms_service_metric.providers": [
             "vllm-ascend = vllm_ascend.observability:get_metric_provider",

@@ -37,8 +37,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -205,10 +205,13 @@ class ModelWithContext(nn.Module):
         self.is_draft_model_prefill = is_draft_model_prefill
 
     def forward(self, *args, **kwargs):
+        forward_context = get_forward_context()
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
-        if torch.npu.is_current_stream_capturing():
-            _EXTRA_CTX.capturing = True
+        _EXTRA_CTX.capturing = (
+            torch.npu.is_current_stream_capturing()
+            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+        )
         if self.is_draft_model:
             _EXTRA_CTX.is_draft_model = True
         if self.is_draft_model_prefill:
