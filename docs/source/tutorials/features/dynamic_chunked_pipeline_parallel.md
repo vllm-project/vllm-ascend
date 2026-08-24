@@ -109,7 +109,6 @@ Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` (dec
     export TASK_QUEUE_ENABLE=1
     export ASCEND_LAUNCH_BLOCKING=0
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_EXEC_TIMEOUT=204

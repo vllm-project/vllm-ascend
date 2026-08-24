@@ -35,7 +35,6 @@ SERVER_ENV = {
     "HCCL_BUFFSIZE": "1024",
 }
 ADDITIONAL_CONFIG = {
-    "enable_flashcomm1": True,
     "ascend_compilation_config": {"fuse_norm_quant": False},
 }
 

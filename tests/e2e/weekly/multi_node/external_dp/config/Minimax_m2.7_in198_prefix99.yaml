@@ -59,7 +59,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "2048"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0

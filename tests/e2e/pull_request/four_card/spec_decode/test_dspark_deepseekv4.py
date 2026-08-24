@@ -65,7 +65,6 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
             [0.65, 0.55, 0.45, 0.35, 0.30],
             5,
             {
-                "enable_flashcomm1": False,
                 "enable_dsa_cp": False,
                 "dynamic_spec_config": DSPARK_DYNAMIC_SPEC_CONFIG,
             },

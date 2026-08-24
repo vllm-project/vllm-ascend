@@ -45,7 +45,6 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   ASCEND_BUFFER_POOL: "4:8"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common

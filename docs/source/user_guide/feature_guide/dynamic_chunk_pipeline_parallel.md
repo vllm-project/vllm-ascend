@@ -25,7 +25,7 @@ Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic chunking st
 
 CPP focuses on optimization during the prefill phase on the **P node in PD disaggregation** scenarios. CPP is recommended for PD (Prefill/Decode) disaggregation scenarios. Supported features are as follows:
 
-|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | Flashcomm1 |
+|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | Sequence parallelism |
 | ------- | ----- | ----- | ------ | ------ | ------ |
 | **CPP** | ✅    | ✅     | ✅      | ✅       | ✅       |
 

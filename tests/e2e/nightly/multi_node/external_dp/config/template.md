@@ -84,7 +84,6 @@ env_common: &env_common
   ASCEND_TRANSFER_TIMEOUT: "10000"
   HCCL_BUFFSIZE: "256"
   SERVER_PORT: "${PORT}"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0

@@ -49,8 +49,11 @@ DCP reuses the TP devices and does not increase the world size.
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
   --block-size <B> \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true}'
+  --additional-config '{"enable_dsa_cp": true}'
 ```
+
+Sequence parallelism is managed by the upstream vLLM parallel configuration
+and is selected automatically for eligible MoE deployments.
 
 ## Constraints
 

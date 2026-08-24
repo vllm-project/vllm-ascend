@@ -141,7 +141,6 @@ Single-node deployment completes both Prefill and Decode within the same node. B
         },
         "multistream_overlap_shared_expert": true,
         "weight_nz_mode": 2,
-        "enable_flashcomm1": true,
         "enable_reduce_sample": true
     }' \
     --port 11223 > ${LOG_PATH} 2>&1 &
@@ -179,7 +178,6 @@ Single-node deployment completes both Prefill and Decode within the same node. B
       "multistream_overlap_shared_expert": true,
       "enable_shared_expert_dp": true,
       "weight_nz_mode": 2,
-      "enable_flashcomm1": true,
       "enable_reduce_sample": true
   }' \
   --port 11223 > ${LOG_PATH} 2>&1 &
@@ -324,7 +322,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     --limit-mm-per-prompt '{"image":1,"video":0}' \
     --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
     --port 11223 > ${LOG_PATH} 2>&1 &
   ```
 
@@ -369,7 +367,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     --limit-mm-per-prompt '{"image":1,"video":0}' \
     --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
     --port 11223 > ${LOG_PATH} 2>&1 &
   ```
 
@@ -405,17 +403,11 @@ When using local media paths in requests, such as `file:///path/to/video.mp4`, a
 
 If the number of sampled video frames is not specified, vLLM uses its default video sampling policy, which samples 32 frames by default. For quick functional smoke tests, a smaller frame count such as 8 or 16 can be set in the request or evaluation config. For benchmark runs, follow the dataset protocol.
 
-FLASHCOMM1 and language-model-only mode should not be enabled at the same time for MiniMax-M3 serving. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`.
-
-```bash
-# Enable FLASHCOMM1.
---additional-config '{"enable_flashcomm1": true}'
-
-# Enable language-model-only mode.
---language-model-only
-```
-
-`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
+The former FlashComm1 environment variable and additional-config field are
+deprecated and no longer control execution. Sequence parallelism is managed by
+the upstream vLLM parallel configuration and is selected automatically for
+eligible MoE deployments. Do not add the former FlashComm1 settings to new
+deployment commands.
 
 ## 6 Thinking and Parser Configuration
 
