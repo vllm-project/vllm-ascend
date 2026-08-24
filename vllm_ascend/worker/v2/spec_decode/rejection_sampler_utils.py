@@ -495,6 +495,9 @@ def rejection_sample(
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
 
+    assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    assert draft_logits is None or (draft_logits.ndim == 3 and draft_logits.stride(-1) == 1)
+
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
