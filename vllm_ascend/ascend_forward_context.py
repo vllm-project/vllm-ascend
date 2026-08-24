@@ -246,7 +246,18 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
         global _dispatch_v2_tokens_capacity
-        _dispatch_v2_tokens_capacity = min(num_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT) * tp_size
+        # Compute dispatch_v2 (normal MC2) tokens capacity independently from the
+        # fused_mc2 path above. When enable_prefill_mc2 or use_mega_moe is true,
+        # max_num_tokens is based on max_num_batched_tokens (prefill+decode unified
+        # batch), which is too large for the normal MC2 decode path. Recompute the
+        # token count from the decode-only configuration so that
+        # _dispatch_v2_tokens_capacity follows the normal MC2 branch logic.
+        if vllm_config.compilation_config.cudagraph_capture_sizes:
+            dispatch_v2_max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
+        else:
+            dispatch_v2_max_num_tokens = max_num_reqs * uniform_decode_query_len
+        dispatch_v2_tokens_per_tp_rank = (dispatch_v2_max_num_tokens + tp_size - 1) // tp_size
+        _dispatch_v2_tokens_capacity = min(dispatch_v2_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT) * tp_size
 
     # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
     else:
