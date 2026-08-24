@@ -26,8 +26,8 @@ DP_SIZE = 4
 # - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
 # - NPU: HCSP operator timeout detects the dead peer.
 # - Deadline (45s): slowest fallback (30s) + margin.
-CPU_DISTRIBUTED_TIMEOUT_S = 30
-FT_COMMUNICATION_ABORT_TIMEOUT_S = 15
+CPU_DISTRIBUTED_TIMEOUT_S = 15
+FT_COMMUNICATION_ABORT_TIMEOUT_S = 10
 FAULT_DETECTION_DEADLINE_S = 45
 
 
@@ -384,7 +384,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     All 4 being UNHEALTHY is the precondition for ``retry``.  The fault
     is patched via a generated ``sitecustomize.py``.
     """
-    fault_step = int(os.getenv("FT_FAULT_STEP", "50"))
+    fault_step = int(os.getenv("FT_FAULT_STEP", "100"))
     _install_fault_injection(monkeypatch, tmp_path, rank=3, step=fault_step)
 
     with _ft_manager() as servers:
