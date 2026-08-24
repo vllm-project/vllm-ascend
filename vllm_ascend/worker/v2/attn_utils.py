@@ -61,24 +61,6 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
-def _get_non_mla_kv_cache_shapes(
-    kv_cache_shape: tuple[int, ...],
-    kv_cache_spec: AttentionSpec,
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Return K/V shapes without corrupting backend-specific layouts.
-
-    Some backends encode the head dimension in more than one physical
-    dimension. For example, the 310P NZ layout uses a fixed trailing packing
-    dimension of 16. Replacing that dimension with ``head_size_v`` is only
-    valid when V has a genuinely different logical head size from K.
-    """
-    k_shape = kv_cache_shape[1:]
-    head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
-    if head_size_v == kv_cache_spec.head_size:
-        return k_shape, k_shape
-    return k_shape, (*kv_cache_shape[1:-1], head_size_v)
-
-
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -245,6 +227,10 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        # Hybrid MambaAttnMetadata already injects ``is_prefilling`` via
+        # ``get_extra_common_attn_kwargs``. Passing it again as a constructor
+        # kwarg raises "got multiple values for keyword argument". Prefer the
+        # model-specific value when present; otherwise forward the caller's.
         if is_prefilling is not None and "is_prefilling" not in common_attn_metadata_extra_kwargs:
             common_attn_metadata_extra_kwargs["is_prefilling"] = is_prefilling
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -313,17 +299,13 @@ def build_attn_state(
 ):
     """Build attention state for npu's attention backend."""
     if vllm_config.model_config.runner_type == "pooling":
-        kv_cache_config = getattr(vllm_config, "kv_cache_config", None)
-        if kv_cache_config is None or not kv_cache_config.kv_cache_groups:
-            return AscendAttentionState.PrefillNoCache
         if isinstance(
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            vllm_config.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):
             attn_state = AscendAttentionState.PrefillNoCache
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
-        return attn_state
     elif np.array_equal(seq_lens_np[:num_reqs], num_scheduled_tokens):
         attn_state = AscendAttentionState.PrefillNoCache
     # We assume it is the decode stage, where prefill occurs
@@ -855,7 +837,13 @@ def _reshape_kv_cache_v2(
                     v_dim = 0
                 v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
             else:
-                k_shape, v_shape = _get_non_mla_kv_cache_shapes(kv_cache_shape, kv_cache_spec)
+                # ND layout: last dim is head size. 310P NZ views are allocated
+                # in ``vllm_ascend._310p.worker.v2`` and never reach this path.
+                k_shape = kv_cache_shape[1:]
+                v_shape = (
+                    *kv_cache_shape[1:-1],
+                    getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size),
+                )
 
             k_dtype = v_dtype = kv_cache_spec.dtype
             if enable_fa_quant(vllm_config):

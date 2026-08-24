@@ -41,6 +41,7 @@ from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.worker.v2 import model_runner as npu_model_runner
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -74,6 +75,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.input_ids_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cpu")
         self.positions_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int64, device="cpu")
         self.next_prefill_tokens_cpu = torch.zeros(1, self.max_num_reqs, dtype=torch.int32, device="cpu")
+        # Keep shared ``NPUModelRunner.prepare_inputs`` unchanged. It calls
+        # module-level Triton helpers; 310P has no Triton, so rebind those
+        # names in this worker process to CPU/NPU copies below.
+        npu_model_runner.prepare_prefill_inputs = self._prepare_prefill_inputs
+        npu_model_runner.prepare_pos_seq_lens = self._prepare_pos_seq_lens
+        npu_model_runner.combine_sampled_and_draft_tokens = self._combine_sampled_and_draft_tokens
 
     def _update_states(self, scheduler_output) -> Any:
         """Drain NPU stream on layout-change steps to prevent 310P ACLGraph precision regressions.
@@ -399,11 +406,15 @@ class NPUModelRunner310V2(NPUModelRunner):
         all_token_ids,
         prefill_len,
         num_computed_tokens,
-        *,
-        idx_mapping_np,
-        query_start_loc_np,
     ) -> None:
-        del idx_mapping, query_start_loc, all_token_ids, prefill_len, num_computed_tokens
+        """Triton-free replacement for ``prepare_prefill_inputs``.
+
+        Signature matches the shared worker helper so
+        ``NPUModelRunner.prepare_inputs`` can stay on the mainline path.
+        """
+        del all_token_ids, prefill_len, num_computed_tokens
+        idx_mapping_np = idx_mapping.detach().cpu().numpy()
+        query_start_loc_np = query_start_loc.detach().cpu().numpy()
         self.input_ids_cpu[: input_ids.shape[0]].zero_()
         self.next_prefill_tokens_cpu.zero_()
         for batch_idx, req_idx in enumerate(idx_mapping_np):
@@ -430,12 +441,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_computed_tokens,
         positions,
         seq_lens,
-        *,
-        idx_mapping_np,
-        query_start_loc_np,
-        num_scheduled_tokens,
     ) -> None:
-        del idx_mapping, query_start_loc, num_computed_tokens
+        """Triton-free replacement for ``prepare_pos_seq_lens``."""
+        del num_computed_tokens
+        idx_mapping_np = idx_mapping.detach().cpu().numpy()
+        query_start_loc_np = query_start_loc.detach().cpu().numpy()
+        num_scheduled_tokens = np.diff(query_start_loc_np[: len(idx_mapping_np) + 1])
         self.input_buffers.seq_lens_cpu.zero_()
         self.positions_cpu[: positions.shape[0]].zero_()
         for batch_idx, (req_idx, num_tokens) in enumerate(zip(idx_mapping_np, num_scheduled_tokens)):
@@ -460,16 +471,16 @@ class NPUModelRunner310V2(NPUModelRunner):
         cu_num_logits,
         num_logits,
         num_bonus_tokens,
-        *,
-        idx_mapping_np,
-        query_start_loc_np,
-        seq_lens_np,
-        prefill_len_np,
     ):
-        del query_start_loc, seq_lens, prefill_len, draft_tokens, cu_num_logits, num_bonus_tokens
+        """Triton-free replacement for ``combine_sampled_and_draft_tokens``."""
+        del seq_lens, prefill_len, draft_tokens, cu_num_logits, num_bonus_tokens
+        idx_mapping_np = idx_mapping.detach().cpu().numpy()
+        query_start_loc_np = query_start_loc.detach().cpu().numpy()
         if num_logits != len(idx_mapping_np):
             raise NotImplementedError("310P Model Runner V2 first release does not support draft tokens.")
 
+        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
+        seq_lens_np = self.input_buffers.seq_lens_np[: len(idx_mapping_np)]
         logits_indices_np = np.empty(num_logits, dtype=np.int64)
         for batch_idx, req_idx in enumerate(idx_mapping_np):
             query_end = int(query_start_loc_np[batch_idx + 1])
