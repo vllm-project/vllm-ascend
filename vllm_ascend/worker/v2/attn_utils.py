@@ -167,6 +167,7 @@ def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
     num_reqs: int,
+    num_actual_reqs: int | None = None,
     num_tokens: int,
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
@@ -211,6 +212,8 @@ def build_attn_metadata(
         num_actual_tokens = num_tokens
     if num_input_tokens is None:
         num_input_tokens = num_tokens
+    if num_actual_reqs is None:
+        num_actual_reqs = num_reqs
 
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
@@ -251,8 +254,10 @@ def build_attn_metadata(
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             if for_cudagraph_capture:
+                # All backends use the capture wrapper; DSA overrides it internally.
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
+                is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
                 attn_metadata_extra_kwargs = (
                     model_specific_attn_metadata.get_extra_attn_kwargs(
                         attn_metadata_builder,
@@ -261,9 +266,10 @@ def build_attn_metadata(
                     if model_specific_attn_metadata is not None
                     else {}
                 )
-                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
+                if is_dsa_builder:
+                    # DSA cache groups share request-level metadata during replay.
                     attn_metadata_extra_kwargs.update(
-                        num_reqs_actual=num_reqs,
+                        num_actual_reqs=num_actual_reqs,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     )
                     if pcp_context is not None:
@@ -276,7 +282,7 @@ def build_attn_metadata(
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
-                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
+                if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
