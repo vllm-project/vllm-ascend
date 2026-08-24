@@ -283,6 +283,7 @@ class AscendConfig:
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
+    dynamic_mx_quant_scale_alg: int = dataclasses.field(default=0, init=False)
 
     # ---- private derived state (init=False) ----
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
@@ -331,6 +332,10 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vc)
+
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
