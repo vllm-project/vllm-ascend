@@ -20,11 +20,14 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
+from packaging.version import Version
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -69,6 +72,27 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+_UVA_INCOMPATIBLE_TRITON_ASCEND_VERSIONS = ("3.2.1", "3.2.2")
+
+
+def _is_triton_ascend_uva_compatible() -> bool:
+    try:
+        installed_version = distribution_version("triton-ascend")
+    except PackageNotFoundError:
+        logger.warning("UVA is disabled because triton-ascend is not installed.")
+        return False
+
+    if Version(installed_version).base_version in (_UVA_INCOMPATIBLE_TRITON_ASCEND_VERSIONS):
+        logger.warning(
+            "triton-ascend %s disables UVA because it cannot validate pinned "
+            "CPU pointers. See https://github.com/triton-lang/"
+            "triton-ascend/issues/783.",
+            installed_version,
+        )
+        return False
+    return True
+
+
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
 
@@ -121,6 +145,19 @@ class NPUPlatform(Platform):
     @classmethod
     def is_pin_memory_available(cls):
         return True
+
+    @classmethod
+    def is_uva_available(cls) -> bool:
+        allocator_config = os.environ.get("PYTORCH_NPU_ALLOC_CONF", "")
+        return "pinned_mem_register:True" in allocator_config and _is_triton_ascend_uva_compatible()
+
+    @classmethod
+    def get_accelerator_view_from_cpu_tensor(cls, cpu_tensor: torch.Tensor) -> torch.Tensor:
+        assert cpu_tensor.is_cpu, "UVA source tensor must be on CPU"
+        assert cpu_tensor.is_pinned(), "UVA source tensor must be pinned"
+        # Registered NPU pinned memory is consumed by Triton kernels through
+        # its host pointer, so no device-side tensor wrapper is required.
+        return cpu_tensor
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

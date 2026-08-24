@@ -1,4 +1,5 @@
 import importlib
+from importlib.metadata import PackageNotFoundError
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,7 +11,11 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform, _validate_eplb_config
+from vllm_ascend.platform import (
+    NPUPlatform,
+    _is_triton_ascend_uva_compatible,
+    _validate_eplb_config,
+)
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -88,6 +93,56 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    @patch("vllm_ascend.platform.distribution_version", return_value="3.3.0")
+    def test_uva_available_with_registered_pinned_memory(self, mock_version):
+        with patch.dict(
+            "os.environ",
+            {"PYTORCH_NPU_ALLOC_CONF": "pinned_mem_register:True"},
+            clear=True,
+        ):
+            self.assertTrue(self.platform.is_uva_available())
+        mock_version.assert_called_once_with("triton-ascend")
+
+    @patch("vllm_ascend.platform.distribution_version")
+    def test_uva_unavailable_without_registered_pinned_memory(self, mock_version):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(self.platform.is_uva_available())
+        mock_version.assert_not_called()
+
+    @patch(
+        "vllm_ascend.platform.distribution_version",
+        return_value="3.2.2+dev20260729205041",
+    )
+    def test_uva_unavailable_with_incompatible_triton_ascend(self, _mock_version):
+        with patch.dict(
+            "os.environ",
+            {"PYTORCH_NPU_ALLOC_CONF": "pinned_mem_register:True"},
+            clear=True,
+        ):
+            self.assertFalse(self.platform.is_uva_available())
+
+    @patch(
+        "vllm_ascend.platform.distribution_version",
+        side_effect=PackageNotFoundError,
+    )
+    def test_uva_unavailable_without_triton_ascend(self, _mock_version):
+        self.assertFalse(_is_triton_ascend_uva_compatible())
+
+    def test_get_accelerator_view_from_cpu_tensor(self):
+        cpu_tensor = MagicMock()
+        cpu_tensor.is_cpu = True
+        cpu_tensor.is_pinned.return_value = True
+
+        self.assertIs(
+            self.platform.get_accelerator_view_from_cpu_tensor(cpu_tensor),
+            cpu_tensor,
+        )
+
+    def test_uva_buffer_uses_upstream_implementation(self):
+        from vllm.v1.worker.gpu.buffer_utils import UvaBuffer
+
+        self.assertEqual(UvaBuffer.__module__, "vllm.v1.worker.gpu.buffer_utils")
 
     def test_validate_eplb_config_allows_v2_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()

@@ -1136,16 +1136,6 @@
 #       Remove this module together with the platform patch once vllm-ascend
 #       fully supports the v2 model runner.
 #
-# ** 30. File: worker/patch_v2/patch_uva.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.states.UvaBuffer`
-#    Why:
-#       ASCEND NPUs do not support UVA yet, so we need to wrap it in vLLM.
-#    How：
-#       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
-#    Future Plan:
-#       Remove this patch when NPU support UVA.
-#
 # ** 31. File: worker/patch_v2/patch_dspark.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.dspark.utils.load_dspark_model`,
