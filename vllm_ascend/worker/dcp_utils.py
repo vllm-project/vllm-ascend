@@ -159,6 +159,17 @@ class DCPManager:
         )
         self.num_decode_reqs = int(self.decode_req_mask.sum())
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
+        expected_decode_prefix = np.arange(num_reqs) < self.num_decode_reqs
+        if not np.array_equal(self.decode_req_mask, expected_decode_prefix):
+            raise RuntimeError(
+                "DCP requires decode requests to form a contiguous prefix "
+                "after batch reordering, but received an interleaved "
+                "decode/prefill batch. Ensure all attention backends use a "
+                "compatible reorder_batch_threshold. "
+                f"decode_threshold={self.decode_threshold}, "
+                f"scheduled_tokens={scheduled.tolist()}, "
+                f"decode_mask={self.decode_req_mask.tolist()}"
+            )
         self.num_decode_tokens = int(scheduled[: self.num_decode_reqs].sum())
         self.query_lens_full.cpu[:num_reqs] = torch.from_numpy(scheduled)
         self.query_lens_full.cpu[num_reqs:].fill_(0)

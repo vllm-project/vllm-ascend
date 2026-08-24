@@ -180,6 +180,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_c_env,
     global_stream,
+    is_drafter_moe_model,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
@@ -2213,6 +2214,149 @@ class NPUModelRunner(GPUModelRunner):
             deferred_state_corrections_fn()
         return None
 
+    def _input_fits_in_drafter(
+        self, common_attn_metadata: CommonAttentionMetadata | None
+    ) -> bool:
+        if common_attn_metadata is None:
+            return False
+        assert self.speculative_config is not None
+
+        num_drafter_query_tokens = self._num_drafter_query_tokens()
+        input_fits_in_drafter = (
+            common_attn_metadata.max_seq_len + num_drafter_query_tokens
+            <= self.effective_drafter_max_model_len
+        )
+        if not input_fits_in_drafter:
+            logger.warning_once(
+                "[spec_decode/overflow_guard_v2] Skipping an over-length "
+                "draft: dp_rank=%s, max_seq_len=%s, query_width=%s, "
+                "drafter_max_model_len=%s.",
+                getattr(self, "dp_rank", "unknown"),
+                common_attn_metadata.max_seq_len,
+                num_drafter_query_tokens,
+                self.effective_drafter_max_model_len,
+            )
+        return input_fits_in_drafter
+
+    def _num_drafter_query_tokens(self) -> int:
+        assert self.speculative_config is not None
+
+        # Parallel drafters may query a different number of positions than K.
+        # In particular, DSpark without anchor sampling queries K + 1 tokens.
+        num_drafter_query_tokens = getattr(
+            self.drafter, "num_query_per_req", None
+        )
+        if num_drafter_query_tokens is None:
+            use_dspark = getattr(
+                self.speculative_config, "use_dspark", lambda: False
+            )()
+            if use_dspark:
+                draft_hf_config = (
+                    self.speculative_config.draft_model_config.hf_config
+                )
+                sample_from_anchor = getattr(
+                    draft_hf_config, "sample_from_anchor", True
+                )
+                num_drafter_query_tokens = self.num_spec_tokens + (
+                    0 if sample_from_anchor else 1
+                )
+            else:
+                num_drafter_query_tokens = self.num_spec_tokens + (
+                    1 if self.speculative_config.use_dflash() else 0
+                )
+        return num_drafter_query_tokens
+
+    def _drafter_needs_dp_dummy(
+        self, drafter_runs_model_forward: bool
+    ) -> bool:
+        """Whether an idle DP rank must match draft-model collectives."""
+        # MoE drafters may have EP collectives spanning DP even when the
+        # metadata all-reduce is skipped. Dense drafters normally communicate
+        # only inside their TP/DCP replica, but still need a dummy when their
+        # metadata path performs a DP all-reduce (for example, with hierarchy
+        # communication enabled).
+        return (
+            drafter_runs_model_forward
+            and self.parallel_config.data_parallel_size > 1
+            and (
+                is_drafter_moe_model(self.vllm_config)
+                or not should_skip_allreduce_across_dp_group(
+                    self.vllm_config,
+                    is_draft_model=True,
+                )
+            )
+        )
+
+    def _handle_drafter_input_overflow(
+        self,
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        scheduler_output: "SchedulerOutput",
+        *,
+        use_padded_batch: bool,
+        drafter_needs_dp_dummy: bool,
+    ) -> None:
+        """Skip an over-length draft while keeping async and DP state aligned."""
+        assert self.speculative_config is not None
+
+        # Async scheduling still needs the verified target token and count for
+        # the next-step state correction, even when the drafter is skipped.
+        if (
+            self.drafter is not None
+            and use_padded_batch
+            and self.valid_sampled_token_count_event is not None
+        ):
+            assert isinstance(sampled_token_ids, torch.Tensor)
+            if self.speculative_config.use_ngram_gpu():
+                next_token_ids, valid_sampled_tokens_count, _ = (
+                    self.drafter.update_token_ids_ngram(
+                        sampled_token_ids,
+                        self.input_batch,
+                        self.token_ids_gpu_tensor,
+                        self.num_tokens_no_spec_gpu,
+                        self.discard_request_mask.gpu,
+                    )
+                )
+            else:
+                next_token_ids, valid_sampled_tokens_count = (
+                    self.drafter.prepare_next_token_ids_padded(
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_indices.gpu,
+                        self.num_discarded_requests,
+                    )
+                )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+        if (
+            self.drafter is not None
+            and drafter_needs_dp_dummy
+        ):
+            # A peer DP rank may still fit and enter draft-model collectives.
+            # Match that collective sequence instead of returning early.
+            self.drafter.dummy_run(num_tokens=1)
+
+        logger.warning_once(
+            "[spec_decode/overflow_guard_v2] Overflow fallback selected: "
+            "dp_rank=%s, action=%s.",
+            getattr(self, "dp_rank", "unknown"),
+            "dp_dummy_then_zero" if drafter_needs_dp_dummy else "zero_only",
+        )
+
+        # Replace the previous frame so stale drafts cannot be replayed by the
+        # scheduler or by Ascend's async device-side state update.
+        self._draft_token_ids = torch.zeros(
+            1, device=self.device, dtype=torch.int32
+        ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
+        if self.drafter is not None:
+            self._copy_draft_token_ids_to_cpu(
+                scheduler_output, zeros_only=True
+            )
+
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -2294,13 +2438,25 @@ class NPUModelRunner(GPUModelRunner):
         output_spec_token_ids = None
         use_padded_batch = False
         early_pp_padded_drafter = False
-        if self.speculative_config:
+        spec_config = self.speculative_config
+        if spec_config:
+            input_fits_in_drafter = self._input_fits_in_drafter(
+                spec_decode_common_attn_metadata
+            )
+            drafter_runs_model_forward = (
+                spec_config.use_eagle()
+                or spec_config.uses_draft_model()
+                or spec_config.uses_extract_hidden_states()
+            )
+            drafter_needs_dp_dummy = self._drafter_needs_dp_dummy(
+                drafter_runs_model_forward
+            )
             use_padded_batch = (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
-                or self.speculative_config.uses_extract_hidden_states()
-                or self.speculative_config.use_ngram_gpu()
-            ) and not self.speculative_config.disable_padded_drafter_batch
+                spec_config.use_eagle()
+                or spec_config.uses_draft_model()
+                or spec_config.uses_extract_hidden_states()
+                or spec_config.use_ngram_gpu()
+            ) and not spec_config.disable_padded_drafter_batch
             early_pp_padded_drafter = (
                 use_pp_spec_decode
                 and not self.use_async_scheduling
@@ -2310,7 +2466,15 @@ class NPUModelRunner(GPUModelRunner):
                 self._draft_token_ids = None
                 self._draft_token_req_ids = None
                 with record_function_or_nullcontext("draft_token"):
-                    propose_draft_token_ids(sampler_output.sampled_token_ids)
+                    if input_fits_in_drafter:
+                        propose_draft_token_ids(sampler_output.sampled_token_ids)
+                    else:
+                        self._handle_drafter_input_overflow(
+                            sampler_output.sampled_token_ids,
+                            scheduler_output,
+                            use_padded_batch=True,
+                            drafter_needs_dp_dummy=drafter_needs_dp_dummy,
+                        )
 
         (
             logprobs_lists,
@@ -2329,18 +2493,24 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         with record_function_or_nullcontext("draft_token"):
-            if self.speculative_config:
+            if spec_config:
                 if not early_pp_padded_drafter:
                     self._draft_token_ids = None
                     self._draft_token_req_ids = None
-                if use_padded_batch and not early_pp_padded_drafter:
-                    # EAGLE speculative decoding can use the GPU sampled tokens
-                    # as inputs, and does not need to wait for bookkeeping to finish.
-                    propose_draft_token_ids(sampler_output.sampled_token_ids)
-                if self.speculative_config and not use_padded_batch:
-                    # ngram and other speculative decoding methods use the sampled
-                    # tokens on the CPU, so they are run after bookkeeping.
-                    propose_draft_token_ids(valid_sampled_token_ids)
+                    sampled_token_ids = (
+                        sampler_output.sampled_token_ids
+                        if use_padded_batch
+                        else valid_sampled_token_ids
+                    )
+                    if input_fits_in_drafter:
+                        propose_draft_token_ids(sampled_token_ids)
+                    else:
+                        self._handle_drafter_input_overflow(
+                            sampled_token_ids,
+                            scheduler_output,
+                            use_padded_batch=use_padded_batch,
+                            drafter_needs_dp_dummy=drafter_needs_dp_dummy,
+                        )
 
             # vLLM v0.18 defers KV connector finalization during target-model
             # forward when speculative decoding is enabled. Finalize here after

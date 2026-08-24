@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import numpy as np
 import torch
@@ -20,6 +20,231 @@ from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestDrafterMaxModelLenGuard(unittest.TestCase):
+    def _build_runner(self, *, data_parallel_size: int = 4):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.num_spec_tokens = 7
+        runner.effective_drafter_max_model_len = 4096
+        runner.speculative_config = SimpleNamespace(
+            use_dflash=MagicMock(return_value=False),
+            use_ngram_gpu=MagicMock(return_value=False),
+        )
+        runner.parallel_config = SimpleNamespace(data_parallel_size=data_parallel_size)
+        runner.vllm_config = SimpleNamespace()
+        runner.input_batch = SimpleNamespace(
+            req_ids=["req_0", "req_1"],
+        )
+        runner.requests = {}
+        runner.discard_request_indices = SimpleNamespace(gpu=torch.empty(0, dtype=torch.int64))
+        runner.num_discarded_requests = 0
+        runner.valid_sampled_token_count_event = object()
+        runner.drafter = MagicMock()
+        runner.drafter.num_query_per_req = 8
+        runner._copy_valid_sampled_token_count = MagicMock()
+        runner._copy_draft_token_ids_to_cpu = MagicMock()
+        runner._draft_probs = torch.ones(1)
+        runner._draft_prob_req_ids = ["req_0"]
+        return runner
+
+    def test_fit_boundary_uses_dspark_query_width(self):
+        runner = self._build_runner()
+
+        self.assertFalse(runner._input_fits_in_drafter(None))
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=4088)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=4089)))
+
+        runner.drafter.num_query_per_req = 7
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=4089)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=4090)))
+
+    def test_overflow_updates_async_state_and_matches_dp_collective(self):
+        runner = self._build_runner(data_parallel_size=4)
+        sampled_token_ids = torch.tensor([[10, -1], [20, 21]], dtype=torch.int32)
+        next_token_ids = torch.tensor([10, 21], dtype=torch.int32)
+        valid_counts = torch.tensor([1, 2], dtype=torch.int32)
+        events = []
+        runner.drafter.prepare_next_token_ids_padded.side_effect = lambda *args: (
+            events.append("prepare"),
+            (next_token_ids, valid_counts),
+        )[1]
+        runner._copy_valid_sampled_token_count.side_effect = lambda *args: events.append("copy_valid_count")
+        runner.drafter.dummy_run.side_effect = lambda *args, **kwargs: events.append("dummy_run")
+        runner._copy_draft_token_ids_to_cpu.side_effect = lambda *args, **kwargs: events.append("copy_zero_drafts")
+        scheduler_output = SimpleNamespace()
+
+        runner._handle_drafter_input_overflow(
+            sampled_token_ids,
+            scheduler_output,
+            use_padded_batch=True,
+            drafter_needs_dp_dummy=True,
+        )
+
+        self.assertEqual(
+            events,
+            ["prepare", "copy_valid_count", "dummy_run", "copy_zero_drafts"],
+        )
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+        self.assertEqual(runner._draft_token_ids.shape, (2, 7))
+        self.assertTrue(
+            torch.equal(
+                runner._draft_token_ids,
+                torch.zeros(2, 7, dtype=torch.int32),
+            )
+        )
+        self.assertIsNone(runner._draft_probs)
+        self.assertIsNone(runner._draft_prob_req_ids)
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(scheduler_output, zeros_only=True)
+
+    def test_single_dp_skips_dummy_collective(self):
+        runner = self._build_runner(data_parallel_size=1)
+        next_token_ids = torch.tensor([10, 20], dtype=torch.int32)
+        valid_counts = torch.tensor([1, 1], dtype=torch.int32)
+        runner.drafter.prepare_next_token_ids_padded.return_value = (
+            next_token_ids,
+            valid_counts,
+        )
+
+        runner._handle_drafter_input_overflow(
+            torch.tensor([[10], [20]], dtype=torch.int32),
+            SimpleNamespace(),
+            use_padded_batch=True,
+            drafter_needs_dp_dummy=False,
+        )
+
+        runner.drafter.prepare_next_token_ids_padded.assert_called_once()
+        runner._copy_valid_sampled_token_count.assert_called_once_with(next_token_ids, valid_counts)
+        runner.drafter.dummy_run.assert_not_called()
+
+    def test_without_async_event_skips_state_update(self):
+        runner = self._build_runner(data_parallel_size=1)
+        runner.valid_sampled_token_count_event = None
+
+        runner._handle_drafter_input_overflow(
+            torch.tensor([[10], [20]], dtype=torch.int32),
+            SimpleNamespace(),
+            use_padded_batch=True,
+            drafter_needs_dp_dummy=False,
+        )
+
+        runner.drafter.prepare_next_token_ids_padded.assert_not_called()
+        runner._copy_valid_sampled_token_count.assert_not_called()
+        runner.drafter.dummy_run.assert_not_called()
+
+    def test_ngram_overflow_updates_tokens_without_dummy_collective(self):
+        runner = self._build_runner(data_parallel_size=4)
+        runner.speculative_config.use_ngram_gpu.return_value = True
+        runner.token_ids_gpu_tensor = torch.zeros((2, 16), dtype=torch.int32)
+        runner.num_tokens_no_spec_gpu = torch.tensor([8, 8], dtype=torch.int32)
+        runner.discard_request_mask = SimpleNamespace(gpu=torch.zeros(2, dtype=torch.bool))
+        next_token_ids = torch.tensor([10, 20], dtype=torch.int32)
+        valid_counts = torch.tensor([1, 1], dtype=torch.int32)
+        runner.drafter.update_token_ids_ngram.return_value = (
+            next_token_ids,
+            valid_counts,
+            torch.zeros(2, dtype=torch.int32),
+        )
+
+        runner._handle_drafter_input_overflow(
+            torch.tensor([[10], [20]], dtype=torch.int32),
+            SimpleNamespace(),
+            use_padded_batch=True,
+            drafter_needs_dp_dummy=False,
+        )
+
+        runner.drafter.update_token_ids_ngram.assert_called_once()
+        runner._copy_valid_sampled_token_count.assert_called_once_with(next_token_ids, valid_counts)
+        runner.drafter.dummy_run.assert_not_called()
+
+    def test_pp_non_last_rank_derives_dspark_query_width_from_config(self):
+        runner = self._build_runner()
+        runner.drafter = None
+        runner.speculative_config = SimpleNamespace(
+            use_dspark=MagicMock(return_value=True),
+            use_dflash=MagicMock(return_value=False),
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(sample_from_anchor=False)),
+        )
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=4088)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=4089)))
+
+    def test_pp_non_last_rank_without_drafter_emits_local_zero_frame(self):
+        runner = self._build_runner(data_parallel_size=4)
+        runner.drafter = None
+
+        runner._handle_drafter_input_overflow(
+            torch.tensor([[10], [20]], dtype=torch.int32),
+            SimpleNamespace(),
+            use_padded_batch=True,
+            drafter_needs_dp_dummy=False,
+        )
+
+        self.assertEqual(runner._draft_token_ids.shape, (2, 7))
+        self.assertTrue(
+            torch.equal(
+                runner._draft_token_ids,
+                torch.zeros(2, 7, dtype=torch.int32),
+            )
+        )
+        runner._copy_valid_sampled_token_count.assert_not_called()
+        runner._copy_draft_token_ids_to_cpu.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.is_drafter_moe_model")
+    def test_dense_drafter_does_not_run_dp_dummy(
+        self,
+        mock_is_drafter_moe,
+        mock_should_skip_allreduce,
+    ):
+        runner = self._build_runner(data_parallel_size=4)
+        mock_is_drafter_moe.return_value = False
+        mock_should_skip_allreduce.return_value = True
+        runner.valid_sampled_token_count_event = None
+
+        needs_dp_dummy = runner._drafter_needs_dp_dummy(True)
+        self.assertFalse(needs_dp_dummy)
+        runner._handle_drafter_input_overflow(
+            torch.tensor([[10], [20]], dtype=torch.int32),
+            SimpleNamespace(),
+            use_padded_batch=True,
+            drafter_needs_dp_dummy=needs_dp_dummy,
+        )
+
+        runner.drafter.dummy_run.assert_not_called()
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(ANY, zeros_only=True)
+        mock_is_drafter_moe.assert_called_once_with(runner.vllm_config)
+        mock_should_skip_allreduce.assert_called_once_with(
+            runner.vllm_config,
+            is_draft_model=True,
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.is_drafter_moe_model")
+    def test_dense_drafter_matches_dp_metadata_allreduce(
+        self,
+        mock_is_drafter_moe,
+        mock_should_skip_allreduce,
+    ):
+        runner = self._build_runner(data_parallel_size=4)
+        mock_is_drafter_moe.return_value = False
+        mock_should_skip_allreduce.return_value = False
+
+        self.assertTrue(runner._drafter_needs_dp_dummy(True))
+        mock_is_drafter_moe.assert_called_once_with(runner.vllm_config)
+        mock_should_skip_allreduce.assert_called_once_with(
+            runner.vllm_config,
+            is_draft_model=True,
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.is_drafter_moe_model")
+    def test_moe_drafter_keeps_dp_dummy(self, mock_is_drafter_moe):
+        runner = self._build_runner(data_parallel_size=4)
+        mock_is_drafter_moe.return_value = True
+
+        self.assertTrue(runner._drafter_needs_dp_dummy(True))
+        mock_is_drafter_moe.assert_called_once_with(runner.vllm_config)
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):

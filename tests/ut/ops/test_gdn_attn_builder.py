@@ -132,6 +132,7 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 8192,
     num_heads: int = 32,
     num_speculative_tokens: int = 0,
+    speculative_method: str | None = None,
     mamba_cache_mode: str = "none",
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ):
@@ -140,6 +141,7 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            method=speculative_method,
         )
 
     model_config = SimpleNamespace(max_model_len=max_model_len)
@@ -171,6 +173,7 @@ def _make_builder(
     device: torch.device,
     num_heads: int,
     num_speculative_tokens: int,
+    speculative_method: str | None = None,
     mamba_cache_mode: str = "none",
     block_size: int = 16,
     num_speculative_blocks: int = 0,
@@ -179,6 +182,7 @@ def _make_builder(
     vllm_config = _make_vllm_config(
         num_heads=num_heads,
         num_speculative_tokens=num_speculative_tokens,
+        speculative_method=speculative_method,
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=cudagraph_mode,
     )
@@ -293,6 +297,20 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+@pytest.mark.parametrize("method", ["dflash", "dspark"])
+def test_parallel_draft_reorder_threshold_includes_target_token(method: str):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+        speculative_method=method,
+    )
+
+    # The target verifier schedules one sampled token plus all seven draft
+    # tokens. Both methods therefore need an eight-token decode region.
+    assert builder.reorder_batch_threshold == 8
 
 
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():

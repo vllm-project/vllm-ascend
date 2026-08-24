@@ -16,6 +16,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.attention.backends.utils import (
+    reorder_batch_to_split_decodes_and_prefills,
+)
 
 from vllm_ascend.attention.utils import AscendDCPMetadata
 from vllm_ascend.worker.dcp_utils import DCPManager
@@ -36,6 +39,15 @@ def _make_dcp_manager(
     manager.vllm_config.parallel_config.cp_kv_cache_interleave_size = interleave_size
     manager.dcp_mtp_attn_mask = MagicMock()
     manager.dcp_mtp_attn_mask.cpu = torch.zeros((1, max_query_len, max_model_len), dtype=torch.bool)
+    return manager
+
+
+def _make_batch_info_manager(max_num_reqs: int = 8) -> DCPManager:
+    manager = object.__new__(DCPManager)
+    manager.pd_decode_recompute_scheduler_enabled = False
+    manager.decode_threshold = 8
+    manager.query_lens_full = MagicMock()
+    manager.query_lens_full.cpu = torch.zeros(max_num_reqs, dtype=torch.int32)
     return manager
 
 
@@ -122,6 +134,89 @@ def test_generate_mtp_attention_mask_for_decode(dcp_rank: int) -> None:
         actual[0, :num_scheduled, :local_k_len],
         expected,
     )
+
+
+def test_dcp_batch_info_rejects_interleaved_decode_and_prefill() -> None:
+    manager = _make_batch_info_manager()
+
+    with pytest.raises(RuntimeError, match="contiguous prefix") as exc_info:
+        manager.init_batch_info(
+            num_scheduled_tokens=np.array([8, 8, 24192, 8, 8], dtype=np.int32),
+            num_reqs=5,
+            num_computed_tokens=np.array([29769, 126, 23808, 127, 132], dtype=np.int32),
+            num_prompt_tokens=np.array([100, 100, 48000, 100, 100], dtype=np.int32),
+        )
+
+    message = str(exc_info.value)
+    assert "scheduled_tokens=[8, 8, 24192, 8, 8]" in message
+    assert "decode_mask=[True, True, False, True, True]" in message
+
+
+def test_k7_reorder_makes_mixed_dcp_decode_prefix_contiguous() -> None:
+    class FakeInputBatch:
+        def __init__(self) -> None:
+            self.req_ids = ["decode-0", "decode-1", "prefill", "decode-2", "decode-3"]
+            self.num_computed_tokens_cpu = np.array(
+                [29769, 126, 23808, 127, 132],
+                dtype=np.int32,
+            )
+            self.num_prompt_tokens = np.array(
+                [100, 100, 48000, 100, 100],
+                dtype=np.int32,
+            )
+
+        def swap_states(self, left: int, right: int) -> None:
+            self.req_ids[left], self.req_ids[right] = (
+                self.req_ids[right],
+                self.req_ids[left],
+            )
+            self.num_computed_tokens_cpu[[left, right]] = self.num_computed_tokens_cpu[[right, left]]
+            self.num_prompt_tokens[[left, right]] = self.num_prompt_tokens[[right, left]]
+
+    input_batch = FakeInputBatch()
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={
+            "decode-0": 8,
+            "decode-1": 8,
+            "prefill": 24192,
+            "decode-2": 8,
+            "decode-3": 8,
+        }
+    )
+
+    modified = reorder_batch_to_split_decodes_and_prefills(
+        input_batch,
+        scheduler_output,
+        decode_threshold=8,
+    )
+    assert modified
+    assert input_batch.req_ids == [
+        "decode-0",
+        "decode-1",
+        "decode-2",
+        "decode-3",
+        "prefill",
+    ]
+
+    scheduled = np.array(
+        [scheduler_output.num_scheduled_tokens[req_id] for req_id in input_batch.req_ids],
+        dtype=np.int32,
+    )
+    manager = _make_batch_info_manager()
+    manager.init_batch_info(
+        num_scheduled_tokens=scheduled,
+        num_reqs=5,
+        num_computed_tokens=input_batch.num_computed_tokens_cpu,
+        num_prompt_tokens=input_batch.num_prompt_tokens,
+    )
+
+    np.testing.assert_array_equal(scheduled, np.array([8, 8, 8, 8, 24192]))
+    np.testing.assert_array_equal(
+        manager.decode_req_mask,
+        np.array([True, True, True, True, False]),
+    )
+    assert manager.num_decode_reqs == 4
+    assert manager.num_decode_tokens == 32
 
 
 def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
