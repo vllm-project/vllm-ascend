@@ -158,9 +158,7 @@ class TestMoECommMethod(TestBase):
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
-    def test_mega_moe_symm_buffer_excludes_recompute_scheduler(
-        self, mock_get_mc2_group, mock_get_current_vllm_config
-    ):
+    def test_mega_moe_symm_buffer_excludes_recompute_scheduler(self, mock_get_mc2_group, mock_get_current_vllm_config):
         self.mock_ascend_config.mega_moe_max_tokens = 32768
         self.mock_ascend_config.scheduler_config.recompute_scheduler_enable = True
         mock_mc2_group = MagicMock()
