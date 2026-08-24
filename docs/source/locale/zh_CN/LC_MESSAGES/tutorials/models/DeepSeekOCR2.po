@@ -237,7 +237,7 @@ msgid ""
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+"请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
 
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"

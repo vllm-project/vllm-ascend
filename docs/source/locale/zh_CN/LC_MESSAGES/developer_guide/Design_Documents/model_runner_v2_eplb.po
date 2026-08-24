@@ -40,7 +40,7 @@ msgid ""
 "[EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md)."
 msgstr ""
 "本页描述当前的同步架构。有关此所有权模型背后的决策，请参阅 [RFC #13410](https://github.com/vllm-"
-"project/vllm-ascend/issues/13410)。有关用户可见的配置和支持的功能矩阵，请参阅 [EPLB "
+"project/vllm-ascend/issues/13410)。有关用户可见的配置和支持的特性矩阵，请参阅 [EPLB "
 "用户指南](../../user_guide/feature_guide/expert_parallelism_load_balancer.md)。"
 
 msgid "## Mental model"
