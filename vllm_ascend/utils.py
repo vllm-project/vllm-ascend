@@ -1170,7 +1170,13 @@ def get_potential_max_tokens() -> int:
     return _potential_max_tokens
 
 
-def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
+def should_skip_allreduce_across_dp_group(
+    vllm_config,
+    is_draft_model: bool = False,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
+) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
     Skipping is applicable for all dense models and for moe models only on ranks
@@ -1209,12 +1215,20 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     )
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
+    def needs_mc2(n: int) -> bool:
+        return select_moe_comm_method(
+            n,
+            vllm_config,
+            model_instance=model_instance,
+            cann_mega_moe_supported=cann_mega_moe_supported,
+        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config, is_draft_model=is_draft_model)
+    decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config)
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
     prefill_comm_method = select_moe_comm_method(
-        scheduler_config.max_num_batched_tokens, vllm_config, is_draft_model=is_draft_model
+        scheduler_config.max_num_batched_tokens, vllm_config
     )
 
     if use_cann_megamoe(vllm_config):

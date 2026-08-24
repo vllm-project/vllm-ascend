@@ -89,7 +89,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
 | `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via the `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the migration period. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. MegaMoe is selected from the instantiated layer capabilities: A2/A3 support W8A8/W4A8, and A5 supports W4A8 MXFP with `group_size=32`. Unsupported layer layouts keep the non-MegaMoe path. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
@@ -97,6 +97,42 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. |
 
 The details of each configuration option are as follows:
+
+**enable_fused_mc2 (CANN MegaMoe / dispatch_ffn_combine)**
+
+When `enable_fused_mc2=1`, MoE communication may be replaced by the fused
+`dispatch_ffn_combine` or `mega_moe` operator. On A5 the MegaMoe path is
+selected from the instantiated MoE layer capabilities instead of checkpoint
+metadata; unsupported layer layouts keep the decomposed MC2/AllToAll path.
+
+| Item | A2 / A3 | A5 (Ascend 950PR / 950DT) |
+| ---- | ------- | ------------------------- |
+| Quantization | W8A8 / W4A8 (INT) and bf16 | W4A8 MXFP only, `group_size=32` |
+| Activation | SwiGLU | SwiGLU and SiTU (`activation_params={beta, linear_beta}`) |
+| Max routed experts | 1024 | 2048 (must be divisible by EP size) |
+| Max EP world size | 64 | 1024 |
+| Max top-k | 16 | 32 |
+| Hidden size | [1024, 8192], multiple of 512 | [1024, 8192], multiple of 512 |
+
+Notes for A5:
+
+- Requires a `cann_ops_transformer` build with SiTUGLU support and the
+  `mega_moe` custom operator package. If the package is installed under
+  `${ASCEND_HOME_PATH}/opp/vendors`, make sure `ASCEND_CUSTOM_OPP_PATH` also
+  contains that vendor directory — vLLM Ascend prepends its own bundled
+  vendors path at startup, which otherwise shadows the installed package and
+  the call falls back to the built-in (older) operator.
+- The symmetric buffer receive capacity uses the operator's automatic mode
+  (`max_recv_token_num=0`); `mega_moe_max_tokens` is not used on A5.
+- The MegaMoe path is mutually exclusive with
+  `multistream_overlap_shared_expert`; the latter is force-disabled when
+  `enable_fused_mc2=1`.
+
+```bash
+vllm serve <model> \
+    --tensor-parallel-size 8 --enable-expert-parallel \
+    --additional-config '{"enable_fused_mc2": 1}'
+```
 
 **xlite_graph_config**
 
