@@ -401,11 +401,14 @@ function(add_ops_src_copy)
     endif()
 
     if(NOT BUILD_OPS_RTY_KERNEL AND BELONG_MC2_OPS)
-        file(GLOB SRC_FILES ${SRC_COPY_SRC}/* ${SRC_COPY_SRC}/op_kernel/*)
+        file(GLOB SRC_FILES CONFIGURE_DEPENDS ${SRC_COPY_SRC}/* ${SRC_COPY_SRC}/op_kernel/*)
     else()
-        file(GLOB SRC_FILES ${SRC_COPY_SRC}/*)
+        file(GLOB SRC_FILES CONFIGURE_DEPENDS ${SRC_COPY_SRC}/*)
     endif()
     list(FILTER SRC_FILES EXCLUDE REGEX "op_host")
+    file(GLOB_RECURSE SRC_FILE_DEPS CONFIGURE_DEPENDS ${SRC_COPY_SRC}/*)
+    list(FILTER SRC_FILE_DEPS EXCLUDE REGEX "/op_host/")
+    list(SORT SRC_FILE_DEPS)
 
     get_filename_component(PARENT_PTH "${SRC_COPY_SRC}" DIRECTORY)
     get_filename_component(CUR_NAME "${SRC_COPY_SRC}" NAME)
@@ -420,16 +423,20 @@ function(add_ops_src_copy)
         set(_BUILD_FLAG ${SRC_COPY_DST}/${DOING_TARGET_NAME}.done)
         if (NOT BUILD_OPS_RTY_KERNEL AND BELONG_MC2_OPS)
             add_custom_command(OUTPUT ${_BUILD_FLAG}
+                    COMMAND rm -rf ${SRC_COPY_DST}
                     COMMAND mkdir -p ${SRC_COPY_DST}
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND rm -rf ${SRC_COPY_DST}/op_kernel/
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_FILE_DEPS}
             )
         else()
             add_custom_command(OUTPUT ${_BUILD_FLAG}
+                    COMMAND rm -rf ${SRC_COPY_DST}
                     COMMAND mkdir -p ${SRC_COPY_DST}
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_FILE_DEPS}
             )
         endif()
 
@@ -445,6 +452,8 @@ function(add_ops_src_copy)
     if (DEFINED SRC_COPY_BE_RELIED)
         add_dependencies(${SRC_COPY_BE_RELIED} ${DOING_TARGET_NAME})
     endif ()
+
+    set(${SRC_COPY_TARGET_NAME}_STAMP ${_BUILD_FLAG} PARENT_SCOPE)
 
 endfunction()
 
@@ -470,6 +479,7 @@ function(add_bin_compile_target)
     endforeach()
 
     set(_ops_target_list)
+    set(_ops_config_deps)
     set(compile_scripts)
     file(GLOB scripts_list ${GEN_OUT_DIR}/*.sh)
     list(APPEND compile_scripts ${scripts_list})
@@ -511,6 +521,7 @@ function(add_bin_compile_target)
                     COMPUTE_UNIT
                     ${BINARY_COMPUTE_UNIT}
             )
+            set(OP_SRC_COPY_STAMPS ${${OP_TARGET_NAME}_src_copy_STAMP})
 
             if (DEFINED ${op_file}_depends)
                 foreach(depend_info ${${op_file}_depends})
@@ -528,13 +539,15 @@ function(add_bin_compile_target)
                             BE_RELIED
                             ${OP_TARGET_NAME}_src_copy
                     )
+                    list(APPEND OP_SRC_COPY_STAMPS ${${_depend_op_target}_STAMP})
                 endforeach()
             endif ()
 
             set(DYNAMIC_PY_FILE ${OP_SRC_OUT_DIR}/${op_type}.py)
             add_custom_command(OUTPUT ${DYNAMIC_PY_FILE}
-                    COMMAND cp -rf ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${DYNAMIC_PY_FILE}
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${DYNAMIC_PY_FILE}
                     # COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/update_get_kernel_source.sh ${DYNAMIC_PY_FILE}
+                    DEPENDS ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${OP_SRC_COPY_STAMPS}
             )
 
             add_custom_target(${OP_TARGET_NAME}_py_copy
@@ -622,17 +635,22 @@ function(add_bin_compile_target)
             add_custom_command(OUTPUT ${_BUILD_FLAG}
                     COMMAND ${_BUILD_COMMAND}
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS
+                    ${bin_script}
+                    ${DYNAMIC_PY_FILE}
+                    ${OP_SRC_COPY_STAMPS}
                     WORKING_DIRECTORY ${GEN_OUT_DIR}
             )
 
             add_custom_target(${OP_TARGET_NAME}_${op_index}
                 DEPENDS ${_BUILD_FLAG}
             )
+            list(APPEND _ops_config_deps ${_BUILD_FLAG})
 
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
                 add_dependencies(${OP_TARGET_NAME}_${op_index} optiling_compat generate_ops_info)
             endif ()
-            add_dependencies(${OP_TARGET_NAME}_${op_index} ${OP_TARGET_NAME}_src_copy ${OP_TARGET_NAME}_py_copy ${OP_TARGET_NAME}_mkdir)
+            add_dependencies(${OP_TARGET_NAME}_${op_index} generate_transformer_adapt_py ${OP_TARGET_NAME}_mkdir)
             add_dependencies(${OP_TARGET_NAME} ${OP_TARGET_NAME}_${op_index})
         endif ()
     endforeach()
@@ -644,6 +662,7 @@ function(add_bin_compile_target)
 
         add_custom_command(OUTPUT ${BINARY_INFO_CONFIG_FILE}
                 COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/ascendc_ops_config.py -p ${BIN_OUT_DIR} -s ${BINARY_COMPUTE_UNIT}
+                DEPENDS ${_ops_config_deps}
         )
 
         add_custom_target(${OPS_CONFIG_TARGET}
