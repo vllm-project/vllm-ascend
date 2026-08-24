@@ -331,15 +331,10 @@ class BlockTable:
 
 class MultiGroupBlockTable:
     """The BlockTables for each KV cache group.
-
-    Supports three compute_slot_mapping strategies:
+    Supports two compute_slot_mapping strategies:
     - Fused:   Single Triton kernel launch for all non-mamba groups (default).
-    - Streams: Multiple torch.npu.Stream() launches for parallel execution.
     - Sequential: Original per-group sequential launches (fallback).
     """
-
-    # Stream pool for multi-stream execution. Created lazily at first use.
-    _stream_pool: list[torch.cuda.Stream | torch.Stream | None] | None = None
 
     def __init__(
         self,
@@ -356,7 +351,6 @@ class MultiGroupBlockTable:
         kv_cache_groups: KVCacheGroupSpec = None,
         *,
         use_fused_slot_mapping: bool = True,
-        enable_multistream_slot_mapping: bool = False,
     ) -> None:
         """Initialize MultiGroupBlockTable.
 
@@ -365,9 +359,6 @@ class MultiGroupBlockTable:
                 Triton kernel to process all groups in a single launch.
                 Falls back to sequential when CP (context parallelism)
                 is active or Triton is unavailable.
-            enable_multistream_slot_mapping: When True and fused is
-                unavailable, use multiple NPU streams for parallel
-                execution. Has no effect when fused mode is active.
         """
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
@@ -394,7 +385,6 @@ class MultiGroupBlockTable:
 
         self._device = device
         self._use_fused_slot_mapping = use_fused_slot_mapping
-        self._enable_multistream = enable_multistream_slot_mapping
 
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         if kv_cache_groups is not None:
@@ -570,23 +560,6 @@ class MultiGroupBlockTable:
             BLOCK_TABLE_WINDOW_SIZE=window_size,
         )
 
-    def _get_stream_pool(self, num_streams: int) -> list[Any]:
-        """Return a pool of NPU/CUDA streams for parallel execution.
-
-        Streams are created once and reused across decode steps.
-        """
-        if MultiGroupBlockTable._stream_pool is None or len(MultiGroupBlockTable._stream_pool) < num_streams:
-            # Determine stream class: torch.npu.Stream for Ascend,
-            # torch.cuda.Stream otherwise.
-            try:
-                stream_cls = torch.npu.Stream  # type: ignore[attr-defined]
-            except AttributeError:
-                stream_cls = torch.cuda.Stream  # type: ignore[attr-defined]
-            old_pool = MultiGroupBlockTable._stream_pool or []
-            new_streams = [stream_cls(device=self._device) for _ in range(num_streams - len(old_pool))]
-            MultiGroupBlockTable._stream_pool = old_pool + new_streams
-        return MultiGroupBlockTable._stream_pool[:num_streams]
-
     # -- core methods --------------------------------------------------
 
     def compute_slot_mapping(
@@ -604,9 +577,7 @@ class MultiGroupBlockTable:
            (per-group sequential, CPU-side numpy).
         2. If fused mode is enabled *and* CP is inactive → fused
            single-kernel launch.
-        3. If multistream mode is enabled *and* CP is inactive →
-           parallel multi-stream launch.
-        4. Otherwise → original sequential per-group launch (fallback).
+        3. Otherwise → original sequential per-group launch (fallback).
         """
         if not self._non_mamba_tables:
             return
@@ -634,11 +605,6 @@ class MultiGroupBlockTable:
                     self._launch_fused_slot_mapping(num_reqs, query_start_loc, positions)
                     return
 
-            # Try multi-stream as secondary optimization.
-            if self._enable_multistream:
-                self.compute_slot_mapping_multistream(num_reqs, query_start_loc, positions)
-                return
-
         # -- fallback: sequential -------------------------------------
         for block_table in self._non_mamba_tables:
             block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
@@ -658,47 +624,6 @@ class MultiGroupBlockTable:
         if self._fused_params is None:
             raise RuntimeError("Fused params not built (num_groups <= 1 or init skipped).")
         self._launch_fused_slot_mapping(num_reqs, query_start_loc, positions)
-
-    def compute_slot_mapping_multistream(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        """Launch per-group compute_slot_mapping on parallel NPU streams.
-
-        Each non-mamba block_table is assigned to a dedicated stream.
-        All launches are non-blocking; the method synchronises all
-        streams before returning to guarantee correctness for downstream
-        consumers that use the default stream.
-
-        .. note::
-            On Ascend 910B, ``torch.npu.Stream()`` serves as its own
-            context manager (no ``StreamContext`` wrapper needed).
-            We use a dynamic-import fallback for portability.
-        """
-        if not self._non_mamba_tables:
-            return
-
-        num_groups = len(self._non_mamba_tables)
-        streams = self._get_stream_pool(num_groups)
-
-        for bt, stream in zip(self._non_mamba_tables, streams):
-            # Ascend NPU Stream supports both context-manager usage
-            # (with stream:) and stream + event synchronization.
-            with stream:
-                bt.compute_slot_mapping(num_reqs, query_start_loc, positions)
-
-        # Make the current (default) stream wait for all worker streams.
-        # This creates a device-side dependency instead of a host-side
-        # barrier: unlike stream.synchronize(), it does not block the CPU
-        # thread in the decode hot path.
-        try:
-            current_stream = torch.npu.current_stream()
-        except AttributeError:
-            current_stream = torch.cuda.current_stream()
-        for stream in streams:
-            current_stream.wait_stream(stream)
 
     def compute_slot_mapping_draft(
         self,
