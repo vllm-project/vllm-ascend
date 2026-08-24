@@ -269,8 +269,8 @@ class AscendConfig:
         # This is a reference value: if the actual per-rank received token
         # count exceeds it, tokens may be truncated, causing precision
         # degradation. Do not set it too large because workspace memory scales
-        # linearly with this value. Default 131072.
-        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
+        # linearly with this value. Default 65536.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
                 f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
