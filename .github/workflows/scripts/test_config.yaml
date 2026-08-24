@@ -543,6 +543,15 @@
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dflash.py
 
+- name: spec_decode_dflash2
+  optional: false
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/dflash2_proposer.py
+    - vllm_ascend/models/qwen3_dflash2.py
+  tests:
+    - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::test_dflash2_acceptance
+
 - name: spec_decode_dspark_one_card
   optional: false
   base: spec_decode_base
@@ -837,6 +846,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::test_dflash2_acceptance: 300
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230

@@ -16,9 +16,9 @@ This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The c
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -257,7 +257,7 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
 
@@ -431,7 +431,7 @@ Key Parameter Descriptions:
 - `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
 
@@ -471,8 +471,8 @@ This architecture is recommended for production deployments with concurrent mult
 
 Take Atlas 800 A3 (64GB × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
 
-- `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
-- `DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 Ascend 950DT (96G × 8).
+- `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64GB × 16).
+- `DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 Ascend 950DT (96GB × 8).
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
@@ -498,7 +498,7 @@ Parameter descriptions:
         # this obtained through ifconfig
         # nic_name is the network interface name corresponding to local_ip of the current node
         nic_name="xxx"
-        local_ip="141.xx.xx.1"
+        local_ip="192.xx.xx.1"
 
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
@@ -572,7 +572,7 @@ Parameter descriptions:
         # this obtained through ifconfig
         # nic_name is the network interface name corresponding to local_ip of the current node
         nic_name="xxx"
-        local_ip="141.xx.xx.2"
+        local_ip="192.xx.xx.2"
 
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
@@ -646,7 +646,7 @@ Parameter descriptions:
         # this obtained through ifconfig
         # nic_name is the network interface name corresponding to local_ip of the current node
         nic_name="xxx"
-        local_ip="141.xx.xx.3"
+        local_ip="192.xx.xx.3"
 
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
@@ -719,7 +719,7 @@ Parameter descriptions:
         # this obtained through ifconfig
         # nic_name is the network interface name corresponding to local_ip of the current node
         nic_name="xxx"
-        local_ip="141.xx.xx.4"
+        local_ip="192.xx.xx.4"
 
         # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
         node0_ip="xxxx"
@@ -792,7 +792,7 @@ Parameter descriptions:
 
         ```shell
         nic_name="xxx"
-        local_ip="141.xx.xx.1"
+        local_ip="192.xx.xx.1"
 
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -858,7 +858,7 @@ Parameter descriptions:
 
         ```shell
         nic_name="xxx"
-        local_ip="141.xx.xx.2"
+        local_ip="192.xx.xx.2"
 
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -932,34 +932,34 @@ Parameter descriptions:
 
         ```shell
         # p0
-        python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         # p1
-        python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
         # d0
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         # d1
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
     === "Ascend 950DT series"
 
         ```shell
         # p0_0
-        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         # p0_1
-        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 192.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         # p1_0
-        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
         # p1_1
-        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 192.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
         # d0_0
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         # d0_1
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         # d0_2
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         # d0_3
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
 4. Run the `proxy.sh` script on the prefill master node(The proxy.sh of the Ascend 950DT is consistent with the A3)
@@ -969,47 +969,47 @@ Parameter descriptions:
     ```shell
     python load_balance_proxy_server_example.py \
       --port 1999 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --prefiller-hosts \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
       --prefiller-ports \
         7100 7101 7100 7101 \
       --decoder-hosts \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
       --decoder-ports \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115 \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115
@@ -1025,7 +1025,7 @@ Deployment Verification:
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together:
 
 ```shell
-curl http://141.xx.xx.1:1999/v1/chat/completions \
+curl http://192.xx.xx.1:1999/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "deepseek_v3",
@@ -1070,7 +1070,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -1179,7 +1179,7 @@ After several minutes, you can get the performance evaluation result.
 
 #### Table 3: Scenario Overview(Ascend 950DT)
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas Ascend 950DT server (96G × 8 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas Ascend 950DT server (96GB × 8 NPUs).
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
@@ -1215,8 +1215,8 @@ After several minutes, you can get the performance evaluation result.
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
