@@ -168,12 +168,13 @@ templates:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_dsa_cp":false,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
 benchmarks:
-  acc_gsm8k_lite:
+  acc-gpqa:
     case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k-lite
+    dataset_path: vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 1024
-    batch_size: 16
-    baseline: 80
-    threshold: 20
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    baseline: 86.36
+    threshold: 5
+    thinking: true
