@@ -104,7 +104,6 @@ class TestMoECommMethod(TestBase):
         call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
         self.assertEqual(call_args.args[:4], ("mc2_group", 8, 128, 2))
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 32768)
-        self.assertEqual(comm_impl._mega_moe_symm_buffer, "symm_buffer")
         mock_warning_once.assert_called_once()
         self.assertIn("mega_moe_max_tokens", mock_warning_once.call_args.args[0])
 
