@@ -191,7 +191,6 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=100
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
@@ -256,9 +255,9 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
       --trust-remote-code \
       --gpu-memory-utilization 0.90 \
       --enable-prefix-caching \
-      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true}'
+      --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2":1}'
     ```
 
 === "A2 series"
@@ -279,7 +278,7 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
 - `--speculative-config` enables Qwen3.5 MTP speculative decoding. Reduce `num_speculative_tokens` or remove this option if the workload is sensitive to first-token latency or if MTP is unstable in your environment.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-- `--additional-config` enables Ascend-specific optimizations. `enable_cpu_binding` enables Ascend-native CPU binding.
+- `--additional-config` enables Ascend-specific optimizations. `enable_fused_mc2` enables MoE fused operators, and `enable_cpu_binding` enables Ascend-native CPU binding.
 
 ### 5.2 Multi-Node Deployment with MP (Recommended)
 
@@ -638,7 +637,6 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_CONNECT_TIMEOUT=180
 export HCCL_BUFFSIZE=300
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -911,15 +909,12 @@ The following configurations are validated in specific test environments and are
 | Low latency     | 1P1D PD disaggregation     | 48 A3 NPUs          | W8A8 MTP       | Use separate prefill and decode DP/TP layouts and enable full decode ACLGraph on decode nodes.        |
 | Low latency     | 1P1D PD disaggregation     | 16 Ascend 950DT NPUs | W4A4 MXFP4 MTP | Use one 8-NPU prefill node and one 8-NPU decode node. Enable full decode ACLGraph on the decode node. |
 
-| Scenario        | Node Role                | NPUs        | TP  | DP                    | Max Num Seqs | Max Model Len | Max Num Batched Tokens | MTP Tokens | Prefix Cache | Main Optimizations                                                                              |
-| --------------- | ------------------------ | ----------- | --- | --------------------- | ------------ | ------------- | ---------------------- | ---------- | ------------ | ----------------------------------------------------------------------------------------------- |
-| Long context    | Single node              | 16          | 16  | 1                     | 128          | 133000        | 16384                  | 3          | On           | FullGraph, FlashComm1, Fused MC2, CPU binding                                                   |
-| Long context    | Single Ascend 950DT node  | 8           | 8   | 1                     | 128          | 133000        | 8192                   | 3          | On           | Full decode ACLGraph, FlashComm1, shared expert overlap, CPU binding, async scheduling          |
-| High throughput | MP node                  | 8 per node  | 8   | 1 per node, 2 global  | 16 per DP    | 32768         | 4096                   | 3          | Off          | FullGraph, shared expert overlap, CPU binding                                                   |
-| Low latency     | Prefill node             | 16          | 2   | 8                     | 64           | 16384         | 4096                   | 3          | Off          | Recompute scheduler, Fused MC2, CPU binding                                                     |
-| Low latency     | Decode node              | 16 per node | 2   | 8 per node, 16 global | 32           | 16384         | 128                    | 3          | Off          | FullGraph, recompute scheduler, Fused MC2, CPU binding                                          |
-| Low latency     | Ascend 950DT prefill node | 8           | 8   | 1                     | 64           | 133000        | 8192                   | 1          | Off          | Recompute scheduler, shared expert overlap, CPU binding, async scheduling                       |
-| Low latency     | Ascend 950DT decode node  | 8           | 8   | 1                     | 64           | 133000        | 240                    | 3          | Off          | Full decode ACLGraph, recompute scheduler, shared expert overlap, CPU binding, async scheduling |
+| Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | MTP Tokens | Prefix Cache | Main Optimizations |
+| -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ---------- | ------------ | ------------------ |
+| Long context | Single node | 16 | 16 | 1 | 128 | 133000 | 16384 | 3 | On | FullGraph, Fused MC2, CPU binding |
+| High throughput | MP node | 8 per node | 8 | 1 per node, 2 global | 16 per DP | 32768 | 4096 | 3 | Off | FullGraph, shared expert overlap, CPU binding |
+| Low latency | Prefill node | 16 | 2 | 8 | 64 | 16384 | 4096 | 3 | Off | Recompute scheduler, Fused MC2, CPU binding |
+| Low latency | Decode node | 16 per node | 2 | 8 per node, 16 global | 32 | 16384 | 128 | 3 | Off | FullGraph, recompute scheduler, Fused MC2, CPU binding |
 
 ### 9.2 Tuning Guidelines
 
@@ -933,7 +928,7 @@ Recommended tuning order:
 4. Tune `--max-num-seqs` according to service concurrency. Requests above this value wait in the queue and the waiting time is counted in TTFT and TPOT.
 5. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation and expert imbalance.
 6. Tune `--speculative-config`. MTP can improve decode throughput, but the best `num_speculative_tokens` depends on acceptance rate and workload.
-7. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With FlashComm1, use capture sizes that are multiples of TP size.
+7. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With sequence parallelism, use capture sizes that are multiples of TP size.
 
 ### 9.3 Model-Specific Optimizations
 
@@ -944,7 +939,6 @@ Recommended tuning order:
 | Zero-like elimination | Enabled by default | Removes unnecessary zero-like tensor operations in attention. | No extra configuration is required. |
 | Qwen3.5 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Improves decode throughput when acceptance rate is good. | Reduce speculative tokens if latency or stability regresses. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| FlashComm1 | `--additional-config '{"enable_flashcomm1": true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Fused MC2 | `--additional-config '{"enable_fused_mc2": 1}'` | Enables MoE fused operators to improve MoE prefill/decode efficiency. | If accuracy or performance regresses in multi-DP large-token scenarios, disable it and compare. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for MP throughput scenarios. |
 | Recompute scheduler | `--additional-config '{"recompute_scheduler_enable": true}'` | Recomputes KV through prefill when decode KV cache is insufficient in PD mode. | Only valid on decode nodes where `kv_role` is `kv_consumer`. |
@@ -978,13 +972,11 @@ For common environment, installation, and general parameter issues, refer to [FA
 
 **Solution:** Use `--no-enable-prefix-caching` for PD disaggregation until the limitation is resolved. For non-PD single-node serving, enable prefix caching only when the workload has repeated prefixes and the cache hit rate is meaningful.
 
-### Q4: Why does performance regress after enabling FlashComm1 or Fused MC2?
+### Q4: Why does performance regress after enabling sequence parallelism or Fused MC2?
 
 **Phenomenon:** Throughput decreases, latency increases, or MoE load becomes unstable after enabling communication or MoE fusion optimizations.
 
-**Cause:** These optimizations are workload dependent. FlashComm1 is most useful in high-concurrency TP scenarios. Fused MC2 may not be suitable for some multi-DP large-token cases where padded tokens overload certain experts.
-
-**Solution:** Compare with `enable_flashcomm1` disabled and `enable_fused_mc2` set to 0. If FlashComm1 is enabled and you tune `cudagraph_capture_sizes`, use values that are multiples of TP size. Keep the better setting for your actual concurrency and prompt length distribution.
+**Cause:** These optimizations are workload dependent. sequence parallelism is most useful in high-concurrency TP scenarios. Fused MC2 may not be suitable for some multi-DP large-token cases where padded tokens overload certain experts.
 
 ### Q5: How should I tune MTP speculative decoding for this model?
 

@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode
-from vllm.forward_context import get_forward_context
 
 
 def update_num_computed_tokens_for_batch_change(
@@ -209,18 +208,6 @@ def _maybe_eager_context(vllm_config):
         vllm_config.compilation_config = target_compilation_config
 
 
-# `sp` should be disabled when running MarkovHead
-@contextmanager
-def _disable_flash_comm_v1_context():
-    forward_context = get_forward_context()
-    _raw_flash_comm_v1 = forward_context.flash_comm_v1_enabled
-    try:
-        forward_context.flash_comm_v1_enabled = False
-        yield
-    finally:
-        forward_context.flash_comm_v1_enabled = _raw_flash_comm_v1
-
-
 class DynamicSpecScheduler:
     """Dynamic verification scheduler shared by DFlash and DSpark.
 
@@ -415,9 +402,8 @@ class DynamicSpecScheduler:
     ) -> torch.Tensor:
         """Estimate DSpark token acceptance probabilities.
 
-        The DSpark confidence head produces logits for each speculative
-        position. Sigmoid converts them to conditional token acceptance
-        probabilities.
+        ``compute_confidence`` already returns per-position acceptance
+        probabilities (sigmoid of the confidence-head logits).
 
         Output:
             token_probs: [B, D]
@@ -446,7 +432,7 @@ class DynamicSpecScheduler:
             markov_embs.shape[-1],
         ).to(flat_hidden.dtype)
 
-        confidence_logits = model.confidence_logits(
+        confidence = model.compute_confidence(
             flat_hidden,
             flat_markov,
         )
@@ -454,13 +440,12 @@ class DynamicSpecScheduler:
         token_probs = self._token_probs_buffer[:num_reqs]
 
         token_probs.copy_(
-            confidence_logits.reshape(
+            confidence.reshape(
                 num_reqs,
                 num_draft_tokens,
             )
         )
 
-        token_probs.sigmoid_()
         token_probs.clamp_(
             min=1e-6,
             max=1.0,
