@@ -318,9 +318,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # also contain target-only attention layers (e.g. GDN layers).
         if attn_metadata is not None and self.draft_attn_layer_names is not None:
             attn_metadata = {
-                name: metadata
-                for name, metadata in attn_metadata.items()
-                if name in self.draft_attn_layer_names
+                name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
         super()._prefill(
