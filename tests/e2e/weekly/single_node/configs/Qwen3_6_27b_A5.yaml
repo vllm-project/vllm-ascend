@@ -36,7 +36,7 @@ _server_cmd: &server_cmd
 _benchmarks_perf1: &benchmarks_perf1
   perf:
     case_type: performance
-    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in3500-bs128-qwen3.6-27b
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-27B_input_3500_lines_128
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 128
@@ -50,7 +50,7 @@ _benchmarks_perf1: &benchmarks_perf1
 _benchmarks_perf2: &benchmarks_perf2
   perf:
     case_type: performance
-    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in3500-bs128-qwen3.6-27b
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-27B_input_3500_lines_128
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 128
