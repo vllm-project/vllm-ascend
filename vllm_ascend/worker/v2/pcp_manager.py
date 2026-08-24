@@ -109,44 +109,6 @@ class AscendPCPManager(PCPManager):
         local_batch.seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         return local_batch
 
-    def build_attention_context(
-        self,
-        input_batch: AscendInputBatch,
-        block_tables: tuple[torch.Tensor, ...],
-        slot_mappings: torch.Tensor,
-    ) -> AscendPCPAttentionContext:
-        """Build the PCP context consumed by attention metadata builders."""
-        if input_batch.is_dummy:
-            local_num_tokens_after_padding = input_batch.num_tokens
-            restore_start = self.pcp_rank * local_num_tokens_after_padding
-            return AscendPCPAttentionContext(
-                global_batch=input_batch,
-                global_block_tables=block_tables,
-                global_slot_mappings=slot_mappings.view(
-                    slot_mappings.shape[0],
-                    self.pcp_world_size,
-                    local_num_tokens_after_padding,
-                )[:, self.pcp_rank],
-                hidden_restore_idx=torch.arange(
-                    restore_start,
-                    restore_start + local_num_tokens_after_padding,
-                    device=self.device,
-                ),
-                local_num_tokens_after_padding=local_num_tokens_after_padding,
-            )
-
-        global_batch = self._global_batch
-        return AscendPCPAttentionContext(
-            global_batch=global_batch,
-            global_block_tables=self._block_tables.gather_block_tables(
-                global_batch.idx_mapping,
-                global_batch.num_reqs_after_padding,
-            ),
-            global_slot_mappings=self._global_batch_slot_mappings[:, : global_batch.num_tokens],
-            hidden_restore_idx=self._hidden_restore_idx,
-            local_num_tokens_after_padding=input_batch.num_tokens_after_padding,
-        )
-
     def prepare_slot_mappings(self) -> torch.Tensor:
         """Pad PCP slot mappings to the fixed FULL-decode graph layout."""
         slot_mappings = super().prepare_slot_mappings()
