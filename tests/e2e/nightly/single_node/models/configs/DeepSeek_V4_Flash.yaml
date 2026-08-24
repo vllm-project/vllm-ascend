@@ -37,7 +37,7 @@ _server_cmd: &server_cmd
 _benchmarks_per1: &benchmarks_acc
   acc:
     case_type: accuracy
-    dataset_path: /mnt/share/modelscope/hub/datasets/vllm-ascend/gpqa
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     max_out_len: 131072
@@ -51,7 +51,7 @@ _benchmarks_per1: &benchmarks_acc
 _benchmarks_per2: &benchmarks_per
   perf:
     case_type: performance
-    dataset_path: /mnt/share/modelscope/hub/datasets/vllm-ascend/DeekSeek-V4-Flash_input_3500_lines_128
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeekSeek-V4-Flash_input_3500_lines_128
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 128
@@ -66,7 +66,7 @@ _benchmarks_per2: &benchmarks_per
 # ACTUAL TEST CASES
 # ==========================================
 test_cases:
-  - name: "DeepSeekV4_Flash_A5_Signle_GPQA_Accurancy_Test_01"
+  - name: "DeepSeekV4_Flash_A5_Signle_GPQA_Accuracy_Test_01"
     model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
     envs:
       <<: *envs

@@ -37,7 +37,7 @@ _server_cmd: &server_cmd
   - "--enable-auto-tool-choice"
   - "--tool-call-parser"
   - "qwen3_coder"
-  - "enable-prefix-caching"
+  - "--enable-prefix-caching"
   - "--speculative-config"
   - '{"method":"qwen3_5_mtp","num_speculative_tokens": 3, "enforce_eager":"true"}'
   - "--compilation-config"
@@ -45,7 +45,7 @@ _server_cmd: &server_cmd
 _benchmarks_per1: &benchmarks_per
   perf:
     case_type: performance
-    dataset_path: /mnt/share/modelscope/hub/datasets/vllm-ascend/Qwen3.5-397B-A17B-w8a8-mxfp8_input_130172_lines_200
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3.5-397B-A17B-w8a8-mxfp8_input_130172_lines_200
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 16
@@ -59,7 +59,7 @@ _benchmarks_per1: &benchmarks_per
 _benchmarks_per3: &benchmarks_acc
   acc:
     case_type: accuracy
-    dataset_path: /mnt/share/modelscope/hub/datasets/vllm-ascend/gpqa
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     max_out_len: 65536
@@ -73,7 +73,7 @@ _benchmarks_per3: &benchmarks_acc
 # ==========================================
 test_cases:
   - name: "Qwen35_397B_PCP_MTP_A5_perf_01"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/vllm-ascend/Qwen3.5-397B-A17B-w8a8-mxfp8"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -87,7 +87,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_per
   - name: "pcp_qwen3_5_acc_001"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/vllm-ascend/Qwen3.5-397B-A17B-w8a8-mxfp8"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
