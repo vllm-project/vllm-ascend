@@ -310,9 +310,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         orig_vllm_config = self.vllm_config
         kvtc = orig_vllm_config.kv_transfer_config
         if kvtc is not None:
+            # kv_connector_extra_config defaults to {} (default_factory), but
+            # guard against None in case a caller/override leaves it unset.
+            extra_src = kvtc.kv_connector_extra_config or {}
             extra = {
                 k: v
-                for k, v in kvtc.kv_connector_extra_config.items()
+                for k, v in extra_src.items()
                 if k not in ("prefill", "decode")
             }
             self.vllm_config = vllm_replace(

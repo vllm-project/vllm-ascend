@@ -189,3 +189,33 @@ class TestCreateDraftVllmConfigPD:
         worker_extra = proposer.vllm_config.kv_transfer_config.kv_connector_extra_config
         assert "prefill" in worker_extra
         assert "decode" in worker_extra
+
+    def test_handles_none_kv_connector_extra_config(self):
+        """Defensive: ``kv_connector_extra_config`` defaults to ``{}`` but an
+        override may leave it ``None``. The strip must not raise
+        ``AttributeError`` on ``.items()`` in that case."""
+        with patch(
+            "vllm_ascend.platform.NPUPlatform.check_and_update_config",
+            side_effect=self._platform_check_only_kv,
+        ):
+            cfg = VllmConfig()
+            cfg.kv_transfer_config = KVTransferConfig(
+                kv_connector="MooncakeConnectorV1",
+                kv_role="kv_producer",
+            )
+            cfg.kv_transfer_config.kv_connector_extra_config = None
+            cfg.parallel_config.data_parallel_size = 1
+            cfg.parallel_config.tensor_parallel_size = 1
+
+            proposer = self._make_proposer(
+                cfg,
+                SimpleNamespace(moe_backend=None, attention_backend=None),
+            )
+            draft = proposer._create_draft_vllm_config()
+
+        # No prefill/decode in the (empty) result; worker config restored.
+        assert draft.kv_transfer_config.kv_connector_extra_config == {}
+        assert (
+            proposer.vllm_config.kv_transfer_config.kv_connector_extra_config
+            is None
+        )
