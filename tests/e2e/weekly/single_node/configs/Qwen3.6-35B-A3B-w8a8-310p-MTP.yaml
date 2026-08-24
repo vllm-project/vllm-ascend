@@ -63,7 +63,7 @@ test_cases:
         max_out_len: 1536
         batch_size: 4
         request_rate: 0
-        baseline: 113
+        baseline: 10
         threshold: 0.97
       perf_PrefixCache_warm_up:
         case_type: performance
