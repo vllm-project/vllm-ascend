@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 
 import os
+
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["OMP_NUM_THREADS"] = "1"
 
