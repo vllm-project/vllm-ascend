@@ -916,6 +916,7 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         self.assertEqual(gmm1_kwargs["weight_dtype"], MXFP4_TEST_DTYPE)
         self.assertEqual(gmm1_kwargs["scale_dtype"], torch.float32)
         self.assertEqual(gmm1_kwargs["per_token_scale_dtype"], torch.float32)
+        self.assertEqual(gmm1_kwargs["output_dtype"], torch.bfloat16)
         mock_dynamic_quant.assert_called_once_with(
             ANY,
             act_quant_type=MXFP4_TEST_DTYPE,

@@ -56,6 +56,7 @@ def _patch_gemma4_vision_patch_embedder(
 
 def _get_tower_quant_config(
     vllm_config: VllmConfig,
+    tower_config,
     *,
     enable_ascend: bool = False,
 ) -> QuantizationConfig | None:
@@ -71,23 +72,30 @@ def _get_tower_quant_config(
         "torchao",
         "compressed-tensors",
     }
-    if enable_ascend:
-        unrestricted_quant_methods.add(ASCEND_QUANTIZATION_METHOD)
     if quant_config and quant_config.get_name() in unrestricted_quant_methods:
         return quant_config
+    if enable_ascend and _is_ascend_mxfp4_quant(quant_config):
+        return quant_config
 
-    vision_config = vllm_config.model_config.hf_config.vision_config
-    quantizable = vision_config.hidden_size % 64 == 0 and vision_config.intermediate_size % 64 == 0
+    quantizable = tower_config.hidden_size % 64 == 0 and tower_config.intermediate_size % 64 == 0
     return quant_config if quantizable else None
+
+
+def _is_ascend_mxfp4_quant(quant_config: QuantizationConfig | None) -> bool:
+    if quant_config is None or quant_config.get_name() != ASCEND_QUANTIZATION_METHOD:
+        return False
+    quant_description = getattr(quant_config, "quant_description", {})
+    return any(value == "W4A4_MXFP4" for value in quant_description.values())
 
 
 class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
     """Gemma4 multimodal model with ModelSlim quantization for its towers."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # This mirrors the upstream constructor. The only intentional behavior
-        # difference is that _get_tower_quant_config permits Ascend ModelSlim
-        # quantization for the ViT's non-64-aligned intermediate dimension.
+        # Keep this constructor aligned with upstream Gemma4 multimodal
+        # initialization. The Ascend-specific changes are intentionally limited
+        # to tower quant_config injection and the MXFP4 vision patch-embedder
+        # activation dtype workaround below.
         torch.nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -97,8 +105,19 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.multimodal_config = multimodal_config
         self.model_dtype = vllm_config.model_config.dtype
         self.vllm_config = vllm_config
-        vision_tower_quant = _get_tower_quant_config(vllm_config, enable_ascend=True)
-        audio_tower_quant = _get_tower_quant_config(vllm_config)
+        vision_tower_quant = _get_tower_quant_config(
+            vllm_config,
+            config.vision_config,
+            enable_ascend=True,
+        )
+        audio_tower_quant = (
+            _get_tower_quant_config(
+                vllm_config,
+                config.audio_config,
+            )
+            if config.audio_config is not None
+            else None
+        )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
@@ -113,7 +132,7 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
                 vision_tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            if vision_tower_quant and vision_tower_quant.get_name() == ASCEND_QUANTIZATION_METHOD:
+            if _is_ascend_mxfp4_quant(vision_tower_quant):
                 _patch_gemma4_vision_patch_embedder(
                     self.vision_tower.patch_embedder,
                     self.model_dtype,
