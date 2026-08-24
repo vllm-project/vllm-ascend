@@ -1367,6 +1367,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         last_hidden_states=last_hidden_states,
                         draft_token_ids=draft_token_ids,
                         num_reqs=num_blk,
+                        request_ids=self.input_batch.req_ids[:num_blk],
                     )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
@@ -1386,6 +1387,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.dynamic_spec.update(
                         logits=logits,
                         num_reqs=logits.shape[0] // current_k,
+                        request_ids=self.input_batch.req_ids[: logits.shape[0] // current_k],
                     )
 
         # Early exit if there is only one draft token to be generated.

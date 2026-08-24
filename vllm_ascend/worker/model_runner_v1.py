@@ -169,6 +169,7 @@ from vllm_ascend.spec_decode.utils import (
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
 )
+from vllm_ascend.spec_decode.dynamic import HardwareProfileCollector
 from vllm_ascend.utils import (
     AscendDeviceType,
     calc_split_factor,
@@ -754,6 +755,98 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, (ACLGraphWrapper, BreakableACLGraphWrapper)):
             return self.model.unwrap()
         return self.model
+
+    @torch.inference_mode()
+    def profile_dynamic_spec_hardware(self) -> dict[str, Any] | None:
+        """Collect and install a startup profile for dynamic speculation.
+
+        This runs after model/KV-cache initialization and normal warmup. The
+        measured step includes the target verification forward, but does not
+        invoke the draft model or the confidence scheduler itself. This keeps
+        the table aligned with ``HardwareAwarePrefixPolicy``'s verification
+        latency objective.
+        Varlen cudagraph support is intentionally outside this change.
+        """
+
+        dynamic_config = get_ascend_config().dynamic_spec_config
+        if not getattr(dynamic_config, "method", None) or dynamic_config.policy != "hardware_aware":
+            return None
+        method_params = dynamic_config.method_params
+        if not bool(
+            method_params.get(
+                "auto_profile",
+                method_params.get("startup_profile", False),
+            )
+        ):
+            return None
+
+        dynamic_spec = getattr(getattr(self, "drafter", None), "dynamic_spec", None)
+        if dynamic_spec is None:
+            logger.warning(
+                "Startup hardware profiling requested, but this worker has no "
+                "dynamic speculative scheduler; skipping profile collection"
+            )
+            return None
+        if self.speculative_config is None:
+            return None
+
+        collector = HardwareProfileCollector.from_params(
+            max_batch_size=int(self.max_num_reqs),
+            max_draft_tokens=int(self.speculative_config.num_speculative_tokens),
+            max_token_capacity=min(
+                int(self.max_num_tokens),
+                int(self.scheduler_config.max_num_batched_tokens),
+            ),
+            params=method_params,
+        )
+
+        def measure_step(batch_size: int, verify_k: int) -> float:
+            num_tokens = batch_size * (verify_k + 1)
+            torch.npu.synchronize()
+            start = time.perf_counter()
+            self._dummy_run(
+                num_tokens=num_tokens,
+                force_attention=True,
+                uniform_decode=True,
+                allow_microbatching=False,
+                profile_query_len=verify_k + 1,
+                profile_cpp=True,
+            )
+            torch.npu.synchronize()
+            return (time.perf_counter() - start) * 1000.0
+
+        fingerprint = dict(method_params.get("profile_fingerprint") or {})
+        fingerprint.setdefault("device", get_ascend_device_type().name)
+        fingerprint.setdefault("method", dynamic_config.method)
+        fingerprint.setdefault(
+            "tensor_parallel_size",
+            self.vllm_config.parallel_config.tensor_parallel_size,
+        )
+        fingerprint.setdefault(
+            "pipeline_parallel_size",
+            self.vllm_config.parallel_config.pipeline_parallel_size,
+        )
+        fingerprint.setdefault("execution_mode", "eager_dummy_step")
+
+        payload = collector.collect(
+            measure_step,
+            fingerprint=fingerprint,
+            confidence_temperatures=method_params.get("confidence_temperatures"),
+            source="startup_dummy_step",
+        )
+        dynamic_spec.set_hardware_profile(payload, source="startup_dummy_step")
+
+        output_path = method_params.get("auto_profile_path")
+        if output_path:
+            HardwareProfileCollector.save(payload, output_path)
+            logger.info("Saved startup dynamic speculative hardware profile to %s", output_path)
+        logger.info(
+            "Collected startup dynamic speculative profile: batches=%s verify_tokens=%s shapes=%d",
+            collector.batch_sizes,
+            collector.verify_token_sizes,
+            len(payload["latency_ms"]),
+        )
+        return payload
 
     def _is_pd_prefill_worker(self) -> bool:
         return self.is_kv_producer and not self.is_kv_consumer
@@ -3482,6 +3575,7 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        profile_query_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3498,7 +3592,15 @@ class NPUModelRunner(GPUModelRunner):
         # When setting max_query_len = 1, we switch to and capture the optimized
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
-        max_query_len = self.uniform_decode_query_len if uniform_decode else num_tokens
+        if profile_query_len is not None:
+            if not uniform_decode or profile_query_len <= 0:
+                raise ValueError(
+                    "profile_query_len requires uniform_decode=True and must be > 0"
+                )
+            uniform_decode_query_len = int(profile_query_len)
+        else:
+            uniform_decode_query_len = self.uniform_decode_query_len
+        max_query_len = uniform_decode_query_len if uniform_decode else num_tokens
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
@@ -3710,7 +3812,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
-            max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
+            max_num_reqs_across_dp = max_num_reqs * uniform_decode_query_len
             dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
 
             def dummy_compute_logits(hidden_states):

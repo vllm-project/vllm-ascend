@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import json
+import os
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 
 def _as_int_keyed_mapping(values: Mapping[Any, Any], name: str) -> dict[int, float]:
@@ -24,6 +26,161 @@ def _as_int_keyed_mapping(values: Mapping[Any, Any], name: str) -> dict[int, flo
     if any(value <= 0 for value in result.values()):
         raise ValueError(f"{name} values must be > 0")
     return result
+
+
+@dataclass(frozen=True)
+class HardwareProfileCollector:
+    """Collect a startup latency profile from real verification steps.
+
+    The collector deliberately stays independent of the model runner.  The
+    runner supplies ``measure_step(batch_size, verify_k)`` and is responsible
+    for executing the actual NPU dummy step.  This makes the collection logic
+    unit-testable on CPU and keeps runner-specific graph/input handling out of
+    the dynamic scheduler.
+
+    The resulting table is keyed by the physical verification token count
+    ``batch_size * (verify_k + 1)``.  The extra token is the target bonus token
+    already accounted for by :class:`HardwareAwarePrefixPolicy`.
+    """
+
+    batch_sizes: tuple[int, ...]
+    verify_token_sizes: tuple[int, ...]
+    warmup_runs: int = 1
+    measure_runs: int = 3
+
+    def __post_init__(self) -> None:
+        if not self.batch_sizes or any(size <= 0 for size in self.batch_sizes):
+            raise ValueError("profile batch_sizes must contain positive integers")
+        if not self.verify_token_sizes or any(size < 0 for size in self.verify_token_sizes):
+            raise ValueError("profile verify_token_sizes must contain non-negative integers")
+        if self.warmup_runs < 0:
+            raise ValueError("profile warmup_runs must be >= 0")
+        if self.measure_runs <= 0:
+            raise ValueError("profile measure_runs must be > 0")
+
+    @classmethod
+    def from_params(
+        cls,
+        *,
+        max_batch_size: int,
+        max_draft_tokens: int,
+        max_token_capacity: int | None = None,
+        params: Mapping[str, Any],
+    ) -> "HardwareProfileCollector":
+        """Build a bounded collector from ``dynamic_spec_config`` params."""
+
+        max_batch_size = max(int(max_batch_size), 1)
+        max_draft_tokens = max(int(max_draft_tokens), 0)
+
+        raw_batches = params.get("profile_batch_sizes")
+        if raw_batches is None:
+            # Keep startup cost bounded while still covering small, medium and
+            # saturated batches. Users can provide an exact sweep when the
+            # deployment has a known concurrency distribution.
+            raw_batches = (1, min(4, max_batch_size), min(8, max_batch_size), max_batch_size)
+        raw_k = params.get("profile_verify_tokens")
+        if raw_k is None:
+            raw_k = range(0, max_draft_tokens + 1)
+
+        batch_sizes = sorted({max(1, min(int(size), max_batch_size)) for size in raw_batches})
+        verify_token_sizes = sorted({max(0, min(int(size), max_draft_tokens)) for size in raw_k})
+
+        if max_token_capacity is not None:
+            capacity = max(int(max_token_capacity), 1)
+            smallest_batch = min(batch_sizes)
+            verify_token_sizes = [
+                verify_k
+                for verify_k in verify_token_sizes
+                if smallest_batch * (verify_k + 1) <= capacity
+            ]
+            batch_sizes = [
+                batch_size
+                for batch_size in batch_sizes
+                if all(batch_size * (verify_k + 1) <= capacity for verify_k in verify_token_sizes)
+            ]
+            verify_token_sizes = [
+                verify_k
+                for verify_k in verify_token_sizes
+                if all(batch_size * (verify_k + 1) <= capacity for batch_size in batch_sizes)
+            ]
+            if not batch_sizes or not verify_token_sizes:
+                raise ValueError(
+                    "profile_batch_sizes/profile_verify_tokens exceed the model runner token capacity"
+                )
+
+        return cls(
+            batch_sizes=tuple(batch_sizes),
+            verify_token_sizes=tuple(verify_token_sizes),
+            warmup_runs=int(params.get("profile_warmup_runs", 1)),
+            measure_runs=int(params.get("profile_measure_runs", 3)),
+        )
+
+    def collect(
+        self,
+        measure_step: Callable[[int, int], float],
+        *,
+        fingerprint: Mapping[str, Any] | None = None,
+        confidence_temperatures: Sequence[float] | None = None,
+        source: str = "startup",
+    ) -> dict[str, Any]:
+        """Measure every configured shape and return a JSON-compatible profile."""
+
+        samples_by_token_count: dict[int, list[float]] = {}
+        shape_samples: dict[str, dict[str, Any]] = {}
+        for batch_size in self.batch_sizes:
+            for verify_k in self.verify_token_sizes:
+                token_count = batch_size * (verify_k + 1)
+                for _ in range(self.warmup_runs):
+                    measure_step(batch_size, verify_k)
+                samples = [
+                    float(measure_step(batch_size, verify_k))
+                    for _ in range(self.measure_runs)
+                ]
+                if any(sample <= 0 for sample in samples):
+                    raise ValueError(
+                        f"profile measurement must be > 0, got {samples} for "
+                        f"batch={batch_size}, verify_k={verify_k}"
+                    )
+                samples_by_token_count.setdefault(token_count, []).extend(samples)
+                shape_samples[f"{batch_size}x{verify_k}"] = {
+                    "batch_size": batch_size,
+                    "verify_tokens": verify_k,
+                    "token_count": token_count,
+                    "latency_ms": statistics.median(samples),
+                    "samples_ms": samples,
+                }
+
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "profile_kind": "startup_dummy_step",
+            "source": source,
+            "fingerprint": dict(fingerprint or {}),
+            "latency_ms": {
+                str(token_count): statistics.median(samples)
+                for token_count, samples in sorted(samples_by_token_count.items())
+            },
+            "shapes": shape_samples,
+            "profile_batch_sizes": list(self.batch_sizes),
+            "profile_verify_tokens": list(self.verify_token_sizes),
+            "profile_warmup_runs": self.warmup_runs,
+            "profile_measure_runs": self.measure_runs,
+        }
+        if confidence_temperatures is not None:
+            payload["confidence_temperatures"] = [float(value) for value in confidence_temperatures]
+        return payload
+
+    @staticmethod
+    def save(payload: Mapping[str, Any], path: str | Path) -> None:
+        """Persist a profile atomically so a failed startup cannot corrupt it."""
+
+        profile_path = Path(path)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = profile_path.with_suffix(profile_path.suffix + ".tmp")
+        temporary_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, profile_path)
 
 
 @dataclass(frozen=True)

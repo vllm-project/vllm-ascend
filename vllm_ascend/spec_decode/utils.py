@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import math
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any
@@ -259,6 +260,27 @@ class DynamicSpecScheduler:
         self.max_batch_size = max_batch_size
         self.num_speculative_tokens = num_speculative_tokens
         self.device = device
+        self._method_params = dict(method_params)
+
+        # PR #47808 smooths request confidence with an EMA.  The alias keeps
+        # the upstream terminology available while ``ema_alpha`` remains
+        # convenient for Ascend deployments.  Legacy confidence-budget mode
+        # stays unchanged unless the user explicitly enables EMA there.
+        default_ema_alpha = 0.8 if self.policy_name == "hardware_aware" else 0.0
+        self.ema_alpha = float(
+            method_params.get(
+                "adaptive_verification_ema_alpha",
+                method_params.get("ema_alpha", default_ema_alpha),
+            )
+        )
+        if not 0.0 <= self.ema_alpha <= 1.0:
+            raise ValueError("adaptive_verification_ema_alpha must be in [0, 1]")
+        self.auto_profile_enabled = bool(
+            method_params.get(
+                "auto_profile",
+                method_params.get("startup_profile", False),
+            )
+        )
 
         # Shared configuration
 
@@ -308,6 +330,7 @@ class DynamicSpecScheduler:
         self.cost_model: HardwareCostModel | None = None
         self.hardware_policy: HardwareAwarePrefixPolicy | None = None
         profile_temperatures: tuple[float, ...] = ()
+        self._configured_temperatures = method_params.get("confidence_temperatures")
         if self.policy_name == "hardware_aware":
             try:
                 profile = method_params.get("profile")
@@ -324,34 +347,25 @@ class DynamicSpecScheduler:
                         expected_fingerprint=method_params.get("profile_fingerprint"),
                         strict_fingerprint=bool(method_params.get("strict_profile_fingerprint", True)),
                     )
-                else:
+                elif not self.auto_profile_enabled:
                     raise ValueError("profile_path or inline profile is required")
-                self.hardware_policy = HardwareAwarePrefixPolicy(
-                    cost_model=self.cost_model,
-                    min_k=self.min_k,
-                    max_batch_size=self.max_batch_size,
-                    max_draft_tokens=self.num_speculative_tokens,
-                    device=device,
-                    decision_interval=self._hardware_decision_interval(method_params),
-                    allocation_interval=self._hardware_allocation_interval(method_params),
-                )
-                profile_temperatures = self.cost_model.confidence_temperatures
+                if self.cost_model is not None:
+                    self._install_hardware_policy(self.cost_model)
+                    profile_temperatures = self.cost_model.confidence_temperatures
             except (OSError, TypeError, ValueError) as exc:
-                # A stale or missing profile must not make an otherwise valid
-                # dynamic SD deployment unusable.  Fall back to the policy
-                # already shipped by PR #13216/#13819.
-                logger.warning(
-                    "Unable to enable hardware-aware dynamic speculative "
-                    "scheduling; falling back to confidence_budget: %s",
-                    exc,
-                )
-                self.policy_name = "confidence_budget"
-                self.cost_model = None
-                self.hardware_policy = None
-                if configured_min_k is None:
-                    self.min_k = 1
+                if self.auto_profile_enabled and not method_params.get("profile") and not method_params.get("profile_path"):
+                    # The runner will collect a real profile after model/KV
+                    # initialization. Keep the policy selected so the profile
+                    # can be installed without reconstructing the proposer.
+                    logger.info(
+                        "Hardware-aware dynamic speculative scheduling is pending "
+                        "startup profiling: %s",
+                        exc,
+                    )
+                else:
+                    self._fallback_to_confidence_budget(exc)
 
-        configured_temperatures = method_params.get("confidence_temperatures")
+        configured_temperatures = self._configured_temperatures
         if configured_temperatures is None and profile_temperatures:
             configured_temperatures = profile_temperatures
         self.calibrator = SequentialTemperatureScaler.from_config(
@@ -431,6 +445,13 @@ class DynamicSpecScheduler:
             device=device,
         )
 
+        # The EMA state is kept separate from the current confidence buffer so
+        # the current batch can be reordered by request id without mixing rows.
+        self._ema_token_probs_buffer = torch.empty_like(self._token_probs_buffer)
+        self._ema_request_to_row: dict[Any, int] = {}
+        self._ema_previous_num_reqs: int | None = None
+        self._ema_previous_num_draft_tokens: int | None = None
+
         # Cumulative survival probability.
         # survival[b, i] = prod(token_probs[b, :i + 1])
         # Shape: [B, D]
@@ -465,6 +486,75 @@ class DynamicSpecScheduler:
         self._confidence_steps = 0
         self._last_confidence_num_reqs: int | None = None
         self._last_confidence_num_draft_tokens: int | None = None
+
+    def _install_hardware_policy(self, cost_model: HardwareCostModel) -> None:
+        """Install or replace the profile-backed prefix policy."""
+
+        self.cost_model = cost_model
+        self.hardware_policy = HardwareAwarePrefixPolicy(
+            cost_model=cost_model,
+            min_k=self.min_k,
+            max_batch_size=self.max_batch_size,
+            max_draft_tokens=self.num_speculative_tokens,
+            device=self.device,
+            decision_interval=self._hardware_decision_interval(self._method_params),
+            allocation_interval=self._hardware_allocation_interval(self._method_params),
+        )
+        if hasattr(self, "_cached_num_verify_tokens"):
+            self._cached_num_verify_tokens = None
+            self._last_confidence_num_reqs = None
+            self._last_confidence_num_draft_tokens = None
+
+    def set_hardware_profile(
+        self,
+        profile: Mapping[str, Any] | HardwareCostModel,
+        *,
+        source: str = "startup",
+    ) -> None:
+        """Install a freshly collected or externally supplied hardware profile."""
+
+        if self.policy_name != "hardware_aware":
+            raise RuntimeError("cannot install a hardware profile for confidence_budget policy")
+        if isinstance(profile, HardwareCostModel):
+            cost_model = profile
+        else:
+            cost_model = HardwareCostModel.from_dict(
+                profile,
+                expected_fingerprint=self._method_params.get("profile_fingerprint"),
+                strict_fingerprint=bool(
+                    self._method_params.get("strict_profile_fingerprint", True)
+                ),
+                source=source,
+            )
+        self._install_hardware_policy(cost_model)
+        if self._configured_temperatures is None and cost_model.confidence_temperatures:
+            self.calibrator = SequentialTemperatureScaler.from_config(
+                cost_model.confidence_temperatures,
+                self.num_speculative_tokens,
+            )
+        logger.info(
+            "Installed hardware-aware dynamic speculative profile source=%s shapes=%d",
+            cost_model.source,
+            len(cost_model.latency_ms),
+        )
+
+    def fallback_to_confidence_budget(self, reason: Exception | str) -> None:
+        """Disable hardware allocation while keeping dynamic confidence scheduling."""
+
+        self._fallback_to_confidence_budget(reason)
+
+    def _fallback_to_confidence_budget(self, reason: Exception | str) -> None:
+        logger.warning(
+            "Unable to enable hardware-aware dynamic speculative scheduling; "
+            "falling back to confidence_budget: %s",
+            reason,
+        )
+        self.policy_name = "confidence_budget"
+        self.cost_model = None
+        self.hardware_policy = None
+        if self._method_params.get("min_verify_tokens") is None:
+            self.min_k = 1
+        self.budget_k = max(self.min_k, min(self.initial_verify_budget_per_req, self.num_speculative_tokens))
 
     @staticmethod
     def _hardware_decision_interval(method_params: dict[str, Any]) -> int:
@@ -547,6 +637,63 @@ class DynamicSpecScheduler:
             return False
         return True
 
+    def _apply_confidence_ema(
+        self,
+        token_probs: torch.Tensor,
+        request_ids: Sequence[Any] | None = None,
+    ) -> torch.Tensor:
+        """Smooth conditional acceptance probabilities before cumprod.
+
+        Request IDs are preferred because vLLM can reorder a running batch.
+        When the caller does not provide IDs, positional smoothing is used as
+        a compatibility fallback and is reset whenever the batch shape changes.
+        The operation runs only when a fresh confidence result is computed;
+        cached confidence steps do not pay this cost.
+        """
+
+        if self.ema_alpha <= 0.0 or token_probs.numel() == 0:
+            return token_probs
+
+        num_reqs, num_draft_tokens = token_probs.shape
+        alpha = self.ema_alpha
+        if request_ids is None:
+            if self._ema_previous_num_draft_tokens == num_draft_tokens:
+                previous = self._ema_token_probs_buffer[:num_reqs, :num_draft_tokens].clone()
+                token_probs.mul_(1.0 - alpha).add_(previous, alpha=alpha)
+            self._ema_token_probs_buffer[:num_reqs, :num_draft_tokens].copy_(token_probs)
+            self._ema_previous_num_reqs = num_reqs
+            self._ema_previous_num_draft_tokens = num_draft_tokens
+            return token_probs
+
+        ids = list(request_ids)
+        if len(ids) != num_reqs:
+            raise ValueError(
+                "request_ids must have one entry per dynamic speculative request"
+            )
+        try:
+            if len(set(ids)) != len(ids):
+                raise ValueError("request_ids must be unique within a batch")
+        except TypeError as exc:
+            raise TypeError("request_ids must contain hashable values") from exc
+
+        previous_state = self._ema_token_probs_buffer[
+            : (self._ema_previous_num_reqs or 0), :num_draft_tokens
+        ].clone()
+        previous_width = self._ema_previous_num_draft_tokens
+        previous_rows = self._ema_request_to_row
+        for row, request_id in enumerate(ids):
+            previous_row = previous_rows.get(request_id)
+            if previous_width == num_draft_tokens and previous_row is not None:
+                token_probs[row].mul_(1.0 - alpha).add_(
+                    previous_state[previous_row],
+                    alpha=alpha,
+                )
+            self._ema_token_probs_buffer[row, :num_draft_tokens].copy_(token_probs[row])
+        self._ema_request_to_row = {request_id: row for row, request_id in enumerate(ids)}
+        self._ema_previous_num_reqs = num_reqs
+        self._ema_previous_num_draft_tokens = num_draft_tokens
+        return token_probs
+
     def update(
         self,
         *,
@@ -555,6 +702,7 @@ class DynamicSpecScheduler:
         last_hidden_states: torch.Tensor | None = None,
         draft_token_ids: torch.Tensor | None = None,
         num_reqs: int | None = None,
+        request_ids: Sequence[Any] | None = None,
     ) -> torch.Tensor:
         self.reused_last_result = False
 
@@ -647,7 +795,7 @@ class DynamicSpecScheduler:
         else:
             raise RuntimeError(f"Unsupported dynamic speculative method: {self.method}")
 
-        result = self._update_from_token_probs(token_probs)
+        result = self._update_from_token_probs(token_probs, request_ids=request_ids)
         if self.hybrid_policy_enabled and self.hardware_policy is not None:
             # The mean full-prefix survival is a batch-level proxy for the
             # probability that the complete physical K is useful. It is more
@@ -787,9 +935,13 @@ class DynamicSpecScheduler:
     def _update_from_token_probs(
         self,
         token_probs: torch.Tensor,
+        *,
+        request_ids: Sequence[Any] | None = None,
     ) -> torch.Tensor:
         """Run the shared dynamic speculative scheduling pipeline."""
         num_reqs, num_draft_tokens = token_probs.shape
+
+        token_probs = self._apply_confidence_ema(token_probs, request_ids)
 
         survival = self._survival_buffer[:num_reqs, : token_probs.shape[1]]
 

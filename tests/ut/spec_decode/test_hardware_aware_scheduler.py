@@ -7,7 +7,10 @@ import pytest
 import torch
 
 from vllm_ascend.spec_decode.dynamic.calibration import SequentialTemperatureScaler
-from vllm_ascend.spec_decode.dynamic.cost_model import HardwareCostModel
+from vllm_ascend.spec_decode.dynamic.cost_model import (
+    HardwareCostModel,
+    HardwareProfileCollector,
+)
 from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
 from vllm_ascend.spec_decode.dynamic.policy import HardwareAwarePrefixPolicy
 from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
@@ -367,6 +370,100 @@ def test_hardware_profile_fingerprint_mismatch() -> None:
             {"fingerprint": {"device": "A3"}, "latency_ms": {"1": 1.0}},
             expected_fingerprint={"device": "A5"},
         )
+
+
+def test_startup_profile_collector_uses_median_and_persists(tmp_path) -> None:
+    collector = HardwareProfileCollector(
+        batch_sizes=(1, 2),
+        verify_token_sizes=(0, 1),
+        warmup_runs=1,
+        measure_runs=3,
+    )
+    calls = []
+
+    def measure(batch_size: int, verify_k: int) -> float:
+        calls.append((batch_size, verify_k))
+        return float(batch_size * 10 + verify_k + len(calls) % 2)
+
+    payload = collector.collect(measure, fingerprint={"device": "A3"})
+    assert len(calls) == 2 * 2 * 4
+    assert payload["profile_kind"] == "startup_dummy_step"
+    assert payload["fingerprint"] == {"device": "A3"}
+    assert set(payload["latency_ms"]) == {"1", "2", "4"}
+
+    output_path = tmp_path / "startup_profile.json"
+    HardwareProfileCollector.save(payload, output_path)
+    loaded = HardwareCostModel.from_json(output_path)
+    assert loaded.latency(1) == payload["latency_ms"]["1"]
+
+
+def test_hardware_profile_collector_filters_shapes_by_capacity() -> None:
+    collector = HardwareProfileCollector.from_params(
+        max_batch_size=8,
+        max_draft_tokens=3,
+        max_token_capacity=16,
+        params={
+            "profile_batch_sizes": [1, 4, 8],
+            "profile_verify_tokens": [0, 1, 3],
+        },
+    )
+
+    assert collector.batch_sizes == (1, 4)
+    assert collector.verify_token_sizes == (0, 1, 3)
+
+
+def test_confidence_ema_follows_request_ids_when_batch_reorders() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    scheduler = DynamicSpecScheduler(
+        method="dflash",
+        policy="confidence_budget",
+        method_params={"ema_alpha": 0.5},
+        max_batch_size=2,
+        num_speculative_tokens=2,
+        device=torch.device("cpu"),
+    )
+
+    first = scheduler._update_from_token_probs(
+        torch.tensor([[0.9, 0.8], [0.2, 0.2]]),
+        request_ids=["a", "b"],
+    )
+    assert first.shape == (2,)
+
+    scheduler._update_from_token_probs(
+        torch.tensor([[0.6, 0.6], [0.8, 0.8]]),
+        request_ids=["b", "a"],
+    )
+    smoothed = scheduler._token_probs_buffer[:2]
+    assert torch.allclose(smoothed[0], torch.tensor([0.4, 0.4]))
+    assert torch.allclose(smoothed[1], torch.tensor([0.85, 0.8]))
+
+
+def test_auto_profile_scheduler_accepts_runtime_profile() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "auto_profile": True,
+            "hardware_min_budget_ratio": 0.0,
+        },
+        max_batch_size=2,
+        num_speculative_tokens=2,
+        device=torch.device("cpu"),
+    )
+    assert scheduler.policy_name == "hardware_aware"
+    assert scheduler.hardware_policy is None
+
+    scheduler.set_hardware_profile(
+        {
+            "fingerprint": {"device": "A3"},
+            "latency_ms": {"1": 1.0, "2": 1.0, "3": 1.0, "4": 1.0, "6": 1.0},
+        }
+    )
+    assert scheduler.hardware_policy is not None
+    assert scheduler.cost_model is not None
 
 
 def test_hardware_profile_accepts_offline_tuner_artifact() -> None:
