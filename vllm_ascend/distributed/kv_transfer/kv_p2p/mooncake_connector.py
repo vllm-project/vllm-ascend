@@ -821,7 +821,7 @@ class KVCacheRecvingThread(threading.Thread):
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
         grouped_remote_k_block_ids: list[list[int]] = []
         grouped_local_k_block_ids: list[list[int]] = []
-        if self.enable_sfa_dcp_replicated_indexer and has_replicate_k_blocks:
+        if has_replicate_k_blocks:
             grouped_remote_k_block_ids, grouped_local_k_block_ids = group_concurrent_contiguous(
                 remote_block_ids_replicate_k[0],
                 local_block_ids_replicate_k[0],
