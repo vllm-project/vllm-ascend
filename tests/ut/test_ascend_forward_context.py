@@ -117,7 +117,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
         no_compile_layers={},
         attn_metadata={},
         slot_mapping={},
-        additional_kwargs={"flash_comm_v1_enabled": False},
+        additional_kwargs={},
     )
 
     with override_forward_context(forward_context):
