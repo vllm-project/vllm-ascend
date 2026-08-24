@@ -22,9 +22,7 @@ from dataclasses import dataclass, replace
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
