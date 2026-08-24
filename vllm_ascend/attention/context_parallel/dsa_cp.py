@@ -1128,6 +1128,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        self.eliminate_dsa_cp_comm = ascend_config.eliminate_dsa_cp_comm and (
+            get_ascend_device_type() != AscendDeviceType.A5
+        )
 
         # indexer param
         if self.indexer is not None:
@@ -1361,14 +1364,18 @@ class AscendDSACPImpl(DSAAttentionImpl):
             local_attn_output,
             layer_name,
             attn_metadata[0],
-            skip_all_to_all=full_gather_wo_a_enabled,
+            skip_all_to_all=full_gather_wo_a_enabled or self.eliminate_dsa_cp_comm,
         )
         num_tokens = o_proj_input.shape[0]
 
         # o
         if full_gather_wo_a_enabled:
             self._switch_o_proj_to_full_weight(o_proj_full_handles)
-        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
+        o_proj_groups = (
+            self.n_group
+            if full_gather_wo_a_enabled or self.eliminate_dsa_cp_comm
+            else self.n_local_groups
+        )
         try:
             if get_ascend_device_type() in {AscendDeviceType.A5}:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
@@ -1394,16 +1401,23 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 else:
                     # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
                     # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                    o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                        o_proj_input,
-                        self.wo_a.weight,
-                        bias=None,
-                        scale=None,
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                        batch_split_factor=1,
-                    )
+                    if full_gather_wo_a_enabled or self.eliminate_dsa_cp_comm:
+                        o_proj_input = torch.bmm(
+                            o_proj_input.permute(1, 0, 2).contiguous(),
+                            self.wo_a.weight,
+                        )
+                        o_proj_input = o_proj_input.permute(1, 0, 2).contiguous()
+                    else:
+                        o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                            o_proj_input,
+                            self.wo_a.weight,
+                            bias=None,
+                            scale=None,
+                            perm_x1=(1, 0, 2),
+                            perm_x2=(0, 1, 2),
+                            perm_y=(1, 0, 2),
+                            batch_split_factor=1,
+                        )
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
                 output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
         finally:

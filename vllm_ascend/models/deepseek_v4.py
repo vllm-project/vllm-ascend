@@ -740,6 +740,7 @@ class DeepseekV4Attention(nn.Module):
         self.norm_eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
         self.enable_dsa_cp = enable_dsa_cp()
+        self.replicated_wo = self.enable_dsa_cp and get_ascend_config().eliminate_dsa_cp_comm
 
         attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
         self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
@@ -772,7 +773,8 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.kv_norm = RMSNorm(self.head_dim, self.norm_eps)
-        self.wo_a = ColumnParallelLinear(
+        wo_a_linear_class = ReplicatedLinear if self.replicated_wo else ColumnParallelLinear
+        self.wo_a = wo_a_linear_class(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * config.o_lora_rank,
             bias=False,
@@ -780,7 +782,8 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_a",
             return_bias=False,
         )
-        self.wo_b = RowParallelLinear(
+        wo_b_linear_class = ReplicatedLinear if self.replicated_wo else RowParallelLinear
+        self.wo_b = wo_b_linear_class(
             self.n_groups * config.o_lora_rank,
             self.dim,
             bias=False,
