@@ -272,6 +272,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.draft_window_size = None
         self.sliding_window = None
 
+    def _dynamic_request_ids(self, num_reqs: int):
+        """Return request IDs only when the current batch matches the update.
+
+        Startup dummy runs use synthetic batches before the real input batch is
+        populated.  In that path confidence EMA must use positional alignment;
+        passing a shorter request-ID list would make the scheduler reject the
+        update.  Real requests still retain request-aware EMA alignment.
+        """
+        input_batch = getattr(self.runner, "input_batch", None)
+        request_ids = getattr(input_batch, "req_ids", None)
+        if request_ids is None:
+            return None
+        try:
+            if len(request_ids) < num_reqs:
+                return None
+        except TypeError:
+            return None
+        return request_ids[:num_reqs]
+
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
             self.speculative_config.disable_padded_drafter_batch
@@ -1367,7 +1386,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         last_hidden_states=last_hidden_states,
                         draft_token_ids=draft_token_ids,
                         num_reqs=num_blk,
-                        request_ids=self.runner.input_batch.req_ids[:num_blk],
+                        request_ids=self._dynamic_request_ids(num_blk),
                     )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
@@ -1387,7 +1406,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.dynamic_spec.update(
                         logits=logits,
                         num_reqs=logits.shape[0] // current_k,
-                        request_ids=self.runner.input_batch.req_ids[: logits.shape[0] // current_k],
+                        request_ids=self._dynamic_request_ids(logits.shape[0] // current_k),
                     )
 
         # Early exit if there is only one draft token to be generated.

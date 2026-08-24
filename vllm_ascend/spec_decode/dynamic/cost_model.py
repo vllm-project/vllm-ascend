@@ -175,7 +175,12 @@ class HardwareProfileCollector:
 
         profile_path = Path(path)
         profile_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = profile_path.with_suffix(profile_path.suffix + ".tmp")
+        # Each TP worker can finish startup profiling concurrently.  A shared
+        # ``.tmp`` name lets one worker replace another worker's temporary
+        # file, making the profile save fail nondeterministically.
+        temporary_path = profile_path.with_name(
+            f"{profile_path.name}.tmp.{os.getpid()}"
+        )
         temporary_path.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
