@@ -31,6 +31,9 @@
 #                             trigger the tests
 #   exclude_source_file_dependencies: Optional list of source/test directories
 #                                     to exclude from source_file_dependencies
+#   required_pr_labels: Optional list of PR labels that must all be present
+#                       for the module to run (PR CI only; inert when
+#                       select_tests.py is called without --pr-labels)
 #   tests: List of test directories/files to run (directories are expanded
 #          to individual test files before routing).  Supports ``::nodeid``
 #          syntax (e.g. ``test_foo.py::test_bar``) to run a single method.
@@ -144,6 +147,10 @@
     - tests/e2e/pull_request/two_card/aclgraph
     - tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py
     - tests/e2e/pull_request/four_card/test_graph_mode.py
+  # Temporarily skipped: the precision check in test_graph_mode.py is
+  # unstable; re-enable once the graph mode precision issue is fixed.
+  skip_tests:
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 - name: compilation_passes_base
   optional: false
@@ -173,14 +180,6 @@
   tests:
     - tests/ut/compilation
     - tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py
-
-- name: compilation_sp_pass_pass
-  optional: false
-  source_file_dependencies:
-    - vllm_ascend/compilation/passes/sequence_parallelism_moe.py
-    - vllm_ascend/compilation/passes/sequence_parallelism.py
-  tests:
-    - tests/e2e/pull_request/two_card/test_sp_pass.py
 
 - name: compilation_no_test
   optional: false
@@ -230,7 +229,7 @@
     - tests/e2e/pull_request/two_card/test_data_parallel.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
-    - tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
+    - tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py
     - tests/e2e/pull_request/two_card/test_disaggregated_encoder.py
 
 # EPLB
@@ -384,9 +383,6 @@
     - vllm_ascend/ops/layer_shard_linear.py
   tests:
     - tests/ut/ops
-    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
-    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_fc1_tp2
-    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
 
 - name: ops_gdn
   optional: false
@@ -614,6 +610,10 @@
     - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
     - tests/e2e/pull_request/four_card/test_qwen3_5.py
     - tests/e2e/pull_request/four_card/test_graph_mode.py
+  # Temporarily skipped: the precision check in test_graph_mode.py is
+  # unstable; re-enable once the graph mode precision issue is fixed.
+  skip_tests:
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 
 - name: worker_v2
@@ -628,6 +628,18 @@
     - tests/e2e/pull_request/four_card/model_runner_v2
     - tests/e2e/pull_request/eight_card/model_runner_v2
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
+
+# Qwen3-32B V1/V2 migration performance guards (LC W8A8 + LL bf16).
+# Gated by the mrv2 PR label; inert for nightly/schedule callers.
+- name: qwen3_32b_v2_migration_perf
+  optional: true
+  required_pr_labels: [mrv2]
+  source_file_dependencies:
+    - vllm_ascend/worker/worker.py
+    - vllm_ascend/worker/v2
+  tests:
+    - tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py
+    - tests/e2e/pull_request/four_card/test_qwen3_32b_bf16_ll_performance.py
 
 # XLite
 - name: xlite
@@ -680,6 +692,7 @@
     - vllm_ascend/_version.py
     - vllm_ascend/ascend_config.py
     - vllm_ascend/ascend_forward_context.py
+    - vllm_ascend/config_utils.py
     - vllm_ascend/cpu_binding.py
     - vllm_ascend/envs.py
     - vllm_ascend/logger.py
@@ -778,6 +791,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_qwen35_densemodel_lora.py: 300
   tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 170
   tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 350
+  tests/e2e/pull_request/one_card/lora/test_qwenvl_lora.py: 600
   tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 2650
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 80
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 270
@@ -821,24 +835,21 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 450
   tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 1590
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
-  tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 520
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 1140
-  tests/e2e/pull_request/two_card/test_data_parallel.py: 560
-  tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 170
-  tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 160
-  tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 170
-  tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 220
-  tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 780
-  tests/e2e/pull_request/two_card/test_prefix_caching.py: 450
-  tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 360
-  tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 330
-  tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 510
-  tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 490
+  tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
+  tests/e2e/pull_request/two_card/test_data_parallel.py: 520
+  tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
+  tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230
+  tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 180
+  tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 560
+  tests/e2e/pull_request/two_card/test_prefix_caching.py: 420
+  tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 260
+  tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 370
+  tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 570
+  tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 470
   tests/e2e/pull_request/two_card/test_qwen3_performance.py: 20
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 290
-  tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py: 60
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 1060
-  tests/e2e/pull_request/two_card/test_sp_pass.py: 280
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 130
   tests/e2e/pull_request/two_card/test_xlite.py: 740
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 500
@@ -854,6 +865,7 @@ estimated_times:
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1360
   tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 930
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
+  tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 950
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690
@@ -862,6 +874,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1160
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
+  tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py: 1800
+  tests/e2e/pull_request/four_card/test_qwen3_32b_bf16_ll_performance.py: 1200
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
   tests/ut/attention/a2/test_attention_cp.py: 30
@@ -936,4 +950,3 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
-

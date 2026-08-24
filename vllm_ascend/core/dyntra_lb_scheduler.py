@@ -134,7 +134,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         additional_config = vllm_config.additional_config or {}
         scheduler_extension_config = additional_config.get("scheduler_config") or {}
         dyntra_lb_user_config = scheduler_extension_config.get("dyntra_lb_config") or {}
-        self._enable_diagnostics = DyntraLBConfig(dyntra_lb_user_config).enable_diagnostics
+        self._enable_diagnostics = DyntraLBConfig(**dyntra_lb_user_config).enable_diagnostics
         self.modifications: dict | None = None
         self.lb_freeze: bool = False
         self._lb_paused_req_ids: set[str] = set()
