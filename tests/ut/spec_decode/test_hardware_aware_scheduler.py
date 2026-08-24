@@ -430,13 +430,13 @@ def test_confidence_ema_follows_request_ids_when_batch_reorders() -> None:
     )
     assert first.shape == (2,)
 
+    second_probs = torch.tensor([[0.6, 0.6], [0.8, 0.8]])
     scheduler._update_from_token_probs(
-        torch.tensor([[0.6, 0.6], [0.8, 0.8]]),
+        second_probs,
         request_ids=["b", "a"],
     )
-    smoothed = scheduler._token_probs_buffer[:2]
-    assert torch.allclose(smoothed[0], torch.tensor([0.4, 0.4]))
-    assert torch.allclose(smoothed[1], torch.tensor([0.85, 0.8]))
+    assert torch.allclose(second_probs[0], torch.tensor([0.4, 0.4]))
+    assert torch.allclose(second_probs[1], torch.tensor([0.85, 0.8]))
 
 
 def test_auto_profile_scheduler_accepts_runtime_profile() -> None:
