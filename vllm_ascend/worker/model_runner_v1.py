@@ -4807,19 +4807,18 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_support = cg_support
                     min_cg_attn_backend = attn_backend.__name__
 
-        with update_pass_config(self):
-            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                min_cg_support=min_cg_support,
-                min_cg_attn_backend=min_cg_attn_backend,
-                uniform_decode_query_len=self.uniform_decode_query_len,
-                use_v2_model_runner=False,
-                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
-                kv_cache_config=self.kv_cache_config,
-                max_num_reqs=self.max_num_reqs,
-            )
-            self.cudagraph_dispatcher.initialize_cudagraph_keys(
-                cudagraph_mode, self.uniform_decode_query_len
-            )
+        cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+            min_cg_support=min_cg_support,
+            min_cg_attn_backend=min_cg_attn_backend,
+            uniform_decode_query_len=self.uniform_decode_query_len,
+            use_v2_model_runner=False,
+            tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+            kv_cache_config=self.kv_cache_config,
+            max_num_reqs=self.max_num_reqs,
+        )
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(
+            cudagraph_mode, self.uniform_decode_query_len
+        )
 
         if (
             self.speculative_config
@@ -4994,13 +4993,3 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         _vllm_encoder_cudagraph.EncoderCudaGraphManager = _encoder_mgr_orig
         if target_module is not None:
             setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
-
-
-@contextmanager
-def update_pass_config(model_runner):
-    try:
-        original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
-        model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)
-        yield
-    finally:
-        model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp
