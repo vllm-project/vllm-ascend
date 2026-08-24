@@ -259,23 +259,82 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
-    def _prepare_prefill_inputs(self, *args, **kwargs) -> None:
-        kwargs.pop("idx_mapping_np")
-        kwargs.pop("query_start_loc_np")
-        prepare_prefill_inputs(*args, **kwargs)
+    def _prepare_prefill_inputs(
+        self,
+        input_ids: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        all_token_ids: torch.Tensor,
+        prefill_len: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        *,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> None:
+        del idx_mapping_np, query_start_loc_np
+        prepare_prefill_inputs(
+            input_ids,
+            next_prefill_tokens,
+            idx_mapping,
+            query_start_loc,
+            all_token_ids,
+            prefill_len,
+            num_computed_tokens,
+        )
 
-    def _prepare_pos_seq_lens(self, *args, **kwargs) -> None:
-        kwargs.pop("idx_mapping_np")
-        kwargs.pop("query_start_loc_np")
-        kwargs.pop("num_scheduled_tokens")
-        prepare_pos_seq_lens(*args, **kwargs)
+    def _prepare_pos_seq_lens(
+        self,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        positions: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+    ) -> None:
+        del idx_mapping_np, query_start_loc_np, num_scheduled_tokens
+        prepare_pos_seq_lens(
+            idx_mapping,
+            query_start_loc,
+            num_computed_tokens,
+            positions,
+            seq_lens,
+        )
 
-    def _combine_sampled_and_draft_tokens(self, *args, **kwargs):
-        kwargs.pop("idx_mapping_np")
-        kwargs.pop("query_start_loc_np")
-        kwargs.pop("seq_lens_np")
-        kwargs.pop("prefill_len_np")
-        return combine_sampled_and_draft_tokens(*args, **kwargs)
+    def _combine_sampled_and_draft_tokens(
+        self,
+        input_ids: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        last_sampled_tokens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        prefill_len: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        num_logits: int,
+        num_bonus_tokens: int,
+        *,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        seq_lens_np: np.ndarray,
+        prefill_len_np: np.ndarray,
+    ) -> torch.Tensor:
+        del idx_mapping_np, query_start_loc_np, seq_lens_np, prefill_len_np
+        return combine_sampled_and_draft_tokens(
+            input_ids,
+            idx_mapping,
+            last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            prefill_len,
+            draft_tokens,
+            cu_num_logits,
+            num_logits,
+            num_bonus_tokens,
+        )
 
     if vllm_version_is("0.27.1"):
 
