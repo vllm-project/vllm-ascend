@@ -48,7 +48,26 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 4. File: platform/patch_distributed.py**
+# ** 2. File: platform/patch_camem_allocator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.model.is_cumem_allocator_available`
+#    Why:
+#       Upstream vLLM main enables and validates the CUDA/ROCm CuMem allocator
+#       when `enable_sleep_mode=True`. Ascend implements sleep mode with its own
+#       CaMem allocator, so the upstream CuMem-only availability check fails
+#       during `ModelConfig` validation before Ascend worker code can run.
+#    How:
+#       Treat Ascend's platform sleep allocator as satisfying the allocator
+#       availability check, while preserving the original vLLM CuMem check as
+#       fallback.
+#    Related PR (if no, explain why):
+#       No, this maps an upstream CUDA/ROCm allocator validation to Ascend's
+#       backend-specific CaMem implementation.
+#    Future Plan:
+#       Remove this patch if upstream exposes a platform allocator capability hook
+#       for sleep mode validation.
+#
+# ** 3. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
 #    Why:
@@ -60,7 +79,7 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** 5. File: platform/patch_dp_device_ids.py**
+# ** 4. File: platform/patch_dp_device_ids.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.dp_utils.get_physical_gpu_ids_for_local_dp_rank`
 #    Why:

@@ -55,8 +55,6 @@ def _ensure_global_patch():
     if _GLOBAL_PATCH_APPLIED:
         return
 
-    import vllm_ascend.patch.platform.patch_breakable_cudagraph  # noqa: F401
-
     from vllm_ascend.utils import adapt_patch
 
     adapt_patch(is_global_patch=True)
