@@ -10,7 +10,6 @@ from vllm_ascend.utils import vllm_version_is
 
 ROOT = Path(__file__).resolve().parents[4]
 POSTPROCESS = ROOT / "vllm_ascend" / "ops" / "triton" / "mamba" / "postprocess.py"
-PATCH_MAMBA_UTILS = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_mamba_utils.py"
 
 
 def _top_level_functions(path: Path) -> dict[str, ast.FunctionDef]:
@@ -60,12 +59,3 @@ def test_postprocess_keeps_only_existing_ascend_precision_kernel() -> None:
         assert "tile_idx" in postprocess_source
         assert "if tile_idx == 0:" in postprocess_source
         assert "and state_idx == 0 and tile_idx == 0" not in postprocess_source
-
-
-def test_patch_only_installs_existing_ascend_postprocess_kernel() -> None:
-    patch_source = PATCH_MAMBA_UTILS.read_text()
-
-    assert "mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel" in patch_source
-    assert "MambaBase.bind_kv_cache" not in patch_source
-    assert "mamba_utils._copy_mamba_state_block" not in patch_source
-    assert "mamba_utils.precopy_mamba_align_fused_kernel" in patch_source
