@@ -1,10 +1,10 @@
 ## 1. Freeze the Baseline and Reproduce Native FULL
 
-- [ ] 1.1 Record commit `1a8feb60`, vLLM/CANN/driver/torch-npu versions, model hashes, dataset hash, NPU inventory, and process-free card selection in a Task 1 evidence report.
-- [ ] 1.2 Run the existing focused Eager, Piecewise, FULL_DECODE_ONLY, graph-input-contract, proposer, and 310P model-runner unit suites unchanged and preserve exact output.
-- [ ] 1.3 Run matched 4B TP1 Eager, Piecewise, and FULL_DECODE_ONLY C1 controls on server 1 and record health, success count, throughput, acceptance length, and graph evidence where applicable.
-- [ ] 1.4 Run the unchanged 4B TP1 DFlash `FULL` startup and one C1 request in strict evidence mode, stop at the first failure, and classify requested/resolved/runtime modes, component, descriptor, execution signature, rank, and first failing operation.
-- [ ] 1.5 Compare the fresh trace with historical hypotheses without copying old code, and mark each hypothesis confirmed, disproved, or not yet reached.
+- [x] 1.1 Record commit `1a8feb60`, vLLM/CANN/driver/torch-npu versions, model hashes, dataset hash, NPU inventory, and process-free card selection in a Task 1 evidence report.
+- [x] 1.2 Run the existing focused Eager, Piecewise, FULL_DECODE_ONLY, graph-input-contract, proposer, and 310P model-runner unit suites unchanged and preserve exact output.
+- [x] 1.3 Run matched 4B TP1 Eager, Piecewise, and FULL_DECODE_ONLY C1 controls on server 1 and record health, success count, throughput, acceptance length, and graph evidence where applicable.
+- [x] 1.4 Run the unchanged 4B TP1 DFlash `FULL` startup and one C1 request in strict evidence mode, stop at the first failure, and classify requested/resolved/runtime modes, component, descriptor, execution signature, rank, and first failing operation.
+- [x] 1.5 Compare the fresh trace with historical hypotheses without copying old code, and mark each hypothesis confirmed, disproved, or not yet reached.
 
 ## 2. Add Exact Activation and Dispatch Policy
 
