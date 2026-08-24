@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -287,6 +288,7 @@ class TestAscendMLAMetadata(TestBase):
         self.assertEqual(metadata.head_dim, head_dim)
         self.assertEqual(metadata.attn_mask, attn_mask)
         self.assertEqual(metadata.attn_state, attn_state)
+        self.assertTrue(metadata.causal)
         self.assertEqual(metadata.decode, decode)
         self.assertEqual(metadata.prefill, prefill)
 
@@ -324,6 +326,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+        mock_vllm_config.model_config.hf_text_config.mla_use_nope = False
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
@@ -333,10 +336,110 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         ascend_config = MagicMock()
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+            builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
 
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
+
+    def test_metadata_builder_uses_draft_layer_rope_mode(self):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
+            qk_rope_head_dim=64,
+            mla_use_nope=True,
+        )
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_vllm_config.speculative_config = None
+        mock_vllm_config.compilation_config.static_forward_context = {
+            "draft.self_attn": SimpleNamespace(
+                impl=SimpleNamespace(use_mla_rope=True),
+            ),
+        }
+
+        with patch(
+            "vllm_ascend.attention.mla_v1.get_ascend_config",
+            return_value=MagicMock(),
+        ):
+            builder = AscendMLAMetadataBuilder(
+                None,
+                ["draft.self_attn"],
+                mock_vllm_config,
+                "cpu",
+            )
+
+        self.assertTrue(builder.use_mla_rope)
+
+    def test_metadata_builder_uses_target_layer_nope_mode(self):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
+            qk_rope_head_dim=64,
+            mla_use_nope=False,
+        )
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_vllm_config.speculative_config = None
+        mock_vllm_config.compilation_config.static_forward_context = {
+            "target.self_attn": SimpleNamespace(
+                impl=SimpleNamespace(use_mla_rope=False),
+            ),
+        }
+
+        with patch(
+            "vllm_ascend.attention.mla_v1.get_ascend_config",
+            return_value=MagicMock(),
+        ):
+            builder = AscendMLAMetadataBuilder(
+                None,
+                ["target.self_attn"],
+                mock_vllm_config,
+                "cpu",
+            )
+
+        self.assertFalse(builder.use_mla_rope)
+
+    def test_metadata_builder_rejects_mixed_rope_modes(self):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
+            qk_rope_head_dim=64,
+            mla_use_nope=False,
+        )
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_vllm_config.speculative_config = None
+        mock_vllm_config.compilation_config.static_forward_context = {
+            "rope.self_attn": SimpleNamespace(
+                impl=SimpleNamespace(use_mla_rope=True),
+            ),
+            "nope.self_attn": SimpleNamespace(
+                impl=SimpleNamespace(use_mla_rope=False),
+            ),
+        }
+
+        with (
+            patch(
+                "vllm_ascend.attention.mla_v1.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+            self.assertRaisesRegex(AssertionError, "separate KV cache groups"),
+        ):
+            AscendMLAMetadataBuilder(
+                None,
+                ["rope.self_attn", "nope.self_attn"],
+                mock_vllm_config,
+                "cpu",
+            )
 
     def test_ascend_mla_metadata_builder_spec_decode(self):
         mock_vllm_config = MagicMock()
@@ -355,7 +458,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         ascend_config = MagicMock()
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+            builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
 
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
@@ -367,6 +470,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+        mock_vllm_config.model_config.hf_text_config.mla_use_nope = False
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
@@ -379,7 +483,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_spec_config.disable_padded_drafter_batch = True
         mock_vllm_config.speculative_config = mock_spec_config
 
-        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+        builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
         common_metadata = MagicMock()
         common_metadata.graph_pad_size = 8
         common_metadata.num_reqs = 4
@@ -390,10 +494,12 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.positions = torch.Tensor([1, 2, 3, 4, 5, 6]).int()
+        common_metadata.causal = False
         block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
         common_metadata.block_table_tensor = block_table
         mock_get_cos_and_sin_mla.return_value = (torch.tensor([6, 6]), torch.Tensor([6, 6]))
         metadata = builder.build(0, common_metadata)
+        self.assertFalse(metadata.causal)
 
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
         self.assertEqual(metadata.decode.block_table.shape[0], 8)
@@ -414,7 +520,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.speculative_config = None
 
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+            builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
             builder.decode_threshold = 1
 
         input_batch = MagicMock()
@@ -465,7 +571,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         mock_vllm_config.speculative_config = None
 
-        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+        builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_actual_tokens = 100
 
@@ -485,7 +591,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_device = "cpu"
         mock_vllm_config.speculative_config = None
 
-        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+        builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
         input_seq_lens = [1, 2, 4, 5]
         expect_output = [1, 2, 4, 5, 6, 6, 7, 8]
         num_reqs = 4
@@ -509,7 +615,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata = MagicMock()
         common_metadata.actual_seq_lengths_q = [2, 4, 6, 8]
 
-        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+        builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
         input_seq_lens = [2, 4, 6]
         expect_output = [2, 4, 6, 8]
         num_reqs = 3
@@ -535,7 +641,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata = MagicMock()
         common_metadata.actual_seq_lengths_q = [2, 4, 6, 100]
 
-        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
+        builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
         input_seq_lens = [2, 4, 6]
         num_reqs = 3
         num_reqs_pad_size = 1
@@ -979,6 +1085,8 @@ class TestAscendMLAImpl(TestBase):
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": kv_a_layernorm,
             "rotary_emb": MagicMock(),
+            "g_proj": None,
+            "use_mla_rope": True,
         }
 
         self.impl = AscendMLAImpl(
@@ -1037,6 +1145,8 @@ class TestAscendMLAImpl(TestBase):
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": MagicMock(),
             "rotary_emb": MagicMock(),
+            "g_proj": None,
+            "use_mla_rope": True,
         }
         impl = AscendMLAImpl(
             num_heads=20,
@@ -1153,7 +1263,6 @@ class TestAscendMLAImpl(TestBase):
         mock_attn_metadata.decode.seq_lens_list = [10, 20, 30]
         mock_attn_metadata.decode.actual_seq_lengths_q = [10, 20, 30]
         mock_attn_metadata.decode.block_table = torch.randint(0, 100, (3, 4))
-
         mock_graph_params = MagicMock()
 
         mock_graph_params.attn_params = {
@@ -1195,13 +1304,14 @@ class TestAscendMLAImpl(TestBase):
         mock_speculative_config = MagicMock()
         mock_speculative_config.disable_padded_drafter_batch = False
 
-        # Test non-draft model
-        mock_ctx.is_draft_model = False
+        mock_ctx.is_draft_model = True
+        mock_ctx.is_draft_model_prefill = False
         AscendMLAImpl.update_graph_params(
             mock_update_stream,
             mock_forward_context,
             100,
             speculative_config=mock_speculative_config,
+            draft_attn_metadatas=[{"layer_0": mock_attn_metadata}],
         )
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -1398,6 +1508,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.weight.data = torch.randn(128, 128)
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
         self.impl.q_lora_rank = 32
+        self.impl._mlapo_quant_type = object
 
         from vllm_ascend.attention.mla_v1 import AscendDeviceType
 
@@ -1483,6 +1594,8 @@ class TestAscendMLAImpl(TestBase):
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": MagicMock(),
             "rotary_emb": MagicMock(),
+            "g_proj": None,
+            "use_mla_rope": True,
         }
         impl = AscendMLAImpl(
             num_heads=num_heads,
@@ -1829,6 +1942,8 @@ class TestAscendMLAImpl(TestBase):
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": MagicMock(),
             "rotary_emb": MagicMock(),
+            "g_proj": None,
+            "use_mla_rope": True,
         }
         impl = AscendMLAImpl(
             num_heads=num_heads,
@@ -2108,6 +2223,8 @@ class TestAscendMLAImpl(TestBase):
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": MagicMock(),
             "rotary_emb": MagicMock(),
+            "g_proj": None,
+            "use_mla_rope": True,
         }
         impl = AscendMLAImpl(
             num_heads=num_heads,
@@ -2182,6 +2299,8 @@ class TestAscendMLAImpl(TestBase):
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": MagicMock(),
             "rotary_emb": MagicMock(),
+            "g_proj": None,
+            "use_mla_rope": True,
         }
         impl = AscendMLAImpl(
             num_heads=num_heads,
