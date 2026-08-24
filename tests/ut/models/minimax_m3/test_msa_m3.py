@@ -882,16 +882,30 @@ def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
     assert kwargs["sparse_mode"] == 0
 
 
-def test_ascendc_index_prefill_wraps_score_and_topk() -> None:
+@pytest.mark.parametrize(
+    ("max_seq_len", "expected_score_width"),
+    [
+        (1, 16),
+        (128, 16),
+        (129, 16),
+        (2048, 16),
+        (2049, 32),
+        (133000, 1040),
+    ],
+)
+def test_ascendc_index_prefill_limits_score_width_for_topk(
+    max_seq_len: int,
+    expected_score_width: int,
+) -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    block_table = torch.arange(1040, dtype=torch.int32).view(1, 1040)
     cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
     seq_lens = torch.tensor([129], dtype=torch.int32)
     context_lens = torch.tensor([128], dtype=torch.int32)
     start_loc = torch.tensor([1], dtype=torch.int32)
     causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
-    score = torch.zeros(2, 1, 4)
+    score = torch.zeros(2, 1, 1040)
     expected = torch.zeros(2, 1, 2, dtype=torch.int32)
 
     with (
@@ -914,6 +928,7 @@ def test_ascendc_index_prefill_wraps_score_and_topk() -> None:
             start_loc,
             causal_mask,
             max_query_len=1,
+            max_seq_len=max_seq_len,
             topk=2,
             init_blocks=1,
             local_blocks=1,
@@ -931,15 +946,14 @@ def test_ascendc_index_prefill_wraps_score_and_topk() -> None:
         init_blocks=1,
         local_blocks=1,
     )
-    mock_topk.assert_called_once_with(
-        score,
-        cu_seqlens_q,
-        context_lens,
-        1,
-        2,
-        1,
-        1,
-    )
+    mock_topk.assert_called_once()
+    topk_args = mock_topk.call_args.args
+    limited_score = topk_args[0]
+    assert limited_score.shape == (2, 1, expected_score_width)
+    assert limited_score.data_ptr() == score.data_ptr()
+    assert topk_args[1] is cu_seqlens_q
+    assert topk_args[2] is context_lens
+    assert topk_args[3:] == (1, 2, 1, 1)
 
 
 def test_ascendc_index_decode_wraps_score_candidates() -> None:

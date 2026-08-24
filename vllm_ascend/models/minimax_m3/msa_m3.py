@@ -565,6 +565,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     p.start_loc,
                     index_md.causal_mask,
                     max_query_len=p.max_query_len,
+                    max_seq_len=p.max_seq_len,
                     topk=self.topk_blocks,
                     init_blocks=self.init_blocks,
                     local_blocks=self.local_blocks,

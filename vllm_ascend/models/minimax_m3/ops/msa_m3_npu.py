@@ -16,6 +16,7 @@ from vllm_ascend.utils import (
 
 _SPARSE_ATTN_INNER_PRECISE = 4
 _MSA_INDEX_BLOCK_SIZE = 128
+_MSA_SCORE_BLOCK_ALIGNMENT = 16
 _ASCEND_DEVICE_TYPE = get_ascend_device_type()
 
 if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
@@ -194,6 +195,7 @@ def minimax_m3_index_prefill(
     causal_mask: torch.Tensor,
     *,
     max_query_len: int,
+    max_seq_len: int,
     topk: int,
     init_blocks: int,
     local_blocks: int,
@@ -210,6 +212,13 @@ def minimax_m3_index_prefill(
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
+    logical_block_count = (
+        max_seq_len + _MSA_INDEX_BLOCK_SIZE - 1
+    ) // _MSA_INDEX_BLOCK_SIZE
+    logical_score_width = (
+        logical_block_count + _MSA_SCORE_BLOCK_ALIGNMENT - 1
+    ) // _MSA_SCORE_BLOCK_ALIGNMENT * _MSA_SCORE_BLOCK_ALIGNMENT
+    score = score[..., :logical_score_width]
     return _minimax_m3_index_prefill_topk(
         score,
         cu_seqlens_q,
