@@ -28,6 +28,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -248,7 +249,11 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     ("replicated_indexer", "expected_size"),
     [(False, 1), (True, 4)],
 )
-def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_indexer, expected_size):
+@pytest.mark.parametrize("li_c8", [False, True])
+@pytest.mark.parametrize("owner", ["unpaired", "static_shared", "mtp", "regular"])
+def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
+    monkeypatch, replicated_indexer, expected_size, li_c8, owner
+):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
     torch.nn.Module.__init__(indexer_module)
@@ -257,6 +262,15 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
         "get_kv_cache_spec",
         lambda _config: object(),
     )
+    layers = {layer_name: indexer_module}
+    if owner != "unpaired":
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl._is_mtp_layer = owner == "mtp"
+        impl.skip_topk = owner != "regular"
+        layers[layer_name.replace(".indexer.k_cache", ".attn")] = SimpleNamespace(
+            impl=impl, get_kv_cache_spec=lambda _config: None
+        )
 
     vllm_config = SimpleNamespace(
         additional_config={},
@@ -270,7 +284,7 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
     monkeypatch.setattr(
         attn_utils,
         "get_layers_from_vllm_config",
-        lambda *_args, **_kwargs: {layer_name: indexer_module},
+        lambda *_args, **_kwargs: layers,
     )
     monkeypatch.setattr(
         attn_utils,
@@ -285,13 +299,19 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
     monkeypatch.setattr(
         attn_utils,
         "get_ascend_config",
-        lambda: SimpleNamespace(is_sparse_li_c8_layer=lambda _layer_name: False),
+        lambda: SimpleNamespace(is_sparse_li_c8_layer=lambda _layer_name: li_c8),
     )
 
-    spec = attn_utils.get_kv_cache_spec(vllm_config)[layer_name]
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+    if owner == "static_shared":
+        assert layer_name not in specs
+        return
+    spec = specs[layer_name]
 
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.sfa_dcp_replicated_indexer_size == expected_size
+    assert spec.dtype == (torch.int8 if li_c8 else torch.bfloat16)
+    assert spec.scale_dim == (1 if li_c8 else 0)
 
 
 @pytest.mark.parametrize(
