@@ -4,7 +4,7 @@ import pytest
 import torch
 from vllm.triton_utils import triton
 
-from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
+from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel, prepare_next_token_ids_padded
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.llm_base_proposer import _PREPARE_INPUTS_BLOCK_SIZE as BLOCK_SIZE
 
@@ -74,3 +74,24 @@ def test_prepare_inputs_padded(num_reqs):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("num_reqs", [1, 128])
+def test_prepare_next_token_ids_padded(num_reqs):
+    vocab_size, num_tokens = 1000, 5
+    sampled = torch.randint(0, vocab_size, (num_reqs, num_tokens), device="npu")
+    valid_lens = torch.arange(num_reqs, device="npu") % (num_tokens + 1)
+    sampled[torch.arange(num_tokens, device="npu") >= valid_lens[:, None]] = -1
+    backup = torch.arange(num_reqs, dtype=torch.int64, device="npu")
+    discard = torch.arange(num_reqs, device="npu") % 3 == 0
+
+    expected_count = ((sampled != -1) & (sampled < vocab_size)).sum(1)
+    expected_count[discard] = 0
+    expected = torch.where(
+        expected_count > 0,
+        sampled.gather(1, (expected_count - 1).clamp_min(0).unsqueeze(1)).squeeze(1),
+        backup,
+    )
+    actual, actual_count = prepare_next_token_ids_padded(sampled, backup, discard, vocab_size)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_count, expected_count)
