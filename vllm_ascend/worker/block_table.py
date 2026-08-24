@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 import torch
-from vllm.logger import logger
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
