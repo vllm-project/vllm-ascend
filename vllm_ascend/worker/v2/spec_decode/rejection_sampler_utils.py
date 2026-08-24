@@ -51,6 +51,10 @@ def _npu_gumbel_block_argmax(
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
 ):
+    # Convert token_idx to int64 before pointer arithmetic so the offset
+    # does not overflow int32 at large token counts (matches the other
+    # kernels that cast tl.program_id(0) up front).
+    token_idx = token_idx.to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
