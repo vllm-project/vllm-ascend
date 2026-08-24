@@ -13,9 +13,17 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
-from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    copy_and_expand_dflash_and_dspark_inputs_kernel,
+)
+from vllm_ascend.spec_decode.dflash_proposer import (
+    AscendDflashProposer,
+    _compute_num_programs,
+)
+from vllm_ascend.spec_decode.utils import (
+    DynamicSpecScheduler,
+    _maybe_eager_context,
+)
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -72,8 +80,14 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 device=device,
             )
-        # DSpark runs eager only (Ascend cudagraph unsupported on this path).
-        self.use_cuda_graph = False
+
+        # ``use_cuda_graph`` is initialized by the base proposer from the
+        # target graph mode and speculative_config.enforce_eager. Keep that
+        # decision instead of forcing DSpark eager here. When the resulting
+        # path is eager, disable compilation while constructing the draft
+        # model as well because its VllmConfig is derived from the target.
+        if not self.use_cuda_graph:
+            self.maybe_eager_context = _maybe_eager_context(vllm_config)
         # Max query tokens depend on whether sampling from anchor or not.
         self.max_query_tokens = self.max_batch_size * self.num_query_per_req
         # Position ids for the draft query block [max_query_tokens].
@@ -286,6 +300,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 # Block table
                 block_table_ptr=gid_block_table,
                 block_table_stride=gid_block_table.stride(0),
+                block_table_num_cols=gid_block_table.shape[1],
                 # Metadata
                 query_start_loc_ptr=cad.query_start_loc,
                 seq_lens_ptr=cad.seq_lens,

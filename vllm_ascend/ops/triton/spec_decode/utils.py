@@ -81,6 +81,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     # Block table
     block_table_ptr,  # [max_reqs, max_blocks]
     block_table_stride,  # stride of block_table dim 0 (in elements)
+    block_table_num_cols,  # number of valid columns in each block-table row
     # Metadata
     query_start_loc_ptr,  # [num_reqs + 1]
     seq_lens_ptr,  # [num_reqs]
@@ -114,8 +115,38 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         offs = block_start + tl.arange(0, TILE_SIZE)
         mask = offs < total_input_tokens
         pos = tl.load(target_positions_ptr + offs, mask=mask)
-        tl.store(out_context_positions_ptr + offs, pos, mask=mask)
         slot = tl.load(context_slot_mapping_ptr + offs, mask=mask)
+        if HAS_NUM_REJECTED:
+            # Resolve each flattened context offset back to its request. This
+            # branch is compiled out for DFlash and the no-rejection fast path.
+            context_req_idx = tl.zeros([TILE_SIZE], dtype=tl.int32)
+            for req_boundary in range(1, batch_size):
+                req_start = tl.load(query_start_loc_ptr + req_boundary)
+                context_req_idx += (offs >= req_start).to(tl.int32)
+            context_end = tl.load(
+                query_start_loc_ptr + context_req_idx + 1,
+                mask=mask,
+                other=0,
+            )
+            context_start = tl.load(
+                query_start_loc_ptr + context_req_idx,
+                mask=mask,
+                other=0,
+            )
+            context_num_tokens = tl.maximum(context_end - context_start, 0)
+            context_num_rejected = tl.load(
+                num_rejected_tokens_ptr + context_req_idx,
+                mask=mask,
+                other=0,
+            )
+            context_num_rejected = tl.minimum(
+                tl.maximum(context_num_rejected, 0),
+                context_num_tokens,
+            )
+            is_valid_context = offs < context_end - context_num_rejected
+            pos = tl.where(is_valid_context, pos, -1)
+            slot = tl.where(is_valid_context, slot, -1)
+        tl.store(out_context_positions_ptr + offs, pos, mask=mask)
         tl.store(out_context_slot_mapping_ptr + offs, slot, mask=mask)
         block_start += block_start_step
 
@@ -131,16 +162,49 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         req_idx = offs // num_query_per_req
         q_idx = offs % num_query_per_req
 
-        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1, mask=mask, other=0)
+        ctx_start = tl.minimum(
+            tl.maximum(
+                tl.load(query_start_loc_ptr + req_idx, mask=mask, other=0),
+                0,
+            ),
+            total_input_tokens,
+        )
+        ctx_end = tl.minimum(
+            tl.maximum(
+                tl.load(
+                    query_start_loc_ptr + req_idx + 1,
+                    mask=mask,
+                    other=0,
+                ),
+                ctx_start,
+            ),
+            total_input_tokens,
+        )
+        num_ctx = ctx_end - ctx_start
         if HAS_NUM_REJECTED:
-            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx, mask=mask, other=0)
+            num_rejected = tl.load(
+                num_rejected_tokens_ptr + req_idx,
+                mask=mask,
+                other=0,
+            )
+            num_rejected = tl.minimum(tl.maximum(num_rejected, 0), num_ctx)
         else:
             num_rejected = tl.zeros([TILE_SIZE], dtype=tl.int32)
         valid_ctx_end = ctx_end - num_rejected
 
         seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
-        effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
+        effective_seq_len = tl.maximum(seq_len - num_rejected, 0)
+        last_valid_idx = tl.maximum(valid_ctx_end - 1, ctx_start)
+        last_pos = tl.load(
+            target_positions_ptr + last_valid_idx,
+            mask=mask,
+            other=0,
+        )
+        last_pos = tl.where(
+            valid_ctx_end > ctx_start,
+            last_pos,
+            last_pos - 1,
+        )
 
         # RoPE position id of the query token, derived from the last context
         # token's position. Written to out_query_positions for position embeddings.
@@ -156,10 +220,27 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         # identical, so this only changes behaviour for multimodal inputs.
         query_kv_slot_pos = effective_seq_len + q_idx
         block_num_q = query_kv_slot_pos // block_size
-        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
-            tl.int64
+        valid_block_num = (
+            (block_num_q >= 0)
+            & (block_num_q < block_table_num_cols)
         )
+        safe_block_num = tl.minimum(
+            tl.maximum(block_num_q, 0),
+            block_table_num_cols - 1,
+        )
+        block_id_q = tl.load(
+            block_table_ptr
+            + req_idx * block_table_stride
+            + safe_block_num,
+            mask=mask,
+            other=-1,
+        ).to(tl.int64)
         slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
+        slot_q = tl.where(
+            valid_block_num & (block_id_q >= 0),
+            slot_q,
+            -1,
+        )
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
