@@ -325,6 +325,16 @@ class DynamicSpecScheduler:
                 "min_verify_tokens must be between 0 and num_speculative_tokens"
             )
 
+        # Request-to-prefix mapping is lowered to device operators on NPU.
+        # Keep an explicit escape hatch for bring-up and A/B comparisons; the
+        # default is enabled only for the hardware-aware policy.
+        self.device_allocation_enabled = bool(
+            method_params.get(
+                "device_allocation_enabled",
+                self.policy_name == "hardware_aware",
+            )
+        )
+
         # Confidence calibration is a no-op unless temperatures are supplied
         # explicitly or in the hardware profile.
         self.cost_model: HardwareCostModel | None = None
@@ -420,16 +430,6 @@ class DynamicSpecScheduler:
         )
         if self.hybrid_full_width_goodput_margin < 0.0:
             raise ValueError("hybrid_full_width_goodput_margin must be >= 0")
-
-        # Request-to-prefix mapping is lowered to device operators on NPU.
-        # Keep an explicit escape hatch for bring-up and A/B comparisons; the
-        # default is enabled only for the hardware-aware policy.
-        self.device_allocation_enabled = bool(
-            method_params.get(
-                "device_allocation_enabled",
-                self.policy_name == "hardware_aware",
-            )
-        )
 
         self._steps_since_budget_update = 0
 
