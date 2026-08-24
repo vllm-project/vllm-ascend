@@ -1380,7 +1380,35 @@
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
 #
-#   3. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
+#   3. `vllm.v1.worker.gpu.sample.output._pack_sampling_mask_kernel` and
+#      `SamplingMaskTensors.from_logits`
+#    Why:
+#       (1) The upstream kernel sums an int1 tensor (`tl.sum(keep)`) before
+#       casting to int32, which native CUDA Triton upcasts automatically.
+#       triton-ascend does not upcast, so `counts` is truncated to 0/1 and the
+#       sampling-mask replay (mask_reply) returns wrong candidate sets on NPU.
+#       (2) The upstream `from_logits` launcher hard-codes `BLOCK_SIZE=8192`,
+#       which the Ascend backend cannot launch. The tightest constraint is the
+#       non-contiguous (strided/gather) load path, whose max block is far
+#       smaller than a contiguous load's, so the block must be reduced to 1024.
+#    How:
+#       Rebind `output._pack_sampling_mask_kernel` to the Ascend copy in
+#       `vllm_ascend/ops/triton/v2/sample/pack_sampling_mask.py`, which casts
+#       `keep` to int32 before the reduction (`tl.sum(keep.to(tl.int32))`).
+#       Also rebind `output.SamplingMaskTensors.from_logits` to the module's
+#       `sampling_mask_from_logits`, which launches with the reduced
+#       `SAMPLING_MASK_BLOCK_SIZE` (1024) instead of 8192.
+#    Test:
+#       Precision test added at
+#       tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pack_sampling_mask.py
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend backend compatibility patch.
+#    Future Plan:
+#       Remove once triton-ascend upcasts int1 reductions and supports the
+#       upstream BLOCK_SIZE, or vLLM adds a backend-dispatch mechanism for
+#       this kernel.
+# 
+#   4. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
 #      `vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel`
 #    Why:
 #       The upstream thinking-budget kernels expose two independent

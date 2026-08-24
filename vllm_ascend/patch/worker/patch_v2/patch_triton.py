@@ -2,16 +2,7 @@ import vllm.v1.worker.gpu.spec_decode.speculator as base_speculator
 from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu import structured_outputs
-from vllm.v1.worker.gpu.sample import (
-    bad_words,
-    gumbel,
-    logprob,
-    penalties,
-    prompt_logprob,
-    sampler,
-    states,
-    thinking_budget,
-)
+from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, output, penalties, prompt_logprob, sampler, states, thinking_budget
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
@@ -22,6 +13,10 @@ from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_ke
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
+from vllm_ascend.ops.triton.v2.sample.pack_sampling_mask import (
+    _pack_sampling_mask_kernel,
+    sampling_mask_from_logits,
+)
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
@@ -61,6 +56,8 @@ sampler.gumbel_sample = categorical_sample
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
+output._pack_sampling_mask_kernel = _pack_sampling_mask_kernel
+output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits)
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
 # support the upstream implementation of fill_logprob_token_ids_kernel.
 # For now, use the Ascend-specific implementation.
