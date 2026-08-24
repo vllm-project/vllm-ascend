@@ -231,11 +231,13 @@ def _deepseek_layer_forward(
 
 
 def sp_with_pp_enabled(parallel_config) -> bool:
+    # Active for any PP size when SP-MoE is on. For PP > 1 it enables the
+    # combination (upstream hard-disables it); for PP = 1 it routes the
+    # layer forwards through the patched copies, whose small-batch
+    # downgrade avoids the NaN produced by SP padding rows on decode steps
+    # in the upstream forwards.
     return bool(
-        VLLM_ASCEND_ENABLE_SP_WITH_PP
-        and parallel_config is not None
-        and parallel_config.pipeline_parallel_size > 1
-        and parallel_config.use_sequence_parallel_moe
+        VLLM_ASCEND_ENABLE_SP_WITH_PP and parallel_config is not None and parallel_config.use_sequence_parallel_moe
     )
 
 

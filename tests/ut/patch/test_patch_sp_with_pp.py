@@ -44,7 +44,9 @@ class TestPredicate:
     def test_enabled_matrix(self):
         cases = [
             (2, True, True),
-            (1, True, False),  # PP=1 never needs the patch
+            # PP=1 is also covered: the patched forwards fix the upstream
+            # SP decode NaN there
+            (1, True, True),
             (2, False, False),
         ]
         for pp, sp_moe, expected in cases:
@@ -111,9 +113,11 @@ class TestModelForwardWrapper:
         assert isinstance(out, IntermediateTensors)
         assert out.tensors["hidden_states"].shape == (3, 4)
 
-    def test_wrapper_noop_when_pp1(self):
+    def test_wrapper_noop_when_sp_off(self):
         model = self._make_model()()
-        model.vllm_config = FakeVllmConfig(FakeParallelConfig(pipeline_parallel_size=1))
+        model.vllm_config = FakeVllmConfig(
+            FakeParallelConfig(pipeline_parallel_size=1, use_sequence_parallel_moe=False)
+        )
         sp_pp._wrap_model_forward(type(model))
         with patch.object(sp_pp, "tensor_model_parallel_all_gather", fake_all_gather):
             out = model.forward(input_ids=None, positions=torch.zeros(3))
@@ -133,7 +137,7 @@ class TestApply:
 
     def test_layer_init_passthrough_when_disabled(self):
         # _wrap_layer_init must call the original __init__ unchanged when
-        # the predicate is off (PP=1)
+        # the predicate is off (SP-MoE off)
         seen = {}
 
         class Layer:
@@ -142,7 +146,7 @@ class TestApply:
                 self.use_attn_reduce_scatter_for_moe = False
 
         sp_pp._wrap_layer_init(Layer)
-        cfg = FakeVllmConfig(FakeParallelConfig(pipeline_parallel_size=1))
+        cfg = FakeVllmConfig(FakeParallelConfig(pipeline_parallel_size=1, use_sequence_parallel_moe=False))
         layer = Layer(cfg)
         assert seen["pp"] == 1
         assert layer.use_attn_reduce_scatter_for_moe is False
