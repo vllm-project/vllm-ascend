@@ -28,10 +28,6 @@ def test_execute_model_records_profiling_time():
             "execute_model",
             return_value=None,
         ) as mock_execute_model,
-        patch(
-            "vllm_ascend.worker.v2.model_runner.enable_sp",
-            return_value=False,
-        ),
         patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
         patch(
             "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
@@ -62,10 +58,6 @@ def test_execute_model_disables_profiling_timer_and_clears_stale_time():
             GPUModelRunner,
             "execute_model",
             return_value=None,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.enable_sp",
-            return_value=False,
         ),
         patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
         patch("vllm_ascend.core.profiling_chunk_predictor.time.perf_counter") as mock_perf_counter,
