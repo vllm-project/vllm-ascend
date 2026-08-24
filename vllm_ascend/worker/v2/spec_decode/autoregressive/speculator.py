@@ -424,10 +424,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if num_reqs is None:
             num_reqs = num_reqs_padded
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(
-            seq_lens_cpu,
-            attn_meta.seq_lens_cpu,
-            num_reqs,
-            step,
+            seq_lens_cpu, 
+            num_reqs, 
+            num_reqs_padded, 
+            step
         )
 
         query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
@@ -446,15 +446,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # to avoid extra sync overhead, `v2` is currently aligned with NPU `v1` only
 
         # follows the logic in `prepare_eagle_decode` and `update_eagle_inputs`
+        next_seqs_cpu = seq_lens_cpu.new_zeros(num_reqs_padded)
+        
         # seq_lens_cpu can contain only active requests, while full graph
-        # metadata is allocated for a padded graph batch. Reuse that buffer,
-        # write the active slice, and clear stale values in the padded tail.
-        active_num_reqs = min(num_reqs, seq_lens_cpu.shape[0])
-        valid_next_seq_lens = next_seq_lens_cpu[:active_num_reqs]
-        torch.add(seq_lens_cpu[:active_num_reqs], step, out=valid_next_seq_lens)
-        valid_next_seq_lens.clamp_max_(self.max_model_len)
-        next_seq_lens_cpu[active_num_reqs:].zero_()
-        return next_seq_lens_cpu
+        # metadata is allocated for num_reqs_padded requests.
+        next_seqs_cpu[:num_reqs] = torch.clamp(
+            seq_lens_cpu[:num_reqs] + step,
+            max=self.max_model_len,
+        )
+
+return next_seqs_cpu
 
     def _get_seq_lens_cpu(self) -> torch.Tensor:
         """Get seq_lens_cpu from input_batch."""
