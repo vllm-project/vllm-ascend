@@ -15,6 +15,7 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend._310p.worker.v2.model_state import Ascend310PModelState
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -45,6 +46,21 @@ def _make_vllm_config(**overrides):
 
 def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
+
+
+@pytest.mark.parametrize(("finished_req_ids", "sync_count"), [({"finished"}, 1), (set(), 0)])
+def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, sync_count) -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    scheduler_output = SimpleNamespace(finished_req_ids=finished_req_ids)
+
+    with (
+        patch.object(NPUModelRunner, "finish_requests") as finish_requests,
+        patch.object(model_runner_module.torch.npu, "current_stream") as current_stream,
+    ):
+        runner.finish_requests(scheduler_output)
+
+    finish_requests.assert_called_once_with(scheduler_output)
+    assert current_stream.return_value.synchronize.call_count == sync_count
 
 
 @pytest.mark.parametrize(

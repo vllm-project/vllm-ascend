@@ -11,7 +11,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.sched.output import GrammarOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -91,6 +91,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         # TODO: Support LoRA in the next 310P MRV2 iteration.
         if vllm_config.lora_config is not None:
             raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
+
+    def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
+        super().finish_requests(scheduler_output)
+        if scheduler_output.finished_req_ids:
+            # A freed request slot can be reused and its CPU-owned block table
+            # rewritten in this step. Drain the previous ACLGraph replay before
+            # the new layout is gathered and copied to attention metadata.
+            torch.npu.current_stream().synchronize()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate the 310P attention cache as separate K/V NZ tensors."""
