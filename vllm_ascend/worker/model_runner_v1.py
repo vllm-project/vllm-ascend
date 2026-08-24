@@ -17,9 +17,9 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-import logging
 import ctypes
 import gc
+import logging
 import math
 import os
 import sys
@@ -3806,6 +3806,10 @@ class NPUModelRunner(GPUModelRunner):
         # module-level device tensors), which the per-model reload above cannot
         # reach via ``named_modules()``.
         self._reload_global_non_persistent_state()
+        # FULL Graph updates attention runtime parameters on streams created
+        # during model loading. Snapshot restore invalidates those streams, so
+        # replace them before recapturing the target and draft graphs.
+        self._reset_resume_graph_update_streams()
         # Snapshot restore invalidates low-level NPU event handles created before
         # suspend. MTP/spec-decode paths synchronize these events on the first
         # post-resume request; stale handles cause aclrtSynchronizeEvent failures.
@@ -3821,6 +3825,14 @@ class NPUModelRunner(GPUModelRunner):
         # drafter's look-ahead slot computation can read, producing an
         # out-of-range KV slot that crashes npu_kv_rmsnorm_rope_cache.
         self._reset_resume_block_table_device_buffers()
+
+    def _reset_resume_graph_update_streams(self) -> None:
+        if hasattr(self, "update_stream"):
+            self.update_stream = torch.npu.Stream()
+
+        drafter = getattr(self, "drafter", None)
+        if drafter is not None and hasattr(drafter, "update_stream"):
+            drafter.update_stream = torch.npu.Stream()
 
     def _reset_resume_npu_event_handles(self) -> None:
         # Async seq-lens copy event used by MTP/spec decode metadata path.

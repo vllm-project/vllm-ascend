@@ -77,3 +77,31 @@ def test_reload_derived_weights_uses_backend_specific_sanity_tensors():
     assert target.reloaded
     logger.error.assert_called_once()
     assert "backend_specific_weight" in str(logger.error.call_args)
+
+
+def test_reset_resume_graph_update_streams_replaces_target_and_drafter_streams():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.update_stream = object()
+    runner.drafter = SimpleNamespace(update_stream=object())
+    target_stream = object()
+    drafter_stream = object()
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.torch.npu.Stream",
+        side_effect=(target_stream, drafter_stream),
+    ) as stream_cls:
+        runner._reset_resume_graph_update_streams()
+
+    assert runner.update_stream is target_stream
+    assert runner.drafter.update_stream is drafter_stream
+    assert stream_cls.call_count == 2
+
+
+def test_reset_resume_graph_update_streams_skips_unconfigured_graphs():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.drafter = SimpleNamespace()
+
+    with patch("vllm_ascend.worker.model_runner_v1.torch.npu.Stream") as stream_cls:
+        runner._reset_resume_graph_update_streams()
+
+    stream_cls.assert_not_called()
