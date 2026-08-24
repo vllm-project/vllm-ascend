@@ -255,6 +255,12 @@ class AscendConfig:
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
     enable_mlapo: bool = True
+    # When True, keep MLAPO prefill weights on NPU instead of freeing them
+    # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
+    # normal local-prefill paths (recompute / fallback / preempt) that crash
+    # when the weights are freed (issue #11882). Default False (preserve
+    # existing memory-saving behavior).
+    mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
@@ -425,6 +431,23 @@ class AscendConfig:
             logger.warning_once(
                 "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
             )
+
+        # mlapo_keep_prefill_weights preconditions: the prefill weights are only
+        # freed by MLAPO in the MLA attention path, so the keep switch is only
+        # meaningful under those same conditions. Fail fast on a no-op / mistaken
+        # config instead of silently leaving the switch ineffective (issue #11882).
+        if self.mlapo_keep_prefill_weights:
+            if not self.enable_mlapo:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True requires enable_mlapo=True. "
+                    "The prefill weights are only freed when MLAPO is enabled."
+                )
+            if vc.model_config is None or not vc.model_config.is_deepseek_mla:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True is only supported for MLA models "
+                    "(e.g., DeepSeek). The prefill weights are only freed by MLAPO "
+                    "in the MLA attention path."
+                )
 
         # PD tp_ratio / head_ratio / num_head_replica derivation
         if vc.kv_transfer_config is not None and vc.model_config is not None and not vc.model_config.is_deepseek_mla:
