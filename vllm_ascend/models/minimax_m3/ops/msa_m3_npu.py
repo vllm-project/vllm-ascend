@@ -212,12 +212,12 @@ def minimax_m3_index_prefill(
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
-    logical_block_count = (
-        max_seq_len + _MSA_INDEX_BLOCK_SIZE - 1
-    ) // _MSA_INDEX_BLOCK_SIZE
+    logical_block_count = (max_seq_len + _MSA_INDEX_BLOCK_SIZE - 1) // _MSA_INDEX_BLOCK_SIZE
     logical_score_width = (
-        logical_block_count + _MSA_SCORE_BLOCK_ALIGNMENT - 1
-    ) // _MSA_SCORE_BLOCK_ALIGNMENT * _MSA_SCORE_BLOCK_ALIGNMENT
+        (logical_block_count + _MSA_SCORE_BLOCK_ALIGNMENT - 1)
+        // _MSA_SCORE_BLOCK_ALIGNMENT
+        * _MSA_SCORE_BLOCK_ALIGNMENT
+    )
     score = score[..., :logical_score_width]
     return _minimax_m3_index_prefill_topk(
         score,

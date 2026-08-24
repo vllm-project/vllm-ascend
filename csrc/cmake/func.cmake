@@ -642,12 +642,10 @@ function(add_bin_compile_target)
         set(BINARY_INFO_CONFIG_FILE ${BIN_OUT_DIR}/binary_info_config.json)
         set(RELOCATABLE_KERNEL_INFO_CONFIG_FILE ${BIN_OUT_DIR}/relocatable_kernel_info_config.json)
 
-        add_custom_command(OUTPUT ${BINARY_INFO_CONFIG_FILE}
-                COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/ascendc_ops_config.py -p ${BIN_OUT_DIR} -s ${BINARY_COMPUTE_UNIT}
-        )
-
         add_custom_target(${OPS_CONFIG_TARGET}
-                DEPENDS ${BINARY_INFO_CONFIG_FILE}
+                COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/ascendc_ops_config.py
+                        -p ${BIN_OUT_DIR} -s ${BINARY_COMPUTE_UNIT}
+                BYPRODUCTS ${BINARY_INFO_CONFIG_FILE} ${RELOCATABLE_KERNEL_INFO_CONFIG_FILE}
         )
 
         add_dependencies(ops_transformer_config ${OPS_CONFIG_TARGET})
