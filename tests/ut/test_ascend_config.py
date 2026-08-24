@@ -108,7 +108,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
-        self.assertEqual(ascend_config.mega_moe_max_tokens, 131072)
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
