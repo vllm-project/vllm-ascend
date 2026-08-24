@@ -15,14 +15,14 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
-from vllm.v1.worker.mamba_utils import (
+
+from vllm_ascend.worker.mamba_utils import (
+    AscendMambaSpecDecodeGPUContext,
     MambaCopyBuffers,
-    MambaSpecDecodeGPUContext,
     collect_mamba_copy_meta,
+    create_mamba_buffers,
     do_mamba_copy_block,
 )
-
-import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
 
 MambaStateCopyFunc = Callable[..., Any]
 _COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
@@ -188,16 +188,20 @@ def _make_requests(
 
 
 def _make_copy_bufs(cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device) -> MambaCopyBuffers:
-    return MambaCopyBuffers.create(
+    return create_mamba_buffers(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
         copy_funcs=_COPY_FUNCS,
         make_buffer=lambda n, dtype: _MockCpuGpuBuffer(n, dtype, device),
-    )
+        device=device,
+        with_postprocess_align=False,
+    ).preprocess
 
 
-def _make_gpu_ctx(cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device) -> MambaSpecDecodeGPUContext:
-    return MambaSpecDecodeGPUContext.create(
+def _make_gpu_ctx(
+    cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device
+) -> AscendMambaSpecDecodeGPUContext:
+    return AscendMambaSpecDecodeGPUContext.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
         num_state_types=2,
@@ -207,7 +211,7 @@ def _make_gpu_ctx(cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torc
 
 
 def _run_gpu_postprocess(
-    gpu_ctx: MambaSpecDecodeGPUContext,
+    gpu_ctx: AscendMambaSpecDecodeGPUContext,
     *,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],

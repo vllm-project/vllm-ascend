@@ -3,6 +3,26 @@ from vllm import ModelRegistry
 
 def register_model():
     ModelRegistry.register_model(
+        "DeepseekForCausalLM",
+        "vllm_ascend.models.deepseek_v2:AscendDeepseekForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "DeepseekV2ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:AscendDeepseekV2ForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "DeepseekV3ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:AscendDeepseekV3ForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "DeepseekV32ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:AscendDeepseekV3ForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "MistralLarge3ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:AscendMistralLarge3ForCausalLM",
+    )
+    ModelRegistry.register_model(
         "DeepseekV4ForCausalLM", "vllm_ascend.models.deepseek_v4.model:AscendDeepseekV4ForCausalLM"
     )
     ModelRegistry.register_model(
