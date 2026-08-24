@@ -16,6 +16,7 @@
 #
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import torch_npu  # noqa: F401
@@ -56,9 +57,11 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
             if scale_alg is not None:
                 return scale_alg
 
-        from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config_or_none
 
-        vllm_config = get_current_vllm_config()
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return 0
 
     model_config = vllm_config.model_config
     architectures = getattr(model_config, "architectures", None) or ()
@@ -72,6 +75,11 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     ):
         return 1
     return 0
+
+
+@lru_cache(maxsize=1)
+def get_dynamic_mx_quant_scale_alg_cached() -> int:
+    return get_dynamic_mx_quant_scale_alg()
 
 
 def get_model_file(

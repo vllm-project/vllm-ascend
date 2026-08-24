@@ -31,7 +31,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
+                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg_cached",
                 return_value=0,
             ),
         ):
