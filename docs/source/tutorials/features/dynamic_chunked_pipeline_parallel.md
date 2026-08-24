@@ -8,7 +8,7 @@ vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for optimizing pref
 
     **CPP is designed to be used on the P (Prefiller) node in Prefill-Decode (PD) disaggregation deployments.** The D (Decoder) node does not require CPP configuration. By dynamically calculating the optimal chunk size based on profiling data, CPP significantly reduces Time-To-First-Token (TTFT) for long sequences on P nodes.
 
-    This guide demonstrates PD disaggregation deployment with DeepSeek-V3.1 on 3 Atlas 800T A3 servers (64G × 16): one server acts as the Prefiller (P node, with CPP enabled) and two servers act as the Decoder (D nodes, without CPP, DP32 standard configuration).
+    This guide demonstrates PD disaggregation deployment with DeepSeek-V3.1 on 3 Atlas 800T A3 servers (64GB × 16): one server acts as the Prefiller (P node, with CPP enabled) and two servers act as the Decoder (D nodes, without CPP, DP32 standard configuration).
 
 For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md).
 
@@ -23,7 +23,7 @@ For complete PD disaggregation setup instructions (environment verification, Moo
 
 ### Model Weight
 
-- `DeepSeek-V3.1-W8A8` (Quantized version): 1 Atlas 800T A3 (64G × 16) node
+- `DeepSeek-V3.1-W8A8` (Quantized version): 1 Atlas 800T A3 (64GB × 16) node
 
 Download to shared directory such as `/mnt/weight/`
 
@@ -425,7 +425,7 @@ Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) f
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in PD disaggregation long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy prefill instance in Ascend Atlas 800T A3 server (64G × 16), the configuration and performance data are as follows.
+To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in PD disaggregation long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy prefill instance in Ascend Atlas 800T A3 server (64GB × 16), the configuration and performance data are as follows.
 
 **Fixed-length requests, concurrency=1**:
 

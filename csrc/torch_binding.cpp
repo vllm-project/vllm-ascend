@@ -46,6 +46,7 @@
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
+#include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/sparse_attention_score_prefill/sparse_attention_score_prefill_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
@@ -2566,5 +2567,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
+
+    ops.def(
+        "npu_msa_index_score("
+        "Tensor query, Tensor key, Tensor block_table, Tensor start_loc, *, "
+        "Tensor? scale=None, Tensor? atten_mask=None, "
+        "Tensor? actual_seq_qlen=None, Tensor? actual_seq_klen=None, "
+        "str layout_key=\"BBND\", int sparse_mode=3, "
+        "int init_blocks=0, int local_blocks=0) -> Tensor"
+    );
+    ops.impl("npu_msa_index_score", torch::kPrivateUse1,
+             &vllm_ascend::npu_msa_index_score);
 }
 #endif

@@ -229,8 +229,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
     export HCCL_BUFFSIZE=1024
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve your_model_path \
@@ -521,8 +519,6 @@ vllm bench serve \
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -557,8 +553,6 @@ vllm serve your_model_path \
 export ASCEND_RT_VISIBLE_DEVICES=0
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -592,8 +586,6 @@ vllm serve your_model_path \
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -626,8 +618,8 @@ vllm serve your_model_path \
 ### 9.2 Tuning Guidelines
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers model-specific issues.

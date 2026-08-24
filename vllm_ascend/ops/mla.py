@@ -22,6 +22,7 @@
 
 import torch
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -156,6 +157,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         return output
 
 
+@eager_break_during_capture
 def mla_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,

@@ -10,9 +10,9 @@ This document is written based on the latest vLLM Ascend main branch. Gemma4 is 
 
 ## 2 Supported Features
 
-Refer to [supported models](../../user_guide/support_matrix/supported_models.md) to get the model support matrix, including BF16, chunked prefill, automatic prefix caching, tensor parallelism, expert parallelism, and ACLGraph support.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model support matrix, including BF16, chunked prefill, automatic prefix caching, tensor parallelism, expert parallelism, and ACLGraph support.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and Ascend 950 Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
 
@@ -240,7 +240,7 @@ The following configurations are for reference only. The optimal configuration d
 
 Please refer to [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 Recommended tuning order:
 
