@@ -17,6 +17,7 @@ class YuanrongConfig:
     enable_remote_h2d: bool
     remote_h2d_transport_backend: str
     enable_fabric_mem: bool
+    use_layerwise: bool = False
     connect_timeout_ms: int = 9000
     request_timeout_ms: int = 0
     get_sub_timeout_ms: int = 0
@@ -33,6 +34,7 @@ class YuanrongConfig:
             enable_remote_h2d=bool(config.get("enable_remote_h2d", False)),
             remote_h2d_transport_backend=config.get("remote_h2d_transport_backend", "HIXL"),
             enable_fabric_mem=bool(config.get("enable_fabric_mem", False)),
+            use_layerwise=bool(config.get("use_layerwise", False)),
             connect_timeout_ms=config.get("connect_timeout_ms", 9000),
             request_timeout_ms=config.get("request_timeout_ms", 0),
             get_sub_timeout_ms=config.get("get_sub_timeout_ms", 0),
@@ -48,7 +50,7 @@ class YuanrongConfig:
 
 
 class YuanrongBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, enable_data_plane: bool = True):
         if lazy_init:
             logger.warning("YuanrongBackend does not support lazy initialization; initializing eagerly.")
         try:
@@ -72,16 +74,18 @@ class YuanrongBackend(Backend):
             raise ValueError(
                 f"Invalid worker_addr {self.config.worker_addr} in yuanrong config, expected '<host>:<port>'."
             ) from exc
+        enable_remote_h2d = enable_data_plane and self.config.enable_remote_h2d
         self.store = HeteroClient(
             host,
             int(port),
             connect_timeout_ms=self.config.connect_timeout_ms,
             req_timeout_ms=self.config.request_timeout_ms,
-            enable_remote_h2d=self.config.enable_remote_h2d,
+            enable_remote_h2d=enable_remote_h2d,
         )
-        self.store.init()
+        if enable_data_plane or self.config.use_layerwise:
+            self.store.init()
         self._needs_dev_mem_pregister = (
-            self.config.enable_remote_h2d
+            enable_remote_h2d
             and self.config.remote_h2d_transport_backend == "HIXL"
             and not self.config.enable_fabric_mem
             and self.config.enable_dev_mem_pregister
@@ -93,6 +97,10 @@ class YuanrongBackend(Backend):
         local_rank = get_world_group().local_rank
         device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
+
+    @classmethod
+    def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        return cls(parallel_config, enable_data_plane=False)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         self._registered_buffers = (list(ptrs), list(lengths))

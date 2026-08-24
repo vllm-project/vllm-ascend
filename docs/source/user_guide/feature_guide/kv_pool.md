@@ -894,6 +894,8 @@ For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM
 
 ```bash
 pip install openyuanrong-datasystem
+python -c "import yr.datasystem; print('Yuanrong Datasystem is ready')"
+dscli --version
 ```
 
 If the prebuilt package does not match the CANN or Ascend driver version in
@@ -901,10 +903,43 @@ your environment, build Yuanrong Datasystem from source in the vLLM Ascend
 image. Follow the official Yuanrong Datasystem build instructions:
 <https://atomgit.com/openeuler/yuanrong-datasystem>
 
-### Step 4.2: Start etcd
+### Step 4.2: Choose a service discovery backend
 
-Yuanrong Datasystem uses etcd for service discovery. The following example
-starts a single-node etcd cluster:
+Yuanrong Datasystem supports both Coordinator and etcd for service discovery.
+Choose exactly one of the following options. Do not configure both backends on
+the same Worker.
+
+#### Option 1: Start Coordinator
+
+Use the Coordinator included with Yuanrong Datasystem for service discovery.
+This avoids installing and maintaining a separate etcd service. Start one
+Coordinator at an address that every Datasystem worker can reach:
+
+```bash
+COORDINATOR_ADDRESS="<coordinator_ip>:31511"
+
+dscli start -c \
+  --coordinator_address "${COORDINATOR_ADDRESS}"
+```
+
+Replace `<coordinator_ip>` with the IP address of the node that runs the
+Coordinator. Use `127.0.0.1` only for a single-node deployment. A successful
+startup prints `Start coordinator service ... success`.
+
+For a minimal single-node trial, you can start the Coordinator and Worker with
+one command instead. If you use this command, skip the separate Worker startup
+below and set `worker_addr` in `yuanrong.json` to `127.0.0.1:31501`:
+
+```bash
+dscli start -a \
+  --coordinator_address "127.0.0.1:31511" \
+  --worker_address "127.0.0.1:31501" \
+  --shared_memory_size_mb 4096
+```
+
+#### Option 2: Start etcd
+
+The following example starts a single-node etcd cluster:
 
 ```bash
 ETCD_VERSION="v3.5.12"
@@ -932,8 +967,80 @@ etcdctl --endpoints "${ETCD_IP}:2379" put key "value"
 etcdctl --endpoints "${ETCD_IP}:2379" get key
 ```
 
+For a multi-node deployment, set `ETCD_IP` to an address that every Worker can
+reach instead of `127.0.0.1`.
+
 For production environments, refer to the official etcd clustering
 documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>
+
+### Multi-node deployment
+
+Install Yuanrong Datasystem on every node. Each node runs one Datasystem
+Worker with a unique, reachable `worker_address`. All Workers must use the
+same service discovery backend and backend address.
+
+The commands in this section use 4 GiB of shared memory as a minimal example.
+For a high-throughput deployment, use the tuned Worker parameters in the next
+section instead; do not start a second Worker on the same address.
+
+#### Multi-node deployment with Coordinator
+
+Start one Coordinator on a node that every Worker can reach. For example, if
+the Coordinator node address is `192.168.1.10`:
+
+```bash
+# Run once on the Coordinator node.
+dscli start -c \
+  --coordinator_address "192.168.1.10:31511"
+```
+
+Then start one Worker on every node. Set `WORKER_IP` to that node's own IP;
+keep `COORDINATOR_ADDRESS` identical on all nodes:
+
+```bash
+# Run on every Worker node.
+WORKER_IP="<this_node_ip>"
+COORDINATOR_ADDRESS="192.168.1.10:31511"
+
+dscli start -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --coordinator_address "${COORDINATOR_ADDRESS}" \
+  --shared_memory_size_mb 4096
+```
+
+This example uses one Coordinator and does not provide Coordinator high
+availability. For production control-plane high availability, deploy multiple
+Coordinators with static Raft peers, a unique `coordinator_address` and
+`coordinator_raft_data_dir` for each Coordinator, and the same
+`coordinator_raft_initial_peers` list. See the
+[Yuanrong Datasystem dscli documentation](https://atomgit.com/openeuler/yuanrong-datasystem/blob/master/docs/source_zh_cn/deployment/dscli.md#coordinator-多节点部署).
+
+#### Multi-node deployment with etcd
+
+Start an etcd service or cluster that every Worker can reach, as described in
+the previous section. Then start one Worker on every node. Set `WORKER_IP` to
+that node's own IP and keep `ETCD_ADDRESS` identical on all nodes:
+
+```bash
+# Run on every Worker node.
+WORKER_IP="<this_node_ip>"
+ETCD_ADDRESS="192.168.1.10:2379"
+
+dscli start -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --etcd_address "${ETCD_ADDRESS}" \
+  --shared_memory_size_mb 4096
+```
+
+For both backends:
+
+* Do not use `127.0.0.1` or `0.0.0.0` as a Worker address in a multi-node
+  deployment. Other Workers must be able to connect to the advertised IP.
+* Allow network access to the Coordinator port (`31511`) or etcd client port
+  (`2379`), and to every Worker port (`31501` in these examples).
+* On each node, set `worker_addr` in `yuanrong.json` to that node's local
+  `WORKER_IP:31501`. The configuration file therefore differs by node.
+* Keep `PYTHONHASHSEED` identical across all vLLM instances.
 
 ### Step 4.3: Start Datasystem Worker
 
@@ -941,14 +1048,21 @@ Start a Datasystem worker on each node by using `dscli`. The following
 configuration is a recommended starting point for high-throughput KV Pool
 workloads:
 
+The Worker examples in this guide use Coordinator. To use etcd instead, replace
+`--coordinator_address "${COORDINATOR_ADDRESS}"` with
+`--etcd_address "${ETCD_ADDRESS}"` in each Worker command.
+
 ```bash
+COORDINATOR_ADDRESS="<coordinator_ip>:31511"
+ETCD_ADDRESS="<etcd_ip>:2379"
+WORKER_IP="<worker_ip>"
 WORKER_LOG_DIR="/var/log/yuanrong/worker"
 sudo mkdir -p "${WORKER_LOG_DIR}"
 sudo chown "$(id -u):$(id -g)" "${WORKER_LOG_DIR}"
 
 dscli start -w \
   --worker_address "${WORKER_IP}:31501" \
-  --etcd_address "${ETCD_IP}:2379" \
+  --coordinator_address "${COORDINATOR_ADDRESS}" \
   --log_dir "${WORKER_LOG_DIR}" \
   --shared_memory_size_mb 40960 \
   --arena_per_tenant 1 \
@@ -961,8 +1075,10 @@ dscli start -w \
   --sc_stream_socket_num 0
 ```
 
-The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so keep
-the host and port identical on the same node.
+The `--worker_address` value is consumed later as `worker_addr` in
+`yuanrong.json`, so keep the host and port identical on the same node.
+Configure only one coordination backend for a Worker. When using Coordinator,
+do not also set `etcd_address` or `metastore_address`.
 
 The tuning parameters above have the following effects:
 
@@ -998,10 +1114,14 @@ For more parameters, refer to the `dscli` usage documentation on the Yuanrong
 Datasystem official site:
 <https://atomgit.com/openeuler/yuanrong-datasystem>
 
-To stop the worker:
+Stop the Worker when it is no longer needed. Stop the selected service
+discovery backend only after all Workers have stopped. For an independent etcd
+cluster, follow its normal cluster maintenance procedure.
 
 ```bash
 dscli stop --worker_address "${WORKER_IP}:31501"
+# Coordinator option only:
+dscli stop --coordinator_address "${COORDINATOR_ADDRESS}"
 ```
 
 ### Step 4.4: Environment Variable Configuration
@@ -1030,9 +1150,76 @@ Set `DATASYSTEM_CLIENT_LOG_DIR` before starting vLLM because the Yuanrong
 client reads it during logging initialization. Client SDK logs, whose base
 name is normally `ds_client`, are written to this directory.
 
-#### Step 4.4.1: Remote H2D Requirements
+#### Step 4.4.1: Yuanrong Client Configuration (`yuanrong.json`)
 
-Set `DS_ENABLE_REMOTE_H2D=1` only when Remote Host-to-Device transfer is
+The `yuanrong.json` file pointed to by `YR_CONFIG_PATH` carries the Yuanrong
+client connection options:
+
+```json
+{
+    "worker_addr": "1.2.3.4:31501",
+    "connect_timeout_ms": 9000,
+    "request_timeout_ms": 0,
+    "get_sub_timeout_ms": 0,
+    "enable_remote_h2d": false,
+    "remote_h2d_transport_backend": "HIXL",
+    "enable_fabric_mem": false,
+    "enable_dev_mem_pregister": false,
+    "use_layerwise": false
+}
+```
+
+**worker_addr**: Datasystem worker address in `<host>:<port>` format. This
+must match the local `dscli start --worker_address` value.
+**connect_timeout_ms**: Maximum time in milliseconds for the Yuanrong client
+to establish a connection. Yuanrong requires an integer greater than or equal
+to `500`. Defaults to `9000`.
+**request_timeout_ms**: Timeout in milliseconds for Yuanrong client requests.
+Defaults to `0`, which preserves the Yuanrong SDK behavior of using
+`connect_timeout_ms` as the request timeout. Set a positive value to control
+request timeout independently.
+**get_sub_timeout_ms**: Maximum time in milliseconds for each
+`mget_h2d_from_multi_buffers` request to wait for objects to become ready. `0`
+means that no waiting is allowed. Defaults to `0`. Yuanrong validates this
+value when the Get request runs. It may be greater than `request_timeout_ms`;
+the Yuanrong Get path expands that call's RPC timeout to accommodate the
+configured object-ready wait.
+**enable_remote_h2d**: Passed to Yuanrong `HeteroClient.enable_remote_h2d`.
+Use `true` only after the Remote H2D requirements below are met. Defaults to
+`false`.
+**remote_h2d_transport_backend**: vLLM-side transport name, used by the
+Yuanrong backend to decide whether to pre-register device memory. `HIXL`
+(default) for HIXL HCCS (covers buffer-pool, HIXL RoCE direct, and FabricMem
+sub-modes); `P2P_TRANSFER` for datasystem P2P-Transfer over RoCE. Must
+correspond to the worker-side `--remote_h2d_link_type` (see the
+[Remote H2D link parameters](#remote-h2d-link-parameters) table below for
+the `HIXL` ↔ `HCCS` / `P2P_TRANSFER` ↔ `ROCE` mapping). Under `HIXL` the
+backend pre-registers device memory unless `enable_fabric_mem` is `true`;
+under `P2P_TRANSFER` it skips pre-registration.
+**enable_fabric_mem**: Selects HIXL FabricMem mode, where HIXL
+`OPTION_ENABLE_USE_FABRIC_MEM` handles Fabric shareable handle exchange
+automatically and the backend skips client-side `pre_register_device_memory`.
+Only meaningful when `remote_h2d_transport_backend="HIXL"`. Defaults to `false`.
+FabricMem requires datasystem-side support (HIXL FabricMem build and the
+corresponding datasystem environment variable); check the datasystem
+documentation before enabling this flag.
+**enable_dev_mem_pregister**: Master toggle for client-side device memory
+pre-registration (`pre_register_device_memory`). Defaults to `false`, so the
+backend does **not** pre-register device buffer pointers by default. To actually
+pre-register, this flag must be `true` **and** the automatic conditions must
+hold: `enable_remote_h2d=true`, `remote_h2d_transport_backend="HIXL"`, and
+`enable_fabric_mem=false`. Under `P2P_TRANSFER` or FabricMem mode pre-registration
+is always skipped regardless of this toggle. Set this to `true` for HIXL HCCS
+Remote H2D deployments that require client-side device memory registration.
+**use_layerwise**: Must match `kv_connector_extra_config.use_layerwise`.
+Defaults to `false`. When `false`, the scheduler-side Yuanrong store skips
+initialization because non-layerwise lookup is delegated to the TP0 worker.
+When `true`, the scheduler initializes a metadata-only Yuanrong client with
+Remote H2D disabled, so it does not create a HIXL engine.
+
+#### Step 4.4.2: Remote H2D Requirements
+
+Set `enable_remote_h2d` to `true` only when Remote Host-to-Device transfer is
 enabled and verified in the Yuanrong Datasystem deployment:
 
 * Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB
@@ -1046,7 +1233,7 @@ enabled and verified in the Yuanrong Datasystem deployment:
 ```bash
 dscli start -w \
   --worker_address "${WORKER_IP}:31501" \
-  --etcd_address "${ETCD_IP}:2379" \
+  --coordinator_address "${COORDINATOR_ADDRESS}" \
   --log_dir "/var/log/yuanrong/worker" \
   --shared_memory_size_mb 40960 \
   --arena_per_tenant 1 \
@@ -1059,6 +1246,40 @@ dscli start -w \
   --sc_stream_socket_num 0 \
   --remote_h2d_device_ids "0,1,2,3,4,5,6,7"
 ```
+
+For HIXL HCCS links (Atlas A3 with HCCS reachability), set
+`--remote_h2d_link_type "HCCS"` and the HIXL buffer-pool parameter. The IP in
+`--worker_address` is also used as the HIXL endpoint IP, so use a reachable
+address rather than `127.0.0.1` or `0.0.0.0`. HIXL RoCE direct mode is a
+sub-mode of HCCS selected by `HCCL_INTRA_ROCE_ENABLE=1` on both sides and
+additionally requires a reachable RoCE link:
+
+```bash
+dscli start --interleave 0-7 -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --coordinator_address "${COORDINATOR_ADDRESS}" \
+  --log_dir "/var/log/yuanrong/worker" \
+  --shared_memory_size_mb 40960 \
+  --arena_per_tenant 1 \
+  --enable_huge_tlb true \
+  --enable_fallocate false \
+  --rpc_thread_num 64 \
+  --oc_thread_num 64 \
+  --enable_worker_worker_batch_get true \
+  --sc_regular_socket_num 0 \
+  --sc_stream_socket_num 0 \
+  --remote_h2d_device_ids "0,1,2,3,4,5,6,7" \
+  --remote_h2d_link_type "HCCS" \
+  --remote_h2d_hccs_buffer_pool "4:8"
+```
+
+#### Remote H2D link parameters
+
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `remote_h2d_device_ids` | empty | Non-empty enables worker-side RH2D. Comma-separated device IDs, e.g. `"0,1,2,3,4,5,6,7"`. |
+| `remote_h2d_link_type` | `ROCE` | Link type, case-sensitive. `ROCE` for P2P-Transfer over RoCE; `HCCS` for HIXL HCCS (covers buffer-pool, HIXL RoCE direct, and FabricMem sub-modes). Must correspond to the client-side `remote_h2d_transport_backend` in `yuanrong.json` (`ROCE` ↔ `P2P_TRANSFER`, `HCCS` ↔ `HIXL`). For `HCCS`, the client process must also export `DS_RH2D_LINK_TYPE=HCCS` before starting vLLM (the backend does not export it automatically); `ROCE` is the datasystem default and needs no env var. |
+| `remote_h2d_hccs_buffer_pool` | `4:8` | HIXL buffer-pool parameter `<count>:<size>`, only used when `remote_h2d_link_type=HCCS`. Ignored under HIXL RoCE direct mode (`HCCL_INTRA_ROCE_ENABLE=1`). |
 
 * Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong
   Remote H2D are installed and visible to the worker process. In containers,
@@ -1118,7 +1339,8 @@ python3 -m vllm.entrypoints.openai.api_server \
     "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "1",
-        "backend": "yuanrong"
+        "backend": "yuanrong",
+        "use_layerwise": false
     }
 }'
 ```
