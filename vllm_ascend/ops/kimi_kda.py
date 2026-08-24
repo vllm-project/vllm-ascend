@@ -81,25 +81,24 @@ _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
 _FUSED_QKV_NAME = "fused_qkv"
 _FUSED_BFG_NAME = "fused_bfg_proj"
-_F_A_SHARD_ID = 1
-_KDA_QUANT_STREAM: torch.npu.Stream | None = None
+_F_PROJ_SHARD_ID = 1
+_KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
-def _kda_quant_stream() -> torch.npu.Stream:
-    global _KDA_QUANT_STREAM
-    if _KDA_QUANT_STREAM is None:
-        _KDA_QUANT_STREAM = torch_npu.npu.Stream()
-    return _KDA_QUANT_STREAM
+def _kda_bfg_stream() -> torch.npu.Stream:
+    global _KDA_BFG_STREAM
+    if _KDA_BFG_STREAM is None:
+        _KDA_BFG_STREAM = torch_npu.npu.Stream()
+    return _KDA_BFG_STREAM
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
-    """Fuse KDA's float B, F-A, and output-gate projections.
+    """Fuse KDA's float B, composed F, and output-gate projections.
 
-    ``b_proj`` and ``g_proj`` are column-parallel, while ``f_a_proj`` is
-    replicated. Represent the replicated output as ``head_dim * tp_size`` in
-    the logical merged matrix so every rank still owns one complete
-    ``head_dim`` slice. Its checkpoint shard is copied verbatim into that local
-    slice instead of being narrowed by TP rank.
+    The checkpoint stores ``f_a_proj`` and ``f_b_proj`` separately. Keep both
+    source weights as staging parameters so initial loading and later reloads
+    can derive ``f_proj = f_b_proj @ f_a_proj`` offline. The derived F shard is
+    column-parallel like ``f_b_proj`` and is packed between B and G.
     """
 
     def __init__(
@@ -116,7 +115,7 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
             input_size=hidden_size,
             output_sizes=[
                 num_heads,
-                head_dim * tp_size,
+                projection_size,
                 projection_size,
             ],
             bias=False,
@@ -125,46 +124,90 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
         )
         if self.tp_size != tp_size:
             raise ValueError(f"KDA fused BFG TP mismatch: layer={self.tp_size}, attention={tp_size}")
+        local_projection_size = projection_size // tp_size
+        self.f_a_weight = torch.nn.Parameter(
+            self.weight.new_empty((head_dim, hidden_size)),
+            requires_grad=False,
+        )
+        self.f_b_weight = torch.nn.Parameter(
+            self.weight.new_empty((local_projection_size, head_dim)),
+            requires_grad=False,
+        )
+        self.f_a_weight.weight_loader = self._load_f_a_weight
+        self.f_b_weight.weight_loader = self._load_f_b_weight
+        self._f_a_loaded = False
+        self._f_b_loaded = False
 
-    def _load_replicated_f_a_shard(
+    def _load_f_a_weight(
         self,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
+        _loaded_shard_id: tuple[int, ...] | int | None = None,
     ) -> None:
-        output_dim = getattr(param, "output_dim", None)
-        if output_dim is None:
-            raise ValueError("KDA fused f_a_proj requires an output-sharded parameter")
-        shard_offset = sum(self.output_sizes[:_F_A_SHARD_ID]) // self.tp_size
-        shard_size = self.output_sizes[_F_A_SHARD_ID] // self.tp_size
-        param_shard = param.data.narrow(output_dim, shard_offset, shard_size)
-        if param_shard.shape != loaded_weight.shape:
+        if param.shape != loaded_weight.shape:
             raise ValueError(
-                "KDA fused f_a_proj checkpoint shape mismatch: "
-                f"expected {tuple(param_shard.shape)}, got {tuple(loaded_weight.shape)}"
+                "KDA f_a_proj checkpoint shape mismatch: "
+                f"expected {tuple(param.shape)}, got {tuple(loaded_weight.shape)}"
             )
-        param_shard.copy_(loaded_weight)
+        param.data.copy_(loaded_weight)
+        self._f_a_loaded = True
+        self._maybe_fuse_f_proj()
 
-    def weight_loader(
+    def _load_f_b_weight(
         self,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
+        _loaded_shard_id: tuple[int, ...] | int | None = None,
     ) -> None:
-        if loaded_shard_id == _F_A_SHARD_ID:
-            self._load_replicated_f_a_shard(param, loaded_weight)
-            return
-        super().weight_loader(param, loaded_weight, loaded_shard_id)
+        if loaded_weight.shape == param.shape:
+            local_weight = loaded_weight
+        else:
+            expected_shape = (param.shape[0] * self.tp_size, param.shape[1])
+            if loaded_weight.shape != expected_shape:
+                raise ValueError(
+                    "KDA f_b_proj checkpoint shape mismatch: "
+                    f"expected {expected_shape} or {tuple(param.shape)}, "
+                    f"got {tuple(loaded_weight.shape)}"
+                )
+            tp_rank = get_tensor_model_parallel_rank()
+            local_weight = loaded_weight.narrow(
+                0,
+                tp_rank * param.shape[0],
+                param.shape[0],
+            )
+        param.data.copy_(local_weight)
+        self._f_b_loaded = True
+        self._maybe_fuse_f_proj()
 
-    def weight_loader_v2(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
-    ) -> None:
-        if loaded_shard_id == _F_A_SHARD_ID:
-            self._load_replicated_f_a_shard(param, loaded_weight)
+    @torch.no_grad()
+    def _maybe_fuse_f_proj(self) -> None:
+        if not self._f_a_loaded or not self._f_b_loaded:
             return
-        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+        output_dim = getattr(self.weight, "output_dim", None)
+        if output_dim is None:
+            raise ValueError("KDA fused f_proj requires an output-sharded parameter")
+        shard_offset = sum(self.output_sizes[:_F_PROJ_SHARD_ID]) // self.tp_size
+        shard_size = self.output_sizes[_F_PROJ_SHARD_ID] // self.tp_size
+        param_shard = self.weight.data.narrow(
+            output_dim,
+            shard_offset,
+            shard_size,
+        )
+        fused_weight = torch.matmul(
+            self.f_b_weight.float(),
+            self.f_a_weight.float(),
+        ).to(dtype=param_shard.dtype)
+        if fused_weight.shape != param_shard.shape:
+            raise ValueError(
+                "KDA composed f_proj shape mismatch: "
+                f"expected {tuple(param_shard.shape)}, got {tuple(fused_weight.shape)}"
+            )
+        param_shard.copy_(fused_weight)
+
+
+def _require_kimi_k3_full_rank_gate(kda_config) -> None:
+    if not bool(kda_config.get("use_full_rank_gate", False)):
+        raise ValueError("Ascend Kimi-K3 KDA requires use_full_rank_gate=true")
 
 
 def _zero_padded_spec_output(
@@ -265,7 +308,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
 
         kda_config = config.linear_attn_config
         assert kda_config is not None, "linear_attn_config must be set"
-        self.use_full_rank_gate = bool(kda_config.get("use_full_rank_gate", False))
+        _require_kimi_k3_full_rank_gate(kda_config)
         gate_lower_bound = kda_config.get("gate_lower_bound")
         self.gate_lower_bound = float(gate_lower_bound) if gate_lower_bound is not None else None
 
@@ -295,16 +338,25 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
 
         # vLLM 0.23 builds the legacy low-rank output gate unconditionally.
         # Replace it with the checkpoint-compatible full-rank projection for K3.
-        if self.use_full_rank_gate:
-            del self.g_a_proj
-            del self.g_b_proj
-            self.g_proj = ColumnParallelLinear(
-                self.hidden_size,
-                self.head_dim * self.num_heads,
-                bias=False,
-                quant_config=self.quant_config,
-                prefix=f"{prefix}.g_proj",
-            )
+        del self.g_a_proj
+        del self.g_b_proj
+        del self.b_proj
+        del self.f_a_proj
+        del self.f_b_proj
+        self.fused_bfg_proj = _KDAFusedBFGLinear(
+            hidden_size=self.hidden_size,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            tp_size=self.tp_size,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.{_FUSED_BFG_NAME}",
+        )
+        projection_size = self.local_num_heads * self.head_dim
+        self._fused_bfg_output_sizes = (
+            self.local_num_heads,
+            projection_size,
+            projection_size,
+        )
 
         # The upstream class used FusedRMSNormGated's default epsilon.  K3's
         # checkpoint config is authoritative and uses the sigmoid gate path.
@@ -364,38 +416,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         )
         num_tokens = hidden_states.size(0)
 
-        if self.use_full_rank_gate:
-            main_stream = torch.npu.current_stream()
-            quant_stream = _kda_quant_stream()
-            hidden_states_ready = main_stream.record_event()
-            hidden_states.record_stream(quant_stream)
-            with npu_stream_switch(quant_stream):
-                torch.npu.current_stream().wait_event(hidden_states_ready)
-                quantized_qkv = self._quantize_fused_qkv(hidden_states)
-                quant_ready = torch.npu.current_stream().record_event()
-
-            raw_bfg = self._project_bfg(hidden_states)
-            bfg_projection_ready = main_stream.record_event()
-            for tensor in raw_bfg:
-                tensor.record_stream(quant_stream)
-            with npu_stream_switch(quant_stream):
-                torch.npu.current_stream().wait_event(bfg_projection_ready)
-                beta, raw_gate, output_gate = self._postprocess_bfg(*raw_bfg)
-                bfg_ready = torch.npu.current_stream().record_event()
-
-            main_stream.wait_event(quant_ready)
-            if isinstance(quantized_qkv, tuple):
-                for tensor in quantized_qkv:
-                    tensor.record_stream(main_stream)
-            qkv = self._matmul_fused_qkv(quantized_qkv)
-            for tensor in (beta, raw_gate, output_gate):
-                tensor.record_stream(main_stream)
-        else:
-            qkv = self._matmul_fused_qkv(self._quantize_fused_qkv(hidden_states))
-            beta, raw_gate, output_gate = self._postprocess_bfg(*self._project_bfg(hidden_states))
-
-        if self.use_full_rank_gate:
-            main_stream.wait_event(bfg_ready)
+        qkv, beta, raw_gate, output_gate = self._run_overlapped_qkv_bfg(hidden_states)
 
         projection_size = self.local_num_heads * self.head_dim
         q, k, v = qkv.split([projection_size] * 3, dim=-1)
@@ -418,18 +439,53 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
+    def _run_overlapped_qkv_bfg(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run QKV and BFG as two explicitly joined overlap stages."""
+        main_stream = torch.npu.current_stream()
+        bfg_stream = _kda_bfg_stream()
+
+        hidden_states_ready = main_stream.record_event()
+        hidden_states.record_stream(bfg_stream)
+        with npu_stream_switch(bfg_stream):
+            bfg_stream.wait_event(hidden_states_ready)
+            raw_bfg = self._project_bfg(hidden_states)
+            bfg_projection_ready = bfg_stream.record_event()
+
+        quantized_qkv = self._quantize_fused_qkv(hidden_states)
+        quant_ready = main_stream.record_event()
+
+        # Stage 1 join: both stage-2 branches start only after DynamicQuant and
+        # the fused BFG projection have completed.
+        main_stream.wait_event(bfg_projection_ready)
+        qkv = self._matmul_fused_qkv(quantized_qkv)
+        qkv_ready = main_stream.record_event()
+
+        with npu_stream_switch(bfg_stream):
+            bfg_stream.wait_event(quant_ready)
+            beta, raw_gate, output_gate = self._postprocess_bfg(*raw_bfg)
+            bfg_ready = bfg_stream.record_event()
+            # Stage 2 join from the auxiliary side. This wait is deliberately
+            # queued after bfg_ready so the reciprocal main-stream wait below
+            # cannot form a cycle.
+            bfg_stream.wait_event(qkv_ready)
+
+        for tensor in (beta, raw_gate, output_gate):
+            tensor.record_stream(main_stream)
+        main_stream.wait_event(bfg_ready)
+        return qkv, beta, raw_gate, output_gate
+
     def _project_bfg(
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        beta = self.b_proj(hidden_states)[0]
-        f_a = self.f_a_proj(hidden_states)[0]
-        raw_gate = self.f_b_proj(f_a)[0]
-        if self.use_full_rank_gate:
-            output_gate = self.g_proj(hidden_states)[0]
-        else:
-            output_gate = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
-        return beta, raw_gate, output_gate
+        fused_bfg = self.fused_bfg_proj(hidden_states)[0]
+        return fused_bfg.split(
+            self._fused_bfg_output_sizes,
+            dim=-1,
+        )
 
     def _postprocess_bfg(
         self,

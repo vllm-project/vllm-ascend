@@ -31,7 +31,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiGatedDeltaNetAttention,
+    _KDAFusedBFGLinear,
     _load_a_log,
+    _require_kimi_k3_full_rank_gate,
     _zero_padded_spec_output,
 )
 from vllm_ascend.quantization.methods.w4a8_mxfp4 import (
@@ -59,6 +61,42 @@ class _RecordingLinear(nn.Module):
     def forward(self, input_: torch.Tensor):
         self.input = input_
         return self.output, None
+
+
+class _RecordingStream:
+    def __init__(self, name: str, event_names: list[str], trace: list[str]) -> None:
+        self.name = name
+        self.event_names = iter(event_names)
+        self.trace = trace
+
+    def record_event(self) -> str:
+        event = next(self.event_names)
+        self.trace.append(f"{self.name}.record:{event}")
+        return event
+
+    def wait_event(self, event: str) -> None:
+        self.trace.append(f"{self.name}.wait:{event}")
+
+
+class _RecordingTensor:
+    def __init__(self, name: str, trace: list[str]) -> None:
+        self.name = name
+        self.trace = trace
+
+    def record_stream(self, stream: _RecordingStream) -> None:
+        self.trace.append(f"{self.name}.record_stream:{stream.name}")
+
+
+class _RecordingStreamSwitch:
+    def __init__(self, stream: _RecordingStream, trace: list[str]) -> None:
+        self.stream = stream
+        self.trace = trace
+
+    def __enter__(self) -> None:
+        self.trace.append(f"enter:{self.stream.name}")
+
+    def __exit__(self, *args) -> None:
+        self.trace.append(f"exit:{self.stream.name}")
 
 
 def _make_conv_pack_attention(
@@ -188,40 +226,186 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.device == output.device
 
 
-def test_staged_bfg_projection_preserves_original_outputs():
+def test_kimi_k3_kda_requires_full_rank_gate():
+    _require_kimi_k3_full_rank_gate({"use_full_rank_gate": True})
+    with pytest.raises(ValueError, match="requires use_full_rank_gate=true"):
+        _require_kimi_k3_full_rank_gate({"use_full_rank_gate": False})
+
+
+@pytest.mark.parametrize("f_b_is_local", [False, True])
+def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
+    with (
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=4),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=2),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=2),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
+    ):
+        linear = _KDAFusedBFGLinear(
+            hidden_size=6,
+            num_heads=8,
+            head_dim=3,
+            tp_size=4,
+            quant_config=None,
+            prefix="model.layers.0.self_attn.fused_bfg_proj",
+        )
+
+    linear.weight.data.zero_()
+    b_weight = torch.arange(8 * 6, dtype=linear.weight.dtype).reshape(8, 6)
+    f_a_weight = torch.arange(3 * 6, dtype=linear.weight.dtype).reshape(3, 6) + 100
+    global_f_b_weight = torch.arange(24 * 3, dtype=linear.weight.dtype).reshape(24, 3) + 200
+    local_f_b_weight = global_f_b_weight[12:18]
+    g_weight = torch.arange(24 * 6, dtype=linear.weight.dtype).reshape(24, 6) + 200
+
+    linear.weight.weight_loader(linear.weight, b_weight, 0)
+    linear.f_a_weight.weight_loader(linear.f_a_weight, f_a_weight)
+    with patch("vllm_ascend.ops.kimi_kda.get_tensor_model_parallel_rank", return_value=2):
+        linear.f_b_weight.weight_loader(
+            linear.f_b_weight,
+            local_f_b_weight if f_b_is_local else global_f_b_weight,
+        )
+    linear.weight.weight_loader(linear.weight, g_weight, 2)
+
+    expected_f = torch.matmul(
+        local_f_b_weight.float(),
+        f_a_weight.float(),
+    ).to(linear.weight.dtype)
+    assert tuple(linear.weight.shape) == (14, 6)
+    torch.testing.assert_close(linear.weight[:2], b_weight[4:6])
+    torch.testing.assert_close(linear.weight[2:8], expected_f)
+    torch.testing.assert_close(linear.weight[8:], g_weight[12:18])
+
+
+def test_fused_bfg_linear_recomposes_f_after_source_reload():
+    with (
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=1),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=0),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1),
+    ):
+        linear = _KDAFusedBFGLinear(
+            hidden_size=4,
+            num_heads=2,
+            head_dim=2,
+            tp_size=1,
+            quant_config=None,
+            prefix="model.layers.0.self_attn.fused_bfg_proj",
+        )
+
+    linear.weight.data.zero_()
+    first_f_a = torch.arange(8, dtype=linear.weight.dtype).reshape(2, 4)
+    first_f_b = torch.arange(8, dtype=linear.weight.dtype).reshape(4, 2)
+    linear.f_a_weight.weight_loader(linear.f_a_weight, first_f_a)
+    torch.testing.assert_close(linear.weight[2:6], torch.zeros_like(linear.weight[2:6]))
+    linear.f_b_weight.weight_loader(linear.f_b_weight, first_f_b)
+    torch.testing.assert_close(linear.weight[2:6], first_f_b.float() @ first_f_a.float())
+
+    reloaded_f_a = first_f_a + 10
+    reloaded_f_b = first_f_b + 20
+    linear.f_a_weight.weight_loader(linear.f_a_weight, reloaded_f_a)
+    linear.f_b_weight.weight_loader(linear.f_b_weight, reloaded_f_b)
+    torch.testing.assert_close(
+        linear.weight[2:6],
+        reloaded_f_b.float() @ reloaded_f_a.float(),
+    )
+
+
+def test_fused_bfg_projection_preserves_staged_outputs():
     attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
     nn.Module.__init__(attention)
-    attention.use_full_rank_gate = True
     attention.head_dim = 3
+    attention._fused_bfg_output_sizes = (2, 6, 6)
 
     hidden_states = torch.randn(4, 5)
-    beta_output = torch.arange(8, dtype=torch.float32).reshape(4, 2)
-    f_a_output = torch.arange(12, dtype=torch.float32).reshape(4, 3)
-    f_b_output = torch.arange(24, dtype=torch.float32).reshape(4, 6)
-    g_output = torch.arange(24, dtype=torch.float32).reshape(4, 6) + 100
-    attention.b_proj = _RecordingLinear(beta_output)
-    attention.f_a_proj = _RecordingLinear(f_a_output)
-    attention.f_b_proj = _RecordingLinear(f_b_output)
-    attention.g_proj = _RecordingLinear(g_output)
+    fused_output = torch.arange(56, dtype=torch.float32).reshape(4, 14)
+    attention.fused_bfg_proj = _RecordingLinear(fused_output)
 
     beta, raw_gate, output_gate = attention._project_bfg(hidden_states)
 
-    torch.testing.assert_close(beta, beta_output)
-    torch.testing.assert_close(attention.f_b_proj.input, f_a_output)
-    torch.testing.assert_close(raw_gate, f_b_output)
-    torch.testing.assert_close(output_gate, g_output)
+    torch.testing.assert_close(beta, fused_output[:, :2])
+    torch.testing.assert_close(raw_gate, fused_output[:, 2:8])
+    torch.testing.assert_close(output_gate, fused_output[:, 8:])
 
     beta, raw_gate, output_gate = attention._postprocess_bfg(
         beta,
         raw_gate,
         output_gate,
     )
-    torch.testing.assert_close(beta, beta_output.sigmoid().unsqueeze(0))
+    torch.testing.assert_close(beta, fused_output[:, :2].sigmoid().unsqueeze(0))
     torch.testing.assert_close(
         raw_gate,
-        f_b_output.reshape(4, 2, 3).unsqueeze(0),
+        fused_output[:, 2:8].reshape(4, 2, 3).unsqueeze(0),
     )
-    torch.testing.assert_close(output_gate, g_output.reshape(4, 2, 3))
+    torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
+
+
+def test_overlapped_qkv_bfg_has_two_bidirectional_event_joins():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    trace: list[str] = []
+    main_stream = _RecordingStream(
+        "main",
+        ["hidden_ready", "quant_ready", "qkv_ready"],
+        trace,
+    )
+    bfg_stream = _RecordingStream(
+        "bfg",
+        ["bfg_projection_ready", "bfg_ready"],
+        trace,
+    )
+    hidden_states = _RecordingTensor("hidden", trace)
+    raw_bfg = tuple(_RecordingTensor(name, trace) for name in ("beta_raw", "raw_gate_raw", "gate_raw"))
+    processed_bfg = tuple(_RecordingTensor(name, trace) for name in ("beta", "raw_gate", "output_gate"))
+    quantized_qkv = object()
+    qkv = object()
+
+    attention._project_bfg = MagicMock(
+        side_effect=lambda _: (trace.append("project_bfg"), raw_bfg)[1],
+    )
+    attention._quantize_fused_qkv = MagicMock(
+        side_effect=lambda _: (trace.append("dynamic_quant"), quantized_qkv)[1],
+    )
+    attention._matmul_fused_qkv = MagicMock(
+        side_effect=lambda _: (trace.append("qkv_matmul"), qkv)[1],
+    )
+    attention._postprocess_bfg = MagicMock(
+        side_effect=lambda *_: (trace.append("postprocess_bfg"), processed_bfg)[1],
+    )
+
+    with (
+        patch("vllm_ascend.ops.kimi_kda.torch.npu.current_stream", return_value=main_stream),
+        patch("vllm_ascend.ops.kimi_kda._kda_bfg_stream", return_value=bfg_stream),
+        patch(
+            "vllm_ascend.ops.kimi_kda.npu_stream_switch",
+            side_effect=lambda stream: _RecordingStreamSwitch(stream, trace),
+        ),
+    ):
+        actual = attention._run_overlapped_qkv_bfg(hidden_states)
+
+    assert actual == (qkv, *processed_bfg)
+    assert trace == [
+        "main.record:hidden_ready",
+        "hidden.record_stream:bfg",
+        "enter:bfg",
+        "bfg.wait:hidden_ready",
+        "project_bfg",
+        "bfg.record:bfg_projection_ready",
+        "exit:bfg",
+        "dynamic_quant",
+        "main.record:quant_ready",
+        "main.wait:bfg_projection_ready",
+        "qkv_matmul",
+        "main.record:qkv_ready",
+        "enter:bfg",
+        "bfg.wait:quant_ready",
+        "postprocess_bfg",
+        "bfg.record:bfg_ready",
+        "bfg.wait:qkv_ready",
+        "exit:bfg",
+        "beta.record_stream:main",
+        "raw_gate.record_stream:main",
+        "output_gate.record_stream:main",
+        "main.wait:bfg_ready",
+    ]
 
 
 @pytest.mark.parametrize(
