@@ -14,8 +14,8 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 class Ascend310PBlockTables(BlockTables):
     """CPU-owned MRV2 block tables matching the 310P MRV1 data path."""
 
-    # TODO: Refactor Triton-backed block-table operations through
-    # triton_dispatch after vLLM RFC #45133 lands.
+    # TODO: Refactor block-table operations to register 310P implementations
+    # through Triton Dispatcher after vLLM RFC #45133 lands.
 
     def __init__(
         self,

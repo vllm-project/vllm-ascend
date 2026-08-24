@@ -13,7 +13,7 @@ from vllm_ascend.worker.v2.states import AscendRequestState
 class Ascend310PStagedWriteTensor:
     """CPU-owned replacement for vLLM's Triton-backed staged writes."""
 
-    # TODO: Refactor this Triton replacement through triton_dispatch after
+    # TODO: Refactor this 310P implementation to use Triton Dispatcher after
     # vLLM RFC #45133 lands.
 
     def __init__(
@@ -71,8 +71,8 @@ class Ascend310PStagedWriteTensor:
 class Ascend310PRequestState(AscendRequestState):
     """MRV2 request state using the same CPU-owner model as MRV1 310P."""
 
-    # TODO: Use the upstream dispatched staged-write state after vLLM RFC
-    # #45133 lands.
+    # TODO: Refactor staged writes to use Triton Dispatcher after vLLM RFC
+    # #45133 lands while retaining the 310P implementation.
 
     def __init__(
         self,

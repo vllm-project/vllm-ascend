@@ -11,6 +11,9 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 class Ascend310PSampler:
     """Triton-free sampler for 310P MRV2."""
 
+    # TODO: Refactor this sampler to register 310P implementations through
+    # Triton Dispatcher after vLLM RFC #45133 lands.
+
     def __init__(self) -> None:
         self.penalties_state = SimpleNamespace(output_bin_counts=None)
 

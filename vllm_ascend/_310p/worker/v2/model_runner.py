@@ -41,8 +41,8 @@ _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 class NPUModelRunner310V2(NPUModelRunner):
     """Model runner v2 for Ascend 310P."""
 
-    # TODO: Refactor Triton-dependent overrides through triton_dispatch after
-    # vLLM RFC #45133 lands.
+    # TODO: Refactor Triton-dependent overrides to register 310P
+    # implementations through Triton Dispatcher after vLLM RFC #45133 lands.
     request_state_cls = Ascend310PRequestState
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -287,7 +287,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         idx_mapping_np: np.ndarray,
         query_start_loc_np: np.ndarray,
     ) -> None:
-        # TODO: Replace this CPU fallback through triton_dispatch after vLLM
+        # TODO: Refactor this CPU fallback to use Triton Dispatcher after vLLM
         # RFC #45133 lands.
         del idx_mapping, query_start_loc, all_token_ids, prefill_len, num_computed_tokens
         self.input_ids_cpu[: input_ids.shape[0]].zero_()
@@ -320,7 +320,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         query_start_loc_np: np.ndarray,
         num_scheduled_tokens: np.ndarray,
     ) -> None:
-        # TODO: Replace this CPU fallback through triton_dispatch after vLLM
+        # TODO: Refactor this CPU fallback to use Triton Dispatcher after vLLM
         # RFC #45133 lands.
         del idx_mapping, query_start_loc, num_computed_tokens
         self.input_buffers.seq_lens_cpu.zero_()
@@ -352,7 +352,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         seq_lens_np: np.ndarray,
         prefill_len_np: np.ndarray,
     ) -> torch.Tensor:
-        # TODO: Replace this CPU fallback through triton_dispatch after vLLM
+        # TODO: Refactor this CPU fallback to use Triton Dispatcher after vLLM
         # RFC #45133 lands.
         del idx_mapping, query_start_loc, seq_lens, prefill_len
         del draft_tokens, cu_num_logits, num_bonus_tokens
@@ -371,8 +371,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         self,
         input_batch: AscendInputBatch,
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        # TODO: Route Triton-backed block-table preparation through
-        # triton_dispatch after vLLM RFC #45133 lands.
+        # TODO: Refactor block-table preparation to use Triton Dispatcher after
+        # vLLM RFC #45133 lands.
         block_tables = self.block_tables.gather_block_tables(
             input_batch.idx_mapping_np,
             num_reqs_padded=input_batch.num_reqs_after_padding,
@@ -402,7 +402,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         input_batch: AscendInputBatch,
         grammar_output: GrammarOutput | None,
     ):
-        # TODO: Route 310P sampling through triton_dispatch after vLLM RFC
+        # TODO: Refactor 310P sampling to use Triton Dispatcher after vLLM RFC
         # #45133 lands.
         if grammar_output is not None:
             # TODO: Restore MRV1 structured output support in the next 310P MRV2 iteration.
@@ -424,8 +424,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
     ) -> None:
-        # TODO: Route the Triton-backed state update through triton_dispatch
-        # after vLLM RFC #45133 lands.
+        # TODO: Refactor this 310P state update to use Triton Dispatcher after
+        # vLLM RFC #45133 lands.
         del num_rejected
         num_entries = min(idx_mapping.shape[0], sampled_tokens.shape[0], num_sampled.shape[0])
         idx_mapping = idx_mapping[:num_entries]
@@ -469,8 +469,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         return query_lens.masked_select(idx_mapping[:num_query_lens] >= 0)
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
-        # TODO: Route the Triton-backed state update through triton_dispatch
-        # after vLLM RFC #45133 lands.
+        # TODO: Refactor this 310P state update to use Triton Dispatcher after
+        # vLLM RFC #45133 lands.
         query_lens = input_batch.query_start_loc[1:] - input_batch.query_start_loc[:-1]
         self.req_states.num_computed_tokens.gpu.index_add_(
             0,
