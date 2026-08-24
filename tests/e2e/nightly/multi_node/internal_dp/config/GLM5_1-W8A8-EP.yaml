@@ -35,7 +35,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
           --host 0.0.0.0
@@ -82,7 +81,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
           --host 0.0.0.0

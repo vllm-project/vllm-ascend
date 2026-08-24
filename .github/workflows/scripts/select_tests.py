@@ -276,6 +276,32 @@ def _resolve_config_inheritance(config: list[dict]) -> list[dict]:
     return [resolve(module["name"]) for module in config]
 
 
+def _filter_label_gated_modules(
+    config: list[dict],
+    pr_labels: str | None,
+) -> tuple[list[dict], set[str]]:
+    """Drop modules whose ``required_pr_labels`` are not all present.
+
+    Label gating is opt-in: it only takes effect when *pr_labels* is
+    provided (the PR-driven path). Returns the filtered config plus the
+    test targets owned by gated modules, so the test-only fallback can
+    skip them as well.
+    """
+    if pr_labels is None:
+        return config, set()
+    labels = {label.strip() for label in pr_labels.split(",") if label.strip()}
+    active: list[dict] = []
+    gated_targets: set[str] = set()
+    for module in config:
+        required = set(_as_base_list(module.get("required_pr_labels", [])))
+        if required and not required.issubset(labels):
+            for target in module.get("tests", []):
+                gated_targets.add(_pytest_node_file_path(target).rstrip("/"))
+            continue
+        active.append(module)
+    return active, gated_targets
+
+
 def _match_modules(
     changed_files: list[str],
     config: list[dict],
@@ -356,6 +382,14 @@ def _configured_nodeid_targets_for_file(file_path: str, config: list[dict]) -> l
 def _is_skipped_test_target(target: str, skip_tests: set[str]) -> bool:
     target = target.rstrip("/")
     return target in skip_tests or _pytest_node_file_path(target) in skip_tests
+
+
+def _is_gated_test_target(target: str, gated_targets: set[str]) -> bool:
+    """Return True if *target* belongs to a label-gated module."""
+    if not gated_targets:
+        return False
+    target = _pytest_node_file_path(target).rstrip("/")
+    return any(target == gated or target.startswith(gated + "/") for gated in gated_targets)
 
 
 def _is_ut_path(path: str) -> bool:
@@ -853,11 +887,19 @@ def main():
         default=None,
         help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
     )
+    parser.add_argument(
+        "--pr-labels",
+        type=str,
+        default=None,
+        help="Comma-separated labels on the triggering PR. When provided, modules "
+        "declaring ``required_pr_labels`` that are not fully present are excluded.",
+    )
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
     meta = docs[1] if len(docs) >= 2 and docs[1] else {}
     _load_runner_mapping(meta)
+    config, gated_test_targets = _filter_label_gated_modules(config, args.pr_labels)
 
     skip_tests: set[str] = set()
     for module in config:
@@ -980,6 +1022,8 @@ def main():
                 changed_targets = _configured_nodeid_targets_for_file(changed_test_file, config) or [changed_test_file]
             for f in changed_targets:
                 if _is_skipped_test_target(f, skip_tests):
+                    continue
+                if _is_gated_test_target(f, gated_test_targets):
                     continue
                 if _is_ut_path(f):
                     key = _route_ut_dir(f)

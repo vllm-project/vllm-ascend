@@ -189,7 +189,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding":true,
                           "enable_fused_mc2":true,
-                          "enable_flashcomm1":true,
                           "weight_nz_mode":true}' \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
@@ -208,7 +207,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 ```bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
-    --reasoning-parser minimax_m2_append_think \
+    --reasoning-parser minimax_m2_append_think
 ```
 
 #### A2 (single node)
@@ -240,8 +239,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 32768 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.85 \
-    --additional-config '{"enable_cpu_binding":true,
-                          "enable_flashcomm1":true}' \
+    --additional-config '{"enable_cpu_binding":true}' \
     --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/",  "num_speculative_tokens":3}'
 ```
@@ -253,7 +251,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 ```bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
-    --reasoning-parser minimax_m2_append_think \
+    --reasoning-parser minimax_m2_append_think
 ```
 
 ### 5.2 Multi-Node PD Separation Deployment
@@ -295,7 +293,6 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 
@@ -357,7 +354,6 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 
@@ -571,7 +567,6 @@ vllm bench serve \
 
 The following configurations are validated in internal testing and are categorized by use case.
 
-| Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max Batched Tokens | Max Num Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | FlashComm1 | Async Scheduling |
 |----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|
 | Short Seq High Throughput | 3.5k → 1.5k | 1P2D PD separation | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
 | Short Seq Low Latency | 3.5k → 1.5k | 1P2D PD separation | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
@@ -604,7 +599,6 @@ The following optimizations are enabled by default and require no additional con
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
-| FlashComm v1 | High-concurrency, TP scenarios | `--additional-config '{"enable_flashcomm1": true}'` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather | Threshold protection: only takes effect when the actual number of tokens exceeds the threshold |
 | Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": true}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
 | Balanced Scheduling | High DP scenarios | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
 | EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{"method": "eagle3", "model": "/path/to/Eagle3/", "num_speculative_tokens": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |
