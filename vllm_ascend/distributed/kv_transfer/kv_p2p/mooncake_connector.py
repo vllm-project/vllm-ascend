@@ -69,7 +69,11 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
+from vllm_ascend.utils import (
+    enable_custom_op,
+    enable_sfa_dcp_replicated_indexer,
+    model_uses_sfa_sparse,
+)
 
 # isort: off
 if TYPE_CHECKING:
@@ -961,12 +965,10 @@ class KVCacheRecvingThread(threading.Thread):
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
                     remote_block_stride = remote_block_stride_per_addr[remote_layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
-                    if self.enable_sfa_dcp_replicated_indexer and self.block_size_scale[layer_idx][cache_idx] > 1:
-                        if has_replicate_k_blocks:
-                            transfer_remote_block_ids = grouped_remote_k_block_ids
-                            transfer_local_block_ids = grouped_local_k_block_ids
-                        else:
-                            continue
+                    is_sfa_indexer_group = group_spec["kv_cache_spec_type"] == "AscendSFAIndexerCacheSpec"
+                    if is_sfa_indexer_group and has_replicate_k_blocks:
+                        transfer_remote_block_ids = grouped_remote_k_block_ids
+                        transfer_local_block_ids = grouped_local_k_block_ids
                     else:
                         if not has_group_blocks:
                             continue
@@ -3465,7 +3467,10 @@ class MooncakeConnectorWorker:
         self,
         meta: ReqMeta,
     ) -> tuple[BlockIds, BlockIds]:
-        if not self.enable_sfa_dcp_replicated_indexer:
+        remote_uses_replicated_indexer = (
+            model_uses_sfa_sparse(self.vllm_config.model_config) and meta.remote_dcp_size > 1
+        )
+        if not (self.enable_sfa_dcp_replicated_indexer or remote_uses_replicated_indexer):
             return tuple(), tuple()
         if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
             return tuple(), tuple()
