@@ -165,8 +165,8 @@ class TestAscendConfig(TestBase):
     def test_sparse_li_c8_layer_filter_uses_indexer_wq_b_weight(self):
         config = self._make_sparse_li_c8_config(
             {
-                "model.layers.3.self_attn.indexer.wq_b_weight": "W8A8_MXFP8",
-                "model.layers.4.self_attn.indexer.wq_b_weight": "W8A8_DYNAMIC",
+                "model.layers.3.self_attn.indexer.wq_b.weight": "W8A8_MXFP8",
+                "model.layers.4.self_attn.indexer.wq_b.weight": "W8A8_DYNAMIC",
             }
         )
 
