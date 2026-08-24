@@ -30,6 +30,7 @@ from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionW
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+from vllm_ascend.compilation.breakable_aclgraph import eager_break_during_capture
 
 
 class IndexerWrapper(nn.Module):
@@ -156,6 +157,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         return output
 
 
+@eager_break_during_capture
 def mla_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
