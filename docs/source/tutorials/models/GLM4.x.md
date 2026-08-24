@@ -154,7 +154,6 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
 The parameters are explained as follows:
 
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
 ### 5.2 Multi-node Deployment
 

@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
 
 import pytest
 import torch_npu
@@ -73,7 +72,6 @@ BASELINES_SP = {
 
 
 @pytest.mark.skip(reason="skip test_eagle3_sp_acceptance")
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @pytest.mark.parametrize("method", ["eagle3"])
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
@@ -266,7 +264,6 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_vwn_eagle3_tp2():
     """
     Test Qwen3-30B-A3B with VWN-Eagle3 speculative decoding acceptance rate.

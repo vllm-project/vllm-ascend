@@ -231,8 +231,8 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
-    --port 8000 
+    --additional-config '{"weight_nz_mode": 2}' \
+    --port 8000
 ```
 
 !!! note
@@ -367,7 +367,7 @@ As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, an
     | Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
     +=============================+============+==========+==========+=======+=========+=========+
     | Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
-    +-----------------------------+------------+----------+----------+-------+---------+---------+ 
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
     +-----------------------------+-----------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
@@ -478,7 +478,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -549,7 +549,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'

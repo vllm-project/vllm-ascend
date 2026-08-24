@@ -1,4 +1,6 @@
-# Decode Context Parallel (DCP)
+# Context Parallel
+
+The context parallel features include Decode Context Parallel (DCP) and DSA-CP.
 
 Decode Context Parallel shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It eliminates redundant KV-cache storage without adding devices to the process world.
 
@@ -73,11 +75,10 @@ This mode is selected automatically for SFA sparse models when
 `prefill_context_parallel_size=1` and `decode_context_parallel_size>1`. It
 requires `decode_context_parallel_size == tensor_parallel_size`.
 
-For a GLM-5.2 DSA-CP deployment, enable FlashComm1 and DSA-CP and keep the CP
+For a GLM-5.2 DSA-CP deployment, enable sequence parallelism and DSA-CP and keep the CP
 interleave size equal to the KV-cache block size:
 
 ```bash
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
@@ -85,7 +86,7 @@ vllm serve <glm-5.2-model> \
   --decode-context-parallel-size <N> \
   --block-size <B> \
   --cp-kv-cache-interleave-size <B> \
-  --additional-config '{"enable_dsa_cp": true}'
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true}'
 ```
 
 The replicated indexer increases indexer-cache memory in proportion to the

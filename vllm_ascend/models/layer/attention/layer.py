@@ -19,7 +19,11 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.attention.dsa_v1 import (
+    AscendDSAC4Backend,
+    AscendDSAC128Backend,
+    AscendDSASWABackend,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -107,7 +111,12 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
-        self.attn_backend = AscendDSABackend
+        if self.compress_ratio == 4:
+            self.attn_backend = AscendDSAC4Backend
+        elif self.compress_ratio == 128:
+            self.attn_backend = AscendDSAC128Backend
+        else:
+            self.attn_backend = AscendDSASWABackend
 
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (
@@ -176,9 +185,11 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         cached_head_size = (
             (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
         )
-        block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
+        storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=block_size,
+            # The scheduler operates in raw-token units. Ascend kernels keep
+            # using the compressed page exposed by storage_block_size.
+            block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=kv_cache_dtype,

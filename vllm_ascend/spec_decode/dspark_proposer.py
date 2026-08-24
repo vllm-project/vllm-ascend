@@ -115,7 +115,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
 
-    def _compute_confidence_logits(
+    def _compute_confidence(
         self,
         last_hidden_states: torch.Tensor,
         draft_token_ids: torch.Tensor,
@@ -129,10 +129,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         # The confidence head concatenates both inputs, so their dtypes must
         # match; it upcasts to float32 internally.
         flat_markov = markov_embs.reshape(num_tokens, markov_embs.shape[-1]).to(flat_hidden.dtype)
-        conf_raw = self.model.confidence_logits(flat_hidden, flat_markov)
-        confidence_logits = self._dspark_confidence_logits_buffer[:num_reqs]
-        confidence_logits.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
-        return confidence_logits
+        conf_raw = self.model.compute_confidence(flat_hidden, flat_markov)
+        confidence = self._dspark_confidence_logits_buffer[:num_reqs]
+        confidence.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
+        return confidence
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)

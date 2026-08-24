@@ -245,7 +245,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --distributed_executor_backend "mp" \
         --no-enable-prefix-caching \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+        --additional-config '{"weight_nz_mode": 2}' \
         --gpu-memory-utilization 0.95 \
         --port 8000 \
         --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -537,7 +537,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -608,7 +608,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}' \

@@ -12,7 +12,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1024"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
@@ -129,7 +128,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1024"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_DISABLE_COMPILE_CACHE: "1"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
@@ -172,7 +170,7 @@ test_cases:
     benchmarks:
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
+        dataset_path: vllm-ascend/GSM8K-in1007616-bs16-prefix0-qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 60

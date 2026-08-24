@@ -59,9 +59,20 @@ def test_qwen3_5_mtp_forward_returns_intermediate_tensors_on_non_last_pp_rank():
     predictor.layers = [MagicMock(return_value=(torch.full((1, 4), 3.0), torch.full((1, 4), 4.0)))]
     predictor.norm = MagicMock()
 
-    with patch(
-        "vllm_ascend.patch.worker.patch_qwen3_5.get_pp_group",
-        return_value=SimpleNamespace(is_last_rank=False),
+    with (
+        patch(
+            "vllm_ascend.patch.worker.patch_qwen3_5.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=False),
+        ),
+        patch(
+            "vllm.model_executor.models.utils.sequence_parallel_chunk",
+            side_effect=lambda x: x,
+        ),
+        patch(
+            "vllm_ascend.patch.worker.patch_qwen3_5.sequence_parallel_chunk",
+            side_effect=lambda x: x,
+            create=True,
+        ),
     ):
         output = predictor.forward(
             input_ids=torch.tensor([1]),
