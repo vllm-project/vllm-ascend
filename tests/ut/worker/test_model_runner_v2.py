@@ -44,7 +44,7 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
     assert output is None
     assert runner._cpp_execution_time_ms == pytest.approx(125.0)
     assert mock_synchronize.call_count == 2
-    expected_kwargs = {
+    expected_kwargs: dict[str, object] = {
         "intermediate_tensors": None,
         "dummy_run": False,
         "skip_attn_for_dummy_run": False,
