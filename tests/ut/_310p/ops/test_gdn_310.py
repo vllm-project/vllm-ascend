@@ -16,12 +16,15 @@
 #
 
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend import utils
 from vllm_ascend._310p.ops.fla.gdn_310 import (
     AscendGatedDeltaNetAttention310,
+    AscendQwenGatedDeltaNetAttention310,
     _mask_padded_recurrent_accepted_tokens,
     _zero_padded_tokens,
 )
@@ -29,6 +32,21 @@ from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
     AscendGDNAttentionBackend310,
     AscendGDNAttentionMetadataBuilder310,
 )
+
+
+def test_register_customop_overrides_qwen_gdn_for_310p():
+    original_registered = utils._ASCEND_CUSTOMOP_IS_REIGISTERED
+    try:
+        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
+        with (
+            mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot"),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        ):
+            utils.register_ascend_customop()
+
+        assert utils.REGISTERED_ASCEND_OPS["QwenGatedDeltaNetAttention"] is AscendQwenGatedDeltaNetAttention310
+    finally:
+        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = original_registered
 
 
 def test_ascend_gdn_attention_310_uses_310p_backend():
