@@ -20,6 +20,52 @@ from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
+class TestDSparkAuxCaptureMode(unittest.TestCase):
+    def _build_runner(
+        self,
+        *,
+        model_type: str,
+        architecture: str,
+        use_dspark: bool = True,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.speculative_config = SimpleNamespace(
+            use_dspark=MagicMock(return_value=use_dspark),
+            draft_model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    model_type=model_type,
+                    architectures=[architecture],
+                )
+            ),
+        )
+        return runner
+
+    def test_qwen3_gqa_dspark_uses_materialized_stream(self):
+        runner = self._build_runner(
+            model_type="qwen3",
+            architecture="Qwen3DSparkModel",
+        )
+
+        self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
+
+    def test_mla_dspark_keeps_raw_stream(self):
+        runner = self._build_runner(
+            model_type="kimi_k3_dspark",
+            architecture="KimiK3DSparkForCausalLM",
+        )
+
+        self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+    def test_non_dspark_keeps_raw_stream(self):
+        runner = self._build_runner(
+            model_type="qwen3",
+            architecture="Qwen3DSparkModel",
+            use_dspark=False,
+        )
+
+        self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)

@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 from collections.abc import Iterable
@@ -5,6 +6,7 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import load_file
+from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 
@@ -50,6 +52,36 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
+
+
+@torch.inference_mode()
+def prepare_quarot_shared_layer(
+    draft_layer: nn.Module | None,
+    target_layer: nn.Module,
+    rotation: torch.Tensor,
+    label: str,
+) -> tuple[nn.Module, torch.Tensor]:
+    """Create a draft-owned target layer in the unrotated hidden basis."""
+    if draft_layer is None:
+        comm_group = getattr(target_layer, "comm_group", None)
+        memo = {id(comm_group): comm_group} if comm_group is not None else None
+        draft_layer = copy.deepcopy(target_layer, memo)
+
+    rotation = rotation.to(
+        device=target_layer.weight.device,
+        dtype=torch.float32,
+    )
+    unrotated = torch.matmul(
+        target_layer.weight.data.to(torch.float32),
+        rotation.T,
+    )
+    draft_layer.weight.data.copy_(unrotated.to(draft_layer.weight.dtype))
+    logger.info(
+        "[spec_decode/quarot] Copied and aligned shared %s (weight=%s).",
+        label,
+        tuple(draft_layer.weight.shape),
+    )
+    return draft_layer, rotation
 
 
 def compute_rotation_matrix3(Q: torch.Tensor) -> torch.Tensor:
