@@ -94,6 +94,9 @@ a2:
 a3:
   multi_node:
     test_config:
+      - name: kimi-k3-w4a8-a3
+        config_file_path: Kimi-K3-W4A8-A3.yaml
+        size: 4
       - name: multi-node-deepseek-v3.2-W8A8-EP
         config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
