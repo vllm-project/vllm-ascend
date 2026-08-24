@@ -34,21 +34,21 @@ FAULT_DETECTION_DEADLINE_S = 45
 # ---------------------------------------------------------------------------
 # Fault-injection via sitecustomize.py
 # ---------------------------------------------------------------------------
-# Patches ``NPUModelRunner._sync_metadata_across_dp`` to raise on ``rank`` at
-# a chosen step. Gated on VLLM_FT_TEST_INJECT_FAULT.
+# Patches ``dp_utils.sync_cudagraph_and_dp_padding`` to raise on ``rank`` after
+# the DP all_reduce at a chosen step. Gated on VLLM_FT_TEST_INJECT_FAULT.
 #
-# The import hook waits for ``vllm_ascend.worker.model_runner_v1`` to land
-# in sys.modules and for ``NPUModelRunner._sync_metadata_across_dp`` to be
-# defined, then wraps the method with a step-counting wrapper.
+# The import hook waits for ``vllm.v1.worker.gpu.dp_utils`` to land in
+# sys.modules and for ``sync_cudagraph_and_dp_padding`` to be defined, then
+# wraps the function with a step-counting wrapper. The wrapper calls the
+# original (so the all_reduce completes) and raises after it returns.
 _FAULT_INJECT_SITECUSTOMIZE = """\
 import builtins
 import os
 import sys
 
 _SPEC = os.environ.get("VLLM_FT_TEST_INJECT_FAULT")
-_MODULE = "vllm_ascend.worker.model_runner_v1"
-_CLASS = "NPUModelRunner"
-_METHOD = "_sync_metadata_across_dp"
+_MODULE = "vllm.v1.worker.gpu.dp_utils"
+_FUNC = "sync_cudagraph_and_dp_padding"
 
 if _SPEC:
     _f = dict(kv.split("=", 1) for kv in _SPEC.split(","))
@@ -56,12 +56,17 @@ if _SPEC:
     _steps = [0]
 
     def _patch(m):
-        cls = getattr(m, _CLASS)
-        _orig = getattr(cls, _METHOD)
+        import inspect
 
-        def _wrapped(self, *args, **kwargs):
-            result = _orig(self, *args, **kwargs)
-            if self.dp_rank == _RANK:
+        _orig = getattr(m, _FUNC)
+        _sig = inspect.signature(_orig)
+
+        def _wrapped(*args, **kwargs):
+            result = _orig(*args, **kwargs)
+            bound = _sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            dp_rank = bound.arguments.get("dp_rank")
+            if dp_rank == _RANK:
                 _steps[0] += 1
                 if _steps[0] == _STEP:
                     raise RuntimeError(
@@ -70,7 +75,7 @@ if _SPEC:
                     )
             return result
 
-        setattr(cls, _METHOD, _wrapped)
+        setattr(m, _FUNC, _wrapped)
 
     _real_import = builtins.__import__
 
@@ -79,13 +84,11 @@ if _SPEC:
         m = sys.modules.get(_MODULE)
         if (
             m is not None
-            and hasattr(m, _CLASS)
+            and hasattr(m, _FUNC)
             and not getattr(m, "_ft_patched", False)
         ):
-            cls = getattr(m, _CLASS)
-            if hasattr(cls, _METHOD):
-                m._ft_patched = True
-                _patch(m)
+            m._ft_patched = True
+            _patch(m)
         return module
 
     builtins.__import__ = _hook
@@ -93,7 +96,7 @@ if _SPEC:
 
 
 def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> None:
-    """Arrange for the DP-sync method to raise on ``rank`` at serving ``step``.
+    """Arrange for the DP all_reduce sync to raise on ``rank`` at serving ``step``.
 
     Writes a ``sitecustomize.py`` and prepends its dir to PYTHONPATH so every
     vLLM subprocess picks it up; the fault spec is read from the environment.
@@ -181,7 +184,10 @@ class FTServerManager:
                         server_host="localhost",
                         server_port=8000 + r,
                         auto_port=False,
-                        env_dict={"ASCEND_RT_VISIBLE_DEVICES": str(r)},
+                        env_dict={
+                            "ASCEND_RT_VISIBLE_DEVICES": str(r),
+                            "VLLM_USE_V2_MODEL_RUNNER": "1",
+                        },
                     )
                     self.servers.append((server, sargs))
                 except Exception:
@@ -372,7 +378,7 @@ def has_npu_ft_capability() -> bool:
     reason="Requires at least 4 NPUs for DP=4 fault-tolerance testing",
 )
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
-    """An exception injected into _sync_metadata_across_dp drives full
+    """An exception injected after the DP allreduce drives full
     retry recovery on all 4 DP ranks.
 
     Inject a fault at a chosen step on rank 3:
