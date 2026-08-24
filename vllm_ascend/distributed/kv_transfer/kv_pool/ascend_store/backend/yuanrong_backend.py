@@ -50,12 +50,15 @@ class YuanrongConfig:
 
 
 class YuanrongBackend(Backend):
+    # MSetD2H filters existing keys and applies NX on publish, so no connector-side existence check needed.
+    requires_exists_before_put = False
+
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, enable_data_plane: bool = True):
         if lazy_init:
             logger.warning("YuanrongBackend does not support lazy initialization; initializing eagerly.")
         try:
             from yr.datasystem.hetero_client import HeteroClient  # type: ignore[import-not-found]
-            from yr.datasystem.kv_client import SetParam  # type: ignore[import-not-found]
+            from yr.datasystem.kv_client import ExistenceOpt, SetParam  # type: ignore[import-not-found]
             from yr.datasystem.object_client import WriteMode  # type: ignore[import-not-found]
         except ImportError as exc:
             raise ImportError(
@@ -66,6 +69,7 @@ class YuanrongBackend(Backend):
 
         self._ds_set_param = SetParam()
         self._ds_set_param.write_mode = WriteMode.NONE_L2_CACHE_EVICT
+        self._ds_set_param.existence = ExistenceOpt.NX
 
         self.config = YuanrongConfig.load_from_env()
         try:
