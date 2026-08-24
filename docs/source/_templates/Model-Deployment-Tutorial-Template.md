@@ -47,7 +47,7 @@ This section introduces the features supported by the model, including supported
 
 **Example 2: Reference Citation**
 
-Please refer to the [Supported Features List](../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Please refer to the [Supported Models](../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for feature configuration information.
 
@@ -248,7 +248,7 @@ If no special tuning is involved, directly provide a feature combination table a
 **Example:**
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Model-Specific Optimizations (Optional)
 

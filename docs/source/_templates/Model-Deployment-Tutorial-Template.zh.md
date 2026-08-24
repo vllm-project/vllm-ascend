@@ -47,9 +47,9 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **示例2：引用**  
 
-请参考[支持的功能列表](../user_guide/support_matrix/supported_models.md)，获取模型支持的特性矩阵。
+请参考[模型支持列表](../user_guide/support_matrix/supported_models.md)，获取模型支持的特性。
 
-请参考[特性指南](../user_guide/feature_guide/index.md)获取功能配置信息。
+请参考[特性指南](../user_guide/feature_guide/index.md)，获取功能配置信息。
 
 ## 3 前置准备
 
