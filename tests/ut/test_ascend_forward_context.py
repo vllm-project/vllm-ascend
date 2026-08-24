@@ -9,6 +9,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_moe_quant_mismatch", None)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -398,3 +399,34 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     )
 
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
+
+
+@pytest.mark.parametrize(
+    ("is_draft_model", "moe_quant_mismatch", "num_tokens", "expected"),
+    [
+        (True, True, 128, MoECommType.MC2),
+        (True, True, 129, MoECommType.ALLTOALL),
+        (False, True, 128, MoECommType.FUSED_MC2),
+        (True, False, 128, MoECommType.FUSED_MC2),
+    ],
+)
+def test_select_a3_draft_quant_mismatch(
+    monkeypatch,
+    is_draft_model,
+    moe_quant_mismatch,
+    num_tokens,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=256,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "get_dispatch_v2_tokens_capacity", lambda: 128)
+    monkeypatch.setattr(afc, "_moe_quant_mismatch", moe_quant_mismatch)
+
+    vllm_config = _make_vllm_config()
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=is_draft_model) == expected

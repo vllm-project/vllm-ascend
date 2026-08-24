@@ -147,8 +147,9 @@ class AscendConfig:
             os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
         )
 
+        enable_shared_expert_dp = additional_config.get("enable_shared_expert_dp", self.enable_flashcomm1)
         self.enable_shared_expert_dp = (
-            additional_config.get("enable_shared_expert_dp", False)
+            enable_shared_expert_dp
             and vllm_config.parallel_config.enable_expert_parallel
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
