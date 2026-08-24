@@ -19,11 +19,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, _is_decode_only_node
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
@@ -305,11 +306,14 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         dispatch_quant_mode: int = 0,
         dispatch_quant_out_dtype: torch.dtype | None = None,
+        is_decode_only_node: bool | None = None,
     ):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        if is_decode_only_node is None:
+            is_decode_only_node = _is_decode_only_node(get_current_vllm_config())
         group = get_mc2_group().device_group
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
@@ -337,32 +341,28 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
         )
 
-        # mega_moe_max_tokens is passed as max_recv_token_num for the CANN
-        # MegaMoe symmetric buffer. The absolute safe upper bound is
-        # num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) *
-        # min(num_topk, expert_per_rank), but this is typically far too large
-        # and causes excessive device memory usage. If the actual per-rank token
-        # count after dispatch exceeds this value, tokens may be truncated,
-        # leading to precision degradation.
-        ascend_config = get_ascend_config()
-        max_recv_token_num = ascend_config.mega_moe_max_tokens
-        logger.warning_once(
-            "MegaMoe symm buffer: max_recv_token_num is set from mega_moe_max_tokens=%d "
-            "(reference value). "
-            "If the actual per-rank received token count after dispatch exceeds this value, "
-            "precision degradation will occur. The absolute safe upper bound is %d "
-            "(num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) "
-            "* min(num_topk, expert_per_rank); num_max_tokens_per_rank=%d, "
-            "ep_world_size=%d, num_topk=%d, expert_per_rank=%d), "
-            "but using it would cause very large device memory usage. Please tune "
-            "mega_moe_max_tokens in additional_config based on actual expert load distribution.",
-            max_recv_token_num,
-            absolute_safe_max_recv_token_num,
-            num_max_tokens_per_rank,
-            int(self.token_dispatcher.ep_world_size),
-            num_topk,
-            expert_per_rank,
-        )
+        if is_decode_only_node:
+            max_recv_token_num = absolute_safe_max_recv_token_num
+        else:
+            # P nodes and PD-mixed nodes use the configured value. This keeps
+            # the existing memory/performance tradeoff for prefill workloads.
+            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
+            logger.warning_once(
+                "MegaMoe symm buffer: max_recv_token_num is set from "
+                "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
+                "node. If the actual per-rank received token count after "
+                "dispatch exceeds this value, precision degradation will "
+                "occur. The absolute safe upper bound is %d "
+                "(num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
+                "expert_per_rank=%d). Please tune mega_moe_max_tokens in "
+                "additional_config based on actual expert load distribution.",
+                max_recv_token_num,
+                absolute_safe_max_recv_token_num,
+                num_max_tokens_per_rank,
+                int(self.token_dispatcher.ep_world_size),
+                num_topk,
+                expert_per_rank,
+            )
 
         logger.info(
             "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",

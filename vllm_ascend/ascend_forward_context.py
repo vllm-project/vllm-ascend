@@ -35,6 +35,28 @@ _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
 
 
+def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return False
+
+    is_decode_bench = getattr(kv_transfer_config, "kv_connector", None) == "DecodeBenchConnector"
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_kv_consumer = (
+        kv_role == "kv_consumer"
+        if kv_role is not None
+        else bool(
+            getattr(kv_transfer_config, "is_kv_consumer", False)
+            and not getattr(kv_transfer_config, "is_kv_producer", False)
+        )
+    )
+    if not (is_decode_bench or is_kv_consumer):
+        return False
+
+    scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
+    return not bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
+
+
 @contextmanager
 def override_mrv2_in_profile_run(enabled: bool):
     """Override MRv2's extra profile-run marker for one forward path.
@@ -228,8 +250,9 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
     ascend_config = get_ascend_config()
     use_mega_moe = use_cann_megamoe(vllm_config)
+    is_decode_only_node = _is_decode_only_node(vllm_config)
 
-    if ascend_config.enable_prefill_mc2 or use_mega_moe:
+    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not is_decode_only_node):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
