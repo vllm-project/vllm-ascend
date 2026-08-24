@@ -59,6 +59,7 @@ class TestQwen3DSparkWeightLoading:
 
         mock_get_rotation_matrix.assert_called_once_with(rotation_path)
         mock_parent_load_weights.assert_called_once()
+        assert model._shared_layer_rotation is rotation_matrix
 
         processed_weights = mock_parent_load_weights.call_args.args[0]
         torch.testing.assert_close(processed_weights[0][1], expected_fc_weight)
