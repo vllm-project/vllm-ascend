@@ -232,6 +232,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
+        self.use_full_cudagraph = (
+            vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         if vllm_config.parallel_config.prefill_context_parallel_size > 1:
             max_num_reqs *= 2
@@ -365,9 +368,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             actual_seq_lengths_key = self.actual_seq_lengths_key
 
         runtime_cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
-        self.actual_seq_lengths_query.zero_()
-        self.actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)
-        if common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly and num_input_tokens > num_reqs:
+        actual_seq_lengths_query.zero_()
+        actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)
+        has_decode_graph_padding = (
+            self.use_full_cudagraph
+            and draft_index is None
+            and common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and num_input_tokens > num_reqs
+        )
+        if has_decode_graph_padding:
             num_dummy_reqs = num_input_tokens - num_reqs
             dummy_query_lens = runtime_cum_query_lens[-1] + torch.arange(
                 1,
@@ -375,14 +384,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 device=runtime_cum_query_lens.device,
                 dtype=runtime_cum_query_lens.dtype,
             )
-            self.actual_seq_lengths_query[num_reqs:num_input_tokens].copy_(dummy_query_lens)
-        cum_query_lens = self.actual_seq_lengths_query[:num_reqs]
+            actual_seq_lengths_query[num_reqs:num_input_tokens].copy_(dummy_query_lens)
+        cum_query_lens = actual_seq_lengths_query[:num_reqs]
         runtime_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        self.actual_seq_lengths_key.zero_()
-        self.actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
-        if common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly and num_input_tokens > num_reqs:
-            self.actual_seq_lengths_key[num_reqs:num_input_tokens].fill_(1)
-        seq_lens = self.actual_seq_lengths_key[:num_reqs]
+        actual_seq_lengths_key.zero_()
+        actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
+        if has_decode_graph_padding:
+            actual_seq_lengths_key[num_reqs:num_input_tokens].fill_(1)
+        seq_lens = actual_seq_lengths_key[:num_reqs]
 
         # Prefer _seq_lens_cpu (always available, updated during draft
         # iterations) over seq_lens_cpu (None in async spec decode mode).

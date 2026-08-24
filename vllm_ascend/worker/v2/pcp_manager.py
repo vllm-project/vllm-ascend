@@ -223,13 +223,17 @@ class AscendPCPManager(PCPManager):
         """Pad PCP slot mappings to the fixed FULL-decode graph layout."""
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
+        graph_num_tokens = self._global_batch.num_tokens_after_padding
         if getattr(self, "_mtp_enabled", False):
             assert isinstance(self._global_batch, AscendInputBatch)
             assert self._global_batch_slot_mappings is not None
+            actual_num_tokens = self._global_batch.num_tokens
+            self._global_batch_slot_mappings[
+                :, actual_num_tokens:graph_num_tokens
+            ].fill_(-1)
             self._global_batch.pcp_global_slot_mappings = (
-                self._global_batch_slot_mappings[:, : self._global_batch.num_tokens]
+                self._global_batch_slot_mappings[:, :graph_num_tokens]
             )
-        graph_num_tokens = self._global_batch.num_tokens_after_padding
         is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
         if not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
             return slot_mappings

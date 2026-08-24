@@ -70,9 +70,10 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
             and not kwargs.get("is_profile", False)
         ):
             assert isinstance(input_batch, AscendInputBatch)
-            attn_metadata, slot_mappings = self._build_global_pcp_draft_inputs(
-                input_batch
-            )
+            if input_batch.pcp_global_slot_mappings is not None:
+                attn_metadata, slot_mappings = self._build_global_pcp_draft_inputs(
+                    input_batch
+                )
         return super().propose(
             input_batch,
             attn_metadata,
@@ -86,12 +87,23 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         input_batch: AscendInputBatch,
     ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
         num_reqs = input_batch.num_reqs
-        num_tokens = input_batch.num_tokens
+        num_actual_tokens = input_batch.num_tokens
+        use_graph_padding = (
+            self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and not bool(input_batch.is_prefilling_np.any())
+        )
+        num_input_tokens = (
+            input_batch.num_tokens_after_padding
+            if use_graph_padding
+            else num_actual_tokens
+        )
         block_tables = tuple(
             table[:num_reqs] for table in self.block_tables.input_block_tables
         )
         slot_mappings = input_batch.pcp_global_slot_mappings
         assert slot_mappings is not None
+        assert slot_mappings.shape[1] >= num_input_tokens
+        slot_mappings = slot_mappings[:, :num_input_tokens]
 
         max_query_len = int(input_batch.num_scheduled_tokens.max())
         max_seq_len = int(
@@ -100,7 +112,7 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         global_attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs,
-            num_tokens=num_tokens,
+            num_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc[: num_reqs + 1],
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
             max_query_len=max_query_len,
@@ -111,10 +123,10 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
             kv_cache_config=self.kv_cache_config,
             seq_lens_np=input_batch.seq_lens_np,
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-            positions=input_batch.positions[:num_tokens],
+            positions=input_batch.positions[:num_input_tokens],
             attn_state=input_batch.attn_state,
-            num_actual_tokens=num_tokens,
-            num_input_tokens=num_tokens,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
         )
         slot_mappings_by_layer = {
             layer_name: slot_mappings[group_idx]
