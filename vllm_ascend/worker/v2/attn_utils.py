@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -53,6 +54,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+from vllm_ascend.worker.utils import bind_kv_cache
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -858,6 +860,43 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    return kv_caches
+
+
+def init_kv_cache(
+    runner_kv_caches: list[Any],
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+    device: torch.device,
+    cache_dtype: str,
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
+) -> dict[str, Any]:
+    """Allocate, reshape, and bind KV cache tensors for the Ascend runner."""
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    raw_tensors = _allocate_kv_cache(
+        kv_cache_config,
+        shared_kv_cache_layers,
+        device,
+    )
+    kv_caches = _reshape_kv_cache_v2(
+        attn_groups=[group for groups in attn_groups for group in groups],
+        kv_cache_raw_tensors=raw_tensors,
+        cache_dtype=cache_dtype,
+        kernel_block_sizes=kernel_block_sizes,
+        shared_kv_cache_layers=shared_kv_cache_layers,
+        kv_cache_config=kv_cache_config,
+    )
+    num_attn_module = (
+        2 if vllm_config.model_config.hf_config.model_type in ("longcat_flash", "longcat_flash_ngram") else 1
+    )
+    bind_kv_cache(
+        kv_caches,
+        forward_context,
+        runner_kv_caches,
+        num_attn_module,
+    )
     return kv_caches
 
 

@@ -53,7 +53,11 @@ from vllm_ascend.ascend_forward_context import (
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import enable_sp, set_potential_max_tokens
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_state,
+    get_kv_cache_spec,
+    init_kv_cache,
+)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -206,6 +210,23 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+
+    def get_kv_cache_spec(self):
+        if self.is_encoder_only:
+            return {}
+        return get_kv_cache_spec(self.vllm_config)
+
+    def _init_kv_cache(self):
+        return init_kv_cache(
+            self.kv_caches,
+            self.compilation_config.static_forward_context,
+            self.kv_cache_config,
+            self.attn_groups,
+            self.device,
+            self.cache_config.cache_dtype,
+            self.kernel_block_sizes,
+            self.vllm_config,
+        )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):

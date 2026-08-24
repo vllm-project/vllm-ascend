@@ -1,3 +1,4 @@
+from collections import defaultdict
 from collections.abc import Iterable
 from itertools import product as iprod
 from typing import Any
@@ -6,9 +7,35 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    KVBlockZeroer,
+    extract_layer_index,
+)
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+
+def bind_kv_cache(
+    kv_caches: dict[str, Any],
+    forward_context: dict[str, Any],
+    runner_kv_caches: list[Any],
+    num_attn_module: int = 1,
+) -> None:
+    """Bind Ascend KV cache components to the runner and attention layers."""
+    assert not runner_kv_caches
+
+    index2name: dict[int, list[str]] = defaultdict(list)
+    for layer_name in kv_caches:
+        layer_index = extract_layer_index(layer_name, num_attn_module)
+        index2name[layer_index].append(layer_name)
+
+    for layer_index in sorted(index2name):
+        for layer_name in index2name[layer_index]:
+            runner_kv_caches.append(kv_caches[layer_name])
+
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].bind_kv_cache(kv_cache)
 
 
 @triton.jit

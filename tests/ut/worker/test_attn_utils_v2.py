@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
+from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
@@ -28,6 +29,7 @@ from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -100,11 +102,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         "get_current_vllm_config",
         lambda: vllm_config,
     )
-    monkeypatch.setattr(
-        upstream_attn_utils,
-        "get_shared_kv_cache_layers",
-        lambda _config: {},
-    )
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _config: {})
 
     discovered_specs = attn_utils.get_kv_cache_spec(vllm_config)
     assert set(discovered_specs) == {layer_name}
@@ -140,7 +138,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     runner_kv_caches: list[Any] = []
 
-    kv_caches = upstream_attn_utils.init_kv_cache(
+    kv_caches = attn_utils.init_kv_cache(
         runner_kv_caches=runner_kv_caches,
         forward_context={layer_name: cache_layer},
         kv_cache_config=kv_cache_config,
@@ -165,6 +163,14 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     ]
     backing_storage = cache_components[0].untyped_storage().data_ptr()
     assert all(component.untyped_storage().data_ptr() == backing_storage for component in cache_components)
+
+
+def test_mrv2_kv_cache_customization_is_runner_owned():
+    assert NPUModelRunner.get_kv_cache_spec is not upstream_model_runner.GPUModelRunner.get_kv_cache_spec
+    assert NPUModelRunner._init_kv_cache is not upstream_model_runner.GPUModelRunner._init_kv_cache
+    assert upstream_attn_utils._allocate_kv_cache is not attn_utils._allocate_kv_cache
+    assert upstream_attn_utils._reshape_kv_cache is not attn_utils._reshape_kv_cache_v2
+    assert upstream_model_runner.get_kv_cache_spec is not attn_utils.get_kv_cache_spec
 
 
 class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):

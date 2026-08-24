@@ -25,6 +25,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
     DeepseekV2Model,
+    DeepseekV32IndexerCache,
     Indexer,
     _get_llama_4_scaling,
     yarn_get_mscale,
@@ -355,3 +356,12 @@ def _patched_forward(
 
 
 DeepseekV2Model.forward = _patched_forward
+
+
+def _get_ascend_sfa_indexer_backend(_self):
+    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+
+    return AscendSFAIndexerBackend
+
+
+DeepseekV32IndexerCache.get_attn_backend = _get_ascend_sfa_indexer_backend

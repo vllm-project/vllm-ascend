@@ -986,38 +986,6 @@
 #       Remove this patch when torch_npu's Triton includes
 #       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
 #
-# ** 22. File: worker/patch_v2/patch_attn_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
-#    Why:
-#       The current v2 worker still goes through the shared upstream v1 helper
-#       to build KV cache specs. For Ascend MLA layers that helper returns the
-#       generic `MLAAttentionSpec`, but NPU-side cache allocation and reshape
-#       logic expects `AscendMLAAttentionSpec`.
-#    How：
-#       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
-#       upstream behavior while MLA layers are rewritten to
-#       `AscendMLAAttentionSpec`, including the FA-quant head-size adjustment.
-#    Related PR (if no, explain why):
-#       No. This is a plugin-side compatibility patch for the current upstream
-#       helper path.
-#    Future Plan:
-#       Remove this patch once upstream adds a backend hook for KV cache spec
-#       construction or v2 worker no longer depends on the shared v1 helper.
-#
-#   2. `DeepseekV32IndexerCache.get_attn_backend`
-#    Why:
-#       SFA indexer cache layers require the Ascend cache-only backend;
-#       the upstream indexer backend is GPU-specific.
-#    How：
-#       Route SFA indexer cache layers to the existing
-#       `AscendSFAIndexerBackend`.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm-ascend/pull/13069
-#    Future Plan:
-#       Remove this patch once upstream adds a backend hook for KV cache spec
-#       construction or v2 worker no longer depends on the shared v1 helper.
-#
 # ** 23. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
