@@ -201,7 +201,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --gpu-memory-utilization 0.90 \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert": true}'
+      --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
     ```
 
     **Key parameters:**
@@ -215,7 +215,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--enable-prefix-caching` enables prefix caching. For long-context serving, monitor memory usage because prefix caching can increase KV cache pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-    - `--additional-config` enables Ascend-specific optimizations. `enable_flashcomm1` enables FlashComm1, `multistream_overlap_shared_expert` overlaps shared expert computation, and `enable_cpu_binding` enables Ascend-native CPU binding.
 
 === "Atlas 300I DUO"
 
@@ -342,8 +341,8 @@ The following configurations are validated in specific test environments and are
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
-| Long context | Single node | 2 or more | 2 | 1 | 128 | 262144 | 16384 | On | FullGraph, FlashComm1, shared expert overlap, CPU binding |
-| High throughput | Single node | 8 or more | 2 | 4 or more | 32 per DP | 65536 | 8192 | On | FullGraph, FlashComm1, async scheduling, shared expert overlap |
+| Long context | Single node | 2 or more | 2 | 1 | 128 | 262144 | 16384 | On | FullGraph, sequence parallelism, shared expert overlap, CPU binding |
+| High throughput | Single node | 8 or more | 2 | 4 or more | 32 per DP | 65536 | 8192 | On | FullGraph, sequence parallelism, async scheduling, shared expert overlap |
 | Low latency | Single node | 2 or more | 2 | 1 | Tune by concurrency | 32768 or 65536 | 1024 to 4096 | Workload dependent | FullGraph, CPU binding, speculative decoding disabled |
 
 ### 9.2 Tuning Guidelines
@@ -357,7 +356,7 @@ Recommended tuning order:
 3. Tune `--max-num-batched-tokens`. Larger values usually improve prefill throughput but increase activation memory. Decode-heavy workloads usually need smaller values.
 4. Tune `--max-num-seqs` according to service concurrency. Requests above this value wait in the queue and the waiting time is counted in TTFT and TPOT.
 5. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation and expert imbalance.
-6. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With FlashComm1, use capture sizes that are multiples of TP size.
+6. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With sequence parallelism, use capture sizes that are multiples of TP size.
 
 ### 9.3 Model-Specific Optimizations
 
@@ -365,7 +364,6 @@ Recommended tuning order:
 | ------------ | ---------- | ------- | ----- |
 | Hybrid attention support | Enabled by model implementation | Supports Qwen3.6 long-context inference. | Tune context length based on KV cache capacity. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| FlashComm1 | `--additional-config '{"enable_flashcomm1": true}'` | Reduces communication overhead in TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads. |
 | Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Validate stability, TTFT, TPOT, and throughput for your workload. |

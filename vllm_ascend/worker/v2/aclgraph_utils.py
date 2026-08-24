@@ -37,6 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -68,37 +69,55 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-        model_runner: Any,
-        lora_capture_cases: list[int] | None = None,
-    ):
-        super().__init__(
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-            lora_capture_cases=lora_capture_cases,
-        )
-        # set model runner attribute, so we can access attributes model runner
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
-        self.model_runner = model_runner
-        # Reuse the public update_stream from model_runner (shared with draft).
-        self.update_stream = self.model_runner.update_stream
-        # The attention backend keys its per-size graph params by the actual
-        # captured token counts (rounded up to decode_query_len when using
-        # speculative decoding), so derive them from the capture descriptors
-        # instead of the raw config sizes.
-        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-        # vllm-ascend need to update graph params of attention backend.
-        # so we need to set graph params before capture full graph.
-        if super().needs_capture():
-            set_graph_params(self.capture_sizes)
+    if vllm_version_is("0.27.1"):
+
+        def __init__(
+            self,
+            vllm_config: VllmConfig,
+            device: torch.device,
+            cudagraph_mode: CUDAGraphMode,
+            decode_query_len: int,
+            model_runner: Any,
+            lora_capture_cases: list[int] | None = None,
+        ):
+            super().__init__(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                lora_capture_cases=lora_capture_cases,
+            )
+            self.model_runner = model_runner
+            self.update_stream = self.model_runner.update_stream
+            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+            if super().needs_capture():
+                set_graph_params(self.capture_sizes)
+
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self,
+            vllm_config: VllmConfig,
+            device: torch.device,
+            cudagraph_mode: CUDAGraphMode,
+            decode_query_len: int,
+            model_runner: Any,
+            lora_capture_cases: list[int] | None = None,
+            varlen_decode: bool = False,
+        ):
+            super().__init__(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                lora_capture_cases=lora_capture_cases,
+                varlen_decode=varlen_decode,
+            )
+            self.model_runner = model_runner
+            self.update_stream = self.model_runner.update_stream
+            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+            if super().needs_capture():
+                set_graph_params(self.capture_sizes)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -111,6 +130,12 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
+        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
+        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
+        # ModelConfig. Publish the target config because set_forward_context()
+        # does not update it.
+        # TODO: Remove this explicit current-config scope once ACL graph replay
+        # passes VllmConfig directly through the graph-update interfaces.
         with (
             set_current_vllm_config(self.vllm_config),
             set_forward_context(

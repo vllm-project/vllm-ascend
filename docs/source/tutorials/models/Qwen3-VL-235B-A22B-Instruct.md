@@ -219,7 +219,6 @@ Single-node deployment runs both Prefill and Decode on the same node. The W8A8 v
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=100
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8 \
       --host 0.0.0.0 \
@@ -261,7 +260,6 @@ Single-node deployment runs both Prefill and Decode on the same node. The W8A8 v
     export OMP_NUM_THREADS=1
     export OMP_PROC_BIND=false
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
@@ -357,7 +355,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --limit-mm-per-prompt.image 1 \
   --limit-mm-per-prompt.video 0 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+  --additional-config '{"enable_cpu_binding":true}'
 ```
 
 Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
@@ -412,7 +410,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --limit-mm-per-prompt.image 1 \
   --limit-mm-per-prompt.video 0 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+  --additional-config '{"enable_cpu_binding":true}'
 ```
 
 If the service starts successfully, the following information is displayed on node 0:
@@ -660,8 +658,8 @@ After several minutes, you can get the performance evaluation result. This rando
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
-| Functional validation | Single node | 16 | 4 | 4 | 32 | 32768 | 16384 | Off | W8A8, FullGraph, FlashComm1, Fused MC2 |
-| Long context | MP node | 8 per node | 8 | 1 per node, 2 global | 16 per DP | 262144 | 4096 | Off | FullGraph, FlashComm1, CPU binding |
+| Functional validation | Single node | 16 | 4 | 4 | 32 | 32768 | 16384 | Off | W8A8, FullGraph, sequence parallelism, Fused MC2 |
+| Long context | MP node | 8 per node | 8 | 1 per node, 2 global | 16 per DP | 262144 | 4096 | Off | FullGraph, sequence parallelism, CPU binding |
 | Low latency | Prefill node | 16 | 8 | 2 | 32 | 8192 | 8192 | Off | Mooncake KV producer, EP |
 | Low latency | Decode node | 16 | 4 | 4 | 32 | 8192 | 8192 | Off | Mooncake KV consumer, FullGraph, EP |
 
@@ -692,7 +690,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 | Multimodal prompt limits | `--limit-mm-per-prompt.image`, `--limit-mm-per-prompt.video` | Avoids reserving memory for unused media types. | Disable video for image-only serving. |
 | Multimodal processor cache | `--mm-processor-cache-gb` | Caches processed media features when repeated media appears. | Set to 0 for memory-constrained validation. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| FlashComm1 | `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` or `--additional-config '{"enable_flashcomm1":true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Fused MC2 | `VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Enables MoE fused operators to improve MoE efficiency. | Compare with disabled state if accuracy or performance regresses. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Validate HBM usage first. For PD, start with prefix caching disabled. |
 | PD disaggregation | `--kv-transfer-config` | Separates prefill and decode resources. | Ensure producer/consumer DP and TP sizes match the actual topology. |
