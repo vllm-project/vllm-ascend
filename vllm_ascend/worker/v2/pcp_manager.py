@@ -22,7 +22,9 @@ from dataclasses import dataclass, replace
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -160,3 +162,41 @@ class AscendPCPManager(PCPManager):
         graph_num_slots = graph_num_tokens * self.pcp_world_size
         self._gathered_kv_slot_mappings[:, slot_mappings.shape[1] : graph_num_slots].fill_(-1)
         return self._gathered_kv_slot_mappings[:, :graph_num_slots]
+
+    def build_attention_context(
+        self,
+        input_batch: AscendInputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+    ) -> AscendPCPAttentionContext:
+        """Build the PCP context consumed by attention metadata builders."""
+        if input_batch.is_dummy:
+            local_num_tokens_after_padding = input_batch.num_tokens
+            restore_start = self.pcp_rank * local_num_tokens_after_padding
+            return AscendPCPAttentionContext(
+                global_batch=input_batch,
+                global_block_tables=block_tables,
+                global_slot_mappings=slot_mappings.view(
+                    slot_mappings.shape[0],
+                    self.pcp_world_size,
+                    local_num_tokens_after_padding,
+                )[:, self.pcp_rank],
+                hidden_restore_idx=torch.arange(
+                    restore_start,
+                    restore_start + local_num_tokens_after_padding,
+                    device=self.device,
+                ),
+                local_num_tokens_after_padding=local_num_tokens_after_padding,
+            )
+
+        global_batch = self._global_batch
+        return AscendPCPAttentionContext(
+            global_batch=global_batch,
+            global_block_tables=self._block_tables.gather_block_tables(
+                global_batch.idx_mapping,
+                global_batch.num_reqs_after_padding,
+            ),
+            global_slot_mappings=self._global_batch_slot_mappings[:, : global_batch.num_tokens],
+            hidden_restore_idx=self._hidden_restore_idx,
+            local_num_tokens_after_padding=input_batch.num_tokens_after_padding,
+        )
