@@ -58,6 +58,7 @@ public:
         concatSize = ropeConcatParams.concatSize;
         hiddenStrideRope_ = ropeConcatParams.hiddenStrideRope;
         qkNopeHeadDim_ = ropeConcatParams.qkNopeHeadDim;
+        enableRope_ = ropeConcatParams.enableRope;
         blockIdx_ = (blockIdx_ / 2) * 2 + static_cast<uint64_t>(GetSubBlockidx());
         loopTime = (blockIdx_ == realCore - 1) ? lastCoreLoopTime : preCoreLoopTime;
         lastLoopN = (blockIdx_ == realCore - 1) ? lastCoreLoopNLast : preCoreLoopNLast;
@@ -77,6 +78,10 @@ public:
     __aicore__ inline void Process()
     {
         if (blockIdx_ >= realCore) return;
+        if (enableRope_ == 0) {
+            ProcessRawQ();
+            return;
+        }
         uint64_t startCoreLineIndex = this->blockIdx_ * this->nlCoreRun;
         // [maxNPerLoopForUb,head_dim] 的 neg
         AscendC::LocalTensor<float> negLocal =
@@ -163,6 +168,36 @@ public:
         }
         WAIT_FLAG(MTE3, MTE2, EVENT_ID1);
     }
+
+    __aicore__ inline void ProcessRawQ()
+    {
+        uint64_t startCoreLineIndex = this->blockIdx_ * this->nlCoreRun;
+        SET_FLAG(MTE3, MTE2, EVENT_ID1);
+        for (uint32_t zz = 0; zz < this->loopTime; ++zz) {
+            uint16_t loopN = (zz == this->loopTime - 1) ? this->lastLoopN : this->maxNPerLoopForUb;
+            uint64_t startHead = startCoreLineIndex + zz * this->maxNPerLoopForUb;
+            uint64_t qOffset = startHead * hiddenStrideRope_ + qkNopeHeadDim_;
+            AscendC::LocalTensor<QkDtype> inputQ = buf.GetBuffer<BufferType::ASCEND_UB, QkDtype>(0);
+
+            SET_FLAG(S, MTE2, EVENT_ID1);
+            WAIT_FLAG(S, MTE2, EVENT_ID1);
+            WAIT_FLAG(MTE3, MTE2, EVENT_ID1);
+            AscendC::DataCopy(inputQ, this->qGm_[qOffset],
+                              {loopN, headBlockLen, static_cast<uint16_t>(qkNopeHeadDim_ / 16), 0});
+            SET_FLAG(MTE2, MTE3, EVENT_ID1);
+            uint64_t outQOffset = startHead * outLineOffset + this->concatSize;
+            uint64_t outQOffset2 = startHead * this->headDim;
+            WAIT_FLAG(MTE2, MTE3, EVENT_ID1);
+            if constexpr (CacheMode == CACHE_MODE_KVCACHE) {
+                AscendC::DataCopy(this->outRopeConcatGm_[outQOffset], inputQ,
+                                  {loopN, headBlockLen, 0, concatBlockLen});
+            } else {
+                AscendC::DataCopy(this->outRopeConcatGm2_[outQOffset2], inputQ, loopN * this->headDim);
+            }
+            SET_FLAG(MTE3, MTE2, EVENT_ID1);
+        }
+        WAIT_FLAG(MTE3, MTE2, EVENT_ID1);
+    }
     // tensor -1 -1 -1 1 1 1
     template <typename BUF_TYPE>
     __aicore__ inline void ExpandNeg(const AscendC::LocalTensor<BUF_TYPE> &tempBuf, uint32_t headNumTemp)
@@ -242,6 +277,7 @@ private:
     uint32_t concatSize;
     uint32_t hiddenStrideRope_;
     uint32_t qkNopeHeadDim_;
+    uint32_t enableRope_{1};
     uint32_t blockIdx_;
     uint32_t loopTime{0};   // The number of current data rounds
     uint32_t lastLoopN{0};  // The number of lines currently processed by tails kernel
@@ -2217,10 +2253,12 @@ private:
                 continue;
             }
             AscendC::DataCopy(srcTensor, s3GmTensor[offset], splitSizeOne_);
-            AscendC::DataCopy(sinTensor, sin1GmTensor[(row_work * vectorBlockIdx + loop) * splitRmsNormSizeTwo_],
-                              splitRmsNormSizeTwo_);
-            AscendC::DataCopy(cosTensor, cos1GmTensor[(row_work * vectorBlockIdx + loop) * splitRmsNormSizeTwo_],
-                              splitRmsNormSizeTwo_);
+            if (mlaParams.enableRope != 0) {
+                AscendC::DataCopy(sinTensor, sin1GmTensor[(row_work * vectorBlockIdx + loop) * splitRmsNormSizeTwo_],
+                                  splitRmsNormSizeTwo_);
+                AscendC::DataCopy(cosTensor, cos1GmTensor[(row_work * vectorBlockIdx + loop) * splitRmsNormSizeTwo_],
+                                  splitRmsNormSizeTwo_);
+            }
             SET_FLAG(MTE2, V, EVENT_ID0);
             uint64_t cacheSlot = static_cast<uint64_t>(slotValue);
             uint64_t cacheStart = GetCacheOffset(cacheSlot, splitSizeOne_, kv_cache_stride0_);
@@ -2270,26 +2308,34 @@ private:
             uint64_t revertOffset = splitRmsNormSizeTwo_ / 2;
             Cast(ropeKTensor, srcTensor[splitRmsNormSizeOne_], AscendC::RoundMode::CAST_NONE,
                  splitRmsNormSizeTwo_);
-            Cast(ropeKRevertTensor[revertOffset], srcTensor[splitRmsNormSizeOne_], AscendC::RoundMode::CAST_NONE,
-                 revertOffset);
-            Cast(ropeKRevertTensor, srcTensor[splitRmsNormSizeOne_ + revertOffset], AscendC::RoundMode::CAST_NONE,
-                 revertOffset);
-            Duplicate(calTensor, static_cast<float>(-1), revertOffset);
-            Duplicate(calTensor[revertOffset], static_cast<float>(1), revertOffset);
-            AscendC::PipeBarrier<PIPE_V>();
-            Cast(calTensor[splitRmsNormSizeTwo_], cosTensor, AscendC::RoundMode::CAST_NONE, splitRmsNormSizeTwo_);
-            Cast(calTensor[splitRmsNormSizeTwo_ * 2], sinTensor, AscendC::RoundMode::CAST_NONE,
-                 splitRmsNormSizeTwo_);
-            AscendC::PipeBarrier<PIPE_V>();
-            Mul(ropeKTensor, calTensor[splitRmsNormSizeTwo_], ropeKTensor, splitRmsNormSizeTwo_);
-            Mul(ropeKRevertTensor, calTensor[splitRmsNormSizeTwo_ * 2], ropeKRevertTensor, splitRmsNormSizeTwo_);
-            AscendC::PipeBarrier<PIPE_V>();
-            Mul(ropeKRevertTensor, calTensor, ropeKRevertTensor, splitRmsNormSizeTwo_);
-            AscendC::PipeBarrier<PIPE_V>();
-            Add(ropeKRevertTensor, ropeKTensor, ropeKRevertTensor, splitRmsNormSizeTwo_);
-            AscendC::PipeBarrier<PIPE_V>();
-            Cast(outTmpTensor[splitRmsNormSizeOne_], ropeKRevertTensor, AscendC::RoundMode::CAST_NONE,
-                 splitRmsNormSizeTwo_);
+            if (mlaParams.enableRope != 0) {
+                Cast(ropeKRevertTensor[revertOffset], srcTensor[splitRmsNormSizeOne_],
+                     AscendC::RoundMode::CAST_NONE, revertOffset);
+                Cast(ropeKRevertTensor, srcTensor[splitRmsNormSizeOne_ + revertOffset],
+                     AscendC::RoundMode::CAST_NONE, revertOffset);
+                Duplicate(calTensor, static_cast<float>(-1), revertOffset);
+                Duplicate(calTensor[revertOffset], static_cast<float>(1), revertOffset);
+                AscendC::PipeBarrier<PIPE_V>();
+                Cast(calTensor[splitRmsNormSizeTwo_], cosTensor, AscendC::RoundMode::CAST_NONE,
+                     splitRmsNormSizeTwo_);
+                Cast(calTensor[splitRmsNormSizeTwo_ * 2], sinTensor, AscendC::RoundMode::CAST_NONE,
+                     splitRmsNormSizeTwo_);
+                AscendC::PipeBarrier<PIPE_V>();
+                Mul(ropeKTensor, calTensor[splitRmsNormSizeTwo_], ropeKTensor, splitRmsNormSizeTwo_);
+                Mul(ropeKRevertTensor, calTensor[splitRmsNormSizeTwo_ * 2], ropeKRevertTensor,
+                    splitRmsNormSizeTwo_);
+                AscendC::PipeBarrier<PIPE_V>();
+                Mul(ropeKRevertTensor, calTensor, ropeKRevertTensor, splitRmsNormSizeTwo_);
+                AscendC::PipeBarrier<PIPE_V>();
+                Add(ropeKRevertTensor, ropeKTensor, ropeKRevertTensor, splitRmsNormSizeTwo_);
+                AscendC::PipeBarrier<PIPE_V>();
+                Cast(outTmpTensor[splitRmsNormSizeOne_], ropeKRevertTensor, AscendC::RoundMode::CAST_NONE,
+                     splitRmsNormSizeTwo_);
+            } else {
+                AscendC::PipeBarrier<PIPE_V>();
+                Cast(outTmpTensor[splitRmsNormSizeOne_], ropeKTensor, AscendC::RoundMode::CAST_NONE,
+                     splitRmsNormSizeTwo_);
+            }
             /* Rope K end */
             // reshapeAndcache
             SET_FLAG(V, MTE3, EVENT_ID0);

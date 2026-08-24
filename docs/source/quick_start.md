@@ -15,6 +15,7 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
+- Atlas 950DT inference series (Atlas 950DT)
 - Atlas inference products
 
 ## Requirements
@@ -24,25 +25,25 @@ This section guides you through container-based environment setup and large mode
 - Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series and Atlas inference products.
 - Software:
 
-    === "Atlas A2 inference products / Atlas A3 inference products"
+    === "Atlas A2/A3/950DT inference products"
 
         | Software      | Supported version                | Note                                      |
         |---------------|----------------------------------|-------------------------------------------|
-        | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-        | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
-        | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+        | CANN          | == 9.1.0                        | Required for vllm-ascend and torch-npu    |
+        | torch-npu     | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
         | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-        | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+        | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
 
     === "Atlas inference products"
 
         | Software      | Supported version                | Note                                      |
         |---------------|----------------------------------|-------------------------------------------|
-        | Ascend HDK    | Refer to the documentation [CANN 9.1.0-beta.1](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
-        | CANN          | == 9.1.0-beta.1                 | Required for vllm-ascend and torch-npu    |
-        | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+        | CANN          | == 9.1.0                 | Required for vllm-ascend and torch-npu    |
+        | torch-npu     | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
         | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-        | NNAL          | == 9.1.0-beta.1                 | Required for libatb.so, enables advanced tensor operations |
+        | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
         | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
 !!! note "Atlas inference products"
@@ -103,6 +104,35 @@ Before using containers, make sure Docker is installed on your system. If Docker
     --shm-size=1g \
     --device $DEVICE0 \
     --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    apt-get update -y && apt-get install -y curl
+    ```
+
+=== "Ubuntu (Atlas 950DT)"
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    # Ascend 950DT:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -193,6 +223,35 @@ Before using containers, make sure Docker is installed on your system. If Docker
     --shm-size=1g \
     --device $DEVICE0 \
     --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    yum update -y && yum install -y curl
+    ```
+
+=== "openEuler (Atlas 950DT)"
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    # Ascend 950DT:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \

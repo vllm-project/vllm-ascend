@@ -112,11 +112,12 @@ class AscendSFADCPMetadataBuilder(
         max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_model_len = vllm_config.model_config.max_model_len
         total_cp_size = self.dcp_size
-        # BlockTable keeps its global maximum width even though DCP only
-        # populates rank-local blocks. Size from that padded input width before
-        # expanding every column into the replicated indexer view.
-        max_block_table_cols = cdiv(max_model_len, kv_cache_spec.block_size) * self.blocks_per_phys_block
-        max_replicated_block_table_cols = max_block_table_cols * total_cp_size
+        # The generic vLLM BlockTable may expose global-width storage, while
+        # the DCP physical KV layout only populates rank-local block columns.
+        self.max_local_block_table_cols = (
+            cdiv(max_model_len, kv_cache_spec.block_size * total_cp_size) * self.blocks_per_phys_block
+        )
+        max_replicated_block_table_cols = self.max_local_block_table_cols * total_cp_size
         self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
             (max_num_reqs, max_replicated_block_table_cols),
             dtype=torch.int32,
@@ -139,6 +140,10 @@ class AscendSFADCPMetadataBuilder(
             self.dcp_size,
             self.cp_kv_cache_interleave_size,
         )[:, self.dcp_rank]
+
+    def _get_dcp_local_block_table(self, block_table: torch.Tensor, num_reqs: int) -> torch.Tensor:
+        local_cols = min(block_table.shape[1], self.max_local_block_table_cols)
+        return block_table[:num_reqs, :local_cols]
 
     def _ensure_replicated_view_buffers(
         self,
@@ -212,10 +217,11 @@ class AscendSFADCPMetadataBuilder(
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
+        local_block_table_cols = block_table_replicated_view.shape[1] // self.dcp_size
         _, _, slot_mapping_replicated_view = self._ensure_replicated_view_buffers(
             num_reqs,
             num_input_tokens,
-            common_attn_metadata.block_table_tensor.shape[1],
+            local_block_table_cols,
         )
         slot_mapping_replicated_view.fill_(-1)
         if num_actual_tokens == 0:
@@ -288,11 +294,12 @@ class AscendSFADCPMetadataBuilder(
         build_metadata: Callable[[], AscendSFAMetadata],
     ) -> AscendSFAMetadata:
         dcp_slot_mapping = common_attn_metadata.slot_mapping
-        dcp_block_table = common_attn_metadata.block_table_tensor
+        full_dcp_block_table = common_attn_metadata.block_table_tensor
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        dcp_block_table = self._get_dcp_local_block_table(full_dcp_block_table, num_reqs)
         block_table_replicated_view = self._build_block_table_replicated_view(
-            dcp_block_table[:num_reqs],
+            dcp_block_table,
             common_attn_metadata.seq_lens,
         )
         slot_mapping_replicated_view = self._build_slot_mapping_replicated_view(
@@ -306,7 +313,7 @@ class AscendSFADCPMetadataBuilder(
             metadata = build_metadata()
         finally:
             common_attn_metadata.slot_mapping = dcp_slot_mapping
-            common_attn_metadata.block_table_tensor = dcp_block_table
+            common_attn_metadata.block_table_tensor = full_dcp_block_table
 
         assert isinstance(metadata, AscendSFADCPMetadata)
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
@@ -325,7 +332,6 @@ class AscendSFADCPMetadataBuilder(
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=False,
         )
-        dcp_block_table = dcp_block_table[:num_reqs]
         kv_gather_block_ids = None
         kv_gather_block_table = None
         if num_prefills > 0:
@@ -342,38 +348,6 @@ class AscendSFADCPMetadataBuilder(
         metadata.num_prefills = num_prefills
         self._update_dsa_cp_slot_mapping_for_dcp(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool = False,
-        **kwargs,
-    ) -> AscendSFAMetadata:
-        return self._build_with_metadata_view(
-            common_attn_metadata,
-            lambda: super(AscendSFADCPMetadataBuilder, self).build(
-                common_prefix_len,
-                common_attn_metadata,
-                fast_build,
-                **kwargs,
-            ),
-        )
-
-    def build_for_drafting(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        draft_index: int,
-        **kwargs,
-    ) -> AscendSFAMetadata:
-        return self._build_with_metadata_view(
-            common_attn_metadata,
-            lambda: super(AscendSFADCPMetadataBuilder, self).build_for_drafting(
-                common_attn_metadata,
-                draft_index,
-                **kwargs,
-            ),
-        )
 
     def build_for_graph_capture(
         self,
@@ -739,6 +713,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         attn_metadata,
         actual_seq_lengths_query,
         actual_seq_lengths_key,
+        block_table=None,
     ):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."

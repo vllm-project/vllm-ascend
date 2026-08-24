@@ -78,9 +78,8 @@ class AclGraphSleepWakeupManager:
 
     @classmethod
     def clear_all_attention_workspaces(cls) -> None:
-        cls.clear_attention_workspaces(acl_graph._graph_params)
-        cls.clear_attention_workspaces(acl_graph._draft_graph_params)
-        cls.clear_attention_workspaces(acl_graph._draft_graph_prefill_params)
+        for params in acl_graph.iter_graph_params():
+            cls.clear_attention_workspaces(params)
 
     @staticmethod
     def reset_graph_params(params) -> None:
@@ -96,9 +95,8 @@ class AclGraphSleepWakeupManager:
 
     @classmethod
     def reset_all_graph_params(cls) -> None:
-        cls.reset_graph_params(acl_graph._graph_params)
-        cls.reset_graph_params(acl_graph._draft_graph_params)
-        cls.reset_graph_params(acl_graph._draft_graph_prefill_params)
+        for params in acl_graph.iter_graph_params():
+            cls.reset_graph_params(params)
         for wrapper in list(acl_graph._acl_graph_wrappers):
             wrapper.concrete_aclgraph_entries.clear()
             wrapper.first_run_finished = False

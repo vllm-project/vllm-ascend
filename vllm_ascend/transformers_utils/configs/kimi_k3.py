@@ -21,11 +21,15 @@ plugin so loading a K3 checkpoint never depends on executing model code from
 the checkpoint repository.
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
 from transformers.configuration_utils import PretrainedConfig
 from vllm.logger import logger
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+K3_DSPARK_HIDDEN_ACT = "silu"
+K3_DSPARK_MAX_POSITION_EMBEDDINGS = 32768
+K3_DSPARK_USE_MLA_ROPE = True
 
 
 class KimiK3TextConfig(KimiLinearConfig):
@@ -56,6 +60,34 @@ class KimiK3TextConfig(KimiLinearConfig):
         self.activation_situ_linear_beta = activation_situ_linear_beta
         self.routed_expert_hidden_size = routed_expert_hidden_size
         self.topk_method = topk_method
+
+
+class K3DSparkConfig(PretrainedConfig):
+    """Configuration contract for Kimi K3 MLA DSpark checkpoints."""
+
+    model_type = "k3_dspark"
+    has_no_defaults_at_init: ClassVar[bool] = True
+
+    # This default is part of the released draft architecture. Keeping it on
+    # the concrete config class preserves direct attribute access when older
+    # checkpoints omit the corresponding serialized field.
+    max_position_embeddings: int = K3_DSPARK_MAX_POSITION_EMBEDDINGS
+
+    hidden_size: int
+    intermediate_size: int
+    kv_lora_rank: int
+    markov_rank: int
+    num_attention_heads: int
+    num_hidden_layers: int
+    num_target_layers: int
+    q_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    rms_norm_eps: float
+    rope_parameters: dict[str, Any]
+    target_hidden_size: int
+    v_head_dim: int
+    vocab_size: int
 
 
 class KimiK3VisionConfig(PretrainedConfig):
@@ -208,3 +240,13 @@ def register_kimi_k3_config() -> None:
 
     vllm_config_module._CONFIG_REGISTRY["kimi_k3"] = KimiK3Config
     AutoConfig.register("kimi_k3", KimiK3Config, exist_ok=True)
+    register_k3_dspark_config()
+
+
+def register_k3_dspark_config() -> None:
+    """Register the standalone K3 MLA DSpark draft configuration."""
+    from transformers import AutoConfig
+    from vllm.transformers_utils import config as vllm_config_module
+
+    vllm_config_module._CONFIG_REGISTRY["k3_dspark"] = K3DSparkConfig
+    AutoConfig.register("k3_dspark", K3DSparkConfig, exist_ok=True)

@@ -117,9 +117,15 @@ SUPPORTED_MODE_COMBOS = [
 
 
 @pytest.mark.parametrize("cache_mode, quant_mode, dtype", SUPPORTED_MODE_COMBOS)
+@pytest.mark.parametrize("enable_rope", [True, False])
 @torch.inference_mode()
-def test_mla_preprocess_supported_modes(cache_mode: str, quant_mode: str, dtype: torch.dtype):
-    """Smoke-test every (cache_mode, quant_mode, dtype) the kernel instantiates."""
+def test_mla_preprocess_supported_modes(
+    cache_mode: str,
+    quant_mode: str,
+    dtype: torch.dtype,
+    enable_rope: bool,
+):
+    """Smoke-test supported modes with RoPE enabled and disabled."""
     torch.manual_seed(0)
     token_num = 8
     head_num = 2
@@ -181,8 +187,8 @@ def test_mla_preprocess_supported_modes(cache_mode: str, quant_mode: str, dtype:
         wuq,
         de_scale1,
         gamma2,
-        cos,
-        sin,
+        cos if enable_rope else None,
+        sin if enable_rope else None,
         wuk,
         kv_cache,
         kv_cache_rope,
