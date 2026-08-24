@@ -22,8 +22,8 @@ from .sampler import Ascend310PSampler
 class Ascend310PModelState(AscendModelState):
     """Model state with the Triton-free 310P sampler."""
 
-    # TODO: Remove the sampler override after its kernels use triton_dispatch
-    # following vLLM RFC #45133.
+    # TODO: Refactor the sampler override to use Triton Dispatcher after vLLM
+    # RFC #45133 lands.
 
     def __init__(
         self,
