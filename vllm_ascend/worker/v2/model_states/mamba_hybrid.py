@@ -22,12 +22,14 @@ import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
     MambaHybridAttnMetadata,
     MambaHybridModelState,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.worker.mamba_utils import AscendMambaSpecDecodeGPUContext
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -40,6 +42,39 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     :class:`MambaHybridModelState`. ``AscendModelState`` remains the second
     base so cooperative ``super()`` calls retain the Ascend model-state MRO.
     """
+
+    def _ensure_align_ctx(
+        self,
+        kv_cache_config: KVCacheConfig,
+        mamba_group_ids: list[int],
+        block_tables: tuple[torch.Tensor, ...],
+    ) -> AscendMambaSpecDecodeGPUContext:
+        """Create the context through the Ascend Mamba backend."""
+        if self._mamba_ctx is None:
+            copy_funcs = self.model.get_mamba_state_copy_func()
+            self._mamba_ctx = AscendMambaSpecDecodeGPUContext.create(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=kv_cache_config,
+                num_state_types=len(copy_funcs),
+                device=self.device,
+                make_buffer=lambda size, dtype: CpuGpuBuffer(
+                    size,
+                    dtype=dtype,
+                    device=self.device,
+                ),
+            )
+
+        ctx = self._mamba_ctx
+        assert isinstance(ctx, AscendMambaSpecDecodeGPUContext)
+        if not ctx.is_initialized:
+            forward_context = self.vllm_config.compilation_config.static_forward_context
+            ctx.initialize_from_forward_context(
+                kv_cache_config,
+                forward_context,
+                self.model.get_mamba_state_copy_func(),
+                [block_tables[group_id] for group_id in mamba_group_ids],
+            )
+        return ctx
 
     def prepare_attn(
         self,

@@ -12,7 +12,7 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-PATCH_MAMBA_UTILS = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_mamba_utils.py"
+ASCEND_MAMBA_UTILS = ROOT / "vllm_ascend" / "worker" / "mamba_utils.py"
 
 
 def _func(path: Path, name: str) -> ast.FunctionDef:
@@ -27,20 +27,23 @@ def _src(node: ast.AST) -> str:
 
 
 def test_310p_postprocess_fallback_preserves_upstream_metadata_semantics() -> None:
-    src = _src(_func(PATCH_MAMBA_UTILS, "_postprocess_mamba_align_gpu_cpu_fallback"))
+    src = _src(_func(ASCEND_MAMBA_UTILS, "_postprocess_mamba_align_gpu_cpu_fallback"))
 
     assert "num_accepted_tokens_gpu" in src
     assert "num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])" in src
-    assert "num_tokens_running_state = num_computed_tokens[i] + num_scheduled_tokens[i] - num_draft_tokens[i]" in src
-    assert "new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens[i] - 1" in src
+    assert (
+        "num_tokens_running_state = num_computed_tokens[index] + num_scheduled_tokens[index] - num_draft_tokens[index]"
+        in src
+    )
+    assert "new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens[index] - 1" in src
     assert "aligned_new_computed_tokens = new_num_computed_tokens // block_size * block_size" in src
     assert "if aligned_new_computed_tokens < num_tokens_running_state:" in src
     assert "if src_block_idx == dest_block_idx:" in src
-    assert "num_accepted_tokens_cpu_tensor[i] = 1" in src
+    assert "num_accepted_tokens_cpu_tensor[index] = 1" in src
 
 
 def test_310p_postprocess_fallback_mirrors_state_copy_without_triton() -> None:
-    src = _src(_func(PATCH_MAMBA_UTILS, "_postprocess_mamba_align_gpu_cpu_fallback"))
+    src = _src(_func(ASCEND_MAMBA_UTILS, "_postprocess_mamba_align_gpu_cpu_fallback"))
 
     assert "run_fused_postprocess" not in src
     assert "postprocess_mamba_fused_kernel" not in src

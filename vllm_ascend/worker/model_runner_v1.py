@@ -102,7 +102,6 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
-from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -188,6 +187,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
+from vllm_ascend.worker import mamba_utils
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -578,6 +578,57 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+
+    def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
+        """Allocate Mamba buffers through the Ascend-owned backend."""
+        assert self.cache_config.mamba_cache_mode == "align"
+        if self._mamba_bufs is None:
+            self._mamba_bufs = mamba_utils.create_mamba_buffers(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=self.kv_cache_config,
+                copy_funcs=self.model.get_mamba_state_copy_func(),
+                make_buffer=self._make_buffer,
+                device=self.device,
+                with_postprocess_align=(
+                    self.speculative_config is not None
+                    and self.model_config.is_hybrid
+                ),
+            )
+        return self._mamba_bufs
+
+    def _update_states_after_model_execute(
+        self,
+        output_token_ids: torch.Tensor,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Dispatch the align-mode postprocess to the Ascend implementation."""
+        if (
+            not self.speculative_config
+            or not self.model_config.is_hybrid
+            or self.cache_config.mamba_cache_mode != "align"
+        ):
+            return super()._update_states_after_model_execute(
+                output_token_ids, scheduler_output
+            )
+
+        num_reqs = output_token_ids.size(0)
+        self.num_accepted_tokens.gpu[:num_reqs] = (
+            output_token_ids != -1
+        ).sum(dim=1)
+        mamba_utils.postprocess_mamba_align_gpu(
+            bufs=self._get_mamba_bufs(),
+            num_reqs=num_reqs,
+            num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
+            num_accepted_tokens_cpu_tensor=(
+                self.input_batch.num_accepted_tokens_cpu_tensor
+            ),
+            input_batch=self.input_batch,
+            kv_cache_config=self.kv_cache_config,
+            forward_context=self.compilation_config.static_forward_context,
+            mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+        )
+        assert self.num_accepted_tokens_event is not None
+        self.num_accepted_tokens_event.record()
 
     @property
     def use_dcp(self) -> bool:

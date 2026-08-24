@@ -578,24 +578,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 2. File: worker/patch_deepseek_v2.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
-#    Why:
-#       GLM-5.2 checkpoints omit `Indexer` weights on shared-indexer layers,
-#       while GLM-5.1 IndexCache overrides only skip top-k computation and keep
-#       per-layer `Indexer` weights. Treating both layouts alike breaks GLM-5.1
-#       weight loading.
-#    How:
-#       Skip `Indexer` construction only when the layer both skips top-k and is
-#       explicitly marked `shared` in `indexer_types`. MTP layers always retain
-#       a complete `Indexer`.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/45895
-#    Future Plan:
-#       Remove this patch when vLLM Ascend depends on a vLLM version that includes
-#       PR #45895.
-#
 # ** 4. File: worker/patch_eagle3_init.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM`,
@@ -699,39 +681,6 @@
 #       and use get_rope_shape to handle the rope shape interpolation.
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest main.
-#
-# ** 9. File: worker/patch_mamba_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
-#    Why:
-#       Oringnal batch_memcpy_kernel implemented in vLLM might encounter bugs when running on
-#       Ascend hardwares.
-#    How：
-#       patch to fix related bugs.
-#    Future Plan:
-#       Remove this patch when:
-#       (1) oringnal batch_memcpy_kernel can run on Ascend hardware.
-#       or
-#       (2) design a dispatch mechanism for batch_memcpy_kernel.
-#   2. `vllm.v1.worker.mamba_utils.batch_memcpy = batch_memcpy`
-#    Why:
-#       vLLM use BLOCK_SIZE 1024 for batch_memcpy_kernel. This results in suboptimal performance
-#       on Ascend hardwares.
-#    How：
-#       patch to change BLOCK_SIZE to 8192.
-#    Future Plan:
-#       Remove this patch when:
-#       design a dispatch mechanism for batch_memcpy_kernel.
-#   3. `mamba_utils.preprocess_mamba = preprocess_mamba`
-#    Why:
-#       1. preprocess_mamba has a assert logic, cause kv transfer call fails
-#       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
-#    How:
-#       1. patch to remove assert
-#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
-#    Future Plan:
-#       Remove this patch when:
-#       vLLM itself supports kv transfer for mamba
 #
 # ** 10. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
