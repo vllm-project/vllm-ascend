@@ -274,16 +274,16 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     def _prepare_prefill_inputs(
         self,
-        input_ids,
-        next_prefill_tokens,
-        idx_mapping,
-        query_start_loc,
-        all_token_ids,
-        prefill_len,
-        num_computed_tokens,
+        input_ids: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        all_token_ids: torch.Tensor,
+        prefill_len: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
         *,
-        idx_mapping_np,
-        query_start_loc_np,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
     ) -> None:
         del idx_mapping, query_start_loc, all_token_ids, prefill_len, num_computed_tokens
         self.input_ids_cpu[: input_ids.shape[0]].zero_()
@@ -306,15 +306,15 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     def _prepare_pos_seq_lens(
         self,
-        idx_mapping,
-        query_start_loc,
-        num_computed_tokens,
-        positions,
-        seq_lens,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        positions: torch.Tensor,
+        seq_lens: torch.Tensor,
         *,
-        idx_mapping_np,
-        query_start_loc_np,
-        num_scheduled_tokens,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
     ) -> None:
         del idx_mapping, query_start_loc, num_computed_tokens
         self.input_buffers.seq_lens_cpu.zero_()
@@ -330,22 +330,22 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     def _combine_sampled_and_draft_tokens(
         self,
-        input_ids,
-        idx_mapping,
-        last_sampled_tokens,
-        query_start_loc,
-        seq_lens,
-        prefill_len,
-        draft_tokens,
-        cu_num_logits,
-        num_logits,
-        num_bonus_tokens,
+        input_ids: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        last_sampled_tokens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        prefill_len: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        num_logits: int,
+        num_bonus_tokens: int,
         *,
-        idx_mapping_np,
-        query_start_loc_np,
-        seq_lens_np,
-        prefill_len_np,
-    ):
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        seq_lens_np: np.ndarray,
+        prefill_len_np: np.ndarray,
+    ) -> torch.Tensor:
         del idx_mapping, query_start_loc, seq_lens, prefill_len
         del draft_tokens, cu_num_logits, num_bonus_tokens
         if num_logits != len(idx_mapping_np):
