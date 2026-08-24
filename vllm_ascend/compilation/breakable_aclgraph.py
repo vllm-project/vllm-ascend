@@ -1,24 +1,20 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Breakable ACL graph capture/replay.
-
-This is an alternative to :class:`ACLGraphWrapper` that replaces vLLM's
-torch.compile-based FX graph splitting with runtime stream-capture
-breaks.
-
-The idea (inspired by sgl-project/sglang#19102): instead of pre-splitting
-the model into many pieces at attention boundaries, a
-single capture context drives the whole forward and intercepts
-attention / kv-cache custom ops at the dispatcher to end the current
-stream capture, run the op eagerly, and resume capture.
-
-The captured artifact is a list of zero-arg callables -- the bound
-``ACLGraph.replay`` for graph segments, or the user fn for eager
-segments -- replayed in order at inference time.
-
-Eager segments must operate on the same static buffers used during
-capture so subsequent graph segments read the same memory addresses.
-"""
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 
 from __future__ import annotations
 
