@@ -21,10 +21,11 @@ and adds ACL graph replay padding for decode / speculative decode metadata.
 from __future__ import annotations
 
 import torch
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend._310p.dflash_full import is_310p_dflash_full
 from vllm_ascend._310p.dflash_full_decode_only import (
     is_310p_dflash_full_decode_only,
 )
@@ -45,6 +46,12 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
     """
 
     use_full_cuda_graph: bool
+
+    @classmethod
+    def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+        if is_310p_dflash_full(vllm_config):
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
 
     def _build_prefill_has_initial_state_and_causal_conv1d_meta(
         self,

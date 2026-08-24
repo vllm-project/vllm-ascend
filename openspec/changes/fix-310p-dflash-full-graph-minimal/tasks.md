@@ -8,12 +8,12 @@
 
 ## 2. Add Exact Activation and Dispatch Policy
 
-- [ ] 2.1 Add RED unit tests for the exact four-condition activation predicate and every one-condition-negative Eager, Piecewise, FDO, non-DFlash, and non-310P control.
-- [ ] 2.2 Implement the immutable predicate and instance-owned controller in `vllm_ascend/_310p/dflash_full.py` until the activation tests pass.
-- [ ] 2.3 Add RED tests that classify prefill, chunked prefill, mixed, decode, speculative decode, and mixed-with-spec without mutating or reconstructing the parent descriptor.
-- [ ] 2.4 Implement classification and validate the final parent dispatcher result, including legitimate out-of-coverage fallback and fail-closed unexpected in-range fallback.
-- [ ] 2.5 Add RED tests for the GDN capability hook and implement an exact-predicate override in `gdn_attn_builder_310.py` while preserving the baseline return for all negative controls.
-- [ ] 2.6 Run the focused FDO/Piecewise/Eager runner regressions and commit the activation/dispatch slice with a signed-off commit.
+- [x] 2.1 Add RED unit tests for the exact four-condition activation predicate and every one-condition-negative Eager, Piecewise, FDO, non-DFlash, and non-310P control.
+- [x] 2.2 Implement the immutable predicate and instance-owned controller in `vllm_ascend/_310p/dflash_full.py` until the activation tests pass.
+- [x] 2.3 Add RED tests that classify prefill, chunked prefill, mixed, decode, speculative decode, and mixed-with-spec without mutating or reconstructing the parent descriptor.
+- [x] 2.4 Implement classification and validate the final parent dispatcher result, including legitimate out-of-coverage fallback and fail-closed unexpected in-range fallback.
+- [x] 2.5 Add RED tests for the GDN capability hook and implement an exact-predicate override in `gdn_attn_builder_310.py` while preserving the baseline return for all negative controls.
+- [x] 2.6 Run the focused FDO/Piecewise/Eager runner regressions and commit the activation/dispatch slice with a signed-off commit.
 
 ## 3. Add the Private Qualified Graph Store
 
