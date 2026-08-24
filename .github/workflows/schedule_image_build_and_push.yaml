@@ -11,6 +11,9 @@
 #   - is for final release image
 #   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
 name: Image Build and Push
+concurrency:
+  group: image-build-${{ github.ref }}
+  cancel-in-progress: false
 on:
   push:
     tags:
@@ -106,6 +109,7 @@ jobs:
         && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         build_meta:
           - name: A2 Ubuntu
@@ -180,6 +184,7 @@ jobs:
         && inputs.branch == 'none' }}
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         build_meta:
           - name: A2 Ubuntu
