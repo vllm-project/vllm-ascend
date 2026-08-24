@@ -165,6 +165,11 @@ class TestCreateDraftVllmConfigPD:
                     "keep_me": 1,
                 },
             )
+            # Simulate the non-field marker that platform init injects at
+            # startup (platform.py sets _engine_id_patched=True). The drafter
+            # sees this on the worker's kv_transfer_config; rebuilding it must
+            # not choke on the injected attr.
+            cfg.kv_transfer_config._engine_id_patched = True
             # Non-MoE per-rank EngineCore view (vllm/v1/engine/core.py sets
             # data_parallel_size=1). tp=1 keeps world_size=1 so the
             # reconstruction does not trip device-count selection.
@@ -204,6 +209,7 @@ class TestCreateDraftVllmConfigPD:
                 kv_role="kv_producer",
             )
             cfg.kv_transfer_config.kv_connector_extra_config = None
+            cfg.kv_transfer_config._engine_id_patched = True
             cfg.parallel_config.data_parallel_size = 1
             cfg.parallel_config.tensor_parallel_size = 1
 

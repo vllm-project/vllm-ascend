@@ -294,6 +294,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
+        from dataclasses import fields as dc_fields
         from vllm.config.utils import replace as vllm_replace
 
         # The drafter inherits the main engine's kv_transfer_config, including
@@ -310,19 +311,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         orig_vllm_config = self.vllm_config
         kvtc = orig_vllm_config.kv_transfer_config
         if kvtc is not None:
+            # Build a separate KVTransferConfig with prefill/decode stripped.
+            # vllm_replace(kvtc, ...) cannot be used here: platform init injects
+            # a non-field marker (_engine_id_patched) onto the instance, and
+            # vllm_replace iterates __dict__ requiring every key to be a declared
+            # field. Reconstruct from declared fields only so injected attrs are
+            # filtered out.
+            declared = {f.name for f in dc_fields(type(kvtc))}
+            stripped_values = {
+                k: v for k, v in kvtc.__dict__.items() if k in declared
+            }
             # kv_connector_extra_config defaults to {} (default_factory), but
             # guard against None in case a caller/override leaves it unset.
-            extra_src = kvtc.kv_connector_extra_config or {}
-            extra = {
+            extra_src = stripped_values.get("kv_connector_extra_config") or {}
+            stripped_values["kv_connector_extra_config"] = {
                 k: v
                 for k, v in extra_src.items()
                 if k not in ("prefill", "decode")
             }
             self.vllm_config = vllm_replace(
                 orig_vllm_config,
-                kv_transfer_config=vllm_replace(
-                    kvtc, kv_connector_extra_config=extra
-                ),
+                kv_transfer_config=type(kvtc)(**stripped_values),
             )
         try:
             return super()._create_draft_vllm_config()
