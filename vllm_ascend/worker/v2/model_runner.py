@@ -21,6 +21,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import torch
+from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.sequence import IntermediateTensors
@@ -94,7 +95,10 @@ class NPUModelRunner(GPUModelRunner):
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+            )
             and not self.model_config.enforce_eager
         )
         load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
@@ -236,6 +240,26 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
+    # Platform hooks: default forwards to vLLM Triton helpers. 310P overrides
+    # these in ``NPUModelRunner310V2`` with CPU/NPU copies (no Triton).
+    def _prepare_prefill_inputs(self, *args, **kwargs) -> None:
+        kwargs.pop("idx_mapping_np", None)
+        kwargs.pop("query_start_loc_np", None)
+        prepare_prefill_inputs(*args, **kwargs)
+
+    def _prepare_pos_seq_lens(self, *args, **kwargs) -> None:
+        kwargs.pop("idx_mapping_np", None)
+        kwargs.pop("query_start_loc_np", None)
+        kwargs.pop("num_scheduled_tokens", None)
+        prepare_pos_seq_lens(*args, **kwargs)
+
+    def _combine_sampled_and_draft_tokens(self, *args, **kwargs):
+        kwargs.pop("idx_mapping_np", None)
+        kwargs.pop("query_start_loc_np", None)
+        kwargs.pop("seq_lens_np", None)
+        kwargs.pop("prefill_len_np", None)
+        return combine_sampled_and_draft_tokens(*args, **kwargs)
+
     if vllm_version_is("0.27.1"):
 
         def prepare_inputs(
@@ -345,7 +369,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get prefill tokens if any.
             if batch_has_prefill:
-                prepare_prefill_inputs(
+                self._prepare_prefill_inputs(
                     self.input_buffers.input_ids,
                     self.req_states.next_prefill_tokens,
                     idx_mapping,
@@ -353,15 +377,20 @@ class NPUModelRunner(GPUModelRunner):
                     self.req_states.all_token_ids.gpu,
                     self.req_states.prefill_len.gpu,
                     self.req_states.num_computed_tokens.gpu,
+                    idx_mapping_np=idx_mapping_np,
+                    query_start_loc_np=query_start_loc_np,
                 )
 
             # Prepare positions and seq_lens.
-            prepare_pos_seq_lens(
+            self._prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
                 self.req_states.num_computed_tokens.gpu,
                 self.input_buffers.positions,
                 self.input_buffers.seq_lens,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                num_scheduled_tokens=num_scheduled_tokens,
             )
             seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -370,7 +399,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
-            logits_indices = combine_sampled_and_draft_tokens(
+            logits_indices = self._combine_sampled_and_draft_tokens(
                 self.input_buffers.input_ids,
                 idx_mapping,
                 self.req_states.last_sampled_tokens,
@@ -381,6 +410,10 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_logits,
                 total_num_logits,
                 self.model_state.num_new_sampled_tokens_per_step,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_np=self.input_buffers.seq_lens_np[:num_reqs_padded],
+                prefill_len_np=prefill_len_np,
             )
 
             # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
@@ -562,7 +595,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get prefill tokens if any.
             if batch_has_prefill:
-                prepare_prefill_inputs(
+                self._prepare_prefill_inputs(
                     self.input_buffers.input_ids,
                     self.req_states.next_prefill_tokens,
                     idx_mapping,
@@ -570,15 +603,20 @@ class NPUModelRunner(GPUModelRunner):
                     self.req_states.all_token_ids.gpu,
                     self.req_states.prefill_len.gpu,
                     self.req_states.num_computed_tokens.gpu,
+                    idx_mapping_np=idx_mapping_np,
+                    query_start_loc_np=query_start_loc_np,
                 )
 
             # Prepare positions and seq_lens.
-            prepare_pos_seq_lens(
+            self._prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
                 self.req_states.num_computed_tokens.gpu,
                 self.input_buffers.positions,
                 self.input_buffers.seq_lens,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                num_scheduled_tokens=num_scheduled_tokens,
             )
             seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -587,7 +625,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
-            logits_indices = combine_sampled_and_draft_tokens(
+            logits_indices = self._combine_sampled_and_draft_tokens(
                 self.input_buffers.input_ids,
                 idx_mapping,
                 self.req_states.last_sampled_tokens,
@@ -598,6 +636,10 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_logits,
                 total_num_logits,
                 self.model_state.num_new_sampled_tokens_per_step,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_np=self.input_buffers.seq_lens_np[:num_reqs_padded],
+                prefill_len_np=prefill_len_np,
             )
 
             # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).

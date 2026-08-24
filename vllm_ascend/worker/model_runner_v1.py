@@ -35,6 +35,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation import breakable_cudagraph
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import (
@@ -131,6 +132,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -187,6 +189,8 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
+    weak_ref_tensor,
+    weak_ref_tensors,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -555,6 +559,8 @@ class NPUModelRunner(GPUModelRunner):
         self.sampling_done_event: torch.npu.Event | None = None
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
+        self.update_stream: torch.npu.Stream | None = None
+
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
             self.compilation_config.cudagraph_capture_sizes
@@ -662,7 +668,10 @@ class NPUModelRunner(GPUModelRunner):
     def _use_aclgraph(self) -> bool:
         return (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+            )
             and not self.model_config.enforce_eager
         )
 
@@ -708,7 +717,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
-        if isinstance(self.model, ACLGraphWrapper):
+        if isinstance(self.model, (ACLGraphWrapper, BreakableACLGraphWrapper)):
             return self.model.unwrap()
         return self.model
 
@@ -3580,21 +3589,42 @@ class NPUModelRunner(GPUModelRunner):
         ) # type: bool
         
         # wrap the model with full graph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            self.model = ACLGraphWrapper(
-                self.model,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
-            # Share the main-model update_stream with the draft drafter so that
-            # both main and draft updates are serialized on the same stream.
-            # The drafter created its own update_stream in its load_model (which
-            # runs BEFORE this point), so overwrite it here with the main one.
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        assert cudagraph_mode is not None
+
+        if cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+
             if self.drafter is not None:
                 self.drafter.update_stream = self.update_stream
+
+        with _torch_cuda_wrapper():
+            if (
+                breakable_cudagraph.is_breakable_cudagraph_enabled()
+                and cudagraph_mode != CUDAGraphMode.NONE
+            ):
+                self.model = BreakableACLGraphWrapper(
+                    self.model,
+                    self.vllm_config,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
+                )
+                drafter = getattr(self, "drafter", None)
+                if drafter is not None and hasattr(drafter, "model"):
+                    drafter.model = BreakableACLGraphWrapper(
+                        drafter.model,
+                        self.vllm_config,
+                        use_eagle=self.use_eagle,
+                        enable_enpu=self.enable_enpu,
+                    )
+            elif cudagraph_mode.has_full_cudagraphs():
+                self.model = ACLGraphWrapper(
+                    self.model,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
+                )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
@@ -4856,7 +4886,7 @@ class NPUModelRunner(GPUModelRunner):
             cuda_graph_size = GPUModelRunner.capture_model(self)
 
         mgr = self.encoder_cudagraph_manager
-        if mgr is not None and hasattr(self, "update_stream"):
+        if mgr is not None and self.update_stream is not None:
             mgr.update_stream = self.update_stream
 
         return cuda_graph_size
@@ -4949,6 +4979,9 @@ def _torch_cuda_wrapper():
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
         torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
+        breakable_cudagraph.weak_ref_tensor = weak_ref_tensor
+        breakable_cudagraph.weak_ref_tensors = weak_ref_tensors
         yield
     except Exception as e:
         torch.cuda.Event = _EventPlaceholder
@@ -4972,6 +5005,9 @@ def _torch_cuda_wrapper():
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
         torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
+        breakable_cudagraph.weak_ref_tensor = weak_ref_tensor
+        breakable_cudagraph.weak_ref_tensors = weak_ref_tensors
 
 
 # TODO: This method will be removed subsequently and implemented in platform.

@@ -9,7 +9,7 @@ from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import is_rot_weight_used
+from vllm_ascend.utils import is_rot_weight_used, vllm_version_is
 
 
 @support_torch_compile
@@ -69,5 +69,9 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 
 class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
-        return loader.load_weights(weights)
+        if vllm_version_is("0.27.1"):
+            loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
+            return loader.load_weights(weights)
+        mapper = WeightsMapper(orig_to_new_prefix={"rot.": None})
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=mapper)
