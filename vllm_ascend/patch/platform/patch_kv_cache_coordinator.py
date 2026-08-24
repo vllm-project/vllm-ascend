@@ -30,8 +30,6 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
-USE_MULTI_GROUPS_KV_CACHE = True
-
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
@@ -423,36 +421,25 @@ def get_kv_cache_coordinator(
             scheduler_block_size=scheduler_block_size,
         )
 
-    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        orig_kwargs = dict(
-            kv_cache_config=kv_cache_config,
-            max_model_len=max_model_len,
-            use_eagle=use_eagle,
-            enable_caching=enable_caching,
-            enable_kv_cache_events=enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=1,
-            hash_block_size=hash_block_size,
-            metrics_collector=metrics_collector,
-        )
-        orig_kwargs["max_in_flight_tokens"] = token_budget
-        orig_kwargs["scheduler_block_size"] = scheduler_block_size
-        return _orig_get_kv_cache_coordinator(**orig_kwargs)
-
-    return AscendHybridKVCacheCoordinator(
-        kv_cache_config,
-        max_model_len,
-        use_eagle,
-        enable_caching,
-        enable_kv_cache_events,
+    # The upstream coordinator now owns the generic hybrid Attention/Mamba
+    # control plane, including fixed-point hit convergence, EAGLE propagation,
+    # partial hash hits and external-hit accounting. Keep the Ascend
+    # coordinator limited to DeepSeek-V4 until its compressed physical block
+    # semantics are represented by the upstream KVCacheSpec contract.
+    # TODO: Remove the remaining coordinator patch as part of
+    # https://github.com/vllm-project/vllm-ascend/issues/14175.
+    return _orig_get_kv_cache_coordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=max_model_len,
+        max_in_flight_tokens=token_budget,
+        use_eagle=use_eagle,
+        enable_caching=enable_caching,
+        enable_kv_cache_events=enable_kv_cache_events,
         dcp_world_size=dcp_world_size,
         pcp_world_size=1,
-        hash_block_size=hash_block_size,
-        eagle_attn_layer_names=eagle_attn_layer_names,
-        metrics_collector=metrics_collector,
-        max_in_flight_tokens=token_budget,
-        max_num_batched_tokens=token_budget,
         scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        metrics_collector=metrics_collector,
     )
 
 

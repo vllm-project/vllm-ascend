@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
@@ -21,6 +22,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -189,6 +194,20 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
             16,
             id="full-attention-no-cp",
         ),
+        pytest.param(
+            lambda: MLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.float16,
+                compress_ratio=4,
+                model_version="deepseek_v4",
+            ),
+            2,
+            True,
+            1024,
+            id="deepseek-v4-compressed-attention-scales-logical-block-with-dcp",
+        ),
     ],
 )
 def test_get_effective_block_size(
@@ -203,6 +222,137 @@ def test_get_effective_block_size(
     )
 
     assert coordinator._get_effective_block_size(spec_factory()) == expected
+
+
+class _C4HitManagerStub:
+    supports_fine_grained_hash_lookup = False
+
+    @classmethod
+    def find_longest_cache_hit(cls, **kwargs):
+        return ([list(range(4))], 16)
+
+
+class _C128HitManagerStub:
+    supports_fine_grained_hash_lookup = False
+
+    @classmethod
+    def find_longest_cache_hit(cls, **kwargs):
+        return ([list(range(2))], 16)
+
+
+class _SWAHitManagerStub:
+    supports_fine_grained_hash_lookup = False
+
+    @classmethod
+    def find_longest_cache_hit(cls, **kwargs):
+        hit_length = min(kwargs["max_length"], 8)
+        return ([list(range(hit_length // 2))], hit_length)
+
+
+def test_deepseek_v4_truncates_every_full_attention_group() -> None:
+    """C4 and C128 must both stop at the reconciled SWA hit boundary."""
+    c4_spec = MLAAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        compress_ratio=2,
+        model_version="deepseek_v4",
+    )
+    c128_spec = MLAAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        sliding_window=4,
+    )
+    kv_cache_groups = [
+        KVCacheGroupSpec(["c4"], c4_spec),
+        KVCacheGroupSpec(["c128"], c128_spec),
+        KVCacheGroupSpec(["swa"], swa_spec),
+    ]
+
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=kv_cache_groups,
+    )
+    coordinator.dcp_world_size = 1
+    coordinator.enable_caching = True
+    coordinator.enable_partial_hash_hits = False
+    coordinator.scheduler_block_size = 8
+    coordinator.hash_block_size = 2
+    coordinator.block_pool = SimpleNamespace()
+    coordinator.single_type_managers = (
+        SimpleNamespace(block_size=2),
+        SimpleNamespace(block_size=2),
+        SimpleNamespace(block_size=2),
+    )
+    coordinator.attention_groups = [
+        SpecGroup(c4_spec, [0], _C4HitManagerStub, False),
+        SpecGroup(c128_spec, [1], _C128HitManagerStub, False),
+        SpecGroup(swa_spec, [2], _SWAHitManagerStub, False),
+    ]
+
+    blocks, hit_length, uncached_common_prefix = coordinator.find_longest_cache_hit(
+        block_hashes=[],
+        max_cache_hit_length=16,
+    )
+
+    assert hit_length == 8
+    assert uncached_common_prefix == 8
+    assert tuple(map(len, blocks)) == (2, 1, 4)
+
+
+def test_deepseek_v4_dcp_supports_compressed_and_swa_groups() -> None:
+    compressed_spec = AscendMLAAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        compress_ratio=2,
+        model_version="deepseek_v4",
+    )
+    swa_spec = AscendSlidingWindowMLASpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        sliding_window=4,
+        model_version="deepseek_v4",
+    )
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["compressed"], compressed_spec),
+                KVCacheGroupSpec(["swa"], swa_spec),
+            ],
+        ),
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=2,
+        pcp_world_size=1,
+        hash_block_size=2,
+        scheduler_block_size=8,
+    )
+
+    assert coordinator.lcm_block_size == 8
+    assert tuple(manager.block_size for manager in coordinator.single_type_managers) == (4, 4)
+    assert coordinator.single_type_managers[1].scheduler_block_size == 8
 
 
 def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
@@ -262,6 +412,49 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
     )
 
     assert coordinator is sentinel
+
+
+def test_get_kv_cache_coordinator_delegates_generic_hybrid(monkeypatch) -> None:
+    sentinel = object()
+    delegated_kwargs = {}
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=16)
+
+    def _stub_orig(*args, **kwargs):
+        delegated_kwargs.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_coordinator._orig_get_kv_cache_coordinator",
+        _stub_orig,
+    )
+
+    coordinator = get_kv_cache_coordinator(
+        kv_cache_config,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        use_eagle=True,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=2,
+        pcp_world_size=1,
+        hash_block_size=16,
+        scheduler_block_size=16,
+    )
+
+    assert coordinator is sentinel
+    assert delegated_kwargs == {
+        "kv_cache_config": kv_cache_config,
+        "max_model_len": 1024,
+        "max_in_flight_tokens": 1024,
+        "use_eagle": True,
+        "enable_caching": True,
+        "enable_kv_cache_events": False,
+        "dcp_world_size": 2,
+        "pcp_world_size": 1,
+        "scheduler_block_size": 16,
+        "hash_block_size": 16,
+        "metrics_collector": None,
+    }
 
 
 def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> None:
