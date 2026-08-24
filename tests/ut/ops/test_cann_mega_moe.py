@@ -4,10 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from vllm_ascend.ascend_config import AscendConfig
-from vllm_ascend.ops.fused_moe.moe_comm_method import (
-    _CANN_MEGA_MOE_MAX_TOKENS_PER_CALL,
-    FusedMC2CommImpl,
-)
+from vllm_ascend.ascend_forward_context import _MEGA_MOE_TOKENS_PER_RANK_LIMIT
+from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
 from vllm_ascend.quantization.methods.base import QuantType
 
@@ -58,16 +56,37 @@ def test_cann_mega_moe_receives_swigluoai_parameters():
     assert call_kwargs["activation_params"] == {"alpha": 1.5, "beta": 0.25}
 
 
+def test_cann_mega_moe_symm_buffer_uses_chunk_capacity():
+    comm_impl = _make_comm_impl()
+    comm_impl.token_dispatcher.ep_world_size = 2
+    comm_impl.token_dispatcher.ep_rank_id = 0
+    comm_impl.token_dispatcher.max_num_tokens_per_rank = 40
+    comm_impl.moe_config = SimpleNamespace(
+        experts_per_token=2,
+        num_experts=8,
+        hidden_dim=4096,
+        intermediate_size_per_partition=1536,
+    )
+    comm_impl.get_symm_buffer_for_mega_moe = MagicMock()
+    mc2_group = SimpleNamespace(device_group=object())
+
+    with patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group", return_value=mc2_group):
+        comm_impl._init_mega_moe_symm_buffer()
+
+    call = comm_impl.get_symm_buffer_for_mega_moe.call_args
+    assert call.args[2] == _MEGA_MOE_TOKENS_PER_RANK_LIMIT
+
+
 def test_cann_mega_moe_splits_batches_above_operator_limit():
     comm_impl = _make_comm_impl()
     comm_impl.token_dispatcher.global_bs = 0
-    first_out = torch.ones(_CANN_MEGA_MOE_MAX_TOKENS_PER_CALL, 4)
+    first_out = torch.ones(_MEGA_MOE_TOKENS_PER_RANK_LIMIT, 4)
     second_out = torch.full((1, 4), 2.0)
     comm_impl.mega_moe.side_effect = [
         (first_out, torch.tensor([1, 2], dtype=torch.int32)),
         (second_out, torch.tensor([3, 4], dtype=torch.int32)),
     ]
-    num_tokens = _CANN_MEGA_MOE_MAX_TOKENS_PER_CALL + 1
+    num_tokens = _MEGA_MOE_TOKENS_PER_RANK_LIMIT + 1
 
     with patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.cat") as mock_cat:
         out, expert_tokens = comm_impl._apply_cann_mega_moe(
@@ -76,11 +95,11 @@ def test_cann_mega_moe_splits_batches_above_operator_limit():
 
     mock_cat.assert_not_called()
     assert [call.args[0].shape[0] for call in comm_impl.mega_moe.call_args_list] == [
-        _CANN_MEGA_MOE_MAX_TOKENS_PER_CALL,
+        _MEGA_MOE_TOKENS_PER_RANK_LIMIT,
         1,
     ]
     assert [call.kwargs["x_active_mask"].shape[0] for call in comm_impl.mega_moe.call_args_list] == [
-        _CANN_MEGA_MOE_MAX_TOKENS_PER_CALL,
+        _MEGA_MOE_TOKENS_PER_RANK_LIMIT,
         1,
     ]
     torch.testing.assert_close(out, torch.cat([first_out, second_out], dim=0))
