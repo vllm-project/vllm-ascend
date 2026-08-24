@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 import torch
+from vllm.logger import logger
 from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -17,8 +17,6 @@ from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
 )
-
-logger = logging.getLogger(__name__)
 
 # Lazy-imported reference to the fused Triton kernel.
 # Cached after first successful import; `None` if Triton is unavailable.
