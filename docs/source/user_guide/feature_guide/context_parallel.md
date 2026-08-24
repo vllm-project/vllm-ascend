@@ -1,6 +1,8 @@
-# Decode Context Parallel Guide
+# Context Parallel Guide
 
 ## Overview
+
+The context parallel features include Decode Context Parallel (DCP) and DSA-CP.
 
 Decode Context Parallel (DCP) shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It removes redundant KV-cache copies and can increase the batch size available for long-context decoding.
 
@@ -10,35 +12,45 @@ DSA-CP is a separate sparse-attention optimization controlled by `additional_con
 
 ## Supported Scenarios
 
-DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The SFA attention backend supports speculative decoding. In the MLA and GQA attention backend, speculative decoding is supported in the P/D disaggregation deployment scenario and not supported in the mixed deployment scenario.
+DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
+
+| Device | Attention Backend | Chunked Prefill + DCP | Prefix Caching + DCP | Graph Mode + DCP | P/D Disaggregation + DCP | MLAPO + DCP | Speculative Decoding + DCP |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Ascend A2/A3 | MLA/GQA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported (MLA)<br>— Not applicable (GQA) | 🟢 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend A2/A3 | SFA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported |
+| Ascend 950 | MLA/GQA | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental (MLA)<br>— Not applicable (GQA) | 🔵 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend 950 | SFA | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported |
+
+- 🟢 **Supported**: Combining the feature with DCP is supported.
+- 🔵 **Experimental**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.
+- 🔴 **Not supported**: Combining the feature with DCP is not supported.
+- **Not applicable**: The feature does not apply to this attention backend.
+
+DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D disaggregation on the model and hardware combinations documented by vLLM Ascend.
 
 ## Usage
 
-Offline example:
-
-```python
-from vllm import LLM, SamplingParams
-
-prompts = ["The future of AI is"]
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-
-llm = LLM(
-    model="deepseek-ai/DeepSeek-V2-Lite",
-    tensor_parallel_size=2,
-    decode_context_parallel_size=2,
-)
-outputs = llm.generate(prompts, sampling_params)
-```
-
-Online example:
+### DCP
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-V2-Lite \
-    --tensor-parallel-size 2 \
-    --decode-context-parallel-size 2
+vllm serve <glm-5.2-model> \
+  --tensor-parallel-size <N> \
+  --prefill-context-parallel-size 1 \
+  --decode-context-parallel-size <N> \
+  --block-size <B> \
+  --cp-kv-cache-interleave-size <B> \
 ```
 
 DCP reuses the TP devices and does not increase the world size.
+
+### DSA-CP
+
+```bash
+vllm serve <glm-5.2-model> \
+  --tensor-parallel-size <N> \
+  --block-size <B> \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true}'
+```
 
 ## Constraints
 
@@ -58,4 +70,4 @@ DCP reuses the TP devices and does not increase the world size.
         --kv-transfer-config '{...}'
     ```
 
-For implementation details, see the [Decode Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
+For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

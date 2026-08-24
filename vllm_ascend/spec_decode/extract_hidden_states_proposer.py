@@ -97,6 +97,7 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
                 num_tokens=num_tokens_padded,
                 is_draft_model=True,
                 cudagraph_mode=cudagraph_mode,
+                allow_dp_padding=use_cudagraphs,
             )
 
             if num_tokens_across_dp is not None:

@@ -10,9 +10,9 @@ This document will show the main verification steps of the model, including supp
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -22,8 +22,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
-- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
-- `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
+- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Since it is now supported, you can use the following quantization scheme to add mtp weights to the quantized weights.
+- `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
 - `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -76,7 +76,7 @@ You can use our official docker image to run `GLM-4.x` directly.
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
 
@@ -114,12 +114,12 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-node Deployment
 
 - In low-latency scenarios, we recommend a single-machine deployment.
-- Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
+- Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8).
 
 Run the following script to execute online inference.
 
@@ -154,11 +154,10 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
 The parameters are explained as follows:
 
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
 ### 5.2 Multi-node Deployment
 
-While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
+While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64GB × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
 
 === "Node 0"
 
@@ -262,7 +261,7 @@ While the previous documentation advises against multi-node deployment on the At
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of `GLM-4.7` in a multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
@@ -663,7 +662,7 @@ Once the preparation is done, you can start the server with the following comman
 === "Decode node 1"
 
     ```shell
-    
+
     # change ip to your own
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
     ```
@@ -708,15 +707,15 @@ curl -H "Accept: application/json" \
     -H "Content-type: application/json" \
     -X POST \
     -d '{
-        "model": "glm", 
-        "messages": [{ 
-            "role": "user", 
-            "content": "The future of AI is" 
-        }], 
-        "stream": false, 
-        "ignore_eos": false, 
-        "temperature": 0, 
-        "max_tokens": 200 
+        "model": "glm",
+        "messages": [{
+            "role": "user",
+            "content": "The future of AI is"
+        }],
+        "stream": false,
+        "ignore_eos": false,
+        "temperature": 0,
+        "max_tokens": 200
     }' http://<node0_ip>:<port>/v1/chat/completions
 ```
 
@@ -732,8 +731,8 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
-| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64G × 16) |
-| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64G × 16) |
+| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64GB × 16) |
+| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64GB × 16) |
 
 ### Using Language Model Evaluation Harness
 

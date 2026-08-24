@@ -1,3 +1,6 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -14,7 +17,7 @@ Prerequisites:
 
     $ VLLM_SERVER_DEV_MODE=1 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
         vllm serve Qwen/Qwen3-0.6b --enforce-eager \
-        --weight-transfer-config '{"backend": "ipc"}' \
+        --weight-transfer-config '{"backend": "npu_ipc"}' \
         --load-format dummy \
         --gpu-memory-utilization 0.5
 
@@ -34,6 +37,7 @@ The example performs the following steps:
 * Generate text again to show normal output after the weight update.
 """
 
+import logging
 import os
 
 import requests
@@ -41,10 +45,7 @@ import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
 
-from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-    NPUIPCTrainerSendWeightsArgs,
-    NPUIPCWeightTransferEngine,
-)
+logger = logging.getLogger(__name__)
 
 BASE_URL = "http://localhost:8000"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -75,15 +76,14 @@ def init_weight_transfer_engine(base_url: str) -> None:
     response.raise_for_status()
 
 
-def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
+def start_weight_update(base_url: str) -> None:
     """Start weight update via HTTP endpoint.
 
     Prepares the model for layerwise reload on the vLLM server side.
     Must be called before update_weights.
     """
     url = f"{base_url}/start_weight_update"
-    payload = {"is_checkpoint_format": is_checkpoint_format}
-    response = requests.post(url, json=payload, timeout=60)
+    response = requests.post(url, timeout=60)
     response.raise_for_status()
 
 
@@ -113,6 +113,10 @@ def resume_generation(base_url: str) -> None:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     # NPU IPC requires the training model to be on the same NPU as the vLLM server.
     # The server should be started on NPU 0 with reduced memory utilization.
     device = "npu:0"
@@ -120,8 +124,8 @@ def main():
 
     # Load the training model on the same NPU as the server.
     # Use bfloat16 to reduce memory footprint.
-    print(f"Loading training model: {MODEL_NAME} on {device}")
-    print(
+    logger.info("Loading training model: %s on %s", MODEL_NAME, device)
+    logger.info(
         "Note: Ensure the vLLM server was started with --gpu-memory-utilization 0.5 "
         "or lower to leave room for the training model."
     )
@@ -145,16 +149,16 @@ def main():
 
     # Generate text before weight update. The output is expected to be nonsense
     # because the server is initialized with dummy weights.
-    print("-" * 50)
-    print("Generating text BEFORE weight update (expect nonsense):")
-    print("-" * 50)
+    logger.info("-" * 50)
+    logger.info("Generating text BEFORE weight update (expect nonsense):")
+    logger.info("-" * 50)
     outputs = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs):
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        logger.info("Prompt: %r\nGenerated text: %r", prompt, generated_text)
+        logger.info("-" * 50)
 
     # Initialize weight transfer on vLLM server (no-op for NPU IPC)
-    print("Initializing weight transfer (NPU IPC backend)...")
+    logger.info("Initializing weight transfer (NPU IPC backend)...")
     init_weight_transfer_engine(BASE_URL)
 
     # Pause generation before weight sync
@@ -164,14 +168,29 @@ def main():
     start_weight_update(BASE_URL)
 
     # Send weights via NPU IPC handles using HTTP mode.
-    # trainer_send_weights internally collects all parameters,
-    # creates IPC handles, and POSTs them to /update_weights.
-    print("Broadcasting weights via NPU IPC (HTTP)...")
-    trainer_args = NPUIPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
-    NPUIPCWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
+    # The trainer-side path is a stateful ``IPCTrainerWeightTransferEngine``
+    # driven by ``WeightTransferTrainerFactory.trainer_init`` +
+    # ``engine.send_weights()``, with HTTP transport delegated to
+    # ``HTTPVLLMWeightSyncClient``.
+    logger.info("Broadcasting weights via NPU IPC (HTTP)...")
+    from vllm.distributed.weight_transfer.base import ModuleSource
+    from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+    from vllm.distributed.weight_transfer.factory import (
+        WeightTransferTrainerFactory,
     )
+
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+        NPUIPCTrainerInitInfo,
+    )
+
+    client = HTTPVLLMWeightSyncClient(base_url=BASE_URL)
+    init_info = NPUIPCTrainerInitInfo(rank=0, packed=False)
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info,
+        client=client,
+        source=ModuleSource(train_model),
+    )
+    engine.send_weights()
 
     # Finish weight update (finalizes layerwise reload on the vLLM server)
     finish_weight_update(BASE_URL)
@@ -181,13 +200,13 @@ def main():
 
     # Generate text after weight update. The output is expected to be normal
     # because the real weights are now loaded.
-    print("-" * 50)
-    print("Generating text AFTER weight update:")
-    print("-" * 50)
+    logger.info("-" * 50)
+    logger.info("Generating text AFTER weight update:")
+    logger.info("-" * 50)
     outputs_updated = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs_updated):
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        logger.info("Prompt: %r\nGenerated text: %r", prompt, generated_text)
+        logger.info("-" * 50)
 
     # Note: The training model and IPC handles remain in memory.
     # In a real RLHF training loop, you would update the training model

@@ -405,7 +405,6 @@ class TestEagleProposerLoadModel(TestBase):
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_context_parallel = False
-        mock_ascend_config.enable_flashcomm1 = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -567,7 +566,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_context_parallel = False
-        mock_ascend_config.enable_flashcomm1 = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -611,9 +609,7 @@ class TestEagleProposerDummyRun(TestBase):
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch(
-        "vllm_ascend.spec_decode.llm_base_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
-    )
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_basic(self, mock_context, mock_get_context, mock_get_context_2):
         num_tokens = 32
@@ -621,7 +617,6 @@ class TestEagleProposerDummyRun(TestBase):
 
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
             self.assertTrue(self.proposer._runnable.call_count == 1)
@@ -629,15 +624,12 @@ class TestEagleProposerDummyRun(TestBase):
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch(
-        "vllm_ascend.spec_decode.llm_base_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
-    )
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_with_prefill(self, mock_context, mock_get_context, mock_get_context_2):
         mock_context.return_value.__enter__.return_value = None
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
             self.assertTrue(self.proposer._runnable.call_count == 1)
 
@@ -653,13 +645,11 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = True
         # cpu does not support parallel-group, let alone `sp`
-        mock_return_context.flash_comm_v1_enabled = False
         mock_get_context.return_value = mock_return_context
         mock_get_context_2.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=True, aclgraph_runtime_mode=CUDAGraphMode.FULL)
             self.assertTrue(self.proposer._runnable.call_count == 1)
             mock_update_full_graph_params.assert_not_called()
@@ -677,14 +667,12 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = False
         # cpu does not support parallel-group, let alone `sp`
-        mock_return_context.flash_comm_v1_enabled = False
         mock_get_context.return_value = mock_return_context
         mock_get_context_2.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
         self.proposer.draft_attn_groups = [MagicMock()]
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
-            self.proposer.enable_shared_expert_dp = False
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=False, aclgraph_runtime_mode=CUDAGraphMode.FULL)
             self.assertTrue(self.proposer._runnable.call_count == 1)
             self.assertTrue(mock_update_full_graph_params.call_count == 1)
@@ -775,100 +763,26 @@ class TestEagleProposerMaybePadAndGather:
         method,
         *,
         is_multimodal_model=False,
-        enable_shared_expert_dp=False,
+        use_sequence_parallel_moe=False,
     ):
         proposer = object.__new__(AscendEagleProposer)
         proposer.method = method
         proposer.is_multimodal_model = is_multimodal_model
-        proposer.enable_shared_expert_dp = enable_shared_expert_dp
+        proposer.use_sequence_parallel_moe = use_sequence_parallel_moe
         return proposer
 
-    def _extra_ctx(self, flash_comm_v1_enabled):
-        extra_ctx = MagicMock()
-        extra_ctx.flash_comm_v1_enabled = flash_comm_v1_enabled
-        return extra_ctx
-
-    @pytest.mark.parametrize(
-        "flash_comm_v1_enabled,is_multimodal_model,expect_reduce",
-        [
-            (True, False, True),
-            (False, False, False),
-            (True, True, False),
-        ],
-    )
-    def test_mtp_maybe_pad_and_reduce(
-        self,
-        flash_comm_v1_enabled,
-        is_multimodal_model,
-        expect_reduce,
-    ):
-        proposer = self._new_proposer("mtp", is_multimodal_model=is_multimodal_model)
-        model_hidden_states = torch.arange(12, device=self.device, dtype=torch.float32).view(6, 2)
-        model_positions = torch.arange(6, device=self.device, dtype=torch.int64)
-
-        def fake_pad_and_reduce(input_tensor):
-            return input_tensor[::2].contiguous()
-
-        with (
-            patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
-            patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=fake_pad_and_reduce, create=True) as mock_reduce,
-        ):
-            reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(
-                model_hidden_states, model_positions
-            )
-
-        if expect_reduce:
-            assert mock_reduce.call_count == 2
-            assert mock_reduce.call_args_list[0].args[0].shape == (6, 2)
-            assert mock_reduce.call_args_list[1].args[0].shape == (6, 1)
-            assert torch.equal(reduced_hidden_states, model_hidden_states[::2])
-            assert torch.equal(reduced_positions, model_positions[::2])
-        else:
-            mock_reduce.assert_not_called()
-            assert reduced_hidden_states is model_hidden_states
-            assert reduced_positions is model_positions
-
-    @pytest.mark.parametrize(
-        "flash_comm_v1_enabled,expect_split",
-        [
-            (True, True),
-            (False, False),
-        ],
-    )
-    def test_eagle_maybe_pad_and_reduce(
-        self,
-        flash_comm_v1_enabled,
-        expect_split,
-    ):
+    def test_maybe_pad_and_reduce_is_removed(self):
         proposer = self._new_proposer("eagle3")
-        model_hidden_states = torch.arange(12, device=self.device, dtype=torch.float32).view(6, 2)
-        model_positions = torch.arange(6, device=self.device, dtype=torch.int64)
+        hidden_states = torch.arange(12, device=self.device, dtype=torch.float32).view(6, 2)
+        positions = torch.arange(6, device=self.device, dtype=torch.int64)
 
-        tp_group = MagicMock()
-        tp_group.world_size = 2
-        tp_group.rank = 1
+        reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(hidden_states, positions)
 
-        with (
-            patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
-            patch("vllm_ascend.spec_decode.llm_base_proposer.get_tp_group", return_value=tp_group) as mock_get_tp_group,
-        ):
-            reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(
-                model_hidden_states, model_positions
-            )
-
-        if expect_split:
-            expected_hidden_states = torch.tensor([[6.0, 7.0], [8.0, 9.0], [10.0, 11.0]], device=self.device)
-            mock_get_tp_group.assert_called_once()
-            assert reduced_hidden_states.shape == (3, 2)
-            assert torch.equal(reduced_hidden_states, expected_hidden_states)
-            assert torch.equal(model_hidden_states[:3], expected_hidden_states)
-        else:
-            mock_get_tp_group.assert_not_called()
-            assert reduced_hidden_states is model_hidden_states
-        assert reduced_positions is model_positions
+        assert reduced_hidden_states is hidden_states
+        assert reduced_positions is positions
 
     @pytest.mark.parametrize(
-        "enable_shared_expert_dp,hidden_states_is_none,expect_gather",
+        "use_sequence_parallel_moe,hidden_states_is_none,expect_gather",
         [
             (True, False, True),
             (True, True, True),
@@ -877,24 +791,33 @@ class TestEagleProposerMaybePadAndGather:
     )
     def test_mtp_maybe_all_gather_and_unpad(
         self,
-        enable_shared_expert_dp,
+        use_sequence_parallel_moe,
         hidden_states_is_none,
         expect_gather,
     ):
-        proposer = self._new_proposer("mtp", enable_shared_expert_dp=enable_shared_expert_dp)
+        proposer = self._new_proposer(
+            "mtp",
+            use_sequence_parallel_moe=use_sequence_parallel_moe,
+        )
         last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
         positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
         hidden_states = None if hidden_states_is_none else last_hidden_states + 1000
 
-        def fake_all_gather_and_unpad(input_tensor, label):
-            assert label is True
+        def fake_all_gather(input_tensor, dim, world_size, group_name):
+            assert dim == 0
             return torch.cat((input_tensor, input_tensor + 100), dim=0)
 
-        with patch(
-            "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
-            side_effect=fake_all_gather_and_unpad,
-            create=True,
-        ) as mock_all_gather:
+        with (
+            patch(
+                "vllm_ascend.spec_decode.llm_base_proposer.get_tp_group",
+                return_value=MagicMock(world_size=2, unique_name="tp_group"),
+            ),
+            patch(
+                "torch.ops.vllm.all_gather",
+                side_effect=fake_all_gather,
+                create=True,
+            ) as mock_all_gather,
+        ):
             gathered_last_hidden_states, gathered_positions, gathered_hidden_states = (
                 proposer.maybe_all_gather_and_unpad(last_hidden_states, positions, hidden_states)
             )
@@ -915,62 +838,25 @@ class TestEagleProposerMaybePadAndGather:
             assert gathered_positions is positions
             assert gathered_hidden_states is hidden_states
 
-    @pytest.mark.parametrize(
-        "flash_comm_v1_enabled,hidden_states_is_none,expect_gather",
-        [
-            (True, False, True),
-            (True, True, True),
-            (False, False, False),
-        ],
-    )
-    def test_eagle_maybe_all_gather_and_unpad(
-        self,
-        flash_comm_v1_enabled,
-        hidden_states_is_none,
-        expect_gather,
-    ):
+    def test_eagle_maybe_all_gather_and_unpad_does_not_gather(self):
         proposer = self._new_proposer("eagle3")
         last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
         positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
-        hidden_states = None if hidden_states_is_none else last_hidden_states + 1000
+        hidden_states = last_hidden_states + 1000
 
-        def fake_all_gather_and_unpad(input_tensor, label):
-            assert label is True
-            return torch.cat((input_tensor, input_tensor + 100), dim=0)
+        gathered_last_hidden_states, gathered_positions, gathered_hidden_states = proposer.maybe_all_gather_and_unpad(
+            last_hidden_states, positions, hidden_states
+        )
 
-        with (
-            patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
-            patch(
-                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
-                side_effect=fake_all_gather_and_unpad,
-                create=True,
-            ) as mock_all_gather,
-        ):
-            gathered_last_hidden_states, gathered_positions, gathered_hidden_states = (
-                proposer.maybe_all_gather_and_unpad(last_hidden_states, positions, hidden_states)
-            )
-
-        if expect_gather:
-            expected_last_hidden_states = torch.cat((last_hidden_states, last_hidden_states + 100), dim=0)
-            assert torch.equal(gathered_last_hidden_states, expected_last_hidden_states)
-            assert gathered_positions is positions
-            if hidden_states_is_none:
-                assert mock_all_gather.call_count == 1
-                assert gathered_hidden_states is None
-            else:
-                expected_hidden_states = torch.cat((hidden_states, hidden_states + 100), dim=0)  # type: ignore
-                assert mock_all_gather.call_count == 2
-                assert torch.equal(gathered_hidden_states, expected_hidden_states)
-        else:
-            mock_all_gather.assert_not_called()
-            assert gathered_last_hidden_states is last_hidden_states
-            assert gathered_positions is positions
-            assert gathered_hidden_states is hidden_states
+        assert gathered_last_hidden_states is last_hidden_states
+        assert gathered_positions is positions
+        assert gathered_hidden_states is hidden_states
 
     def check_mock(self):
         import vllm_ascend.spec_decode.llm_base_proposer
 
         assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
+        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "get_tp_group")
         RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
 
         assert hasattr(RunnerCls, "maybe_pad_and_reduce")
@@ -1000,7 +886,6 @@ class TestEagleProposerPropose:
         mock_get_ascend_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_context_parallel = False
-        mock_ascend_config.enable_flashcomm1 = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -1089,6 +974,16 @@ class TestEagleProposerPropose:
         # Clear the current vllm config
         set_current_vllm_config(None)
         clear_ascend_config()
+
+    def test_slot_mapping_group_reserves_mtp_draft_slots(self):
+        self.vllm_config.speculative_config.num_speculative_tokens = 5
+        self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(6)])
+
+        proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+
+        expected_capacity = self.runner.max_num_tokens + 4 * self.runner.max_num_reqs
+        assert len(proposer.slot_mapping_group) == 5
+        assert all(slot_mapping.shape == torch.Size([expected_capacity]) for slot_mapping in proposer.slot_mapping_group)
 
     # config: prefill and decode, Qwen3-8B, tp1, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
     @pytest.mark.parametrize(
@@ -1337,7 +1232,8 @@ class TestEagleProposerPropose:
             patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
             set_current_vllm_config(self.vllm_config),
         ):
-            self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
+            self.proposer._propose(self.proposer.num_speculative_tokens,
+                                target_token_ids, target_positions, target_hidden_states, next_token_ids,
                                 token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
                                 mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
@@ -1614,7 +1510,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_sync_metadata_across_dp")
         sig = inspect.signature(RunnerCls._sync_metadata_across_dp)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode']
+        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode', 'allow_dp_padding']
 
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
@@ -1639,7 +1535,8 @@ class TestEagleProposerPropose:
         assert 'self.kernel_block_size' in src
         sig = inspect.signature(RunnerCls._propose)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'target_token_ids', 'target_positions', 'target_hidden_states', 'next_token_ids',
+        assert sig_name == ['self', 'num_speculative_tokens', 'target_token_ids', 'target_positions',
+                            'target_hidden_states', 'next_token_ids',
                             'token_indices_to_sample', 'common_attn_metadata', 'target_model_batch_desc',
                             'sampling_metadata', 'mm_embed_inputs', 'req_scheduled_tokens', 'long_seq_metadata',
                             'num_prefill_reqs', 'num_decode_reqs', 'scheduler_output', 'num_scheduled_tokens',
@@ -2340,10 +2237,6 @@ class TestRunMergedDraft(TestBase):
         self.mock_supports_multimodal_inputs.start()
         self.mock_enable_sp = patch("vllm_ascend.spec_decode.llm_base_proposer.enable_sp", return_value=False)
         self.mock_enable_sp.start()
-        self.mock_shared_expert_dp = patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.shared_expert_dp_enabled", return_value=False
-        )
-        self.mock_shared_expert_dp.start()
         self.mock_extra_ctx = patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=MagicMock())
         self.mock_extra_ctx.start()
         set_current_vllm_config(self.vllm_config)
@@ -2363,7 +2256,6 @@ class TestRunMergedDraft(TestBase):
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
         self.mock_enable_sp.stop()
-        self.mock_shared_expert_dp.stop()
         self.mock_extra_ctx.stop()
         set_current_vllm_config(None)
 
@@ -2488,7 +2380,7 @@ class TestRunMergedDraft(TestBase):
 
         assert hasattr(vllm_ascend.ascend_forward_context, "_EXTRA_CTX")
         extra_attrs = set(vllm_ascend.ascend_forward_context._ExtraForwardContextProxy.extra_attrs)
-        fields = {"num_tokens", "num_accept_tokens", "flash_comm_v1_enabled"}
+        fields = {"num_tokens", "num_accept_tokens"}
         missing = fields - extra_attrs
         assert not missing, f"Missing extra forward context attrs: {missing}"
 
@@ -2497,7 +2389,6 @@ class TestRunMergedDraft(TestBase):
         for attr in (
             "AscendSpecDecodeBaseProposer",
             "enable_sp",
-            "shared_expert_dp_enabled",
             "lmhead_tp_enable",
             "get_forward_context",
             "_EXTRA_CTX",

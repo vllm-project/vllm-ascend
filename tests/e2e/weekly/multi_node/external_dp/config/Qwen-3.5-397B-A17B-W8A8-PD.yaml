@@ -51,7 +51,6 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
   TASK_QUEUE_ENABLE: "1"
-  ASCEND_BUFFER_POOL: "4:8"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
   HCCL_BUFFSIZE: "1536"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
@@ -62,7 +61,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -143,7 +141,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "67000"
+      - "34816"
       - --max-num-batched-tokens
       - "128"
       - --trust-remote-code
@@ -202,7 +200,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "67000"
+      - "34816"
       - --max-num-batched-tokens
       - "128"
       - --trust-remote-code

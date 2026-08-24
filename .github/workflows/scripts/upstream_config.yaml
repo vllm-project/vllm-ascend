@@ -38,8 +38,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/llm/test_prompt_validation.py
     estimated_time: 20
-  - name: tests/entrypoints/llm/offline_mode/test_offline_mode.py
-    estimated_time: 20
   - name: tests/entrypoints/openai/test_cli_args.py
     estimated_time: 20
   - name: tests/entrypoints/openai/test_uds.py
@@ -109,8 +107,6 @@ e2e-upstream_singlecard:
   - name: tests/models/multimodal/processing/test_qwen2_vl.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_smolvlm.py
-    estimated_time: 20
-  - name: tests/models/multimodal/processing/test_transformers.py
     estimated_time: 20
   - name: tests/models/test_utils.py
     estimated_time: 20
@@ -336,8 +332,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/distributed/test_packed_tensor.py
     estimated_time: 20
-  - name: tests/kernels/attention/test_use_trtllm_attention.py
-    estimated_time: 20
   - name: tests/entrypoints/openai/responses/test_sampling_params.py
     estimated_time: 20
   - name: tests/model_executor/test_oink_integration.py
@@ -408,8 +402,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_flexkv_connector.py
     estimated_time: 20
-  - name: tests/v1/kv_connector/unit/test_kv_cache_layout.py
-    estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_kv_connector_lifecycle.py
     estimated_time: 20
   - name: tests/entrypoints/openai/parser/test_harmony_utils.py
@@ -423,8 +415,6 @@ e2e-upstream_singlecard:
   - name: tests/kernels/helion/test_utils.py
     estimated_time: 20
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_utils.py
-    estimated_time: 20
-  - name: tests/model_executor/test_model_load_with_params.py
     estimated_time: 20
   - name: tests/models/language/pooling_mteb_test/test_jina.py
     estimated_time: 20
@@ -742,8 +732,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/models/multimodal/pooling/test_prithvi_mae.py
     estimated_time: 20
-  - name: tests/models/test_registry.py
-    estimated_time: 20
   - name: tests/kernels/helion/test_case_key.py
     estimated_time: 20
   - name: tests/utils_/test_spawn_decorator.py
@@ -751,8 +739,6 @@ e2e-upstream_singlecard:
   - name: tests/ir/test_inplace_op.py
     estimated_time: 20
   - name: tests/v1/attention/test_kv_head_stride_canonicalization.py
-    estimated_time: 20
-  - name: tests/v1/attention/test_mla_prefill_selector.py
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/offloading_connector/test_worker_metadata.py
     estimated_time: 20
@@ -861,8 +847,6 @@ e2e-upstream_singlecard:
   - name: tests/entrypoints/openai/test_reasoning_enable_thinking.py
     estimated_time: 20
   - name: tests/entrypoints/openai/responses/test_response_input_to_harmony.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/parser/test_harmony_render_parity.py
     estimated_time: 20
   - name: tests/lora/test_moe_lora_ep_load.py
     estimated_time: 20
@@ -1116,8 +1100,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/multimodal/test_parse.py
     estimated_time: 20
-  - name: tests/parser/test_harmony.py
-    estimated_time: 20
   - name: tests/parser/engine/test_ufffd_reasoning_transition.py
     estimated_time: 20
   - name: tests/parser/engine/test_parser_engine.py
@@ -1158,10 +1140,76 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/multimodal/openai/responses/test_image.py
     estimated_time: 20
+  - name: tests/v1/attention/test_backend_per_kind.py
+    estimated_time: 20
+  - name: tests/v1/core/test_swa_inflight_window_free.py
+    estimated_time: 20
+  - name: tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py
+    estimated_time: 20
+  - name: tests/v1/ec_connector/unit/test_ec_transfer_params.py
+    estimated_time: 20
+  - name: tests/v1/ec_connector/unit/cpu/test_connector.py
+    estimated_time: 20
+  - name: tests/v1/ec_connector/unit/cpu/scheduler/test_embedding_cache.py
+    estimated_time: 20
+  - name: tests/v1/ec_connector/unit/cpu/scheduler/test_step_tracker.py
+    estimated_time: 20
+  - name: tests/v1/ec_connector/unit/test_metadata.py
+    estimated_time: 20
+  - name: tests/v1/spec_decode/test_dflash_causality.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_batch_ordering.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_cp_utils.py
+    estimated_time: 20
+  - name: tests/v1/engine/test_iteration_logging.py
+    estimated_time: 20
+  - name: tests/v1/structured_output/test_outlines_cache.py
+    estimated_time: 20
+  - name: tests/v1/sample/test_head_dtype.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_moriio_proxy_routing.py
+    estimated_time: 20
+  - name: tests/quantization/test_humming_ignore.py
+    estimated_time: 20
+  - name: tests/renderers/test_inkling.py
+    estimated_time: 20
+  - name: tests/entrypoints/serve/instrumentator/test_http_status_metrics.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_include_reasoning.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_logprob_token_ids.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/basic/test_tiling_engine.py
+    estimated_time: 20
+  - name: tests/entrypoints/scale_out/derender/test_derender_parity.py
+    estimated_time: 20
+  - name: tests/lora/test_layers_utils.py
+    estimated_time: 20
+  - name: tests/model_executor/model_loader/test_filter_duplicate_safetensors.py
+    estimated_time: 20
+  - name: tests/test_sampling_params.py
+    estimated_time: 20
+  - name: tests/plugins_tests/test_endpoint_plugins.py
+    estimated_time: 20
+  - name: tests/models/inkling/test_contract_validation.py
+    estimated_time: 20
+  - name: tests/models/inkling/test_fa4_rel_attention.py
+    estimated_time: 20
+  - name: tests/models/inkling/test_fa4_warmup.py
+    estimated_time: 20
+  - name: tests/models/inkling/test_qkvr_prep.py
+    estimated_time: 20
+  - name: tests/models/inkling/test_moe_weight_layout.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_llava_next_video.py
+    estimated_time: 20
+  - name: tests/parser/test_include_reasoning.py
+    estimated_time: 20
+  - name: tests/parser/engine/test_inkling.py
+    estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
-    estimated_time: 20
-  - name: tests/reasoning/test_mistral_reasoning_parser.py
     estimated_time: 20
   - name: tests/renderers/test_mistral.py
     estimated_time: 20
@@ -1170,8 +1218,6 @@ e2e-upstream_online_1:
   - name: tests/reasoning/test_olmo3_reasoning_parser.py
     estimated_time: 20
   - name: tests/tokenizers_/test_basic.py
-    estimated_time: 20
-  - name: tests/tool_parsers/test_mistral_tool_parser.py
     estimated_time: 20
   - name: tests/v1/structured_output/test_backend_guidance.py
     estimated_time: 20
@@ -1182,6 +1228,14 @@ e2e-upstream_online_1:
   - name: tests/evals/mrcr/test_mrcr_correctness.py
     estimated_time: 20
   - name: tests/plugins_tests/lora_resolvers/test_hf_hub_resolver.py
+    estimated_time: 20
+  - name: tests/entrypoints/llm/offline_mode/test_offline_mode.py
+    estimated_time: 20
+  - name: tests/model_executor/test_model_load_with_params.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/parser/test_harmony_render_parity.py
+    estimated_time: 20
+  - name: tests/parser/test_harmony.py
     estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/v1/distributed/test_async_llm_dp.py

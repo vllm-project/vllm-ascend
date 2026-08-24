@@ -60,6 +60,9 @@ def apply_temperature(
         temperature: Tensor containing the temperature value for each request.
     """
     num_tokens, vocab_size = logits.shape
+    # BLOCK_SIZE fits the FP32 working vector within the Ascend A2/A3 UB limit
+    # (192 KB). Upstream restores the FP32 logit upcast (vllm #49033), so on
+    # main / v0.27.1 the kernel gets FP32 logits and 44032 * 32 bits fits.
     BLOCK_SIZE = 44032
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _temperature_kernel[(num_tokens, num_blocks)](
@@ -80,6 +83,7 @@ def apply_temperature(
         "processed_logits_stride",
         "logits_stride",
         "vocab_size",
+        "num_blocks",
     ]
 )
 def _gumbel_sample_kernel(
@@ -97,60 +101,67 @@ def _gumbel_sample_kernel(
     pos_ptr,
     temp_ptr,
     vocab_size,
+    num_blocks,
     BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    logits = tl.load(
-        logits_ptr + token_idx * logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
-    )
-    logits = logits.to(tl.float32)
 
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        # NOTE(woosuk): Match the behavior of _temperature_kernel.
-        logits = logits / temp
-
-    if processed_logits_ptr is not None:
-        # Store the temperature-applied logits.
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
-        else:
-            col = 0
-        tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
-            logits,
+    for block_idx in range(num_blocks):
+        block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = block < vocab_size
+        logits = tl.load(
+            logits_ptr + token_idx * logits_stride + block,
             mask=mask,
+            other=float("-inf"),
         )
+        logits = logits.to(tl.float32)
 
-    if temp != 0.0:
-        # Calculate the seed for gumbel noise.
-        seed = tl.load(seeds_ptr + req_state_idx)
-        # NOTE(Ronald1995): change pos's dtype to tl.int32, because triton-ascend's
-        # compiler doesn't support uint64 of pos arg.
-        pos = tl.load(pos_ptr + token_idx).to(tl.int32)
-        gumbel_seed = tl.randint(seed, pos)
+        block_temp = temp
+        if block_temp != 0.0 and APPLY_TEMPERATURE:
+            logits = logits / block_temp
 
-        # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
-        # because triton-ascend's compiler does not support float64.
-        r = tl.rand(gumbel_seed, block).to(tl.float32)
-        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        if processed_logits_ptr is not None:
+            # Store the temperature-applied logits.
+            if processed_logits_col_ptr is not None:
+                if PER_TOKEN_COL:
+                    col = tl.load(processed_logits_col_ptr + token_idx)
+                else:
+                    col = tl.load(processed_logits_col_ptr)
+            else:
+                col = 0
+            tl.store(
+                processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+                logits,
+                mask=mask,
+            )
 
-        # Apply gumbel noise.
-        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+        if block_temp != 0.0:
+            # Calculate the seed for gumbel noise.
+            seed = tl.load(seeds_ptr + req_state_idx)
+            # NOTE(Ronald1995): change pos's dtype to tl.int32, because triton-ascend's
+            # compiler doesn't support uint64 of pos arg.
+            pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+            gumbel_seed = tl.randint(seed, pos)
 
-    idx = tl.argmax(logits, axis=0)
-    token_id = block_idx * BLOCK_SIZE + idx
-    value = tl.max(logits, axis=0)
-    tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
-    tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
+            # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
+            # because triton-ascend's compiler does not support float64.
+            r = tl.rand(gumbel_seed, block).to(tl.float32)
+            gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+
+            # Apply gumbel noise.
+            logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+
+        idx = tl.argmax(logits, axis=0)
+        token_id = block_idx * BLOCK_SIZE + idx
+        value = tl.max(logits, axis=0)
+
+        tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
+        tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
 
 def gumbel_sample(
@@ -181,7 +192,8 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
-    _gumbel_sample_kernel[(num_tokens, num_blocks)](
+    per_token_col = output_processed_logits_col is not None and output_processed_logits_col.dim() > 0
+    _gumbel_sample_kernel[(num_tokens,)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
@@ -196,8 +208,10 @@ def gumbel_sample(
         pos,
         temperature,
         vocab_size,
+        num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
+        PER_TOKEN_COL=per_token_col,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

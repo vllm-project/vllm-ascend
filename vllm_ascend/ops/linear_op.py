@@ -20,11 +20,9 @@ Current class inheritance structure:
 CustomLinearOp
 ├── CustomColumnParallelOp
 │   ├── MLPColumnParallelOp
-│   ├── SequenceColumnParallelOp
 └── CustomRowParallelOp
 │   ├── MLPRowParallelOp
 │   ├── OProjRowParallelOp
-│   └── SequenceRowParallelOp
 └── CustomReplicatedOp
 How to extend a new linear op? Taking column parallel op as an example:
 1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
@@ -43,27 +41,17 @@ from types import SimpleNamespace
 import regex as re
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-from vllm.distributed import (
-    split_tensor_along_last_dim,
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_reduce_scatter,
-)
+from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
-from vllm.model_executor.models.utils import extract_layer_index
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
 )
 from vllm_ascend.utils import (
     enable_dsa_cp,
-    enable_sp,
-    is_vl_model,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -285,142 +273,6 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self.input_size_per_partition = self.layer.input_size_per_partition
 
 
-class SequenceColumnParallelOp(CustomColumnParallelOp):
-    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        """Linear layer with column parallelism.
-
-        Implemented multiple optimization projects for dense models, such as FlashComm and
-        communication-computation fusion.
-        """
-
-        bias = self.bias if not self.skip_bias_add else None
-
-        # Matrix multiply.
-        assert self.quant_method is not None
-        need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix)
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
-        output_parallel = self.quant_method.apply(self.layer, input_, bias)
-
-        if self.gather_output:
-            # All-gather across the partitions.
-            output = self.comm_group.all_gather(output_parallel)
-        else:
-            output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
-
-
-class SequenceRowParallelOp(CustomRowParallelOp):
-    def __init__(self, layer):
-        super().__init__(layer)
-        self.unique_prefix = None
-
-    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        """Linear layer with column parallelism.
-
-        Implemented multiple optimization projects for dense models, such as FlashComm and
-        communication-computation fusion.
-        """
-        input_parallel = self.get_input_parallel(input_)
-
-        assert self.quant_method is not None
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-
-        if self.tp_size == 1 or not self.reduce_results:
-            output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
-        else:
-            output = torch.ops.vllm.matmul_and_reduce(input_parallel, self.unique_prefix)
-
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
-
-    def matmul_and_reduce(self, input_parallel: torch.Tensor, bias_: Parameter | None) -> torch.Tensor:
-        assert self.quant_method is not None
-        try:
-            flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
-            mmrs_fusion = _EXTRA_CTX.mmrs_fusion
-        except AssertionError:
-            flash_comm_v1_enabled = False
-            mmrs_fusion = False
-            logger.debug(
-                "matmul_and_reduce: _EXTRA_CTX access failed (profile_run?), "
-                "using defaults: flash_comm_v1=False, mmrs_fusion=False",
-            )
-
-        x = input_parallel
-
-        if not flash_comm_v1_enabled:
-            output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
-            return tensor_model_parallel_all_reduce(output_parallel)
-
-        pad_size = _EXTRA_CTX.pad_size
-        dsa_cp_attn_out = enable_dsa_cp() and ("o_proj" in self.layer.prefix or "wo_b" in self.layer.prefix)
-        if pad_size > 0 and not dsa_cp_attn_out:
-            x = F.pad(x, (0, 0, 0, pad_size))
-
-        world_size = self.layer.tp_size
-        hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
-
-        from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-
-        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
-        from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-
-        # For unquant
-        if mmrs_fusion and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
-            output = DeviceOperator.npu_mm_reduce_scatter_base(
-                x,
-                self.layer.weight.t(),
-                hcom_name,
-                world_size,
-                reduce_op="sum",
-                bias=None,
-                comm_turn=0,
-            )
-            if bias_ is not None:
-                output.add_(bias_)
-        # For w8a8 quant
-        elif mmrs_fusion and (
-            isinstance(self.layer.quant_method, AscendLinearMethod)
-            and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)
-        ):
-            if x.dtype != torch.int8:
-                x_quant = torch.ops.vllm.quantize(
-                    x,
-                    self.layer.aclnn_input_scale,
-                    self.layer.aclnn_input_scale_reciprocal,
-                    self.layer.aclnn_input_offset,
-                )
-            else:
-                x_quant = x
-            quant_bias = self.layer.quant_bias
-            deq_scale = self.layer.deq_scale
-            output_dtype = torch.bfloat16
-            output = DeviceOperator.npu_mm_reduce_scatter_base(
-                x_quant,
-                self.layer.weight,
-                hcom_name,
-                world_size,
-                reduce_op="sum",
-                bias=None,
-                comm_turn=0,
-                x2_scale=deq_scale,
-                output_dtype=output_dtype,
-            )
-            output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
-        else:
-            output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
-            output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
-
-        return output
-
-    def update_attrs(self):
-        super().update_attrs()
-        self.input_is_parallel = self.layer.input_is_parallel
-        self.reduce_results = self.layer.reduce_results
-        self.unique_prefix = self.layer.unique_prefix
-
-
 class ShardedCPColumnParallelOp(CustomColumnParallelOp):
     @property
     def comm_group(self):
@@ -440,90 +292,48 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
         return output, output_bias
 
 
-_MULTIMODAL_ENCODER_PREFIX_PARTS = (
-    "vision_tower",
-    "vision_model",
-    "multi_modal_projector",
-    "patch_merge_mlp",
-)
-
-
-def _should_skip_sp_for_multimodal_encoder(prefix: str) -> bool:
-    return any(part in prefix for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
+def _is_shared_expert_layer(prefix: str) -> bool:
+    return "shared_experts" in prefix or "shared_expert" in prefix or "share_expert" in prefix
 
 
 def _get_column_parallel_op(
     prefix, layer
-) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | None:
+) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | ShardedCPColumnParallelOp | None:
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
     if "wo_a" in prefix and oproj_tp_enable():
         return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
-    if enable_sp() and not _should_skip_sp_for_multimodal_encoder(prefix):
-        # "share_expert" added for Step3p5
-        if "shared_expert" in prefix or "share_expert" in prefix:
-            return None
-        sp_column_prefix = [
-            "gate_up_proj",  # first MLP of most LLMs
-            "in_proj",  # gated deltanet of Qwen3 Next
-            "qkv_proj",  # qkv linear of most LLMs
-            "conv1d",  # gated deltanet of Qwen3 Next
-            "query_key_value",  # qkv linear of Bailing
-            "indexer_proj",  # indexer linear of M3
-            "g_proj",  # attention gate projection of Step3p5
-        ]
-        for a_prefix in sp_column_prefix:
-            if a_prefix in prefix:
-                return SequenceColumnParallelOp(layer)
-
     return None
 
 
-def _get_row_parallel_op(
-    prefix, layer
-) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | None:
+def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | None:
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
-    if enable_sp() and not _should_skip_sp_for_multimodal_encoder(prefix):
-        # "share_expert" added for Step3p5
-        if "shared_expert" in prefix or "share_expert" in prefix:
-            return None
-        sp_row_prefixes = [
-            "o_proj",  # attn output linear of most LLMs
-            "out_proj",  # attn output linear of Qwen3 Next
-            "down_proj",  # second MLP of most LLMs
-            "attention.dense",  # attn output linear of Bailing
-            "wo_b",  # attn output linear of v4
-        ]
-        for a_prefix in sp_row_prefixes:
-            if a_prefix in prefix:
-                return SequenceRowParallelOp(layer)
-
     return None
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
-    if (
-        disable_tp
-        or ("shared_experts" in prefix and shared_expert_dp_enabled())
-        or ("shared_expert" in prefix and shared_expert_dp_enabled())
-        or ("share_expert" in prefix and shared_expert_dp_enabled())  # "share_expert" added for Step3p5
-    ):
+    if _is_shared_expert_layer(prefix):
+        # Shared-expert weight layout is decoupled from sequence parallelism:
+        # only the shared-expert DP switch replicates weights. Models still
+        # pass disable_tp=is_sequence_parallel for shared experts, so SP alone
+        # must not force replication here.
+        if shared_expert_dp_enabled():
+            return None, 0, 1
+    elif disable_tp:
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp
         | DSV4OProjColumnParallelOp
-        | SequenceColumnParallelOp
         | MLPRowParallelOp
         | OProjRowParallelOp
         | DSV4OProjRowParallelOp
-        | SequenceRowParallelOp
         | ShardedCPColumnParallelOp
         | None
     ) = None

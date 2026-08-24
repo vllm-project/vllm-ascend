@@ -20,6 +20,7 @@ os.environ["VLLM_BATCH_INVARIANT"] = "1"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN = 512
 MAX_TOKENS = 32
+FA3_ADDITIONAL_CONFIG = {"rl_config": {"enabled": True, "enable_training_consistency": True}}
 
 SHORT_PROMPTS = [
     "The capital of France is",
@@ -86,7 +87,7 @@ def test_fa3_vs_fia_single_prompt():
     """
     single_prompt = ["Explain quantum computing in simple terms."]
     fia_outputs = _generate_with_backend(single_prompt)
-    fa3_outputs = _generate_with_backend(single_prompt, attention_backend="FLASH_ATTN")
+    fa3_outputs = _generate_with_backend(single_prompt, additional_config=FA3_ADDITIONAL_CONFIG)
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[SinglePrompt] ")
 
 
@@ -105,7 +106,7 @@ def test_fa3_vs_fia_mixed_lengths():
         LONG_PROMPT[:MAX_MODEL_LEN],
     ]
     fia_outputs = _generate_with_backend(mixed_prompts)
-    fa3_outputs = _generate_with_backend(mixed_prompts, attention_backend="FLASH_ATTN")
+    fa3_outputs = _generate_with_backend(mixed_prompts, additional_config=FA3_ADDITIONAL_CONFIG)
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[MixedLen] ")
 
 
@@ -114,7 +115,11 @@ def test_fa3_vs_fia_with_chunkprefill():
     """Compare FA3 and FIA with single token generation where chunkprefill is used."""
     fia_outputs = _generate_with_backend(SHORT_PROMPTS, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
     fa3_outputs = _generate_with_backend(
-        SHORT_PROMPTS, attention_backend="FLASH_ATTN", max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5
+        SHORT_PROMPTS,
+        additional_config=FA3_ADDITIONAL_CONFIG,
+        max_tokens=2,
+        max_num_seqs=2,
+        max_num_batched_tokens=5,
     )
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[Chunkprefill] ")
 
@@ -123,7 +128,7 @@ def test_fa3_vs_fia_with_chunkprefill():
 def test_fa3_vs_fia_logprobs():
     """Compare FA3 and FIA logprobs for fine-grained numerical verification."""
     fia_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1])
-    fa3_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], attention_backend="FLASH_ATTN")
+    fa3_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], additional_config=FA3_ADDITIONAL_CONFIG)
 
     for i, (fia_out, fa3_out) in enumerate(zip(fia_logprobs, fa3_logprobs)):
         fia_ids, _, fia_lp = fia_out

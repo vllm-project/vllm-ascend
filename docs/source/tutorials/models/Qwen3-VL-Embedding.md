@@ -6,13 +6,13 @@ The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest additio
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
+- `Qwen3-VL-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
 - `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -27,7 +27,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -52,7 +52,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
       export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -75,7 +75,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
@@ -108,11 +108,11 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 === "A3/A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     #!/bin/sh
@@ -123,9 +123,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
       --max-model-len 1024
     ```
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     #!/bin/sh
@@ -141,13 +141,13 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     Required  Parameter Descriptions:
 
-    `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+    `--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 Key Parameter Descriptions:
 
-- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas 300I DUO if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -214,24 +214,24 @@ Here are two accuracy evaluation methods.
 2. Run follow code to execute the accuracy evaluation.
 
     ```python
-  
+
     import os
     import mteb
-    
+
     from mteb.models.vllm_wrapper import VllmEncoderWrapper
-    
+
     if __name__ == "__main__":
-    
+
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    
+
         model = VllmEncoderWrapper(f"/root/.cache/Qwen3-VL-Embedding-2B",
                                     revision="norm",
                                     dtype="float16",
                                     max_model_len=10240,
                                    )
-    
+
         cache = mteb.ResultCache("/home/data/mteb_data")
         tasks = mteb.get_tasks(tasks=["LeCaRDv2"])
         results = mteb.evaluate(model, tasks=tasks, cache=cache, encode_kwargs={"batch_size": 2}, overwrite_strategy="always")
@@ -258,4 +258,4 @@ After about several minutes, you can get the performance evaluation result.
 
 ## 9 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

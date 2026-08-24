@@ -21,15 +21,17 @@ Run `pytest tests/e2e/pull_request/two_card/test_xlite.py`.
 """
 
 import os
+from unittest.mock import patch
 
 import pytest
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 os.environ["VLLM_ASCEND_ENABLE_NZ"] = "2"
 
 MODELS: list[str] = ["Qwen/Qwen3-30B-A3B"]
+TPDP_SIZES: list[tuple[int, int]] = [(2, 1), (1, 2)]
 
 
 @pytest.mark.e2e_model(*MODELS)
@@ -43,13 +45,17 @@ MODELS: list[str] = ["Qwen/Qwen3-30B-A3B"]
     graph_mode="xlite_decode_only",
 )
 @pytest.mark.parametrize("model", MODELS)
-@wait_until_npu_memory_free()
-def test_models_with_xlite_decode_only(model: str):
-    with VllmRunner(
+@pytest.mark.parametrize("tpdp", TPDP_SIZES)
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free(target_free_percentage=0.7)
+def test_models_with_xlite_decode_only(model: str, tpdp: tuple[int, int]):
+    runner = VllmRunner if tpdp[1] == 1 else DPVllmRunner
+    dp_args = {} if tpdp[1] == 1 else {"data_parallel_size": tpdp[1]}
+    with runner(
         model,
-        tensor_parallel_size=2,
+        tensor_parallel_size=tpdp[0],
+        **dp_args,  # type: ignore
         enable_expert_parallel=True,
-        distributed_executor_backend="mp",
         block_size=128,
         max_model_len=2048,
         additional_config={"xlite_graph_config": {"enabled": True, "full_mode": False}},
@@ -70,13 +76,17 @@ def test_models_with_xlite_decode_only(model: str):
     graph_mode="xlite_full",
 )
 @pytest.mark.parametrize("model", MODELS)
-@wait_until_npu_memory_free()
-def test_models_with_xlite_full_mode(model: str):
-    with VllmRunner(
+@pytest.mark.parametrize("tpdp", TPDP_SIZES)
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free(target_free_percentage=0.7)
+def test_models_with_xlite_full_mode(model: str, tpdp: tuple[int, int]):
+    runner = VllmRunner if tpdp[1] == 1 else DPVllmRunner
+    dp_args = {} if tpdp[1] == 1 else {"data_parallel_size": tpdp[1]}
+    with runner(
         model,
-        tensor_parallel_size=2,
+        tensor_parallel_size=tpdp[0],
+        **dp_args,  # type: ignore
         enable_expert_parallel=True,
-        distributed_executor_backend="mp",
         block_size=128,
         max_model_len=2048,
         additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}},

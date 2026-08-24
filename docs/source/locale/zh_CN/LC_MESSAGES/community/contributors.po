@@ -44,3 +44,6 @@ msgstr "| 序号 | 贡献者 | 日期 | 提交ID |"
 
 msgid "Updated on 2026-07-17:"
 msgstr "更新于 2026-07-17："
+
+msgid "## Emeritus Committers"
+msgstr "## 荣誉提交者"

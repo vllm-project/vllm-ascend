@@ -21,6 +21,7 @@ import os
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tp_group
 from vllm.forward_context import is_forward_context_available
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
@@ -33,7 +34,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import has_rope, is_vl_model
+from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -175,42 +176,20 @@ def rope_forward_oot(
             is_neox_style=is_neox_style,
         )
     else:
-        if rotary_dim < head_size:
-            num_tokens = query.shape[0]
-            query = query.view(num_tokens, -1, head_size)
-            key = key.view(num_tokens, -1, head_size)
-            q_rot = query[..., :rotary_dim]
-            q_pass = query[..., rotary_dim:]
-            k_rot = key[..., :rotary_dim]
-            k_pass = key[..., rotary_dim:]
-            q_rot = q_rot.contiguous().view(num_tokens, -1)
-            k_rot = k_rot.contiguous().view(num_tokens, -1)
-            # only the rotary part is processed here,
-            # the dimension should be rotary_dim
-            torch_npu._npu_rotary_embedding(
-                positions,
-                q_rot,
-                k_rot,
-                rotary_dim,
-                cos_sin_cache,
-                is_neox_style,
-            )
-            q_rot = q_rot.view(num_tokens, -1, rotary_dim)
-            k_rot = k_rot.view(num_tokens, -1, rotary_dim)
-            query = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
-            key = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
-        else:
-            # TODO: Remove the contiguous in the future.
-            query = query.contiguous().view(query.shape[0], -1)
-            key = key.contiguous().view(key.shape[0], -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                query,
-                key,
-                head_size,
-                cos_sin_cache,
-                is_neox_style,
-            )
+        # npu_mrope handles both full and partial rotary internally:
+        # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
+        # where rotary_dim is inferred from cos_sin_cache.shape[-1].
+        rotary_mode = "half" if is_neox_style else "interleaved"
+        query, key = torch_npu.npu_mrope(
+            positions,
+            query.contiguous().view(query.shape[0], -1),
+            key.contiguous().view(key.shape[0], -1),
+            cos_sin_cache,
+            head_size,
+            mrope_section=[0, 0, 0],
+            rotary_mode=rotary_mode,
+            cache_mode="default",
+        )
     return query.view(query_shape), key.view(key_shape)
 
 
@@ -243,9 +222,9 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
-        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
-        if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
-            positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+        if is_draft_model and self.use_mtp and enable_sp():
+            tp_group = get_tp_group()
+            positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
         return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )

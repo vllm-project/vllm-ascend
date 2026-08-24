@@ -28,18 +28,17 @@ from vllm.logger import logger
 
 def check_triton_ascend_version_valid() -> bool:
     """
-    Check triton-ascend version and warn about UVA feature disablement in 3.2.1.
-    If version isn't 3.2.1, return True.
+    Check triton-ascend version and warn about UVA feature disablement.
+    If the installed version isn't affected by the UVA issue, return True.
     """
-    # Target version that disables UVA feature
-    DISABLE_UVA_VERSION = "3.2.1"
+    # Triton Ascend versions affected by the UVA pointer validation issue.
+    UVA_INCOMPATIBLE_VERSIONS = ("3.2.1", "3.2.2")
     installed_version = version("triton-ascend")
-    # Check if current version is the one with UVA disabled
-    if installed_version == DISABLE_UVA_VERSION:
+    if installed_version in UVA_INCOMPATIBLE_VERSIONS:
         logger.warning(
             "triton-ascend %s disables the UVA feature.\n"
             "Related bug issue: https://github.com/triton-lang/triton-ascend/issues/783",
-            DISABLE_UVA_VERSION,
+            installed_version,
         )
         return False
     return True
@@ -47,8 +46,8 @@ def check_triton_ascend_version_valid() -> bool:
 
 def is_uva_available() -> bool:
     """check if uva feature is supported in this environment"""
-    # FIXME(chenboxun): There is an issue with using the UVA feature alongside triton-ascend3.2.1.
-    # Thus UVA feature is disabled when using version 3.2.1
+    # FIXME(chenboxun): Some triton-ascend versions reject pinned CPU tensors.
+    # Thus UVA is disabled for affected versions.
     # (Related bug issue link: https://github.com/triton-lang/triton-ascend/issues/783)
     return (
         "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
@@ -150,11 +149,21 @@ class UvaBufferWrapper:
     def uva(self):
         """Get the device data of the buffer."""
         if not is_uva_available() and self._modified_indices:
-            # Sort for better memory access locality
             dirty_rows = sorted(self._modified_indices)
-            # can't use copy_ method, because copy_ for index tensor
-            #  will malloc new memory.
-            self._uva[dirty_rows] = self._cpu[dirty_rows].to(device="npu", non_blocking=True)
+            n_dirty = len(dirty_rows)
+            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
+                # Common path: dirty rows are a contiguous prefix [0..n-1].
+                # This is always the case when copy_to_uva writes via
+                # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
+                # pinned and enables true async DMA without an intermediate
+                # tensor or stream sync.
+                self._uva[:n_dirty].copy_(self._cpu[:n_dirty], non_blocking=True)
+            else:
+                # Sparse modification pattern — fall back to indexed copy.
+                # Explicitly re-pin the CPU source so that non_blocking is
+                # not silently degraded.
+                src = self._cpu[dirty_rows].pin_memory()
+                self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
         return self._uva
 
